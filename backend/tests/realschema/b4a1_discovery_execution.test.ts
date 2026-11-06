@@ -187,7 +187,11 @@ const okPorts = (over: Record<string, unknown> = {}) => ({
   hasProvider: () => true,
   credential: { resolveCredential: async () => 'tenant-key' },
   authorizeCost: async () => ({ authorized: true, holdId: null, cost: { kind: 'unknown' } }),
-  ingest: async ({ records }: any) => ({ succeeded: records.length, failed: 0 }),
+  // The executor reads the projection counters too; a double that omits them
+  // reports `resultsProjected: null` and the run closes as unconfirmed.
+  ingest: async ({ records }: any) => ({
+    succeeded: records.length, failed: 0, projected: records.length, notProjected: 0,
+  }),
   // Explicit, greppable bypass: this suite tests the executor ledger, not R3 screening.
   screen: passThroughScreen,
   now: () => NOW,
@@ -652,7 +656,10 @@ describe('B4-A1 — the executor against the real ledger', () => {
         organizationId: ORG_A, executionId: created.executionId,
         ports: okPorts({
           getProvider: () => adapter,
-          ingest: async (i: any) => { handed.push(i); return { succeeded: i.records.length }; },
+          ingest: async (i: any) => {
+            handed.push(i);
+            return { succeeded: i.records.length, projected: i.records.length, notProjected: 0 };
+          },
         }),
       });
       expect(out.status).toBe('completed');
