@@ -61,23 +61,23 @@ const portsWith = (
   now: () => '2026-09-05T00:00:00.000Z',
 });
 
-describe('A3B — the prospect enrichment action is not registered', () => {
-  it('is genuinely absent from CREDIT_ACTIONS — this is the real blocker', () => {
-    expect(CREDIT_ACTIONS as readonly string[]).not.toContain(PROSPECT_ENRICHMENT_ACTION);
+describe('A3B — the prospect enrichment action (registered by mode B, 2026-11-10)', () => {
+  it('is now in CREDIT_ACTIONS and resolves to itself', () => {
+    expect(CREDIT_ACTIONS as readonly string[]).toContain(PROSPECT_ENRICHMENT_ACTION);
+    expect(resolveMonetizationFeature({ action_key: PROSPECT_ENRICHMENT_ACTION })?.action_key).toBe(PROSPECT_ENRICHMENT_ACTION);
   });
 
   it('the registry answers NULL for an unregistered action (the no-report-fields fallback is closed, 89/b3 2026-11-20)', () => {
     // Was a live-registry finding: the last fallback resolved with no report inputs, so an unknown action became a
     // different, credit-holding, customer-facing action. featureRegistry.ts now runs it only with report fields.
-    expect(resolveMonetizationFeature({ action_key: PROSPECT_ENRICHMENT_ACTION })).toBeNull();
+    expect(resolveMonetizationFeature({ action_key: 'not_a_registered_enrichment_action' })).toBeNull();
   });
 
-  it('the default port therefore refuses, naming the action', async () => {
+  it('the default port (no reservation wired) still refuses before any external call, naming the action', async () => {
     const d = await creditCostPort.authorizeCost(costInput);
     expect(d.authorized).toBe(false);
     if ('reason' in d) {
       expect(d.reason).toContain(PROSPECT_ENRICHMENT_ACTION);
-      expect(d.reason).toMatch(/no credit action '.+' is registered/); // the null-resolution refusal path
       expect(d.reason).toContain('before any external call');
     }
   });
