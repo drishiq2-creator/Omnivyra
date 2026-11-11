@@ -62,6 +62,12 @@ export interface ReapResult {
   skippedQuarantined: number;
   failed: number;
   releasedHoldIds: string[];
+  /** Report-only run: `released` / `releasedHoldIds` are WOULD-release. */
+  dryRun?: boolean;
+  /** The preflight reconciler's result (in a dry run: its WOULD-confirm/-release decisions). */
+  preflight?: import('./monetizationReservationReconciliationService').ReservationReconciliationResult | null;
+  /** Dry run only: holds the preflight would settle or quarantine, so the reaper would not reach them. */
+  skippedByPreflight?: number;
 }
 
 const DEFAULT_MIN_AGE_SECONDS = 60 * 60;       // 1 hour
@@ -77,9 +83,18 @@ export async function reapOrphanHolds(input?: {
   maxAgeSeconds?: number;
   /** When set, restrict to this org. Useful for ops triage. */
   orgId?: string;
+  /**
+   * REPORT-ONLY (2026-11-12, e9): list what WOULD be released (and what the
+   * preflight reconciler WOULD confirm - i.e. charge - or release) without
+   * writing anything. The first run must be a dry run; enabling the reaper
+   * also enables those confirms, so the owner approves both together.
+   */
+  dryRun?: boolean;
 }): Promise<ReapResult> {
-  // e9 2026-11-13: default-OFF until 053 + an in-flight-aware resolver (holdReleaseGate). Every caller is refused.
-  assertHoldReleaseEnabled('credit-orphan-hold-reap');
+  const dryRun = input?.dryRun === true;
+  // e9 2026-11-13: default-OFF until 053 + an in-flight-aware resolver (holdReleaseGate). Every RELEASING caller is
+  // refused. A dry run is report-only (it releases nothing), so it stays available while releases are gated (c6 re-land).
+  if (!dryRun) assertHoldReleaseEnabled('credit-orphan-hold-reap');
   const minAge = input?.minAgeSeconds ?? DEFAULT_MIN_AGE_SECONDS;
   const maxAge = input?.maxAgeSeconds ?? DEFAULT_MAX_AGE_SECONDS;
   const limit  = input?.batchLimit    ?? DEFAULT_BATCH_LIMIT;
@@ -87,15 +102,17 @@ export async function reapOrphanHolds(input?: {
   const cutoffMin = new Date(Date.now() - minAge * 1000).toISOString();
   const cutoffMax = new Date(Date.now() - maxAge * 1000).toISOString();
 
-  await reconcileDurableMonetizationReservations({
+  const preflight = await reconcileDurableMonetizationReservations({
     minAgeSeconds: minAge,
     batchLimit: limit,
     orgId: input?.orgId,
     reconciledBy: 'system:credit-orphan-hold-reap-preflight',
+    dryRun,
   }).catch((err) => {
     logger.error('orphan_hold_reaper_preflight_reconciliation_failed', {
       message: err instanceof Error ? err.message : String(err),
     });
+    return null;
   });
 
   let query = ownedDbTable('credit_transactions')
@@ -111,7 +128,7 @@ export async function reapOrphanHolds(input?: {
   const { data: holds, error } = await query;
   if (error) {
     logger.error('orphan_hold_reaper_query_failed', { message: error.message });
-    await recordMonetizationOperationalEvent({
+    if (!dryRun) await recordMonetizationOperationalEvent({
       eventName: 'monetization.orphan_hold_reaper_query_failed',
       severity: 'ERROR',
       organizationId: input?.orgId ?? null,
@@ -121,7 +138,14 @@ export async function reapOrphanHolds(input?: {
     throw new Error(`orphan_hold_reaper_query_failed: ${error.message}`);
   }
 
+  // In a dry run the preflight settled nothing, so exclude the holds it WOULD
+  // confirm / release / quarantine - a real run would never reach them here.
+  const preflightDecided = new Set(
+    dryRun && preflight ? preflight.actions.filter((a) => a.decision !== 'skip').map((a) => a.holdId) : [],
+  );
+
   const result: ReapResult = {
+    ...(dryRun ? { dryRun: true, preflight, skippedByPreflight: 0 } : { preflight }),
     scanned:           (holds ?? []).length,
     released:          0,
     skippedHasSibling: 0,
@@ -132,9 +156,13 @@ export async function reapOrphanHolds(input?: {
   };
 
   for (const row of (holds ?? []) as HoldRow[]) {
+    if (preflightDecided.has(row.id)) {
+      result.skippedByPreflight = (result.skippedByPreflight ?? 0) + 1;
+      continue;
+    }
     if (row.metadata?.reconciliation_status === 'quarantined') {
       result.skippedQuarantined += 1;
-      await recordMonetizationOperationalEvent({
+      if (!dryRun) await recordMonetizationOperationalEvent({
         eventName: 'monetization.orphan_hold_reaper_skipped_quarantined',
         severity: 'WARN',
         organizationId: row.organization_id,
@@ -155,7 +183,7 @@ export async function reapOrphanHolds(input?: {
         holdId: row.id,
         key:    row.idempotency_key,
       });
-      await recordMonetizationOperationalEvent({
+      if (!dryRun) await recordMonetizationOperationalEvent({
         eventName: 'monetization.orphan_hold_reaper_unrecognized_key',
         severity: 'WARN',
         organizationId: row.organization_id,
@@ -169,10 +197,17 @@ export async function reapOrphanHolds(input?: {
     const confirmKey = `${baseKey}:confirm`;
     const releaseKey = `${baseKey}:release`;
 
-    const { data: siblings } = await ownedDbTable('credit_transactions')
+    // MONEY: a failed read is NOT "no sibling" - answering that RELEASED a hold
+    // whose confirm may already exist. Count it failed and move on.
+    const { data: siblings, error: siblingsErr } = await ownedDbTable('credit_transactions')
       .select('id, execution_phase')
       .in('idempotency_key', [confirmKey, releaseKey])
       .limit(2);
+    if (siblingsErr) {
+      result.failed += 1;
+      logger.error('orphan_hold_reaper_sibling_read_failed', { holdId: row.id, message: siblingsErr.message });
+      continue;
+    }
 
     if (siblings && siblings.length > 0) {
       result.skippedHasSibling += 1;
@@ -189,6 +224,12 @@ export async function reapOrphanHolds(input?: {
       // is no longer scanned, by writing the canonical RELEASE row with
       // zero amounts. apply_credit_reservation handles zero deltas as
       // a no-op state update + ledger row.
+    }
+
+    if (dryRun) {
+      result.released += 1;
+      result.releasedHoldIds.push(row.id);
+      continue;
     }
 
     const { error: rpcErr } = await callCreditReservation({
@@ -247,6 +288,15 @@ export async function reapOrphanHolds(input?: {
     });
   }
 
+  if (dryRun) {
+    // Report-only: logged, nothing persisted.
+    logger.info('orphan_hold_reaper_dry_run', {
+      scanned: result.scanned, wouldRelease: result.released, skippedByPreflight: result.skippedByPreflight,
+      skippedHasSibling: result.skippedHasSibling, skippedQuarantined: result.skippedQuarantined, failed: result.failed,
+      preflightWouldConfirm: preflight?.confirmed ?? null, preflightWouldRelease: preflight?.released ?? null,
+    });
+    return result;
+  }
   if (result.released > 0 || result.failed > 0) {
     logger.warn('orphan_hold_reaper_summary', { ...result });
   }

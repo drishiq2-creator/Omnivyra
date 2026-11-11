@@ -41,6 +41,10 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   const batchLimit = numberFromQuery(req.query.batchLimit);
   const orgId = typeof req.query.orgId === 'string' ? req.query.orgId : undefined;
   const includeAudit = String(req.query.audit ?? 'true') !== 'false';
+  // ?dryRun=true: REPORT-ONLY - every decision (confirm = a CHARGE, release,
+  // quarantine) computed and returned, nothing written. Own idempotency key.
+  const dryRun = req.query.dryRun === 'true';
+  const dryTag = dryRun ? ':dry' : '';
 
   const triggeredByCronSecret = bearerTokenMatches(req.headers.authorization, process.env.CRON_SECRET);
 
@@ -51,8 +55,8 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       tenantId: orgId ?? null,
       principalKind: 'cron-secret',
       idempotencyKey: orgId
-        ? `cron:monetization-reservation-reconcile:${orgId}:${Math.floor(Date.now() / 900_000)}`
-        : `cron:monetization-reservation-reconcile:${Math.floor(Date.now() / 900_000)}`,
+        ? `cron:monetization-reservation-reconcile${dryTag}:${orgId}:${Math.floor(Date.now() / 900_000)}`
+        : `cron:monetization-reservation-reconcile${dryTag}:${Math.floor(Date.now() / 900_000)}`,
     },
     async () => {
       const reconciliation = await reconcileDurableMonetizationReservations({
@@ -60,6 +64,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
         batchLimit,
         orgId,
         reconciledBy: triggeredByCronSecret ? 'cron:monetization-reservation-reconcile' : 'admin:monetization-reservation-reconcile',
+        dryRun,
       });
       const audit = includeAudit ? await auditMonetizationInvariants({ staleHoldSeconds: minAgeSeconds }) : null;
       return { reconciliation, audit };
