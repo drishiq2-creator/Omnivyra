@@ -14,6 +14,7 @@ import { supabase } from '../../../db/supabaseClient';
 import { logger } from '../../logger';
 import { recordExportManifest, type ExportFormat, type ManifestResult, type ExportType } from './auditManifestService';
 import { CONFIRM_PHASES } from '../../../../shared/billing/creditPhaseVocabulary';
+import { loadCurrentCreditRateUsd, needsDerivedUsd, rowUsd } from '../ledgerUsd';
 
 export interface LedgerExportFilters {
   organizationId?: string;
@@ -105,7 +106,15 @@ export async function exportCompanyUsage(args: {
   const { data, error } = await q.limit(10000);
   if (error) throw new Error(error.message);
 
-  const rows = (data ?? []) as Array<Record<string, unknown>>;
+  // Each charge carries its USD: the recorded one, or one derived at read time
+  // from the current credit rate and marked usd_estimated (e9 ruling b). The
+  // recorded usd_equivalent column is exported unchanged.
+  const raw = (data ?? []) as Array<Record<string, unknown>>;
+  const rate = needsDerivedUsd(raw) ? await loadCurrentCreditRateUsd(args.organizationId) : 0;
+  const rows = raw.map((r) => {
+    const u = rowUsd(r as { usd_equivalent?: number | null; credits_delta?: number | null }, rate);
+    return { ...r, usd_amount: u.usd, usd_estimated: u.estimated };
+  });
   const body = serialize(rows, args.format);
   const manifest = await recordExportManifest({
     exportType:     'company_usage',
