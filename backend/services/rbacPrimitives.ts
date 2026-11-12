@@ -23,10 +23,9 @@ export type Role = (typeof Role)[keyof typeof Role];
  * OWNER RULING (e9, 2026-11-12): CONTENT_MANAGER, CONTENT_PLANNER,
  * CONTENT_ENGAGER and VIEWER are REAL tenant roles and belong here. FINANCE_*
  * stays OUT. The invitations_role_check widening is a separate migration.
- * KNOWN GAP (blocking release of this unit): normalizeRole still maps the four
- * onto CONTENT_CREATOR / VIEW_ONLY for RBAC, and CapabilityService reads the
- * RAW role, for which ROLE_CAPABILITIES has no entry - so a member stored as
- * one of the four holds NO capability until the per-role sets are ruled.
+ * The former KNOWN GAP is CLOSED on this branch: roles Approach A R1 (the four
+ * keep their identity, authorised by ROLE_BASE_TIERS below) and R2 (explicit
+ * ROLE_CAPABILITIES entries, since CapabilityService reads the RAW role).
  */
 export const NON_ADMIN_TENANT_ROLES = [
   Role.CONTENT_CREATOR,
@@ -39,12 +38,37 @@ export const NON_ADMIN_TENANT_ROLES = [
   Role.VIEWER,
 ] as const;
 
+/**
+ * ROLES APPROACH A (owner ruling via e9, 2026-11-12). CONTENT_MANAGER,
+ * CONTENT_PLANNER, CONTENT_ENGAGER and VIEWER are REAL roles: they keep their
+ * identity (they are no longer rewritten) and authorise through deliberate
+ * BASE TIERS - a role satisfies an allow-list that names it OR any of its tiers.
+ *   VIEWER          = VIEW_ONLY
+ *   CONTENT_ENGAGER = VIEW_ONLY + engagement (named where engagement is granted)
+ *   CONTENT_PLANNER = CONTENT_CREATOR + planning (named on planning routes)
+ *   CONTENT_MANAGER = CONTENT_PUBLISHER u CONTENT_REVIEWER, incl. create
+ *                     (CONTENT_CREATOR, which a manager held before this change)
+ * No tier is an admin role: none of the four reaches team / users / roles /
+ * external APIs / billing / org, because no admin role is a tier.
+ */
+export const ROLE_BASE_TIERS: Readonly<Record<string, ReadonlyArray<Role>>> = {
+  [Role.VIEWER]: [Role.VIEW_ONLY],
+  [Role.CONTENT_ENGAGER]: [Role.VIEW_ONLY],
+  [Role.CONTENT_PLANNER]: [Role.CONTENT_CREATOR],
+  [Role.CONTENT_MANAGER]: [Role.CONTENT_CREATOR, Role.CONTENT_PUBLISHER, Role.CONTENT_REVIEWER],
+};
+
+/** The role itself plus its base tiers (the set an allow-list is matched against). */
+export const roleAndTiers = (role: string | null | undefined): string[] =>
+  role ? [role, ...(ROLE_BASE_TIERS[role] ?? [])] : [];
+
+/** True when `allowed` names the role or one of its base tiers ('*' allows any role). */
+export const roleSatisfies = (role: string | null | undefined, allowed: ReadonlyArray<string>): boolean =>
+  !!role && (allowed.includes('*') || roleAndTiers(role).some((r) => allowed.includes(r)));
+
+/** Only the legacy ADMIN alias is rewritten; the four content roles keep their identity. */
 export const normalizePermissionRole = (role: string) => {
   if (role === Role.ADMIN) return Role.COMPANY_ADMIN;
-  if (role === Role.CONTENT_MANAGER) return Role.CONTENT_CREATOR;
-  if (role === Role.CONTENT_PLANNER) return Role.CONTENT_CREATOR;
-  if (role === Role.CONTENT_ENGAGER) return Role.VIEW_ONLY;
-  if (role === Role.VIEWER) return Role.VIEW_ONLY;
   return role;
 };
 
@@ -54,11 +78,9 @@ export const normalizeRole = (value?: string | null): Role | null => {
   const upper = trimmed.toUpperCase().replace(/\s+/g, '_');
   if (upper === 'ADMIN' || upper === 'COMPANYADMIN') return Role.COMPANY_ADMIN;
   if (upper === 'COMPANY_ADMIN') return Role.COMPANY_ADMIN;
-  if (upper === 'CONTENT_MANAGER' || upper === 'CONTENTPLANNER') return Role.CONTENT_CREATOR;
-  if (upper === 'CONTENT_PLANNER') return Role.CONTENT_CREATOR;
-  if (upper === 'CONTENT_CREATOR') return Role.CONTENT_CREATOR;
-  if (upper === 'CONTENT_ENGAGER') return Role.VIEW_ONLY;
-  if (upper === 'VIEWER') return Role.VIEW_ONLY;
+  // Approach A: the four content roles keep their identity (tiers decide access).
+  // 'CONTENTPLANNER' is a historical spelling of CONTENT_PLANNER.
+  if (upper === 'CONTENTPLANNER') return Role.CONTENT_PLANNER;
   return (Role as Record<string, Role>)[upper] || null;
 };
 
