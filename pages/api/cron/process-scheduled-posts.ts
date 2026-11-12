@@ -174,11 +174,14 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       }
 
       if (!socialAccountId) {
-        // No usable account — terminal classification, do not retry.
+        // No usable account - terminal classification, do not retry (a read failure was retried above).
+        // CLASS-2 D8: every write here names the status it expects. The scan read `scheduled`; the
+        // queue worker may have claimed the post since, and a blind `failed` flipped its live claim.
         await updatePostPublishStatus({
           post_id: post.id,
           status: 'FAILED',
           last_error: accountFailure ?? `No connected ${post.platform} account`,
+          expectedFromStatus: 'scheduled',
         });
         results.skipped++;
         continue;
@@ -189,7 +192,8 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
         await supabase
           .from('scheduled_posts')
           .update({ social_account_id: socialAccountId })
-          .eq('id', post.id);
+          .eq('id', post.id)
+          .eq('status', 'scheduled');
       }
 
       // Per-post runJob with tenant containment. The runner rejects
@@ -233,6 +237,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
           post_id: post.id,
           status: 'FAILED',
           last_error: `Tenant invalid: ${outcome.reason}`,
+          expectedFromStatus: 'scheduled',
         });
         results.skipped_tenant_invalid++;
         results.errors.push(`[${post.id}] tenant_invalid: ${outcome.reason}`);
@@ -250,10 +255,14 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
         const msg = outcome.error instanceof Error ? outcome.error.message : String(outcome.error);
         results.errors.push(`[${post.id}] ${msg}`);
         try {
+          // publishNow threw: it restores the pre-claim status (`scheduled`) when nothing was sent, and
+          // records an uncertain outcome itself when the call had started. Only the restored row is
+          // this cron's to fail; any other state belongs to another execution or to reconciliation.
           await updatePostPublishStatus({
             post_id: post.id,
             status: 'FAILED',
             last_error: msg || 'Unexpected error',
+            expectedFromStatus: 'scheduled',
           });
         } catch (_) { /* fail-soft */ }
         continue;
@@ -275,11 +284,14 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
         results.skipped++;
         continue;
       }
+      // A mirror of what publishNow already wrote, so it lands only on that status: once `failed`
+      // the post is claimable, and another execution may hold it already.
       await updatePostPublishStatus({
         post_id:          post.id,
         status:           result.status,
         external_post_id: result.external_post_id,
         last_error:       result.status === 'PUBLISHED' ? undefined : result.message,
+        expectedFromStatus: result.status.toLowerCase(),
       });
 
       if (result.status === 'PUBLISHED') {
