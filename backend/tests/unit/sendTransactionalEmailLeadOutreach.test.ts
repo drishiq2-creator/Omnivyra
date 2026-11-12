@@ -193,7 +193,9 @@ describe('041-A-O — the SES request', () => {
     // CLASS-2 D3 added `progress` (set just before client.send); the return contract is unchanged.
     expect(indexSrc).toMatch(/async function sendViaSES\(envelope: Envelope, progress: SendProgress\): Promise<string \| null>/);
     expect(indexSrc).toMatch(/typeof result\?\.MessageId === "string" \? result\.MessageId : null/);
-    expect(indexSrc).toMatch(/JSON\.stringify\(\{ ok: true, messageId \}\)/);
+    // Built by sendOnce since the idempotency change; index.ts sends that body as-is.
+    expect(fs.readFileSync(path.join(FN_DIR, 'idempotency.ts'), 'utf8')).toMatch(/body: \{ ok: true, messageId \}/);
+    expect(indexSrc).toMatch(/JSON\.stringify\(outcome \? \{ \.\.\.result\.body, outcome \} : result\.body\)/);
     // `ok` keeps its meaning, so callers that read only `ok` are unaffected.
     expect(indexSrc).not.toMatch(/ok: false/);
   });
@@ -248,7 +250,10 @@ describe('041-A-O — every pre-existing template is unchanged', () => {
     // three helpers below are pinned one by one and are unchanged).
     const helpers = indexSrc.slice(0, indexSrc.indexOf('function render(t: Template)'));
     expect(crypto.createHash('sha256').update(helpers).digest('hex').slice(0, 16))
-      .toBe('75694257d1203f9e');
+      // Re-pinned (a9, CI-124 x CI-248 merge): this region changed ONLY by import lines - D3's outcome.ts import
+      // and the idempotency change's parseSecretKeys / idempotency.ts / store.ts imports. Was '75694257d1203f9e'
+      // (D3) and '2758c0aea4f96f6d' (idempotency); every helper is still pinned one by one below.
+      .toBe('69231f53b6bf9b53');
   });
 
   it.each([
@@ -274,11 +279,14 @@ describe('041-A-O — authentication and tenancy are untouched', () => {
       .toBe('a54502c49da80106');
   });
 
-  it('NO PROVIDER-SIDE IDEMPOTENCY WAS ADDED, and none is claimed', () => {
-    // A-N corrected the record: the key is sent by the transport and discarded
-    // here. This workstream did not change that, and must not pretend otherwise.
-    expect(indexSrc).not.toMatch(/idempotency/i);
-    expect(indexSrc).not.toMatch(/duplicate/i);
+  it('the idempotency key IS honoured now - through sendOnce, reserve-first (it used to be discarded here)', () => {
+    // CHANGED 2026-11-13 (correct-sending, e9 rulings): this test used to pin that the key was discarded ("none is
+    // claimed"). The function now honours it; the behaviour is pinned by transactionalEmailIdempotency.test.ts and
+    // the SQL by realschema/transactional_email_idempotency_real. Here: the wiring.
+    expect(indexSrc).toMatch(/const result = await sendOnce\(\{/);
+    expect(indexSrc).toMatch(/idempotencyKey/);
+    // A keyless send never touches the database.
+    expect(indexSrc).toMatch(/store: idempotencyKey \? lazyStore\(\) : NO_STORE/);
   });
 
   it('no tenant field is consulted for rendering', () => {

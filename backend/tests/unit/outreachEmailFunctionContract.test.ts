@@ -153,7 +153,11 @@ describe('WP1 — what the real outreach provider posts is what the real functio
 
 describe('WP1 — the SES message id survives the round trip', () => {
   it('the function emits the id under the key the outreach provider reads', () => {
-    expect(indexSrc).toMatch(/JSON\.stringify\(\{ ok: true, messageId \}\)/);
+    // Since the idempotency change the success body is built by sendOnce (idempotency.ts) and index.ts sends it
+    // as-is: the id is still emitted under `messageId`.
+    const idemSrc = fs.readFileSync(path.join(ROOT, 'supabase', 'functions', 'send-transactional-email', 'idempotency.ts'), 'utf8');
+    expect(idemSrc).toMatch(/body: \{ ok: true, messageId \}/);
+    expect(indexSrc).toMatch(/JSON\.stringify\(outcome \? \{ \.\.\.result\.body, outcome \} : result\.body\)/);
   });
 
   it('the provider returns the id the function sent back', async () => {
@@ -285,11 +289,13 @@ describe('WP3/L5 — the send path (source contract)', () => {
     expect(indexSrc).toMatch(/import \{ SESv2Client, SendEmailCommand as SendEmailV2Command \} from "npm:@aws-sdk\/client-sesv2@3\.658\.1";/);
     expect(v2).toMatch(/ConfigurationSetName: configurationSet,/);
     expect(v2).toMatch(/Headers: envelope\.headers,/);
-    expect(v2).toMatch(/if \(!configurationSet\) throw new Error\("SES_CONFIGURATION_SET_MISSING"\);/);
+    // A PreSendError since the idempotency change: refused BEFORE any request, so it classifies as definite.
+    expect(v2).toMatch(/if \(!configurationSet\) throw new PreSendError\("SES_CONFIGURATION_SET_MISSING"\);/);
   });
 
   it('only lead_outreach is routed to v2; the seven composed templates keep the v1 path', () => {
-    // CLASS-2 D3 added the `progress` argument (where the SES call starts); the routing is unchanged.
+    // CLASS-2 D3 added the `progress` argument (where the SES call starts); since the idempotency change
+    // (e9 2026-11-13) the routing sits INSIDE sendOnce's `send` (merged by a9, CI-124 x CI-248). Unchanged otherwise.
     expect(indexSrc).toMatch(/requestedType === "lead_outreach"\s*\n\s*\? await sendOutreachViaSESv2\(envelope, progress\)\s*\n\s*: await sendViaSES\(envelope, progress\);/);
   });
 
