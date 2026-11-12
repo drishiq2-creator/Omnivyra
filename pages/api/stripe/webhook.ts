@@ -31,7 +31,9 @@ import {
   processStripeWebhookEvent,
   type StripeEventPayload,
   type StripeWebhookDeps,
+  RetryableWebhookError,
 } from '../../../backend/services/payments/stripeWebhookService';
+import { markPaymentEventState, readPaymentEventState } from '../../../backend/services/payments/paymentEventState';
 
 export const config = { api: { bodyParser: false } };
 
@@ -147,25 +149,23 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     },
     applySubscriptionEvent: async (eventType, obj, organizationId) =>
       applyStripeSubscriptionEvent(eventType, obj as any, organizationId, { db: { from: ownedDbTable } }),
-    markEvent: async (eventId, status, errorMsg) => {
-      // best-effort: the event's side effects are already done and idempotent;
-      // a failed status write only leaves processing_status stale (a redelivery
-      // is a recorded duplicate). Logged, never silent.
-      const { error } = await ownedDbTable('payment_provider_events')
-        .update({
-          processing_status: status,
-          processed_at: new Date().toISOString(),
-          error_message: errorMsg ?? null,
-        })
-        .eq('id', eventId);
-      if (error) logger.error('stripe_webhook_mark_event_failed', { eventId, status, message: error.message });
-    },
+    // 20270217000003: state lives in payment_provider_event_state, written ONLY by the
+    // guarded forward-only RPC (the ledger row is immutable - the old UPDATE here was
+    // refused by raise_ledger_immutable and never read its error). Bookkeeping: a
+    // failure is LOGGED (visible) and never fails the webhook (e9).
+    markEvent: async (eventId, status, errorMsg) => markPaymentEventState(eventId, status, errorMsg),
+    getEventState: async (eventId) => readPaymentEventState(eventId),
   };
 
   try {
     const outcome = await processStripeWebhookEvent(event, deps);
     return res.status(200).json(outcome);
   } catch (err) {
+    if (err instanceof RetryableWebhookError) {
+      // MONEY (e9): the money action failed - NON-2xx so Stripe redelivers; the
+      // redelivery is reprocessed from the 'failed' state.
+      return res.status(500).json({ error: 'webhook_money_action_failed', reason: err.reason, retryable: true });
+    }
     return res.status(500).json({ error: 'webhook_processing_failed', message: err instanceof Error ? err.message : 'unknown' });
   }
 }
