@@ -40,3 +40,14 @@ export function customerLedgerPhaseLabel(phase: string | null | undefined): stri
     default: return 'Other';
   }
 }
+
+/**
+ * A guarded partial confirm (apply_credit_partial_confirm_guarded, 20270217000023) writes the unused hold as its own
+ * 'release' row keyed `<confirm key>:remainder`. It is a release (credits returned), never consumption, and it belongs
+ * to its partial confirm - a reader must not treat it as a separate settlement of the hold.
+ */
+export const REMAINDER_KEY_SUFFIX = ':remainder';
+
+export function isRemainderKey(key: string | null | undefined): boolean {
+  return typeof key === 'string' && key.endsWith(REMAINDER_KEY_SUFFIX);
+}
