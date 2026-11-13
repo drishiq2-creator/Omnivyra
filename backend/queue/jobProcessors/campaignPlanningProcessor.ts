@@ -363,6 +363,12 @@ export async function processCampaignPlanningJob(job: Job<CampaignPlanningJobPay
     const { incrCounter } = await import('../../services/billing/billingMetrics');
     incrCounter('queue_replay_blocked_total');
   }
+  // Reads contract (A2b, e1 GO): the result was ignored, so an UNREADABLE credit state completed the job as a success
+  // with no work done. Throw (retryable); every other outcome is unchanged.
+  if (wrapped.kind === 'executed' && wrapped.orchestrator.result.status === 'state_unreadable') {
+    const { CreditStateUnreadableError } = await import('../../repositories/creditExecutionRepository');
+    throw new CreditStateUnreadableError(wrapped.orchestrator.result.detail);
+  }
 }
 
 async function processCampaignPlanningJobInner(job: Job<CampaignPlanningJobPayload>): Promise<void> {
