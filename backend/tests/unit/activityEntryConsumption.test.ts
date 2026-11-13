@@ -34,7 +34,11 @@ const repo = {
   findCreditTransaction: jest.fn(),
   loadCreditHoldSplit: jest.fn(),
 };
-jest.mock('../../repositories/creditExecutionRepository', () => repo);
+jest.mock('../../repositories/creditExecutionRepository', () => ({
+  ...repo,
+  // the REAL typed error, so `instanceof` in the engine is meaningful (reads contract)
+  CreditStateUnreadableError: jest.requireActual('../../repositories/creditExecutionRepository').CreditStateUnreadableError,
+}));
 
 const priority = {
   getTotalAvailable: jest.fn(),
@@ -109,6 +113,42 @@ beforeEach(() => {
   repo.callCreditPartialConfirm.mockResolvedValue({
     error: null,
     data: { id: 'settle-id', total_consumed: 7, total_released: 6 },
+  });
+});
+
+describe('reads contract (e9 BLOCKING, e1): an UNREADABLE credit state refuses before any hold or action', () => {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { CreditStateUnreadableError } = jest.requireActual('../../repositories/creditExecutionRepository');
+  const run = (executor: jest.Mock) => executeWithEntryConsumption({
+    userId: USER, orgId: ORG, action: ACTION as any, referenceType: 'content', referenceId: REF,
+    idempotencyKey: IDEM, validateMembership: false, amountOverride: 9, executor,
+  });
+
+  it('the confirm / release / hold lookup FAILS -> typed CREDIT_STATE_UNREADABLE, NO hold, executor never invoked', async () => {
+    repo.findCreditTransaction.mockRejectedValue(new CreditStateUnreadableError('credit_transactions lookup failed: connection reset'));
+    const executor = jest.fn(async () => 'OUTPUT');
+    const res = await run(executor);
+    expect(res).toMatchObject({ status: 'state_unreadable', code: 'CREDIT_STATE_UNREADABLE', retryable: true });
+    expect(executor).not.toHaveBeenCalled();
+    expect(repo.callCreditReservation).not.toHaveBeenCalled();
+  });
+
+  it('an existing HOLD whose split read FAILS -> refused (never treated as a corrupted hold with a zero split)', async () => {
+    repo.findCreditTransaction.mockImplementation(async (key: string) => (key.endsWith(':hold') ? { id: 'hold-1', execution_phase: 'hold' } : null));
+    repo.loadCreditHoldSplit.mockRejectedValue(new CreditStateUnreadableError('credit hold hold-1 split read failed'));
+    const executor = jest.fn(async () => 'OUTPUT');
+    const res = await run(executor);
+    expect(res).toMatchObject({ status: 'state_unreadable', code: 'CREDIT_STATE_UNREADABLE', retryable: true });
+    expect(executor).not.toHaveBeenCalled();
+    expect(repo.callCreditReservation).not.toHaveBeenCalled();
+  });
+
+  it('CONTROL: readable state -> the action runs and a HOLD is placed', async () => {
+    const executor = jest.fn(async () => 'OUTPUT');
+    const res = await run(executor);
+    expect(res.status).toBe('executed');
+    expect(executor).toHaveBeenCalledTimes(1);
+    expect(repo.callCreditReservation).toHaveBeenCalled();
   });
 });
 

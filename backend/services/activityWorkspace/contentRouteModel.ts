@@ -88,6 +88,7 @@ export async function runReservedFixedWorkflow<T>(input: {
   if (result.status === 'not_a_member') throw new MonetizedWorkflowError(403, { error: 'ORG_SCOPE_VIOLATION' });
   if (result.status === 'org_control_blocked') throw new MonetizedWorkflowError(403, { error: result.code, detail: result.reason });
   if (result.status === 'no_credit_account') throw new MonetizedWorkflowError(402, { error: 'No credit account for org' });
+  if (result.status === 'state_unreadable') throw new MonetizedWorkflowError(503, { error: result.code, retryable: true });
   throw new MonetizedWorkflowError(409, { error: `Credit reservation is already settled: ${result.status}` });
 }
 
