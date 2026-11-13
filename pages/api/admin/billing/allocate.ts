@@ -33,7 +33,8 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
 
   try {
     const summary = await runMonthlyAllocationSweep({ orgIds, dryRun });
-    return res.status(200).json({ ok: true, mode: dryRun ? 'dry_run' : 'live', ...summary });
+    // B1b: an incomplete sweep is not "ok" - surface it (the operator re-runs; allocation is idempotent).
+    return res.status(summary.incomplete ? 503 : 200).json({ ok: !summary.incomplete, mode: dryRun ? 'dry_run' : 'live', ...summary });
   } catch (err: any) {
     return res.status(500).json({ ok: false, error: err instanceof Error ? err.message : String(err) });
   }

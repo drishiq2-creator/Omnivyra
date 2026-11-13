@@ -50,7 +50,14 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     async () => runMonthlyAllocationSweep({ dryRun }),
   );
 
-  if (outcome.status === 'completed') return res.status(200).json({ ok: true, summary: outcome.result, executionId: outcome.ctx.executionId, dryRun });
+  if (outcome.status === 'completed') {
+    // B1b: an incomplete sweep is VISIBLE (non-2xx) but the job itself completed - never DLQ'd, so the next run in the
+    // period re-attempts the undecided orgs (allocation is idempotent per org/plan/period).
+    if (outcome.result.incomplete) {
+      return res.status(503).json({ ok: false, code: 'ALLOCATION_INCOMPLETE', summary: outcome.result, executionId: outcome.ctx.executionId, dryRun });
+    }
+    return res.status(200).json({ ok: true, summary: outcome.result, executionId: outcome.ctx.executionId, dryRun });
+  }
   if (outcome.status === 'dead_letter_skip') return res.status(202).json({ ok: false, code: 'DEAD_LETTER_SKIP', reason: outcome.reason });
   return res.status(500).json({ ok: false, error: outcome.status === 'failed' && outcome.error instanceof Error ? outcome.error.message : String(outcome.status) });
 }

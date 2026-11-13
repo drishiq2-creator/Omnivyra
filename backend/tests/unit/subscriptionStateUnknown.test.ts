@@ -76,9 +76,9 @@ describe('resolveSubscriptionState: a failed read is UNKNOWN, never "plan assign
     await expect(resolveSubscriptionState('org1', deps(db({ sub: [], plan: { organization_id: 'o' } })))).resolves.toBe('ACTIVE');
     await expect(resolveSubscriptionState('org1', deps(db({ sub: [], plan: null })))).resolves.toBe('EXPIRED');
   });
-  it('allocation: UNKNOWN -> subscription_inactive, 0 credits (no grant); CONTROL: ACTIVE passes the gate', async () => {
+  it('allocation: UNKNOWN -> subscription_state_unreadable (B1b: recoverable, never inactive), 0 credits (no grant); CONTROL: ACTIVE passes the gate', async () => {
     const r = await allocateMonthlyCreditsForOrg({ orgId: 'org1', planKey: 'growth', subscriptionState: 'UNKNOWN', now: new Date(NOW) });
-    expect(r).toMatchObject({ status: 'subscription_inactive', credits: 0 });
+    expect(r).toMatchObject({ status: 'subscription_state_unreadable', credits: 0 });
     const ok = await allocateMonthlyCreditsForOrg({ orgId: 'org1', planKey: 'growth', subscriptionState: 'ACTIVE', now: new Date(NOW), dryRun: true });
     expect(ok.status).toBe('dry_run');
   });

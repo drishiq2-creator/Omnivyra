@@ -18,6 +18,7 @@ import {
 } from './subscriptionStateResolver';
 import { SYSTEM_USER_ID } from './auditActorService';
 import { supabase } from '../db/supabaseClient';
+import { logger } from './logger';
 
 /** SECTION A — plan credit rules. Monthly grant per plan_key. */
 export const PLAN_MONTHLY_CREDITS: Record<string, number> = {
@@ -59,7 +60,15 @@ export function buildAllocationKey(orgId: string, planKey: string | null, period
   return `monthly_alloc:${orgId}:${planKey ?? 'none'}:${periodStart}`;
 }
 
-export type AllocationStatusKind = 'allocated' | 'dry_run' | 'no_plan' | 'not_billable' | 'subscription_inactive';
+export type AllocationStatusKind =
+  | 'allocated' | 'dry_run' | 'no_plan' | 'not_billable' | 'subscription_inactive'
+  // Reads contract (B1b, e1): the state could not be READ. NOT terminal - nothing was written, so a later run in the
+  // same period allocates (idempotency is per org/plan/period and only a granted row blocks it).
+  | 'subscription_state_unreadable' | 'plan_unreadable';
+
+class PlanUnreadableError extends Error {
+  constructor(message: string) { super(message); this.name = 'PlanUnreadableError'; }
+}
 
 export interface AllocationResult {
   status: AllocationStatusKind;
@@ -75,15 +84,35 @@ export interface AllocationResult {
 }
 
 async function resolvePlanKey(orgId: string): Promise<string | null> {
-  const { data: assignment } = await supabase
+  // B1b: a FAILED read is not "no plan" (a terminal skip for the whole month).
+  const { data: assignment, error: assignmentErr } = await supabase
     .from('organization_plan_assignments')
     .select('plan_id')
     .eq('organization_id', orgId)
     .maybeSingle();
+  if (assignmentErr) throw new PlanUnreadableError(`organization_plan_assignments read failed: ${assignmentErr.message}`);
   const planId = (assignment as { plan_id?: string } | null)?.plan_id;
   if (!planId) return null;
-  const { data: plan } = await supabase.from('pricing_plans').select('plan_key').eq('id', planId).maybeSingle();
+  const { data: plan, error: planErr } = await supabase.from('pricing_plans').select('plan_key').eq('id', planId).maybeSingle();
+  if (planErr) throw new PlanUnreadableError(`pricing_plans read failed: ${planErr.message}`);
   return (plan as { plan_key?: string } | null)?.plan_key ?? null;
+}
+
+/** B1b: alertable + countable - one ERROR log and operational event per org, keyed by the period's idempotency key. */
+async function reportAllocationUnreadable(orgId: string, status: AllocationStatusKind, idempotencyKey: string | null, detail: string): Promise<void> {
+  logger.error('subscription_allocation_state_unreadable', { orgId, status, idempotencyKey, detail });
+  try {
+    const { recordMonetizationOperationalEvent } = await import('./monetizationOpsService');
+    await recordMonetizationOperationalEvent({
+      eventName: 'monetization.subscription_allocation_unreadable',
+      severity: 'ERROR',
+      organizationId: orgId,
+      alertKey: 'subscription_allocation_unreadable',
+      metadata: { status, idempotency_key: idempotencyKey, detail },
+    });
+  } catch (err) {
+    logger.error('subscription_allocation_unreadable_event_failed', { orgId, message: err instanceof Error ? err.message : String(err) });
+  }
 }
 
 /**
@@ -102,7 +131,19 @@ export async function allocateMonthlyCreditsForOrg(params: {
 }): Promise<AllocationResult> {
   const { orgId } = params;
   const now = params.now ?? new Date();
-  const planKey = params.planKey ?? (await resolvePlanKey(orgId));
+  let planKey: string | null;
+  try {
+    // An explicit planKey (including null = "no plan") is honoured without a read; only an omitted one is resolved.
+    planKey = params.planKey !== undefined ? params.planKey : await resolvePlanKey(orgId);
+  } catch (err) {
+    if (!(err instanceof PlanUnreadableError)) throw err;
+    const periodStartU = computePeriodStart(now, params.anchorDay ?? 1);
+    await reportAllocationUnreadable(orgId, 'plan_unreadable', null, err.message);
+    return {
+      status: 'plan_unreadable', orgId, planKey: null, credits: 0, periodStart: periodStartU,
+      nextAllocationDate: computeNextAllocationDate(periodStartU), idempotencyKey: '', referenceType: ALLOCATION_REFERENCE_TYPE,
+    };
+  }
   const credits = getMonthlyCreditsForPlan(planKey);
   const periodStart = computePeriodStart(now, params.anchorDay ?? 1);
   const nextAllocationDate = computeNextAllocationDate(periodStart);
@@ -117,6 +158,10 @@ export async function allocateMonthlyCreditsForOrg(params: {
   // admin-assigned plans (no billing_subscriptions row) resolve to ACTIVE, so existing
   // allocation is unchanged until the subscription lifecycle write-path lands.
   const subscriptionState = params.subscriptionState ?? (await resolveSubscriptionState(orgId, { db: supabase, now: () => now.getTime() }));
+  if (subscriptionState === 'UNKNOWN') {
+    await reportAllocationUnreadable(orgId, 'subscription_state_unreadable', idempotencyKey, 'subscription state could not be read');
+    return { ...base, status: 'subscription_state_unreadable', credits: 0, subscriptionState };
+  }
   if (!canReceiveSubscriptionCredits(subscriptionState)) {
     return { ...base, status: 'subscription_inactive', credits: 0, subscriptionState };
   }
@@ -142,6 +187,14 @@ export interface AllocationSweepSummary {
   skipped: number;
   dryRun: boolean;
   results: AllocationResult[];
+  /** B1b: orgs whose state could not be read this run (recoverable - a later run in the period allocates). */
+  unreadable: number;
+  /** B1b: orgs whose allocation threw (logged per org; recoverable likewise). */
+  failed: number;
+  /** B1b: the org list itself could not be read - nothing was attempted. */
+  orgListUnreadable: boolean;
+  /** B1b: true when any org was not decided - callers surface it as non-2xx WITHOUT failing the job (no DLQ). */
+  incomplete: boolean;
 }
 
 /**
@@ -159,20 +212,32 @@ export async function runMonthlyAllocationSweep(params?: {
 
   let orgIds = params?.orgIds;
   if (!orgIds) {
-    const { data } = await supabase.from('organization_plan_assignments').select('organization_id');
+    const { data, error } = await supabase.from('organization_plan_assignments').select('organization_id');
+    if (error) {
+      // B1b: never "no orgs this month". Do NOT throw - a failed job is DLQ'd and every later run in the window skips.
+      logger.error('subscription_allocation_org_list_unreadable', { message: error.message });
+      return { processed: 0, allocated: 0, skipped: 0, dryRun, results: [], unreadable: 0, failed: 0, orgListUnreadable: true, incomplete: true };
+    }
     orgIds = Array.from(new Set((data ?? []).map((r: { organization_id?: string }) => r.organization_id).filter(Boolean) as string[]));
   }
 
   const results: AllocationResult[] = [];
+  let failed = 0;
   for (const orgId of orgIds) {
     try {
       results.push(await allocateMonthlyCreditsForOrg({ orgId, now, dryRun }));
-    } catch {
-      /* per-org failure must not abort the sweep */
+    } catch (err) {
+      // per-org failure must not abort the sweep - but it is counted and logged, never silent (B1b)
+      failed += 1;
+      logger.error('subscription_allocation_org_failed', { orgId, message: err instanceof Error ? err.message : String(err) });
     }
   }
   const allocated = results.filter((r) => r.status === 'allocated' || r.status === 'dry_run').length;
-  return { processed: results.length, allocated, skipped: results.length - allocated, dryRun, results };
+  const unreadable = results.filter((r) => r.status === 'subscription_state_unreadable' || r.status === 'plan_unreadable').length;
+  return {
+    processed: results.length, allocated, skipped: results.length - allocated, dryRun, results,
+    unreadable, failed, orgListUnreadable: false, incomplete: unreadable > 0 || failed > 0,
+  };
 }
 
 /** SECTION D/E — allocation history + cycle status for the Billing Center. */
