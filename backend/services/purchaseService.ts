@@ -30,6 +30,20 @@ type PurchaseRow = {
   fulfillment_status?: 'pending' | 'event_recorded' | 'completed' | 'failed' | null;
 };
 
+/**
+ * Reads contract (A6, e9 BLOCKING; e1): the payment-event dedup state could not be READ after a 23505. Answered as
+ * "duplicate, status unknown" it skipped the processed-duplicate refusal and re-ran fulfilment. Typed and retryable:
+ * the webhook answers 5xx and the provider redelivers.
+ */
+export class PaymentEventStateUnreadableError extends Error {
+  readonly code = 'PAYMENT_EVENT_UNREADABLE' as const;
+  readonly retryable = true as const;
+  constructor(message: string) {
+    super(message);
+    this.name = 'PaymentEventStateUnreadableError';
+  }
+}
+
 export async function recordPaymentProviderEvent(input: {
   provider: string;
   providerEventId: string;
@@ -59,11 +73,22 @@ export async function recordPaymentProviderEvent(input: {
     processingStatus: (data as { processing_status?: string | null } | null)?.processing_status ?? null,
   };
   if ((error as any).code === '23505') {
-    const { data: existing } = await ownedDbTable('payment_provider_events')
+    const { data: existing, error: existingErr } = await ownedDbTable('payment_provider_events')
       .select('id, processing_status')
       .eq('provider', input.provider)
       .eq('provider_event_id', input.providerEventId)
       .maybeSingle();
+    // A FAILED re-read is not "duplicate, status unknown"; NO row after a 23505 is an impossible state, not an answer.
+    if (existingErr) {
+      throw new PaymentEventStateUnreadableError(
+        `payment event ${input.provider}/${input.providerEventId} re-read after 23505 failed: ${existingErr.message}`,
+      );
+    }
+    if (!existing) {
+      throw new PaymentEventStateUnreadableError(
+        `payment event ${input.provider}/${input.providerEventId}: 23505 on insert but the re-read found no row`,
+      );
+    }
     return {
       id: (existing as { id?: string } | null)?.id ?? null,
       duplicate: true,
