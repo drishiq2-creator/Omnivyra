@@ -7,7 +7,7 @@
 import React from 'react';
 import '@testing-library/jest-dom';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
-import { classifyBilledResponse, billedOutcomeText, TOP_UP_HREF } from '../../../lib/billing/billedResponse';
+import { classifyBilledResponse, billedOutcomeText, TOP_UP_HREF, KNOWN_UNVERIFIABLE_CODES, UNVERIFIABLE_MESSAGE } from '../../../lib/billing/billedResponse';
 import { createBilledActionKeyGate } from '../../../lib/idempotency';
 
 describe('classifyBilledResponse: keyed on status + code only', () => {
@@ -29,9 +29,31 @@ describe('classifyBilledResponse: keyed on status + code only', () => {
       .toEqual({ kind: 'credits', code: 'insufficient_credits', message: 'Not enough.', available: 1 });
   });
 
-  it('409 ALREADY_PROCESSED is success; ALREADY_RELEASED is retry', () => {
+  it('409 ALREADY_PROCESSED is success; 500 RECLAIM_CAP_EXHAUSTED is a plain retry', () => {
     expect(classifyBilledResponse(409, { error: 'dup', code: 'ALREADY_PROCESSED' }, 'x').kind).toBe('already_processed');
-    expect(classifyBilledResponse(409, { error: 'released', code: 'ALREADY_RELEASED' }, 'x').kind).toBe('retry');
+    const reclaim = classifyBilledResponse(500, { error: 'cap', code: 'RECLAIM_CAP_EXHAUSTED', retryable: false }, 'x');
+    expect(reclaim.kind).toBe('retry');
+    expect(billedOutcomeText(reclaim)).not.toMatch(/RECLAIM|Top up/);
+  });
+
+  it('the known *_UNVERIFIABLE codes are exactly these (update when 6f adds one)', () => {
+    expect([...KNOWN_UNVERIFIABLE_CODES].sort()).toEqual(['BUDGET_UNVERIFIABLE', 'DAILY_LIMIT_UNVERIFIABLE', 'ORG_CONTROLS_UNVERIFIABLE']);
+  });
+
+  it.each([...KNOWN_UNVERIFIABLE_CODES, 'SOME_FUTURE_UNVERIFIABLE'])(
+    '503 %s: plain retry, nothing charged, never top-up, never the code',
+    (code) => {
+      const out = classifyBilledResponse(503, { error: 'internal detail', code }, 'fallback');
+      expect(out).toEqual({ kind: 'retry', message: UNVERIFIABLE_MESSAGE });
+      const text = billedOutcomeText(out);
+      expect(text).toContain('Nothing was charged');
+      expect(text).not.toMatch(/UNVERIFIABLE|Top up|internal detail/);
+    },
+  );
+
+  it('the suffix rule needs an exact code shape (not just any string containing it)', () => {
+    expect(classifyBilledResponse(503, { error: 'x', code: 'unverifiable' }, 'fallback').kind).toBe('error');
+    expect(classifyBilledResponse(503, { error: 'x', code: 'BUDGET_UNVERIFIABLE_SOMETHING' }, 'fallback').kind).toBe('error');
   });
 
   it('never shows a raw code; 403 org codes use a human detail or the fallback', () => {
