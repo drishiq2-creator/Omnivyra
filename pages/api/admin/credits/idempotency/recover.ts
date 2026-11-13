@@ -79,6 +79,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (!result.ok) {
     const status = result.error === 'NOT_FOUND'        ? 404 :
                    result.error === 'DRIFT_DETECTED'   ? 409 :
+                   result.error === 'STATE_UNREADABLE' ? 503 :   // reads contract A8: retryable, nothing expired
                                                          400;
     return res.status(status).json({ ok: false, ...result });
   }

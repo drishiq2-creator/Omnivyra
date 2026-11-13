@@ -60,6 +60,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       result.code === 'COMPLETED_SETTLEMENT'  ? 409 :   // replay protection enforced
       result.code === 'ACTIVE_RESERVATION'    ? 409 :
       result.code === 'NOT_RECOVERABLE'       ? 409 :
+      result.code === 'STATE_UNREADABLE'      ? 503 :   // reads contract A8: retryable, nothing changed
                                                 400;
     return res.status(status).json({ ok: false, ...result });
   }

@@ -43,6 +43,7 @@ import {
   isTerminal,
   type IdempotencyState,
 } from './idempotencyStateMachine';
+import { CreditStateUnreadableError } from '../../../repositories/creditExecutionRepository';
 
 // ── Configurable expiry windows (seconds) ─────────────────────────────────────
 
@@ -168,7 +169,7 @@ export interface RecoveryResult {
   fromStatus?:  string;
   toStatus?:    string;
   error?:       string;
-  driftCheck?:  'ok' | 'drift_detected' | 'skipped';
+  driftCheck?:  DriftCheck;
 }
 
 /**
@@ -194,6 +195,11 @@ export async function recoverOperation(args: RecoveryArgs): Promise<RecoveryResu
 
   // ── Drift pre-check ────────────────────────────────────────────────────
   const driftCheck = await checkFinancialDrift(args.surface, args.id);
+  // Reads contract (A8): the financial state could not be READ - refuse; nothing is expired on a guess.
+  if (driftCheck === 'unreadable') {
+    logger.error('idempotency_recovery_state_unreadable', { surface: args.surface, id: args.id });
+    return { ok: false, surface: args.surface, id: args.id, error: 'STATE_UNREADABLE', driftCheck };
+  }
   if (driftCheck === 'drift_detected') {
     emitAnomaly({
       kind: 'reservation_orphan_reaped',
@@ -339,7 +345,7 @@ export type SafeRetryResult =
     }
   | {
       ok: false;
-      code: 'NOT_FOUND' | 'COMPLETED_SETTLEMENT' | 'ACTIVE_RESERVATION' | 'NOT_RECOVERABLE' | 'REASON_REQUIRED' | 'FAILED';
+      code: 'NOT_FOUND' | 'COMPLETED_SETTLEMENT' | 'ACTIVE_RESERVATION' | 'NOT_RECOVERABLE' | 'REASON_REQUIRED' | 'FAILED' | 'STATE_UNREADABLE';
       message: string;
     };
 
@@ -371,19 +377,33 @@ export async function safeRetryOperation(args: SafeRetryArgs): Promise<SafeRetry
     return { ok: false, code: 'REASON_REQUIRED', message: 'reason required' };
   }
 
-  const idemKey = await readIdempotencyKey(args.surface, args.id);
+  // Reads contract (A8): every safety read below refuses on a FAILED read - a retry key is never minted on a guess.
+  const unreadable = (detail: string): SafeRetryResult => {
+    logger.error('idempotency_safe_retry_state_unreadable', { surface: args.surface, id: args.id, detail });
+    return { ok: false, code: 'STATE_UNREADABLE', message: `Refusing retry: the operation's financial state could not be read (${detail}). Retry shortly.` };
+  };
+  let idemKey: string | null;
+  try {
+    idemKey = await readIdempotencyKey(args.surface, args.id);
+  } catch (err) {
+    if (err instanceof CreditStateUnreadableError) return unreadable(err.message);
+    throw err;
+  }
   if (!idemKey) {
     return { ok: false, code: 'NOT_FOUND', message: `no idempotency_key bound to ${args.surface}:${args.id}` };
   }
 
   // 1+2. COMPLETED settlement / ledger mutation check — any CONFIRM or GRANT
   //      row for this key means money already moved; retry is forbidden.
-  const { data: settled } = await supabase
+  const { data: settled, error: settledErr } = await supabase
     .from('credit_transactions')
     .select('id, execution_phase')
     .in('idempotency_key', [idemKey, `${idemKey}:confirm`])
-    .in('execution_phase', ['confirm', 'grant'])
+    // e1/e9 (BLOCKING for A8): the live apply_credit_partial_confirm settles with 'confirm_partial' - every
+    // token-priced op. TODO: use CONFIRM_PHASES from billing/holdSettlementState.ts once e1's settle fix is on main.
+    .in('execution_phase', ['confirm', 'confirm_partial', 'grant'])
     .limit(1);
+  if (settledErr) return unreadable(`settlement read failed: ${settledErr.message}`);
   if (settled && settled.length > 0) {
     return {
       ok: false,
@@ -394,6 +414,7 @@ export async function safeRetryOperation(args: SafeRetryArgs): Promise<SafeRetry
 
   // 3. Active HOLD with no terminal sibling ⇒ original may still finish.
   const drift = await checkFinancialDrift(args.surface, args.id);
+  if (drift === 'unreadable') return unreadable('reservation state read failed');
   if (drift === 'drift_detected') {
     return {
       ok: false,
@@ -495,7 +516,7 @@ export async function safeRetryOperation(args: SafeRetryArgs): Promise<SafeRetry
 // ── Phase F: Reconciliation-after-recovery ────────────────────────────────────
 
 export interface ReconAfterRecoveryResult {
-  verdict:   'consistent' | 'drift' | 'skipped';
+  verdict:   'consistent' | 'drift' | 'skipped' | 'unverifiable';
   surface:   string;
   id:        string;
   details:   Record<string, unknown>;
@@ -531,6 +552,11 @@ export async function runReconciliationAfterRecovery(args: {
     logger.error('reconciliation_after_recovery_drift', { surface: args.surface, id: args.id });
     return { verdict: 'drift', surface: args.surface, id: args.id, details: { drift } };
   }
+  // Reads contract (A8): an unreadable state is not "consistent".
+  if (drift === 'unreadable') {
+    logger.error('reconciliation_after_recovery_unverifiable', { surface: args.surface, id: args.id });
+    return { verdict: 'unverifiable', surface: args.surface, id: args.id, details: { drift } };
+  }
 
   logger.info('reconciliation_after_recovery_consistent', { surface: args.surface, id: args.id });
   return { verdict: 'consistent', surface: args.surface, id: args.id, details: { drift } };
@@ -538,9 +564,28 @@ export async function runReconciliationAfterRecovery(args: {
 
 // ── Drift detection ─────────────────────────────────────────────────────────
 
-export async function checkFinancialDrift(surface: StuckOperation['surface'], id: string): Promise<'ok' | 'drift_detected' | 'skipped'> {
+export type DriftCheck = 'ok' | 'drift_detected' | 'skipped' | 'unreadable';
+
+/**
+ * Reads contract (A8, e9 BLOCKING; e1): every read here used to answer 'ok' on a FAILED read (no key -> 'ok', no HOLD
+ * rows -> 'ok'), letting recovery expire / retry past an active HOLD. A failed read now answers 'unreadable', which
+ * every caller refuses.
+ */
+export async function checkFinancialDrift(surface: StuckOperation['surface'], id: string): Promise<DriftCheck> {
   if (surface === 'credit_action_approvals') return 'skipped';  // approvals have no financial state themselves
   if (surface === 'payment_provider_event_state') return 'skipped';
+  try {
+    return await checkFinancialDriftReads(surface, id);
+  } catch (err) {
+    if (err instanceof CreditStateUnreadableError) {
+      logger.error('financial_drift_check_unreadable', { surface, id, message: err.message });
+      return 'unreadable';
+    }
+    throw err;
+  }
+}
+
+async function checkFinancialDriftReads(surface: StuckOperation['surface'], id: string): Promise<'ok' | 'drift_detected'> {
 
   // For billing_operations + job_execution_registry: check whether the
   // bound idempotency_key has an unreaped HOLD in credit_transactions.
@@ -548,21 +593,24 @@ export async function checkFinancialDrift(surface: StuckOperation['surface'], id
   if (!idemKey) return 'ok';
 
   // Check for HOLD with no sibling CONFIRM/RELEASE
-  const { data: holdRows } = await supabase
+  const { data: holdRows, error: holdErr } = await supabase
     .from('credit_transactions')
     .select('id')
     .eq('idempotency_key', `${idemKey}:hold`)
     .eq('execution_phase', 'hold')
     .limit(1);
+  if (holdErr) throw new CreditStateUnreadableError(`HOLD read failed for ${idemKey}: ${holdErr.message}`);
   if (!holdRows || holdRows.length === 0) return 'ok';  // no HOLD → no drift risk
 
   const holdId = String((holdRows[0] as { id: string }).id);
-  const { data: siblings } = await supabase
+  const { data: siblings, error: siblingsErr } = await supabase
     .from('credit_transactions')
     .select('id, execution_phase')
     .eq('parent_transaction_id', holdId)
-    .in('execution_phase', ['confirm', 'release'])
+    // e1/e9: include 'confirm_partial' (token-priced settles). TODO: CONFIRM_PHASES (billing/holdSettlementState.ts).
+    .in('execution_phase', ['confirm', 'confirm_partial', 'release'])
     .limit(1);
+  if (siblingsErr) throw new CreditStateUnreadableError(`HOLD ${holdId} sibling read failed: ${siblingsErr.message}`);
 
   if (!siblings || siblings.length === 0) {
     // HOLD with no terminal sibling → reaper must run first
@@ -573,11 +621,13 @@ export async function checkFinancialDrift(surface: StuckOperation['surface'], id
 
 async function readIdempotencyKey(surface: StuckOperation['surface'], id: string): Promise<string | null> {
   if (surface === 'billing_operations') {
-    const { data } = await supabase.from('billing_operations').select('idempotency_key').eq('id', id).maybeSingle();
+    const { data, error } = await supabase.from('billing_operations').select('idempotency_key').eq('id', id).maybeSingle();
+    if (error) throw new CreditStateUnreadableError(`billing_operations ${id} key read failed: ${error.message}`);
     return (data as { idempotency_key?: string } | null)?.idempotency_key ?? null;
   }
   if (surface === 'job_execution_registry') {
-    const { data } = await supabase.from('job_execution_registry').select('idempotency_key').eq('id', id).maybeSingle();
+    const { data, error } = await supabase.from('job_execution_registry').select('idempotency_key').eq('id', id).maybeSingle();
+    if (error) throw new CreditStateUnreadableError(`job_execution_registry ${id} key read failed: ${error.message}`);
     return (data as { idempotency_key?: string } | null)?.idempotency_key ?? null;
   }
   return null;
