@@ -46,15 +46,30 @@ interface StoredAiResultV2 {
   payload_gz: string;
 }
 
+/**
+ * Reads contract (e9 BLOCKING, e1): the stored-result READ failed. Not "no stored result" - answered as absent, the
+ * runtime re-ran the AI work uncharged (platform cost) on every transient DB failure. Typed and retryable.
+ */
+export class AiResultUnreadableError extends Error {
+  readonly code = 'AI_RESULT_UNREADABLE' as const;
+  readonly retryable = true as const;
+  constructor(message: string) {
+    super(message);
+    this.name = 'AiResultUnreadableError';
+  }
+}
+
 export async function loadAiExecutionResult<T = unknown>(
   idempotencyKey: string,
 ): Promise<StoredAiResult<T> | null> {
+  const { data, error } = await supabase
+    .from('billing_operations')
+    .select('metadata')
+    .eq('idempotency_key', idempotencyKey)
+    .maybeSingle();
+  if (error) throw new AiResultUnreadableError(`stored AI result read failed for ${idempotencyKey}: ${error.message}`);
+  // Below: a row that WAS read but holds no / an undecodable result is a real absence (re-run is the right answer).
   try {
-    const { data } = await supabase
-      .from('billing_operations')
-      .select('metadata')
-      .eq('idempotency_key', idempotencyKey)
-      .maybeSingle();
     const stored = (data?.metadata as { ai_result?: StoredAiResult<T> | StoredAiResultV2 } | null)?.ai_result;
     if (stored && stored.v === 1 && 'payload' in stored) return stored;
     // W3-7: v2 (compressed) entries are ALWAYS readable regardless of the
