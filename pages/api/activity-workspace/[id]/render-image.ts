@@ -33,6 +33,7 @@ import {
   RenderProjectionError,
 } from '@/backend/services/creator/rendering';
 import { evaluateRenderGovernanceGate } from '@/backend/services/creator/rendering/governance/renderGovernanceGate';
+import { enforceCampaignWriteRole } from '../../../../backend/services/campaignWriteRole';
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'POST') {
@@ -52,6 +53,8 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     'id, campaign_id, content, content_type, platform, intent_type, organization_id');
   if (!authorized) return;
   const { row, companyId, access } = authorized;
+  // Campaign WRITE role guard (2026-11-13): membership alone may not mutate campaign data (view-only -> 403).
+  if (!(await enforceCampaignWriteRole({ req, res, companyId: String(companyId), userId: String(access.userId) }))) return;
   if ((row as any).intent_type !== 'creator') {
     return res.status(409).json({ error: 'Not a Creator row.', code: 'NOT_A_CREATOR_ROW' });
   }
