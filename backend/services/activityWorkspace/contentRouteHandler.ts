@@ -721,6 +721,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         return res.status(402).json({ error: 'No credit account for org' });
       }
       if (result.status === 'state_unreadable') {
+        res.setHeader('Retry-After', '5');
         return res.status(503).json({ error: result.code, retryable: true });
       }
       if (result.status !== 'executed') {
@@ -1011,6 +1012,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     });
   } catch (error) {
     if (error instanceof MonetizedWorkflowError) {
+      if (error.statusCode === 503) res.setHeader('Retry-After', '5');   // reads contract: retryable refusal
       return res.status(error.statusCode).json(error.payload);
     }
     if ((error as Error & { code?: string })?.code === 'VARIANT_GENERATION_FAILED') {

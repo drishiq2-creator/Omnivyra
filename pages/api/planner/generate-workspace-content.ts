@@ -343,6 +343,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     });
 
     if (outcome.status === 'blocked') {
+      if (outcome.httpStatus === 503) res.setHeader('Retry-After', '5');   // reads contract: temporarily_unavailable
       return res.status(outcome.httpStatus).json({
         error: outcome.userMessage,
         code: outcome.code,

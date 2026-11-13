@@ -116,6 +116,56 @@ beforeEach(() => {
   });
 });
 
+describe('B2 (e9): an UNVERIFIABLE org control refuses before any hold or action, on both credit paths', () => {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const oc = require('../../services/orgControlService');
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { executeWithCredits } = require('../../services/creditExecutionService');
+  const verdict = (code: string) => ({ allowed: false, code, reason: `${code} detail`, retryable: true });
+  afterEach(() => { oc.preflightCheck.mockImplementation(async () => ({ allowed: true })); });
+
+  it.each(['DAILY_LIMIT_UNVERIFIABLE', 'ORG_CONTROLS_UNVERIFIABLE'])('entry path: %s -> state_unreadable, NO hold, executor never invoked', async (code) => {
+    oc.preflightCheck.mockImplementation(async () => verdict(code));
+    const executor = jest.fn(async () => 'OUTPUT');
+    const res = await executeWithEntryConsumption({
+      userId: USER, orgId: ORG, action: ACTION as any, referenceType: 'content', referenceId: REF,
+      idempotencyKey: IDEM, validateMembership: false, amountOverride: 9, executor,
+    });
+    expect(oc.preflightCheck).toHaveBeenCalled();
+    expect(res).toMatchObject({ status: 'state_unreadable', code, retryable: true });
+    expect(executor).not.toHaveBeenCalled();
+    expect(repo.callCreditReservation).not.toHaveBeenCalled();
+  });
+  it.each(['DAILY_LIMIT_UNVERIFIABLE', 'ORG_CONTROLS_UNVERIFIABLE'])('executeWithCredits path: %s -> state_unreadable, NO hold, executor never invoked', async (code) => {
+    oc.preflightCheck.mockImplementation(async () => verdict(code));
+    const executor = jest.fn(async () => 'OUTPUT');
+    const res = await executeWithCredits({
+      userId: USER, orgId: ORG, action: ACTION as any, referenceType: 'content', referenceId: REF,
+      idempotencyKey: IDEM, validateMembership: false, amountOverride: 9, executor,
+    });
+    expect(res).toMatchObject({ status: 'state_unreadable', code, retryable: true });
+    expect(executor).not.toHaveBeenCalled();
+    expect(repo.callCreditReservation).not.toHaveBeenCalled();
+  });
+  it('CONTROL: a real ORG_BLOCKED verdict keeps the existing org_control_blocked status', async () => {
+    oc.preflightCheck.mockImplementation(async () => ({ allowed: false, code: 'ORG_BLOCKED', reason: 'underfunded' }));
+    const res = await executeWithCredits({
+      userId: USER, orgId: ORG, action: ACTION as any, referenceType: 'content', referenceId: REF,
+      idempotencyKey: IDEM, validateMembership: false, amountOverride: 9, executor: jest.fn(),
+    });
+    expect(res).toMatchObject({ status: 'org_control_blocked', code: 'ORG_BLOCKED' });
+  });
+  it('CONTROL: allowed -> the hold IS placed (the fixture really would reserve)', async () => {
+    const executor = jest.fn(async () => 'OUTPUT');
+    await executeWithCredits({
+      userId: USER, orgId: ORG, action: ACTION as any, referenceType: 'content', referenceId: REF,
+      idempotencyKey: IDEM, validateMembership: false, amountOverride: 9, executor,
+    });
+    expect(repo.callCreditReservation).toHaveBeenCalled();
+    expect(executor).toHaveBeenCalled();
+  });
+});
+
 describe('reads contract (e9 BLOCKING, e1): an UNREADABLE credit state refuses before any hold or action', () => {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const { CreditStateUnreadableError } = jest.requireActual('../../repositories/creditExecutionRepository');
