@@ -19,6 +19,7 @@ import { supabase } from '../db/supabaseClient';
 import { checkDomainEligibility } from './domainEligibilityService';
 import { reviewableResults } from '../../lib/auth/domainEligibilityModel';
 import { getTotalAvailable } from './creditPriorityService';
+import { CreditStateUnreadableError } from '../repositories/creditExecutionRepository';
 import { getFeatureDisplayGroup, resolveMonetizationFeature } from '../../shared/monetization/featureRegistry';
 
 // ── Credit cost map ───────────────────────────────────────────────────────────
@@ -211,7 +212,7 @@ export async function wasRecentlyRun(
   windowSeconds: number,
 ): Promise<boolean> {
   const since = new Date(Date.now() - windowSeconds * 1000).toISOString();
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from('credit_transactions')
     .select('id')
     .eq('organization_id', orgId)
@@ -220,6 +221,9 @@ export async function wasRecentlyRun(
     .gt('created_at', since)
     .limit(1)
     .maybeSingle();
+  // Reads contract (A9, e9 BLOCKING; e1): a FAILED read is not "not recently run" - answered false, the smart-mode
+  // dedup was skipped and the action charged again. Throw: deductCreditsAwaited's catch refuses before any hold.
+  if (error) throw new CreditStateUnreadableError(`smart-mode dedup read failed for ${orgId}/${action}: ${error.message}`);
   return !!data;
 }
 
