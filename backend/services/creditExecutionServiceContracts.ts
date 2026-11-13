@@ -158,6 +158,9 @@ export interface SettlementReport {
   pricing?:        ResolvedLlmCost;
 }
 
+/** Reads contract: every retryable "could not read / verify" refusal (503 + Retry-After at the edge). */
+export type StateUnreadableCode = 'CREDIT_STATE_UNREADABLE' | 'DAILY_LIMIT_UNVERIFIABLE' | 'ORG_CONTROLS_UNVERIFIABLE';
+
 export type ExecuteResult<T> =
   | { status: 'executed';            result: T; settlement?: SettlementReport; settlementPending?: import('./billing/holdSettlementState').SettlementPending }
   | { status: 'already_confirmed' }
@@ -166,7 +169,7 @@ export type ExecuteResult<T> =
   | { status: 'no_credit_account' }
   | { status: 'not_a_member'; userId: string; orgId: string }
   | { status: 'org_control_blocked'; code: 'ORG_BLOCKED' | 'HIGH_RISK_ACTION_GATED' | 'DAILY_LIMIT_EXCEEDED'; reason: string }
-  | { status: 'state_unreadable'; code: 'CREDIT_STATE_UNREADABLE'; retryable: true; detail: string };
+  | { status: 'state_unreadable'; code: StateUnreadableCode; retryable: true; detail: string };
 
 export interface CreditReservationHandle {
   orgId: string;
@@ -188,7 +191,7 @@ export type CreditReservationResult =
   | { status: 'no_credit_account' }
   | { status: 'not_a_member'; userId: string; orgId: string }
   | { status: 'org_control_blocked'; code: 'ORG_BLOCKED' | 'HIGH_RISK_ACTION_GATED' | 'DAILY_LIMIT_EXCEEDED'; reason: string }
-  | { status: 'state_unreadable'; code: 'CREDIT_STATE_UNREADABLE'; retryable: true; detail: string };
+  | { status: 'state_unreadable'; code: StateUnreadableCode; retryable: true; detail: string };
 
 export type CreditReservationSettlement =
   | { status: 'confirmed'; confirmTransactionId: string | null; creditsCharged: number }
@@ -428,6 +431,11 @@ export async function reserveCreditsForWork(opts: {
   const { preflightCheck } = await import('./orgControlService');
   const verdict = await preflightCheck(orgId, credits);
   if (verdict.allowed === false) {
+    // B2 (e9): an unverifiable control is a retryable refusal BEFORE any hold, not an org block.
+    if ('retryable' in verdict) {
+      logger.error('credit_org_control_unverifiable', { orgId, action, code: verdict.code });
+      return { status: 'state_unreadable', code: verdict.code, retryable: true, detail: verdict.reason };
+    }
     const blocked = verdict as Extract<typeof verdict, { allowed: false }>;
     logger.warn('credit_org_control_block', { orgId, action, code: blocked.code });
     return { status: 'org_control_blocked', code: blocked.code, reason: blocked.reason };

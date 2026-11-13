@@ -62,6 +62,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       result.code === 'NOT_RECOVERABLE'       ? 409 :
       result.code === 'STATE_UNREADABLE'      ? 503 :   // reads contract A8: retryable, nothing changed
                                                 400;
+    if (status === 503) res.setHeader('Retry-After', '5');
     return res.status(status).json({ ok: false, ...result });
   }
   return res.status(200).json(result);

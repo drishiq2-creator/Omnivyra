@@ -151,6 +151,11 @@ export async function executeWithCredits<T>(
   {
     const { preflightCheck } = await import('./orgControlService');
     const verdict = await preflightCheck(orgId, credits);
+    if (verdict.allowed === false && 'retryable' in verdict) {
+      // B2 (e9): an unverifiable control is a retryable refusal BEFORE any reservation, not an org block.
+      logger.error('credit_org_control_unverifiable', { orgId, action, code: verdict.code });
+      return { status: 'state_unreadable', code: verdict.code, retryable: true, detail: verdict.reason };
+    }
     if (verdict.allowed === false) {
       // TS narrows here in theory but has been flaky in this project; grab
       // the fields via an explicit type assertion to keep the build stable.

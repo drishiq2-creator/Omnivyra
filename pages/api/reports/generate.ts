@@ -247,6 +247,7 @@ async function handler(
       }
       if (reservation.status === 'state_unreadable') {
         // Reads contract (A2/A3, e1 follow-up): the credit state could not be READ - retryable, nothing reserved.
+        res.setHeader('Retry-After', '5');
         return res.status(503).json(withTrace({
           error: 'Report generation is temporarily unavailable. Please try again in a moment.',
           code: reservation.code,

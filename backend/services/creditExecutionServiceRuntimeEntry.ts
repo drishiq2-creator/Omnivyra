@@ -93,7 +93,7 @@ export type ExecuteWithEntryConsumptionResult<T> =
   | { status: 'no_credit_account' }
   | { status: 'not_a_member'; userId: string; orgId: string }
   | { status: 'org_control_blocked'; code: 'ORG_BLOCKED' | 'HIGH_RISK_ACTION_GATED' | 'DAILY_LIMIT_EXCEEDED'; reason: string }
-  | { status: 'state_unreadable'; code: 'CREDIT_STATE_UNREADABLE'; retryable: true; detail: string };
+  | { status: 'state_unreadable'; code: import('./creditExecutionServiceContracts').StateUnreadableCode; retryable: true; detail: string };
 
 export interface ExecuteWithEntryConsumptionOptionsFixed<T> extends ExecuteBase {
   llmPricing?: undefined;

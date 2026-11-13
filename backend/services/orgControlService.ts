@@ -31,25 +31,43 @@ interface ControlsRow {
 
 const _cache = new Map<string, { row: ControlsRow | null; fetchedAt: number }>();
 
+/**
+ * Reads contract (B2, e9 ruling): an org-control input could not be READ. Typed and retryable; preflightCheck turns it
+ * into a refusal BEFORE any hold. Never cached (a failed read is not "no controls").
+ */
+export class OrgControlUnverifiableError extends Error {
+  readonly retryable = true as const;
+  constructor(readonly code: 'ORG_CONTROLS_UNVERIFIABLE' | 'DAILY_LIMIT_UNVERIFIABLE', message: string) {
+    super(message);
+    this.name = 'OrgControlUnverifiableError';
+  }
+}
+
+/**
+ * FAIL CLOSED (e9 ruling, 2026-11-14; previously failed open). is_blocked is set automatically by autoBlockLlm when a charge
+ * exceeds what the wallet can cover - an org blocked for not paying must not run paid work exactly when this table is
+ * unhealthy. The cost of failing closed is a retryable 503 for every org during an org_controls outage; a refusal
+ * costs nothing, an overspend is money.
+ */
 async function loadControls(orgId: string): Promise<ControlsRow | null> {
   const cached = _cache.get(orgId);
   if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) return cached.row;
 
+  let data: unknown;
   try {
-    const { data, error } = await ownedDbTable('org_controls')
+    const res = await ownedDbTable('org_controls')
       .select('organization_id, is_blocked, blocked_reason, is_high_risk, daily_credit_limit')
       .eq('organization_id', orgId)
       .maybeSingle();
-    if (error) throw error;
-    const row = (data as ControlsRow | null) ?? null;
-    _cache.set(orgId, { row, fetchedAt: Date.now() });
-    return row;
+    if (res.error) throw res.error;
+    data = res.data;
   } catch (err: any) {
-    logger.warn('org_controls_load_failed', { orgId, message: err?.message });
-    // Fail-open: if we can't read controls, permit the action. A writable
-    // outage on this table shouldn't silently gate every request.
-    return null;
+    logger.error('org_controls_load_failed', { orgId, message: err?.message });
+    throw new OrgControlUnverifiableError('ORG_CONTROLS_UNVERIFIABLE', `org_controls read failed for ${orgId}: ${err?.message ?? 'error'}`);
   }
+  const row = (data as ControlsRow | null) ?? null;   // a READ that finds no row is a real "no controls"
+  _cache.set(orgId, { row, fetchedAt: Date.now() });
+  return row;
 }
 
 export function invalidateOrgControlsCache(orgId: string): void {
@@ -60,17 +78,29 @@ export function invalidateOrgControlsCache(orgId: string): void {
 
 export type PreflightVerdict =
   | { allowed: true }
-  | { allowed: false; code: 'ORG_BLOCKED' | 'HIGH_RISK_ACTION_GATED' | 'DAILY_LIMIT_EXCEEDED'; reason: string };
+  | { allowed: false; code: 'ORG_BLOCKED' | 'HIGH_RISK_ACTION_GATED' | 'DAILY_LIMIT_EXCEEDED'; reason: string }
+  | { allowed: false; code: 'ORG_CONTROLS_UNVERIFIABLE' | 'DAILY_LIMIT_UNVERIFIABLE'; reason: string; retryable: true };
 
 /**
  * Check whether an org can execute an action of a given credit cost right now.
- * Never throws. If the org_controls table is unreachable, returns allowed=true
- * (fail-open — alerting covers the observability gap).
+ * Never throws. FAIL CLOSED (e9 ruling): if the controls or today's usage cannot be READ, the verdict is a retryable
+ * refusal (ORG_CONTROLS_UNVERIFIABLE / DAILY_LIMIT_UNVERIFIABLE) - callers refuse BEFORE any hold (503 + Retry-After).
  */
 export async function preflightCheck(
   orgId: string,
   creditsRequired: number,
 ): Promise<PreflightVerdict> {
+  try {
+    return await preflightCheckReads(orgId, creditsRequired);
+  } catch (err) {
+    if (err instanceof OrgControlUnverifiableError) {
+      return { allowed: false, code: err.code, reason: err.message, retryable: true };
+    }
+    throw err;
+  }
+}
+
+async function preflightCheckReads(orgId: string, creditsRequired: number): Promise<PreflightVerdict> {
   const controls = await loadControls(orgId);
   if (!controls) return { allowed: true };
 
@@ -107,22 +137,27 @@ export async function preflightCheck(
 async function getCreditsUsedToday(orgId: string): Promise<number> {
   const dayStart = new Date();
   dayStart.setUTCHours(0, 0, 0, 0);
+  // FAIL CLOSED (B2, e9): a usage read that FAILED is not "nothing used today" - read as 0 it bypassed the cap.
+  let data: unknown;
   try {
-    const { data } = await ownedDbTable('unified_transactions')
+    const res = await ownedDbTable('unified_transactions')
       .select('credits_charged')
       .eq('organization_id', orgId)
       .eq('final_attempt', true)
       .not('credits_charged', 'is', null)
       .gte('created_at', dayStart.toISOString())
       .limit(10_000);
-    let sum = 0;
-    for (const r of (data ?? []) as Array<{ credits_charged: number | null }>) {
-      sum += Number(r.credits_charged ?? 0);
-    }
-    return sum;
-  } catch {
-    return 0;  // fail-open for the limit check
+    if (res.error) throw res.error;
+    data = res.data;
+  } catch (err: any) {
+    logger.error('org_daily_usage_read_failed', { orgId, message: err?.message });
+    throw new OrgControlUnverifiableError('DAILY_LIMIT_UNVERIFIABLE', `daily usage read failed for ${orgId}: ${err?.message ?? 'error'}`);
   }
+  let sum = 0;
+  for (const r of (data ?? []) as Array<{ credits_charged: number | null }>) {
+    sum += Number(r.credits_charged ?? 0);
+  }
+  return sum;
 }
 
 // ── Auto-block (immediate hard stop) ───────────────────────────────────────

@@ -81,6 +81,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
                    result.error === 'DRIFT_DETECTED'   ? 409 :
                    result.error === 'STATE_UNREADABLE' ? 503 :   // reads contract A8: retryable, nothing expired
                                                          400;
+    if (status === 503) res.setHeader('Retry-After', '5');
     return res.status(status).json({ ok: false, ...result });
   }
   return res.status(200).json(result);
