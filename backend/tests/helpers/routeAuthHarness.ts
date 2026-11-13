@@ -121,6 +121,7 @@ const state: {
   tables: Record<string, Row[]>;
   calls: Call[];
   failTables: Set<string>;
+  failSelects: Array<{ table: string; match: (q: { cols: string; filters: Array<{ col: string; op: string; val: unknown }> }) => boolean }>;
   /**
    * table → columns that INSERT must find unoccupied (see uniqueKey).
    *
@@ -168,6 +169,7 @@ const state: {
   tables: {},
   calls: [],
   failTables: new Set(),
+  failSelects: [],
   unique: {},
   upsertModes: {},
   poisoned: new Set(),
@@ -743,6 +745,7 @@ export function seed(extra: Record<string, Row[]> = {}): void {
   // (routeAuth001DataAdmin) is a declaring suite.
   state.calls = state.calls.filter((c) => c.refused);
   state.failTables = new Set();
+  state.failSelects = [];
   state.genSeq = 0;
   // Deep-copied, so a stored fixture row never aliases the object the suite
   // passed to seed() — a suite that mutates its own fixture literal between
@@ -775,6 +778,15 @@ seed();
  */
 export function failTable(table: string, op?: 'select' | 'insert' | 'update' | 'upsert' | 'delete'): void {
   state.failTables.add(op ? `${table}|${op}` : table);
+}
+
+/**
+ * Fail the NEXT select on `table` whose selected columns / filters satisfy `match` - once. Lets a suite fail ONE read
+ * (e.g. the count a route uses for a limit) while the auth reads on the same table still succeed, which failTable()
+ * cannot express (reads contract, 2026-11-13). Additive, opt-in, cleared by seed().
+ */
+export function failSelectOnce(table: string, match: (q: { cols: string; filters: Array<{ col: string; op: string; val: unknown }> }) => boolean): void {
+  state.failSelects.push({ table, match });
 }
 
 /**
@@ -1201,8 +1213,10 @@ function makeBuilder(table: string): any {
   let limitN: number | null = null;
   let orderBy: { col: string; asc: boolean } | null = null;
   const b: any = {};
-  const passthrough = ['select', 'range', 'or', 'not', 'ilike', 'like', 'contains', 'overlaps', 'match', 'textSearch', 'filter', 'returns', 'abortSignal', 'csv', 'throwOnError'];
+  let selectCols = '';
+  const passthrough = ['range', 'or', 'not', 'ilike', 'like', 'contains', 'overlaps', 'match', 'textSearch', 'filter', 'returns', 'abortSignal', 'csv', 'throwOnError'];
   for (const m of passthrough) b[m] = () => b;
+  b.select = (cols?: unknown) => { if (typeof cols === 'string') selectCols = cols; return b; };
   for (const m of ['eq', 'neq', 'in', 'is', 'gt', 'gte', 'lt', 'lte']) {
     b[m] = (col: string, val: unknown) => { filters.push({ col, op: m, val }); return b; };
   }
@@ -1221,6 +1235,13 @@ function makeBuilder(table: string): any {
     // Table-wide fault, or one scoped to this statement kind. See failTable().
     if (state.failTables.has(table) || state.failTables.has(`${table}|${op}`)) {
       return { data: null, error: { message: `forced failure on ${table}`, code: 'XX000' }, count: 0 };
+    }
+    if (op === 'select') {
+      const i = state.failSelects.findIndex((f) => f.table === table && f.match({ cols: selectCols, filters }));
+      if (i >= 0) {
+        state.failSelects.splice(i, 1);
+        return { data: null, error: { message: `forced read failure on ${table}`, code: 'XX000' }, count: null as unknown as number };
+      }
     }
     const all = state.tables[table] || (state.tables[table] = []);
     if (op === 'insert' || op === 'upsert') {

@@ -289,11 +289,13 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     }
 
     // status === 'active' — simple toggle, no cascade.
-    const { data: previousActive } = await supabase
+    const { data: previousActive, error: previousActiveErr } = await supabase
       .from('companies')
       .select('status, deleted_at')
       .eq('id', companyId)
       .maybeSingle();
+    // Reads contract (e9 BLOCKING): a FAILED read is not "absent" - refuse retryably instead of acting on a guess. (a failed read skipped the soft-delete guard)
+    if (previousActiveErr) return res.status(503).json({ error: 'COMPANY_STATE_UNVERIFIABLE', retryable: true });
     if (previousActive && (previousActive as any).deleted_at) {
       return res.status(409).json({
         error: 'COMPANY_DELETED',

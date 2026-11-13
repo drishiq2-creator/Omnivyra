@@ -119,12 +119,16 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   // row to 'active' on acceptance rather than rejecting the invitation
   // as a duplicate. Pre-existing 'active' rows still short-circuit as
   // already-a-member (legacy behavior preserved).
-  const { data: existingRole } = await supabase
+  const { data: existingRole, error: existingRoleErr } = await supabase
     .from('user_company_roles')
     .select('id, status, role')
     .eq('user_id', userId)
     .eq('company_id', companyId)
     .maybeSingle();
+  // Reads contract (e9 BLOCKING): a FAILED read is not "absent" - refuse retryably instead of acting on a guess. (a failed read let the invitation be consumed before the insert failed)
+  if (existingRoleErr) {
+    return res.status(503).json({ error: 'Could not verify your membership. Please retry - your invitation is still valid.', retryable: true });
+  }
 
   const existingStatus = (existingRole as any)?.status ?? null;
   const existingRoleValue = (existingRole as any)?.role ?? null;

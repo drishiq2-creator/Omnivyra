@@ -103,12 +103,16 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
 
   // ── 3. If a specific user is tagged, ensure they are COMPANY_ADMIN ─────────
   if (userId) {
-    const { data: existingRole } = await sb
+    const { data: existingRole, error: existingRoleErr } = await sb
       .from('user_company_roles')
       .select('id, role')
       .eq('user_id', userId)
       .eq('company_id', organizationId)
       .maybeSingle();
+    // Reads contract (e9 BLOCKING): a FAILED read is not "absent" - refuse retryably instead of acting on a guess. (credits are granted above; the role step is refused, not guessed)
+    if (existingRoleErr) {
+      return res.status(503).json({ error: 'Credits granted, but the user role could not be verified - retry the role step.', code: 'ROLE_UNVERIFIABLE', retryable: true });
+    }
 
     if (!existingRole) {
       await sb.from('user_company_roles').insert({

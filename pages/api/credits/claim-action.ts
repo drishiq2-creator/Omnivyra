@@ -101,13 +101,20 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
      * into that organisation's ledger, and with several rows the unordered
      * limit(1) could prefer a stale one over a live one.
      */
-    const { data: membership } = await serviceSb
+    const { data: membership, error: membershipErr } = await serviceSb
       .from('user_company_roles')
       .select('company_id')
       .eq('user_id', user.id)
       .eq('status', 'active')
       .limit(1)
       .maybeSingle();
+    // Reads contract (e9 BLOCKING): a FAILED read is not "absent" - refuse retryably instead of acting on a guess. The claim row is already inserted: a failed read used to skip the grant, KEEP the claim and
+    // answer success - the reward was lost and could not be retried. Roll the claim back and refuse retryably.
+    if (membershipErr) {
+      logger.error('credits_claim_action_membership_unreadable', { userId: user.id, category, message: membershipErr.message });
+      await serviceSb.from('free_credit_claims').delete().eq('user_id', user.id).eq('category', category);
+      return res.status(503).json({ error: 'Could not verify your organization. Please try again.', retryable: true });
+    }
 
     const orgId = (membership as any)?.company_id ?? null;
     if (orgId) {
