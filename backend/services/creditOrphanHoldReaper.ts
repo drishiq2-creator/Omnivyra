@@ -169,10 +169,30 @@ export async function reapOrphanHolds(input?: {
     const confirmKey = `${baseKey}:confirm`;
     const releaseKey = `${baseKey}:release`;
 
-    const { data: siblings } = await ownedDbTable('credit_transactions')
+    const { data: siblings, error: siblingsErr } = await ownedDbTable('credit_transactions')
       .select('id, execution_phase')
       .in('idempotency_key', [confirmKey, releaseKey])
       .limit(2);
+
+    // Reads contract (A4, e9 BLOCKING; e1): a FAILED sibling read is not "no sibling". Releasing on it could return
+    // the credits of a hold that was already CONFIRMED (charged). Skip this hold - a later run re-checks it.
+    if (siblingsErr) {
+      result.failed += 1;
+      logger.error('orphan_hold_reaper_sibling_read_failed', {
+        holdId:  row.id,
+        orgId:   row.organization_id,
+        message: siblingsErr.message,
+      });
+      await recordMonetizationOperationalEvent({
+        eventName: 'monetization.orphan_hold_reaper_sibling_read_failed',
+        severity: 'ERROR',
+        organizationId: row.organization_id,
+        reservationId: row.id,
+        alertKey: 'orphan_hold_sibling_read_failed',
+        metadata: { message: siblingsErr.message },
+      });
+      continue;
+    }
 
     if (siblings && siblings.length > 0) {
       result.skippedHasSibling += 1;
