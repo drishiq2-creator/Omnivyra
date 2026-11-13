@@ -23,7 +23,7 @@
 import { createHash } from 'crypto';
 import { supabase } from '../db/supabaseClient';
 import { SYSTEM_USER_ID } from './auditActorService';
-import { resolveTopupEntitlement, type TopupEntitlement } from './subscriptionStateResolver';
+import { resolveTopupEntitlement, SubscriptionStateUnreadableError, type TopupEntitlement } from './subscriptionStateResolver';
 
 export interface ExpiryDeps {
   db: { from: (table: string) => any };
@@ -55,7 +55,15 @@ export async function expireSubscriptionCreditsForOrg(orgId: string, deps: Expir
 
   // Only terminated subscriptions expire credits. NO_SUBSCRIPTION / ACTIVE / TRIALING / GRACE /
   // PAST_DUE → never (legacy orgs and entitled orgs keep their free pool).
-  const { state } = await resolveTopupEntitlement(orgId, { db: deps.db, now: () => nowMs });
+  let state: Awaited<ReturnType<typeof resolveTopupEntitlement>>['state'];
+  try {
+    ({ state } = await resolveTopupEntitlement(orgId, { db: deps.db, now: () => nowMs }));
+  } catch (err) {
+    // B1: an unreadable subscription never expires credits; skip this org (the next sweep re-checks) - one org's
+    // failed read must not abort the sweep for every org.
+    if (err instanceof SubscriptionStateUnreadableError) return { expired: 0, state: 'UNKNOWN', reason: 'state_unreadable' };
+    throw err;
+  }
   if (state !== 'EXPIRED' && state !== 'CANCELED') return { expired: 0, state, reason: 'not_terminated' };
 
   const walletRes = await deps.db

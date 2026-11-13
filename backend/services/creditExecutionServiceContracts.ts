@@ -474,7 +474,18 @@ export async function reserveCreditsForWork(opts: {
     }
   }
 
-  const { wallet, available, split } = await resolveDeduction(orgId, credits);
+  let resolved: Awaited<ReturnType<typeof resolveDeduction>>;
+  try {
+    resolved = await resolveDeduction(orgId, credits);
+  } catch (err) {
+    // B1 (e1 Q1 a): an unreadable subscription / wallet state refuses BEFORE the HOLD.
+    if (err instanceof CreditStateUnreadableError) {
+      logger.error('credit_state_unreadable', { orgId, action, message: err.message });
+      return { status: 'state_unreadable', code: err.code, retryable: true, detail: err.message };
+    }
+    throw err;
+  }
+  const { wallet, available, split } = resolved;
   if (!wallet) {
     logger.warn('credit_no_account', { orgId, action });
     return { status: 'no_credit_account' };

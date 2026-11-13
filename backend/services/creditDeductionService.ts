@@ -195,7 +195,8 @@ export interface DeductOptions {
 }
 
 export type DeductResult =
-  | { success: true; creditsCharged: number; balanceAfter: number; reason?: undefined; detail?: undefined }
+  // balanceAfter null = UNKNOWN (the post-charge balance read failed) - never 0, which would read as "out of credits" (e1).
+  | { success: true; creditsCharged: number; balanceAfter: number | null; reason?: undefined; detail?: undefined }
   | { success: false; reason: 'insufficient_credits' | 'no_credit_account' | 'error'; detail?: string }
   | { success: true; skipped: true; reason: 'smart_mode_dedup'; detail?: undefined };
 
