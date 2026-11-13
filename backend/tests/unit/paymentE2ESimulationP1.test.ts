@@ -43,7 +43,7 @@ const db: { credit_purchases: Row[]; payment_provider_events: Row[] } = {
   credit_purchases: [], payment_provider_events: [],
 };
 type Filter = { op: 'eq' | 'neq' | 'lt'; col: string; val: unknown };
-const fail = { update: false, message: 'simulated db failure' };
+const fail: { update: boolean; message: string; selectOnce: string | null } = { update: false, message: 'simulated db failure', selectOnce: null };
 
 function applyFilters(rows: Row[], f: Filter[]): Row[] {
   return rows.filter((r) => f.every((x) => {
@@ -58,6 +58,8 @@ function makeBuilder(table: keyof typeof db, mode: 'select' | 'update' | 'insert
   const filters: Filter[] = []; let limitN: number | null = null;
   const run = () => {
     if (mode === 'update' && fail.update) { fail.update = false; return { data: [], error: { message: fail.message } }; }
+    // reads contract: one failed READ of this table (supabase-js returns it as { data: null, error }, never throws)
+    if (mode === 'select' && fail.selectOnce === table) { fail.selectOnce = null; return { data: null as unknown as Row[], error: { message: 'simulated read failure' } }; }
     if (mode === 'insert') {
       // UNIQUE(provider, provider_event_id) on payment_provider_events.
       if (table === 'payment_provider_events') {
@@ -79,8 +81,8 @@ function makeBuilder(table: keyof typeof db, mode: 'select' | 'update' | 'insert
     neq(c: string, v: unknown) { filters.push({ op: 'neq', col: c, val: v }); return api; },
     lt(c: string, v: unknown) { filters.push({ op: 'lt', col: c, val: v }); return api; },
     order() { return api; }, limit(n: number) { limitN = n; return api; }, select() { return api; },
-    single() { const r = run(); return Promise.resolve({ data: (r.data as Row[])[0] ?? null, error: r.error }); },
-    maybeSingle() { const r = run(); return Promise.resolve({ data: (r.data as Row[])[0] ?? null, error: r.error }); },
+    single() { const r = run(); return Promise.resolve({ data: (r.data as Row[] | null)?.[0] ?? null, error: r.error }); },
+    maybeSingle() { const r = run(); return Promise.resolve({ data: (r.data as Row[] | null)?.[0] ?? null, error: r.error }); },
     then(res: (v: unknown) => unknown) { return Promise.resolve(run()).then(res); },
   };
   return api;
@@ -232,7 +234,7 @@ const balance = () => grants.reduce((s, g) => s + g.amount, 0);
 beforeEach(() => {
   db.credit_purchases = []; db.payment_provider_events = [];
   grants.length = 0; invoices.length = 0; seq = 0;
-  fail.update = false; creditFails = false; invoiceFails = false;
+  fail.update = false; fail.selectOnce = null; creditFails = false; invoiceFails = false;
   providerOutcome.mockReset();
   providerOutcome.mockResolvedValue({ outcome: 'unpaid', providerRawStatus: 'created' });
 });
@@ -249,6 +251,24 @@ describe('S1 — webhook test event (valid signature, real handler)', () => {
     expect(grantsFor(o.purchaseId)[0].amount).toBe(250);
     expect(invoicesFor(o.purchaseId)).toHaveLength(1);
     expect(db.payment_provider_events).toHaveLength(1);
+  });
+});
+
+// ═══ R1 — reads contract: a FAILED purchase lookup is not "unmatched" (e9 BLOCKING) ══════════════════════════
+describe('R1 — the purchase lookup FAILS on delivery', () => {
+  it('503 (retryable), no grant, no invoice; the redelivery fulfils exactly once', async () => {
+    const o = simCreateOrder(); simProviderPaid(o);
+    fail.selectOnce = 'credit_purchases';
+    const r1 = await simDeliverWebhook(rzpEvent(o));
+    expect(r1).toMatchObject({ status: 503, body: { ok: false, error: 'purchase_lookup_failed', retryable: true } });
+    expect(grantsFor(o.purchaseId)).toHaveLength(0);
+    expect(invoicesFor(o.purchaseId)).toHaveLength(0);
+    expect(get(o.purchaseId).status).toBe('pending');
+    const r2 = await simRedeliverWebhook(rzpEvent(o));
+    expect(r2.status).toBe(200);
+    expect(get(o.purchaseId).status).toBe('completed');
+    expect(grantsFor(o.purchaseId)).toHaveLength(1);
+    expect(invoicesFor(o.purchaseId)).toHaveLength(1);
   });
 });
 
