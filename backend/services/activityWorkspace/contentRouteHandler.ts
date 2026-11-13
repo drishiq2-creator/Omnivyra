@@ -720,6 +720,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       if (result.status === 'no_credit_account') {
         return res.status(402).json({ error: 'No credit account for org' });
       }
+      if (result.status === 'state_unreadable') {
+        return res.status(503).json({ error: result.code, retryable: true });
+      }
       if (result.status !== 'executed') {
         return res.status(500).json({ error: 'Failed to generate master content' });
       }
