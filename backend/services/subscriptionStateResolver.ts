@@ -22,7 +22,20 @@ export type SubscriptionState =
   | 'GRACE'
   | 'PAST_DUE'
   | 'EXPIRED'
-  | 'CANCELED';
+  | 'CANCELED'
+  // Reads contract (B1, e9): the subscription could not be READ. Never derived from data - only a failed read yields it.
+  // Every entitlement predicate refuses it (allow-lists), and it never expires credits.
+  | 'UNKNOWN';
+
+/** Reads contract (B1): the subscription state could not be READ. Typed and retryable. */
+export class SubscriptionStateUnreadableError extends Error {
+  readonly code = 'SUBSCRIPTION_STATE_UNREADABLE' as const;
+  readonly retryable = true as const;
+  constructor(message: string) {
+    super(message);
+    this.name = 'SubscriptionStateUnreadableError';
+  }
+}
 
 /** Days after `current_period_end` during which a lapsed sub is GRACE/PAST_DUE, not yet EXPIRED. */
 export const GRACE_DAYS = 3;
@@ -105,7 +118,8 @@ export function isEntitled(state: SubscriptionState): boolean {
  * paid for those credits and is in a payment-retry grace window. Renewal → ACTIVE auto-restores.
  */
 export function isTopupUsable(state: SubscriptionState): boolean {
-  return state !== 'EXPIRED' && state !== 'CANCELED';
+  // An ALLOW-list (B1): a deny-list (`!== EXPIRED && !== CANCELED`) would have made UNKNOWN usable.
+  return state === 'ACTIVE' || state === 'TRIALING' || state === 'GRACE' || state === 'PAST_DUE';
 }
 
 export interface TopupEntitlement {
@@ -114,27 +128,30 @@ export interface TopupEntitlement {
 }
 
 /**
- * Resolve top-up usability for an org. NON-REGRESSIVE + fail-open: an org with NO
- * billing_subscriptions row (never subscribed / legacy) is NOT gated — top-up stays usable.
- * Only an org with an actual terminated subscription (EXPIRED/CANCELED) is locked. A read error
- * also fails open (never break paid-credit usage on a transient error).
+ * Resolve top-up usability for an org. NON-REGRESSIVE: an org whose billing_subscriptions READ finds no row (never
+ * subscribed / legacy) is NOT gated — top-up stays usable. Only an org with an actual terminated subscription
+ * (EXPIRED/CANCELED) is locked. FAIL CLOSED (B1, e9/e1; previously failed open): a FAILED read throws
+ * SubscriptionStateUnreadableError - an EXPIRED/CANCELED org must not regain top-up on a transient error. Callers
+ * refuse retryably (503); a paid balance is never shown as "insufficient" (e1).
  */
 export async function resolveTopupEntitlement(organizationId: string, deps: ResolverDeps): Promise<TopupEntitlement> {
   const nowMs = deps.now ? deps.now() : Date.now();
+  let r: { data?: unknown[] | null; error?: { message?: string } | null } | undefined;
   try {
-    const r = await deps.db
+    r = await deps.db
       .from('billing_subscriptions')
       .select('status, current_period_end, trial_ends_at, cancel_at_period_end')
       .eq('organization_id', organizationId)
       .order('current_period_end', { ascending: false })
       .limit(1);
-    const row = (r?.data ?? [])[0] ?? null;
-    if (!row) return { usable: true, state: 'NO_SUBSCRIPTION' };
-    const state = resolveSubscriptionStateFrom({ subscription: row, hasPlanAssignment: false, nowMs, graceDays: deps.graceDays });
-    return { usable: isTopupUsable(state), state };
-  } catch {
-    return { usable: true, state: 'NO_SUBSCRIPTION' };
+  } catch (err) {
+    throw new SubscriptionStateUnreadableError(`billing_subscriptions read failed for ${organizationId}: ${(err as Error)?.message ?? 'error'}`);
   }
+  if (r?.error) throw new SubscriptionStateUnreadableError(`billing_subscriptions read failed for ${organizationId}: ${r.error.message ?? 'error'}`);
+  const row = ((r?.data ?? [])[0] ?? null) as BillingSubscriptionRow | null;
+  if (!row) return { usable: true, state: 'NO_SUBSCRIPTION' };
+  const state = resolveSubscriptionStateFrom({ subscription: row, hasPlanAssignment: false, nowMs, graceDays: deps.graceDays });
+  return { usable: isTopupUsable(state), state };
 }
 
 // ── Async resolver (injectable db) ───────────────────────────────────────────
@@ -146,18 +163,13 @@ export interface ResolverDeps {
 
 /**
  * Resolve the canonical state for an org. Loads the latest billing_subscriptions row (by
- * current_period_end) + plan-assignment presence. Fail-closed-to-legacy on error: never throws
- * into a caller, preserving current allocation behavior.
+ * current_period_end) + plan-assignment presence. Never throws into a caller. FAIL CLOSED (B1, e9; previously a
+ * failed read fell back to "plan assignment -> ACTIVE", which granted monthly credits to a canceled org): if EITHER
+ * read fails the state is 'UNKNOWN', which no entitlement predicate accepts (allocation -> subscription_inactive;
+ * the next run re-checks).
  */
 export async function resolveSubscriptionState(organizationId: string, deps: ResolverDeps): Promise<SubscriptionState> {
   const nowMs = deps.now ? deps.now() : Date.now();
-  const loadPlanAssignment = async (): Promise<boolean> => {
-    try {
-      const r = await deps.db.from('organization_plan_assignments').select('organization_id').eq('organization_id', organizationId).maybeSingle();
-      return Boolean(r?.data);
-    } catch { return false; }
-  };
-
   try {
     const subRes = await deps.db
       .from('billing_subscriptions')
@@ -165,12 +177,13 @@ export async function resolveSubscriptionState(organizationId: string, deps: Res
       .eq('organization_id', organizationId)
       .order('current_period_end', { ascending: false })
       .limit(1);
+    if (subRes?.error) return 'UNKNOWN';
     const subscription = (subRes?.data ?? [])[0] ?? null;
-    const hasPlanAssignment = await loadPlanAssignment();
+    const planRes = await deps.db.from('organization_plan_assignments').select('organization_id').eq('organization_id', organizationId).maybeSingle();
+    if (planRes?.error) return 'UNKNOWN';
+    const hasPlanAssignment = Boolean(planRes?.data);
     return resolveSubscriptionStateFrom({ subscription, hasPlanAssignment, nowMs, graceDays: deps.graceDays });
   } catch {
-    // Transient load failure: preserve legacy behavior rather than block allocation.
-    const hasPlanAssignment = await loadPlanAssignment();
-    return hasPlanAssignment ? 'ACTIVE' : 'EXPIRED';
+    return 'UNKNOWN';
   }
 }

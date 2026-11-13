@@ -238,7 +238,17 @@ export async function executeWithEntryConsumption<T>(
   // Admission control (Phase 8 TASK 2): require effective balance ≥ MAX exposure
   // BEFORE consuming the non-refundable entry, so we never charge entry on an
   // activity that cannot reserve its full exposure.
-  const availableTotal = await getTotalAvailable(opts.orgId);
+  let availableTotal: number | null;
+  try {
+    availableTotal = await getTotalAvailable(opts.orgId);
+  } catch (err) {
+    // B1 (e1 Q1 a): unreadable -> refuse BEFORE the entry is consumed.
+    if (err instanceof CreditStateUnreadableError) {
+      logger.error('credit_state_unreadable', { orgId: opts.orgId, action: opts.action, message: err.message });
+      return { status: 'state_unreadable', code: err.code, retryable: true, detail: err.message };
+    }
+    throw err;
+  }
   if ((availableTotal ?? 0) < maxExposure) {
     fireAlerts(opts.orgId);
     return { status: 'insufficient_credits', available: availableTotal ?? 0, required: maxExposure };
@@ -664,8 +674,13 @@ export async function deductCreditsAwaited(
     });
 
     if (result.status === 'executed' || result.status === 'already_confirmed') {
-      const balanceAfter = await getTotalAvailable(orgId);
-      return { success: true, creditsCharged: credits, balanceAfter: balanceAfter ?? 0 };
+      // B1: display-only, AFTER a successful charge - an unreadable balance must not turn the charge into a failure,
+      // and is reported as UNKNOWN (null), not 0 (e1).
+      const balanceAfter = await getTotalAvailable(orgId).catch((err: unknown) => {
+        logger.error('credit_balance_after_unreadable', { orgId, action, message: err instanceof Error ? err.message : String(err) });
+        return null;
+      });
+      return { success: true, creditsCharged: credits, balanceAfter };   // null = unknown (e1), never coerced to 0
     }
     if (result.status === 'already_released') {
       return { success: true, skipped: true, reason: 'smart_mode_dedup' };

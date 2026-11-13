@@ -116,6 +116,48 @@ beforeEach(() => {
   });
 });
 
+describe('B1 (e1 Q1 a): an unreadable subscription / wallet state refuses BEFORE any hold, never "insufficient"', () => {
+  const { CreditStateUnreadableError } = jest.requireActual('../../repositories/creditExecutionRepository');
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { executeWithCredits } = require('../../services/creditExecutionService');
+  const args = (executor: jest.Mock) => ({
+    userId: USER, orgId: ORG, action: ACTION as any, referenceType: 'content', referenceId: REF,
+    idempotencyKey: IDEM, validateMembership: false, amountOverride: 9, executor,
+  });
+
+  it('executeWithCredits: resolveDeduction throws CreditStateUnreadableError -> state_unreadable, NO hold, executor never invoked', async () => {
+    priority.resolveDeduction.mockRejectedValue(new CreditStateUnreadableError('billing_subscriptions read failed'));
+    const executor = jest.fn(async () => 'OUTPUT');
+    const res = await executeWithCredits(args(executor));
+    expect(priority.resolveDeduction).toHaveBeenCalled();
+    expect(res).toMatchObject({ status: 'state_unreadable', code: 'CREDIT_STATE_UNREADABLE', retryable: true });
+    expect(res.status).not.toBe('insufficient_credits');
+    expect(executor).not.toHaveBeenCalled();
+    expect(repo.callCreditReservation).not.toHaveBeenCalled();
+  });
+  it('entry path: the admission balance read throws -> state_unreadable before the entry is consumed (no reservation RPC)', async () => {
+    priority.getTotalAvailable.mockRejectedValue(new CreditStateUnreadableError('billing_subscriptions read failed'));
+    const executor = jest.fn(async () => 'OUTPUT');
+    const res = await executeWithEntryConsumption(args(executor));
+    expect(priority.getTotalAvailable).toHaveBeenCalled();
+    expect(res).toMatchObject({ status: 'state_unreadable', code: 'CREDIT_STATE_UNREADABLE', retryable: true });
+    expect(executor).not.toHaveBeenCalled();
+    expect(repo.callCreditReservation).not.toHaveBeenCalled();
+  });
+  it('entry path: reserveCreditsForWork resolveDeduction throws -> state_unreadable, no HOLD RPC', async () => {
+    priority.resolveDeduction.mockRejectedValue(new CreditStateUnreadableError('billing_subscriptions read failed'));
+    const executor = jest.fn(async () => 'OUTPUT');
+    const res = await executeWithEntryConsumption(args(executor));
+    expect(res).toMatchObject({ status: 'state_unreadable', retryable: true });
+    expect(executor).not.toHaveBeenCalled();
+    expect(repo.callCreditReservation.mock.calls.filter((c: any[]) => c[0].phase === 'hold')).toHaveLength(0);
+  });
+  it('CONTROL: a non-typed error still propagates (not swallowed as state_unreadable)', async () => {
+    priority.resolveDeduction.mockRejectedValue(new Error('boom'));
+    await expect(executeWithCredits(args(jest.fn()))).rejects.toThrow('boom');
+  });
+});
+
 describe('B2 (e9): an UNVERIFIABLE org control refuses before any hold or action, on both credit paths', () => {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const oc = require('../../services/orgControlService');

@@ -8,7 +8,18 @@
  */
 
 import { supabase } from '../db/supabaseClient';
-import { resolveTopupEntitlement } from './subscriptionStateResolver';
+import { resolveTopupEntitlement, SubscriptionStateUnreadableError } from './subscriptionStateResolver';
+import { CreditStateUnreadableError } from '../repositories/creditExecutionRepository';
+
+/** B1 (e1 Q1 a): an unreadable subscription is an unreadable CREDIT state - refused retryably, never "insufficient". */
+async function topupUsableOrRefuse(orgId: string): Promise<boolean> {
+  try {
+    return (await resolveTopupEntitlement(orgId, { db: supabase })).usable;
+  } catch (err) {
+    if (err instanceof SubscriptionStateUnreadableError) throw new CreditStateUnreadableError(err.message);
+    throw err;
+  }
+}
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -116,7 +127,7 @@ export async function resolveDeduction(orgId: string, amount: number): Promise<{
   const wallet = await getWalletSnapshot(orgId);
   if (!wallet) return { wallet: null, available: null, split: null };
 
-  const { usable } = await resolveTopupEntitlement(orgId, { db: supabase });
+  const usable = await topupUsableOrRefuse(orgId);
   const available = computeAvailable(wallet, { topupUsable: usable });
   const split = computeSplit(amount, available);
 
@@ -130,6 +141,6 @@ export async function resolveDeduction(orgId: string, amount: number): Promise<{
 export async function getTotalAvailable(orgId: string): Promise<number | null> {
   const wallet = await getWalletSnapshot(orgId);
   if (!wallet) return null;
-  const { usable } = await resolveTopupEntitlement(orgId, { db: supabase });
+  const usable = await topupUsableOrRefuse(orgId);
   return computeAvailable(wallet, { topupUsable: usable }).total;
 }

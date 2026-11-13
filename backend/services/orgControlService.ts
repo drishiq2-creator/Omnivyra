@@ -83,7 +83,7 @@ export type PreflightVerdict =
 
 /**
  * Check whether an org can execute an action of a given credit cost right now.
- * Never throws. FAIL CLOSED (e9 ruling): if the controls or today's usage cannot be READ, the verdict is a retryable
+ * Never throws for a read failure (e1). FAIL CLOSED (e9 ruling): if the controls or today's usage cannot be READ, the verdict is a retryable
  * refusal (ORG_CONTROLS_UNVERIFIABLE / DAILY_LIMIT_UNVERIFIABLE) - callers refuse BEFORE any hold (503 + Retry-After).
  */
 export async function preflightCheck(
