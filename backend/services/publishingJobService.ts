@@ -1,4 +1,5 @@
 import { ownedDbTable } from '../db/writeOwner';
+import { resolveTenantOfRow, systemTenantContext, tenantChildTable, tenantTable } from '../db/tenantTable';
 import { getCmsAdapter, isCmsProvider } from './cms/registry';
 import type { CmsProvider } from './cms/types';
 import { getIntegration } from './integrationService';
@@ -92,6 +93,16 @@ export interface CreatePublishingJobInput {
   scheduledFor?: string | null;
   createdBy?: string | null;
 }
+
+/**
+ * S2 tenant seam: writes of ONE publishing job run under that job's own tenant. `job` is always a publishing_jobs
+ * row this module READ (claim / select), so job.company_id is the row's own company (UUID NOT NULL, FK to
+ * companies), never caller input. A malformed id throws TenantSeamError (TENANT_CONTEXT_MISSING).
+ */
+function jobsOf(job: Pick<PublishingJob, 'company_id'>, reason: string) {
+  return tenantTable('publishing_jobs', systemTenantContext(job.company_id, reason));
+}
+type PublishingJobRows = ReturnType<typeof jobsOf>;
 
 export interface WorkerRunResult {
   claimed: number;
@@ -225,7 +236,15 @@ export async function claimDuePublishingJobs(input: {
   const claimed: PublishingJob[] = [];
   for (const row of data || []) {
     const lockExpiresAt = new Date(Date.now() + (input.lockMs ?? 120_000)).toISOString();
-    const claim = await ownedDbTable('publishing_jobs')
+    // S2: each claim is written under the claimed row's own tenant (company_id read from the row above). A row
+    // whose company cannot form a context is not claimed (same outcome as a lost claim race).
+    let jobs: PublishingJobRows;
+    try {
+      jobs = jobsOf(row as PublishingJob, 'publishing worker: claim due job');
+    } catch {
+      continue;
+    }
+    const claim = await jobs
       .update({
         status: 'processing',
         locked_by: input.workerId,
@@ -253,7 +272,11 @@ export type PublishingExecution = { success: boolean; message: string; external_
  * unique per call, so two inline runs never share a claim identity.
  */
 export async function executePublishingJob(jobId: string, workerId = `inline-worker:${randomUUID()}`): Promise<PublishingExecution> {
-  const claimed = await ownedDbTable('publishing_jobs')
+  // S2 tenant seam: the claim runs under the job's own tenant, read from the row by the seam. A job with no
+  // resolvable tenant fails exactly like a missing job.
+  const jobCtx = await resolveTenantOfRow('publishing_jobs', jobId, 'publishing job: inline execute claim');
+  if (!jobCtx) throw new Error('Publishing job not found or not claimable');
+  const claimed = await tenantTable('publishing_jobs', jobCtx)
     .update({
       status: 'processing',
       locked_by: workerId,
@@ -271,8 +294,11 @@ export async function executePublishingJob(jobId: string, workerId = `inline-wor
 }
 
 export async function executeClaimedPublishingJob(job: PublishingJob, workerId: string): Promise<PublishingExecution> {
+  // S2 tenant seam: every job write below goes through the job's own tenant (see jobsOf). Created before any
+  // write; a malformed company id throws here, before anything is written.
+  const jobs = jobsOf(job, 'publishing job: execute claimed job');
   if (!isCmsProvider(job.provider)) {
-    await markJobFailure(job, `Unsupported CMS provider: ${job.provider}`, 'validation');
+    await markJobFailure(jobs, job, `Unsupported CMS provider: ${job.provider}`, 'validation');
     return { success: false, message: `Unsupported CMS provider: ${job.provider}` };
   }
 
@@ -293,7 +319,8 @@ export async function executeClaimedPublishingJob(job: PublishingJob, workerId: 
   // a job retry without end. It is also the CLAIM CHECK, written FIRST and fenced on the claim: a
   // run that lost its claim (lock expired, job recovered and claimed again) stops here, before an
   // attempt row or a provider call - two runs never share an attempt number (CLASS-2).
-  const { data: counted, error: countError } = await whereClaimHeld(ownedDbTable('publishing_jobs')
+  // S2: written through the job's own tenant handle (jobs); the claim fence is unchanged.
+  const { data: counted, error: countError } = await whereClaimHeld(jobs
     .update({ attempt_count: attemptNumber, updated_at: new Date().toISOString() })
     .eq('id', job.id), job)
     .select('id');
@@ -303,7 +330,11 @@ export async function executeClaimedPublishingJob(job: PublishingJob, workerId: 
     return { success: false, notClaimed: true, message: 'This publishing job is now held by another run.' };
   }
 
-  const { data: attempt, error: attemptError } = await ownedDbTable('publishing_attempts')
+  // S2 tenant seam: publishing_attempts is a child of publishing_jobs (job_id). The handle verifies the job is in
+  // the job's tenant and pins every attempt write to this job; a refusal throws before the attempt insert, as an
+  // insert error would.
+  const attempts = await tenantChildTable('publishing_attempts', systemTenantContext(job.company_id, 'publishing job: attempt rows'), job.id);
+  const { data: attempt, error: attemptError } = await attempts
     .insert({
       job_id: job.id,
       attempt_number: attemptNumber,
@@ -380,7 +411,7 @@ export async function executeClaimedPublishingJob(job: PublishingJob, workerId: 
     // LOAD-BEARING for stale recovery, which reads this row to decide whether a stuck job was
     // published: if this write fails the attempt stays 'running' = outcome unknown, which recovery
     // dead-letters for review (never republishes). Logged, not thrown: the provider already answered.
-    const { error: attemptResultError } = await ownedDbTable('publishing_attempts')
+    const { error: attemptResultError } = await attempts
       .update({
         status: result.success ? 'succeeded' : 'failed',
         provider_response: result.providerResponse ?? {},
@@ -397,7 +428,7 @@ export async function executeClaimedPublishingJob(job: PublishingJob, workerId: 
     }
 
     if (result.success) {
-      await markJobPublished(job, result, duration);
+      await markJobPublished(jobs, job, result, duration);
       if (job.job_type === 'delete_post') {
         const { error: blogError } = await ownedDbTable('blogs')
           .update({
@@ -433,7 +464,7 @@ export async function executeClaimedPublishingJob(job: PublishingJob, workerId: 
       return { success: true, message: result.message, external_id: result.externalId, external_url: result.externalUrl };
     }
 
-    await markJobFailure(job, result.message, category, attemptNumber, result.providerResponse, duration);
+    await markJobFailure(jobs, job, result.message, category, attemptNumber, result.providerResponse, duration);
     return { success: false, message: result.message };
   } catch (err) {
     const duration = Date.now() - started;
@@ -442,7 +473,7 @@ export async function executeClaimedPublishingJob(job: PublishingJob, workerId: 
     // for a create; before it (blog / integration load) nothing was sent.
     const category = providerCallStarted && isCreateJob(job) ? UNCERTAIN_PUBLISH_CATEGORY : categorizeFailure(message);
     // best-effort: the failure is recorded on the job by markJobFailure below; an unwritten attempt stays 'running' (recovery reviews it)
-    const { error: catchAttemptError } = await ownedDbTable('publishing_attempts')
+    const { error: catchAttemptError } = await attempts
       .update({
         status: 'failed',
         error_message: message,
@@ -452,7 +483,7 @@ export async function executeClaimedPublishingJob(job: PublishingJob, workerId: 
       })
       .eq('id', attempt.id);
     if (catchAttemptError) console.warn('[publishingJob] failed attempt not recorded', { job_id: job.id, attempt_id: attempt.id, error: catchAttemptError.message });
-    await markJobFailure(job, message, category, attemptNumber, undefined, duration);
+    await markJobFailure(jobs, job, message, category, attemptNumber, undefined, duration);
     return { success: false, message };
   }
 }
@@ -637,13 +668,21 @@ export async function recoverStalePublishingJobs(workerId = 'stale-recovery'): P
   const now = new Date().toISOString();
   // best-effort: an unreadable stale list only delays recovery to the next tick; nothing is re-queued without it
   const { data, error: staleError } = await ownedDbTable('publishing_jobs')
-    .select('id, attempt_count, locked_by')
+    .select('id, company_id, attempt_count, locked_by')
     .eq('status', 'processing')
     .lt('lock_expires_at', now)
     .limit(50);
   if (staleError) console.warn('[publishingJob] stale processing jobs unreadable; recovery deferred', { error: staleError.message });
   let recovered = 0;
   for (const job of data || []) {
+    // S2: the cross-tenant stale scan above stays a read; each recovery WRITE is one row under that row's own
+    // tenant (company_id read from the row). A row whose company cannot form a context is skipped, not counted.
+    let jobs: PublishingJobRows;
+    try {
+      jobs = jobsOf(job as Pick<PublishingJob, 'company_id'>, 'publishing worker: stale-job recovery');
+    } catch {
+      continue;
+    }
     const { data: lastAttempt, error: attemptError } = await ownedDbTable('publishing_attempts')
       .select('status, provider_response, failure_category')
       .eq('job_id', job.id)
@@ -679,7 +718,7 @@ export async function recoverStalePublishingJobs(workerId = 'stale-recovery'): P
     // finished and claimed again in between holds a fresh lock, and this decision - made from the
     // old run's attempt - must not land on the new run (CLASS-2). Only a moved row counts.
     const holder = (job as { locked_by?: string | null }).locked_by ?? null;
-    const recover = ownedDbTable('publishing_jobs')
+    const recover = jobs
       .update(patch)
       .eq('id', job.id)
       .eq('status', 'processing')
@@ -720,11 +759,11 @@ async function loadPublishingIntegration(job: PublishingJob) {
   return integration;
 }
 
-async function markJobPublished(job: PublishingJob, result: { providerResponse?: unknown; externalId?: string; externalUrl?: string; message: string }, duration: number): Promise<void> {
+async function markJobPublished(jobs: PublishingJobRows, job: PublishingJob, result: { providerResponse?: unknown; externalId?: string; externalUrl?: string; message: string }, duration: number): Promise<void> {
   const response = (result.providerResponse ?? {}) as Record<string, unknown>;
   // The post is LIVE. If this write fails the job stays `processing`; stale recovery then reads the
   // 'succeeded' attempt and marks it published - it is never republished. Logged at ERROR.
-  const { data: marked, error: publishedError } = await whereClaimHeld(ownedDbTable('publishing_jobs')
+  const { data: marked, error: publishedError } = await whereClaimHeld(jobs
     .update({
       status: 'published',
       external_id: result.externalId ?? null,
@@ -762,6 +801,7 @@ async function markJobPublished(job: PublishingJob, result: { providerResponse?:
 }
 
 async function markJobFailure(
+  jobs: PublishingJobRows,
   job: PublishingJob,
   message: string,
   category: PublishingFailureCategory,
@@ -779,7 +819,7 @@ async function markJobFailure(
   const nextRetryAt = exhausted ? null : new Date(Date.now() + backoffMs(attemptNumber)).toISOString();
   // Not silent: an unwritten failure leaves the job `processing`; stale recovery then reads the
   // failed attempt and re-queues it (the retry bound is the persisted attempt_count).
-  const { data: failed, error: failureWriteError } = await whereClaimHeld(ownedDbTable('publishing_jobs')
+  const { data: failed, error: failureWriteError } = await whereClaimHeld(jobs
     .update({
       status,
       provider_response: providerResponse ?? {},
