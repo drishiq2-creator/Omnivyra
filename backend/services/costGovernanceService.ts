@@ -24,16 +24,35 @@ import type {
 } from '../types/costGovernance';
 import { COST_BUDGET_WINDOW_MS } from '../types/costGovernance';
 
+/**
+ * Reads contract (B3, e9 BLOCKING): the budget or the rolling spend could not be READ. Answered as "no active budget"
+ * / "0 spent" it allowed spend past the hard ceiling. Typed and retryable; evaluateCost refuses instead (503).
+ */
+export class BudgetUnverifiableError extends Error {
+  readonly code = 'BUDGET_UNVERIFIABLE' as const;
+  readonly retryable = true as const;
+  constructor(message: string) {
+    super(message);
+    this.name = 'BudgetUnverifiableError';
+  }
+}
+
 async function loadBudget(
   organizationId: string,
   category: CostCategory,
 ): Promise<CostBudget | null> {
-  const { data } = await ownedDbTable('cost_budgets')
-    .select('*')
-    .eq('organization_id', organizationId)
-    .eq('category', category)
-    .maybeSingle();
-  return (data as CostBudget | null) ?? null;
+  let res: { data: unknown; error: { message?: string } | null };
+  try {
+    res = await ownedDbTable('cost_budgets')
+      .select('*')
+      .eq('organization_id', organizationId)
+      .eq('category', category)
+      .maybeSingle();
+  } catch (err) {
+    throw new BudgetUnverifiableError(`cost_budgets read failed: ${(err as Error)?.message ?? 'error'}`);
+  }
+  if (res.error) throw new BudgetUnverifiableError(`cost_budgets read failed: ${res.error.message ?? 'error'}`);
+  return (res.data as CostBudget | null) ?? null;   // a READ that finds no row is a real "no budget"
 }
 
 async function rollingSpend(
@@ -41,12 +60,19 @@ async function rollingSpend(
   category: CostCategory,
 ): Promise<number> {
   const since = new Date(Date.now() - COST_BUDGET_WINDOW_MS).toISOString();
-  const { data } = await ownedDbTable('cost_events')
-    .select('units')
-    .eq('organization_id', organizationId)
-    .eq('category', category)
-    .gt('created_at', since)
-    .in('decision', ['allowed', 'overage_approved']);
+  let res: { data: unknown; error: { message?: string } | null };
+  try {
+    res = await ownedDbTable('cost_events')
+      .select('units')
+      .eq('organization_id', organizationId)
+      .eq('category', category)
+      .gt('created_at', since)
+      .in('decision', ['allowed', 'overage_approved']);
+  } catch (err) {
+    throw new BudgetUnverifiableError(`cost_events read failed: ${(err as Error)?.message ?? 'error'}`);
+  }
+  if (res.error) throw new BudgetUnverifiableError(`cost_events read failed: ${res.error.message ?? 'error'}`);
+  const data = res.data;
   return ((data ?? []) as Array<{ units: number }>).reduce(
     (acc, r) => acc + Math.max(0, r.units),
     0,
