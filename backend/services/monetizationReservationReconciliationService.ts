@@ -6,6 +6,7 @@ import {
   releaseCreditReservation,
   type CreditReservationHandle,
 } from './creditExecutionService';
+import { CreditStateUnreadableError } from '../repositories/creditExecutionRepository';
 import type { CreditAction } from './creditDeductionService';
 import type { CategorySplit } from './creditPriorityService';
 
@@ -122,19 +123,24 @@ function buildHandle(row: HoldRow): CreditReservationHandle | null {
 async function hasTerminalSibling(row: HoldRow): Promise<TerminalRow | null> {
   const baseKey = stripHoldSuffix(row.idempotency_key);
   if (!baseKey) return null;
-  const { data } = await ownedDbTable('credit_transactions')
+  // Reads contract (A7, e9 BLOCKING; e1): a FAILED sibling read is not "no terminal sibling" - answered as null the
+  // reconciler would confirm or RELEASE a hold that may already be settled. Throw: the per-row catch in
+  // reconcileDurableMonetizationReservations counts it failed, logs, emits the event and leaves the hold alone.
+  const { data, error } = await ownedDbTable('credit_transactions')
     .select('id, parent_transaction_id, execution_phase, idempotency_key')
     .eq('parent_transaction_id', row.id)
     .in('execution_phase', ['confirm', 'release'])
     .limit(1)
     .maybeSingle();
+  if (error) throw new CreditStateUnreadableError(`terminal sibling (by parent) read failed for hold ${row.id}: ${error.message}`);
   if (data) return data as TerminalRow;
 
-  const { data: keyed } = await ownedDbTable('credit_transactions')
+  const { data: keyed, error: keyedErr } = await ownedDbTable('credit_transactions')
     .select('id, parent_transaction_id, execution_phase, idempotency_key')
     .in('idempotency_key', [`${baseKey}:confirm`, `${baseKey}:release`])
     .limit(1)
     .maybeSingle();
+  if (keyedErr) throw new CreditStateUnreadableError(`terminal sibling (by key) read failed for hold ${row.id}: ${keyedErr.message}`);
   return (keyed as TerminalRow | null) ?? null;
 }
 
