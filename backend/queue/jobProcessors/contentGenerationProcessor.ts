@@ -193,6 +193,12 @@ export async function processContentGenerationJob(job: Job): Promise<any> {
     if (wrapped.kind === 'duplicate_blocked') {
       return { skipped: true, reason: wrapped.reason };
     }
+    // Reads contract (A2b, e1 GO): same as the entry path - an UNREADABLE credit state did no work; throw (retryable)
+    // instead of completing the job as { skipped }.
+    if (wrapped.orchestrator.result.status === 'state_unreadable') {
+      const { CreditStateUnreadableError } = await import('../../repositories/creditExecutionRepository');
+      throw new CreditStateUnreadableError(wrapped.orchestrator.result.detail);
+    }
     return wrapped.orchestrator.result.status === 'executed'
       ? (wrapped.orchestrator.result.result as unknown)
       : { skipped: true, reason: wrapped.orchestrator.result.status };
