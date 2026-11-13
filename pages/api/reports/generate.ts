@@ -245,6 +245,14 @@ async function handler(
           code: 'INSUFFICIENT_CREDITS',
         }));
       }
+      if (reservation.status === 'state_unreadable') {
+        // Reads contract (A2/A3, e1 follow-up): the credit state could not be READ - retryable, nothing reserved.
+        return res.status(503).json(withTrace({
+          error: 'Report generation is temporarily unavailable. Please try again in a moment.',
+          code: reservation.code,
+          retryable: true,
+        }));
+      }
       if (reservation.status !== 'reserved' && reservation.status !== 'already_reserved') {
         const statusCode = reservation.status === 'no_credit_account' ? 402 : 409;
         return res.status(statusCode).json(withTrace({

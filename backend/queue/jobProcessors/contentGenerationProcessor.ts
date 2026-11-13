@@ -163,6 +163,12 @@ export async function processContentGenerationJob(job: Job): Promise<any> {
       collectViaCollector: true,
       executor:            () => processContentGenerationJobInner(job),
     });
+    // Reads contract (A2/A3, e1 follow-up 2): an UNREADABLE credit state did no work - throw (retryable) so BullMQ
+    // retries; returning would complete the job as a success with nothing done. Other statuses unchanged.
+    if (r.status === 'state_unreadable') {
+      const { CreditStateUnreadableError } = await import('../../repositories/creditExecutionRepository');
+      throw new CreditStateUnreadableError(r.detail);
+    }
     return r.status === 'executed' ? (r.result as unknown) : { skipped: true, reason: r.status };
   }
 

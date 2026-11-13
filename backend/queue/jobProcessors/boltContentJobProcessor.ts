@@ -342,7 +342,7 @@ export async function processBoltContentJob(job: Job): Promise<void> {
     const referenceId = String(d.bolt_job_id ?? job.id ?? d.run_id);
     // Phase 12E — engine-owned usage scope; entry consumed at the first provider
     // call across the master+variant generation.
-    await executeWithEntryConsumption<void>({
+    const r = await executeWithEntryConsumption<void>({
       userId:              String(d.campaign?.user_id ?? orgId),
       orgId,
       action:              'content_generation',
@@ -354,6 +354,12 @@ export async function processBoltContentJob(job: Job): Promise<void> {
       collectViaCollector: true,
       executor:            () => processBoltContentJobInner(job),
     });
+    // Reads contract (A2/A3, e1 follow-up 2): an UNREADABLE credit state did no work - throw (retryable) so BullMQ
+    // retries; returning would complete the job as a success with nothing done. Other statuses unchanged.
+    if (r.status === 'state_unreadable') {
+      const { CreditStateUnreadableError } = await import('../../repositories/creditExecutionRepository');
+      throw new CreditStateUnreadableError(r.detail);
+    }
     return;
   }
 
