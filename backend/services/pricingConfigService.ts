@@ -50,24 +50,32 @@ function buildFxConfig(rateRows: RateRow[], overrideRows: OverrideRow[]): FxConf
  * never getFxConfig (pinned by test).
  */
 export async function getFxConfigForCharge(chargeCurrency: Currency): Promise<FxConfig> {
-  let rateRes: { data: unknown; error: { message?: string } | null };
-  let overrideRes: { data: unknown; error: { message?: string } | null };
+  // Two separately awaited reads (not Promise.all): each destructures its own error, which the reads contract can
+  // verify; a charge path is not latency-critical enough to justify an unverifiable shape.
+  let rateData: unknown;
+  let overrideData: unknown;
   try {
-    [rateRes, overrideRes] = await Promise.all([
-      supabase.from('billing_fx_rates').select('currency, rate, updated_at'),
-      supabase.from('billing_price_overrides').select('sku, currency, amount'),
-    ]) as any;
+    const { data, error } = await supabase.from('billing_fx_rates').select('currency, rate, updated_at');
+    if (error) throw new PricingUnavailableError(`billing_fx_rates read failed: ${error.message ?? 'error'}`);
+    rateData = data;
   } catch (err) {
-    throw new PricingUnavailableError(`pricing read failed: ${(err as Error)?.message ?? 'error'}`);
+    if (err instanceof PricingUnavailableError) throw err;
+    throw new PricingUnavailableError(`billing_fx_rates read failed: ${(err as Error)?.message ?? 'error'}`);
   }
-  if (rateRes?.error) throw new PricingUnavailableError(`billing_fx_rates read failed: ${rateRes.error.message ?? 'error'}`);
-  if (overrideRes?.error) throw new PricingUnavailableError(`billing_price_overrides read failed: ${overrideRes.error.message ?? 'error'}`);
-  const rateRows = (rateRes?.data ?? []) as RateRow[];
+  try {
+    const { data, error } = await supabase.from('billing_price_overrides').select('sku, currency, amount');
+    if (error) throw new PricingUnavailableError(`billing_price_overrides read failed: ${error.message ?? 'error'}`);
+    overrideData = data;
+  } catch (err) {
+    if (err instanceof PricingUnavailableError) throw err;
+    throw new PricingUnavailableError(`billing_price_overrides read failed: ${(err as Error)?.message ?? 'error'}`);
+  }
+  const rateRows = (rateData ?? []) as RateRow[];
   const usdBase = chargeCurrency === 'USD';
   if (!usdBase && !rateRows.some((r) => r.currency === chargeCurrency && Number.isFinite(Number(r.rate)) && Number(r.rate) > 0)) {
     throw new PricingUnavailableError(`no configured FX rate for ${chargeCurrency}`);
   }
-  return buildFxConfig(rateRows, (overrideRes?.data ?? []) as OverrideRow[]);
+  return buildFxConfig(rateRows, (overrideData ?? []) as OverrideRow[]);
 }
 
 /** Assemble the live FxConfig (rates + market overrides) for DISPLAY. Falls back to defaults - never for a charge. */
