@@ -13,7 +13,7 @@ import { withOrgAccess } from '../../../../backend/middleware/withOrgAccess';
 import { logger } from '../../../../backend/services/logger';
 import { supabase } from '@/backend/db/supabaseClient';
 import { resolvePrincipal } from '@/backend/security/IdentityResolver';
-import { getFxConfig } from '@/backend/services/pricingConfigService';
+import { getFxConfigForCharge, PricingUnavailableError } from '@/backend/services/pricingConfigService';
 import { resolvePrice, CURRENCIES, type Currency } from '@/lib/billing/currency';
 import { createOrder as orchestratorCreateOrder } from '@/backend/services/payments/orchestrator';
 import { getProviderCredentials, getActiveMode } from '@/backend/services/payments/orchestrator';
@@ -52,7 +52,18 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   const canonicalUsd = (pkg as any).canonical_usd_price;
   let amount = Number((pkg as any).price); // INR fallback (DB authoritative)
   if (canonicalUsd != null && Number.isFinite(Number(canonicalUsd))) {
-    const fx = await getFxConfig();
+    // B4 (e9 ruling): a charge is priced only with a REAL rate - never DEFAULT_FX, never without market overrides.
+    let fx;
+    try {
+      fx = await getFxConfigForCharge(currency);
+    } catch (err) {
+      if (err instanceof PricingUnavailableError) {
+        logger.error('checkout_pricing_unavailable', { organizationId, currency, message: err.message });
+        res.setHeader('Retry-After', '30');
+        return res.status(503).json({ error: 'pricing_unavailable', code: err.code, retryable: true });
+      }
+      throw err;
+    }
     amount = resolvePrice(Number(canonicalUsd), currency, fx, (pkg as any).sku ?? undefined);
   } else if (currency !== 'INR') {
     // No canonical USD to convert from → can't price this pack in a non-INR currency.

@@ -5,6 +5,7 @@ import { requireAdminRateLimit } from '@/backend/services/requestAccessService';
 import { BILLING_PLATFORM_MANAGE } from '@/shared/contracts/security';
 import { createRazorpayStagingCreditOrder } from '@/backend/services/payments/razorpayStagingService';
 import { getMonetizationControlMode } from '@/backend/services/monetizationOpsService';
+import { PricingUnavailableError } from '@/backend/services/pricingConfigService';
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
@@ -49,6 +50,11 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       razorpay_key_id: order.keyId,
     });
   } catch (err) {
+    if (err instanceof PricingUnavailableError) {
+      // B4: retryable - no purchase row, no provider order was created.
+      res.setHeader('Retry-After', '30');
+      return res.status(503).json({ ok: false, error: 'pricing_unavailable', code: err.code, retryable: true });
+    }
     return res.status(400).json({
       ok: false,
       error: err instanceof Error ? err.message : String(err),

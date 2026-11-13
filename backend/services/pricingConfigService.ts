@@ -12,7 +12,65 @@
 import { supabase } from '../db/supabaseClient';
 import { DEFAULT_FX, type FxConfig, type Currency } from '@/lib/billing/currency';
 
-/** Assemble the live FxConfig (rates + market overrides). Falls back to defaults. */
+/**
+ * Reads contract (B4, e9 ruling): a CHARGE / price path has no real rate to price with - the FX or override read failed,
+ * or no rate is configured for the charge currency. Typed and retryable; the caller refuses (503 + Retry-After) BEFORE
+ * any purchase row or provider order exists. DEFAULT_FX is for DISPLAY only - a charge is never priced at it.
+ */
+export class PricingUnavailableError extends Error {
+  readonly code = 'PRICING_UNAVAILABLE' as const;
+  readonly retryable = true as const;
+  constructor(message: string) {
+    super(message);
+    this.name = 'PricingUnavailableError';
+  }
+}
+
+type RateRow = { currency: string; rate: number; updated_at?: string };
+type OverrideRow = { sku: string; currency: string; amount: number };
+
+function buildFxConfig(rateRows: RateRow[], overrideRows: OverrideRow[]): FxConfig {
+  const rates: Record<Currency, number> = { ...DEFAULT_FX.rates };
+  let updatedAt: string | undefined;
+  for (const r of rateRows) {
+    rates[r.currency as Currency] = Number(r.rate);
+    if (r.updated_at && (!updatedAt || r.updated_at > updatedAt)) updatedAt = r.updated_at;
+  }
+  const overrides: NonNullable<FxConfig['overrides']> = {};
+  for (const o of overrideRows) {
+    (overrides[o.sku] ??= {})[o.currency as Currency] = Number(o.amount);
+  }
+  return { rates, overrides, updatedAt };
+}
+
+/**
+ * The FxConfig a CHARGE may be priced with (B4, e9 ruling). Refuses with PricingUnavailableError when either read
+ * fails (error object or thrown), or when no real rate row exists for the charge currency (empty table included) - a
+ * charge is never priced at DEFAULT_FX, and market overrides are never silently dropped. Charge paths MUST use this,
+ * never getFxConfig (pinned by test).
+ */
+export async function getFxConfigForCharge(chargeCurrency: Currency): Promise<FxConfig> {
+  let rateRes: { data: unknown; error: { message?: string } | null };
+  let overrideRes: { data: unknown; error: { message?: string } | null };
+  try {
+    [rateRes, overrideRes] = await Promise.all([
+      supabase.from('billing_fx_rates').select('currency, rate, updated_at'),
+      supabase.from('billing_price_overrides').select('sku, currency, amount'),
+    ]) as any;
+  } catch (err) {
+    throw new PricingUnavailableError(`pricing read failed: ${(err as Error)?.message ?? 'error'}`);
+  }
+  if (rateRes?.error) throw new PricingUnavailableError(`billing_fx_rates read failed: ${rateRes.error.message ?? 'error'}`);
+  if (overrideRes?.error) throw new PricingUnavailableError(`billing_price_overrides read failed: ${overrideRes.error.message ?? 'error'}`);
+  const rateRows = (rateRes?.data ?? []) as RateRow[];
+  const usdBase = chargeCurrency === 'USD';
+  if (!usdBase && !rateRows.some((r) => r.currency === chargeCurrency && Number.isFinite(Number(r.rate)) && Number(r.rate) > 0)) {
+    throw new PricingUnavailableError(`no configured FX rate for ${chargeCurrency}`);
+  }
+  return buildFxConfig(rateRows, (overrideRes?.data ?? []) as OverrideRow[]);
+}
+
+/** Assemble the live FxConfig (rates + market overrides) for DISPLAY. Falls back to defaults - never for a charge. */
 export async function getFxConfig(): Promise<FxConfig> {
   try {
     const [{ data: rateRows }, { data: overrideRows }] = await Promise.all([
