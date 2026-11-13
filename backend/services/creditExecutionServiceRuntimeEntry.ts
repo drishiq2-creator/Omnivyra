@@ -47,6 +47,7 @@ import {
   callCreditReservation,
   findCreditTransaction,
   loadCreditHoldSplit,
+  CreditStateUnreadableError,
 } from '../repositories/creditExecutionRepository';
 import { readHoldSettlementState, isDefinitiveDbRefusal, pendingSettlement, type SettlementPending } from './billing/holdSettlementState';
 import { resolveMonetizationFeature } from '../../shared/monetization/featureRegistry';
@@ -91,7 +92,8 @@ export type ExecuteWithEntryConsumptionResult<T> =
   | { status: 'insufficient_credits'; available: number; required: number }
   | { status: 'no_credit_account' }
   | { status: 'not_a_member'; userId: string; orgId: string }
-  | { status: 'org_control_blocked'; code: 'ORG_BLOCKED' | 'HIGH_RISK_ACTION_GATED' | 'DAILY_LIMIT_EXCEEDED'; reason: string };
+  | { status: 'org_control_blocked'; code: 'ORG_BLOCKED' | 'HIGH_RISK_ACTION_GATED' | 'DAILY_LIMIT_EXCEEDED'; reason: string }
+  | { status: 'state_unreadable'; code: 'CREDIT_STATE_UNREADABLE'; retryable: true; detail: string };
 
 export interface ExecuteWithEntryConsumptionOptionsFixed<T> extends ExecuteBase {
   llmPricing?: undefined;
@@ -159,7 +161,7 @@ export function planEntryConsumptionSettlement(input: {
 function mapReservationFailure(
   r: CreditReservationResult,
 ): Extract<ExecuteWithEntryConsumptionResult<never>,
-  { status: 'insufficient_credits' | 'no_credit_account' | 'not_a_member' | 'org_control_blocked' | 'already_settled' | 'already_released' }> {
+  { status: 'insufficient_credits' | 'no_credit_account' | 'not_a_member' | 'org_control_blocked' | 'already_settled' | 'already_released' | 'state_unreadable' }> {
   switch (r.status) {
     case 'insufficient_credits': return { status: 'insufficient_credits', available: r.available, required: r.required };
     case 'no_credit_account':    return { status: 'no_credit_account' };
@@ -167,6 +169,7 @@ function mapReservationFailure(
     case 'org_control_blocked':  return { status: 'org_control_blocked', code: r.code, reason: r.reason };
     case 'already_confirmed':    return { status: 'already_settled' };
     case 'already_released':     return { status: 'already_released' };
+    case 'state_unreadable':     return { status: 'state_unreadable', code: r.code, retryable: true, detail: r.detail };
     default:
       // 'reserved' | 'already_reserved' never reach here (handled by callers).
       throw new Error(`[entryConsumption] unexpected reservation status: ${r.status}`);
@@ -213,10 +216,22 @@ export async function executeWithEntryConsumption<T>(
 
   // Idempotency gate: if the exposure was already settled/released on a prior
   // attempt, do NOT re-execute the work.
-  const [settledTxn, releasedTxn] = await Promise.all([
-    findCreditTransaction(exposureConfirmKey),
-    findCreditTransaction(exposureReleaseKey),
-  ]);
+  type TxLookup = Awaited<ReturnType<typeof findCreditTransaction>>;
+  let settledTxn: TxLookup, releasedTxn: TxLookup;
+  try {
+    [settledTxn, releasedTxn] = await Promise.all([
+      findCreditTransaction(exposureConfirmKey),
+      findCreditTransaction(exposureReleaseKey),
+    ]);
+  } catch (err) {
+    // Reads contract (e9 BLOCKING, e1): an unreadable settlement state is not "not settled" - refuse BEFORE any
+    // hold or executor run (typed, retryable).
+    if (err instanceof CreditStateUnreadableError) {
+      logger.error('credit_state_unreadable', { orgId: opts.orgId, action, idempotencyKey: opts.idempotencyKey, message: err.message });
+      return { status: 'state_unreadable', code: err.code, retryable: true, detail: err.message };
+    }
+    throw err;
+  }
   if (settledTxn)  return { status: 'already_settled' };
   if (releasedTxn) return { status: 'already_released' };
 

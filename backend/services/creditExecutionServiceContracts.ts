@@ -46,6 +46,7 @@ import {
   callCreditReservation,
   findCreditTransaction,
   loadCreditHoldSplit,
+  CreditStateUnreadableError,
 } from '../repositories/creditExecutionRepository';
 import { resolveMonetizationFeature } from '../../shared/monetization/featureRegistry';
 import { resolveActivityEconomics } from './activityEconomyCatalog';
@@ -163,7 +164,8 @@ export type ExecuteResult<T> =
   | { status: 'insufficient_credits'; available: number; required: number }
   | { status: 'no_credit_account' }
   | { status: 'not_a_member'; userId: string; orgId: string }
-  | { status: 'org_control_blocked'; code: 'ORG_BLOCKED' | 'HIGH_RISK_ACTION_GATED' | 'DAILY_LIMIT_EXCEEDED'; reason: string };
+  | { status: 'org_control_blocked'; code: 'ORG_BLOCKED' | 'HIGH_RISK_ACTION_GATED' | 'DAILY_LIMIT_EXCEEDED'; reason: string }
+  | { status: 'state_unreadable'; code: 'CREDIT_STATE_UNREADABLE'; retryable: true; detail: string };
 
 export interface CreditReservationHandle {
   orgId: string;
@@ -184,7 +186,8 @@ export type CreditReservationResult =
   | { status: 'insufficient_credits'; available: number; required: number }
   | { status: 'no_credit_account' }
   | { status: 'not_a_member'; userId: string; orgId: string }
-  | { status: 'org_control_blocked'; code: 'ORG_BLOCKED' | 'HIGH_RISK_ACTION_GATED' | 'DAILY_LIMIT_EXCEEDED'; reason: string };
+  | { status: 'org_control_blocked'; code: 'ORG_BLOCKED' | 'HIGH_RISK_ACTION_GATED' | 'DAILY_LIMIT_EXCEEDED'; reason: string }
+  | { status: 'state_unreadable'; code: 'CREDIT_STATE_UNREADABLE'; retryable: true; detail: string };
 
 export type CreditReservationSettlement =
   | { status: 'confirmed'; confirmTransactionId: string | null; creditsCharged: number }
@@ -399,11 +402,22 @@ export async function reserveCreditsForWork(opts: {
   }
 
   const { holdKey, confirmKey, releaseKey } = getReservationKeys(opts.idempotencyKey);
-  const [existingConfirm, existingRelease, existingHold] = await Promise.all([
-    findCreditTransaction(confirmKey),
-    findCreditTransaction(releaseKey),
-    findCreditTransaction(holdKey),
-  ]);
+  type TxLookup = Awaited<ReturnType<typeof findCreditTransaction>>;
+  let existingConfirm: TxLookup, existingRelease: TxLookup, existingHold: TxLookup;
+  try {
+    [existingConfirm, existingRelease, existingHold] = await Promise.all([
+      findCreditTransaction(confirmKey),
+      findCreditTransaction(releaseKey),
+      findCreditTransaction(holdKey),
+    ]);
+  } catch (err) {
+    // Reads contract: refuse BEFORE any hold - never treat an unreadable state as "nothing settled yet".
+    if (err instanceof CreditStateUnreadableError) {
+      logger.error('credit_state_unreadable', { orgId, action, idempotencyKey: opts.idempotencyKey, message: err.message });
+      return { status: 'state_unreadable', code: err.code, retryable: true, detail: err.message };
+    }
+    throw err;
+  }
 
   if (existingConfirm) return { status: 'already_confirmed' };
   if (existingRelease) return { status: 'already_released' };
@@ -419,7 +433,16 @@ export async function reserveCreditsForWork(opts: {
   }
 
   if (existingHold) {
-    const split = await loadCreditHoldSplit(existingHold.id);
+    let split: CategorySplit | null;
+    try {
+      split = await loadCreditHoldSplit(existingHold.id);
+    } catch (err) {
+      if (err instanceof CreditStateUnreadableError) {
+        logger.error('credit_state_unreadable', { orgId, action, holdId: existingHold.id, message: err.message });
+        return { status: 'state_unreadable', code: err.code, retryable: true, detail: err.message };
+      }
+      throw err;
+    }
     if (split) {
       logger.info('credit_hold_reused_for_long_running_work', {
         orgId,

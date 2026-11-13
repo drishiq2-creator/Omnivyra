@@ -47,6 +47,7 @@ import {
   callCreditReservation,
   findCreditTransaction,
   loadCreditHoldSplit,
+  CreditStateUnreadableError,
 } from '../repositories/creditExecutionRepository';
 import { readHoldSettlementState, isDefinitiveDbRefusal, pendingSettlement } from './billing/holdSettlementState';
 import { resolveMonetizationFeature } from '../../shared/monetization/featureRegistry';
@@ -164,10 +165,22 @@ export async function executeWithCredits<T>(
   }
 
   // ── 2. Idempotency: check for settled phases ───────────────────────────────
-  const [existingConfirm, existingRelease] = await Promise.all([
-    findCreditTransaction(confirmKey),
-    findCreditTransaction(releaseKey),
-  ]);
+  type TxLookup = Awaited<ReturnType<typeof findCreditTransaction>>;
+  let existingConfirm: TxLookup, existingRelease: TxLookup, existingHold: TxLookup;
+  try {
+    [existingConfirm, existingRelease, existingHold] = await Promise.all([
+      findCreditTransaction(confirmKey),
+      findCreditTransaction(releaseKey),
+      findCreditTransaction(holdKey),
+    ]);
+  } catch (err) {
+    // Reads contract (e9 BLOCKING, e1): an unreadable credit state refuses BEFORE any hold or executor run.
+    if (err instanceof CreditStateUnreadableError) {
+      logger.error('credit_state_unreadable', { orgId, action, idempotencyKey: baseKey, message: err.message });
+      return { status: 'state_unreadable', code: err.code, retryable: true, detail: err.message };
+    }
+    throw err;
+  }
 
   if (existingConfirm) {
     logger.info('credit_already_confirmed', { idempotencyKey: baseKey });
@@ -182,13 +195,20 @@ export async function executeWithCredits<T>(
   let holdId: string | null = null;
   let usedSplit: CategorySplit;
 
-  const existingHold = await findCreditTransaction(holdKey);
-
   if (existingHold) {
     // Resume from existing HOLD
     holdId = existingHold.id;
     logger.info('credit_reusing_hold', { holdId, idempotencyKey: baseKey });
-    const loadedSplit = await loadCreditHoldSplit(holdId);
+    let loadedSplit: CategorySplit | null;
+    try {
+      loadedSplit = await loadCreditHoldSplit(holdId);
+    } catch (err) {
+      if (err instanceof CreditStateUnreadableError) {
+        logger.error('credit_state_unreadable', { orgId, action, holdId, message: err.message });
+        return { status: 'state_unreadable', code: err.code, retryable: true, detail: err.message };
+      }
+      throw err;
+    }
     if (!loadedSplit) {
       // Corrupted hold — treat as fresh
       holdId = null;

@@ -77,12 +77,27 @@ export async function callCreditReservation(command: CreditReservationCommand): 
   return { error: error as Error | null, transactionId: txId };
 }
 
+/**
+ * Reads contract (e9 BLOCKING, e1 reviewed): a credit-state read that FAILED is not "no such transaction". Answered as
+ * absent it skipped the already-confirmed / already-released short-circuit (the action re-ran) or started a fresh HOLD.
+ * Typed and retryable: callers refuse BEFORE creating a hold or running the action.
+ */
+export class CreditStateUnreadableError extends Error {
+  readonly code = 'CREDIT_STATE_UNREADABLE' as const;
+  readonly retryable = true as const;
+  constructor(message: string) {
+    super(message);
+    this.name = 'CreditStateUnreadableError';
+  }
+}
+
 export async function findCreditTransaction(key: string): Promise<CreditTransactionLookup | null> {
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from('credit_transactions')
     .select('id, execution_phase')
     .eq('idempotency_key', key)
     .maybeSingle();
+  if (error) throw new CreditStateUnreadableError(`credit_transactions lookup failed for ${key}: ${error.message}`);
 
   return data as CreditTransactionLookup | null;
 }
@@ -108,11 +123,13 @@ export async function callCreditPartialConfirm(command: CreditPartialConfirmComm
 }
 
 export async function loadCreditHoldSplit(holdId: string): Promise<CategorySplit | null> {
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from('credit_transactions')
     .select('free_delta, paid_delta, incentive_delta')
     .eq('id', holdId)
     .maybeSingle();
+  // A FAILED read is not a "corrupted hold" (which the caller treats as fresh, with a zero split, against no hold).
+  if (error) throw new CreditStateUnreadableError(`credit hold ${holdId} split read failed: ${error.message}`);
 
   if (!data) return null;
   const deltas = data as { free_delta?: number | null; paid_delta?: number | null; incentive_delta?: number | null };
