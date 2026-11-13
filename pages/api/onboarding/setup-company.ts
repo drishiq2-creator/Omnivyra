@@ -261,11 +261,13 @@ async function handler(req: NextApiRequest, res: NextApiResponse<Result>) {
       // Configurable via PUBLIC_EMAIL_MAX_ORGS env var (default: 2).
       // Counts only active memberships — invited/inactive rows don't count.
       const maxOrgs = parseInt(process.env.PUBLIC_EMAIL_MAX_ORGS ?? '2', 10);
-      const { count: activeOrgCount } = await supabase
+      const { count: activeOrgCount, error: orgCountErr } = await supabase
         .from('user_company_roles')
         .select('id', { count: 'exact', head: true })
         .eq('user_id', user.id)
         .eq('status', 'active');
+      // Reads contract (e9 BLOCKING): a FAILED read is not "absent" - refuse retryably instead of acting on a guess. (a null count read as 0 bypassed the org limit)
+      if (orgCountErr) return res.status(503).json({ code: 'ORG_LIMIT_UNVERIFIABLE', error: 'Could not verify your organization count. Please retry.', retryable: true });
 
       if ((activeOrgCount ?? 0) >= maxOrgs) {
         return res.status(403).json({
@@ -305,12 +307,14 @@ async function handler(req: NextApiRequest, res: NextApiResponse<Result>) {
       const orgId = accessRequest!.organization_id as string;
 
       // Idempotent: only insert if not already a member
-      const { data: existingRole } = await supabase
+      const { data: existingRole, error: existingRoleErr } = await supabase
         .from('user_company_roles')
         .select('id')
         .eq('user_id', user.id)
         .eq('company_id', orgId)
         .maybeSingle();
+      // Reads contract (e9 BLOCKING): a FAILED read is not "absent" - refuse retryably instead of acting on a guess. (a failed read inserted a second / reinstated admin row)
+      if (existingRoleErr) return res.status(503).json({ code: 'MEMBERSHIP_UNVERIFIABLE', error: 'Could not verify your membership. Please retry.', retryable: true });
 
       if (!existingRole) {
         await supabase.from('user_company_roles').insert({
@@ -345,12 +349,14 @@ async function handler(req: NextApiRequest, res: NextApiResponse<Result>) {
     //    The new company's own membership is created below as COMPANY_ADMIN.
 
     // ── 2. Check for existing company membership (idempotent) ────────────────
-    const { data: existingRows } = await supabase
+    const { data: existingRows, error: existingRowsErr } = await supabase
       .from('user_company_roles')
       .select('company_id, join_source, created_at')
       .eq('user_id', user.id)
       .eq('status', 'active')
       .order('created_at', { ascending: false });
+    // Reads contract (e9 BLOCKING): a FAILED read is not "absent" - refuse retryably instead of acting on a guess. (a failed read skipped the idempotent return and created a new company + admin)
+    if (existingRowsErr) return res.status(503).json({ code: 'MEMBERSHIP_UNVERIFIABLE', error: 'Could not verify your existing companies. Please retry.', retryable: true });
 
     if (existingRows?.length) {
       const existingCompanyIds = Array.from(new Set(

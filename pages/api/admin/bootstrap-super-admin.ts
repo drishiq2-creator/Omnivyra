@@ -219,10 +219,12 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     }
 
     // 3. Single-use check: refuse if any SUPER_ADMIN already exists.
-    const { count: existingCount2 } = await ownedDbTable('user_company_roles')
+    const { count: existingCount2, error: existingCount2Err } = await ownedDbTable('user_company_roles')
       .select('id', { count: 'exact', head: true })
       .eq('role', SUPER_ADMIN_ROLE)
       .eq('status', 'active');
+    // Reads contract (e9 BLOCKING): a FAILED read is not "absent" - refuse retryably instead of acting on a guess. (a null count skipped the single-use guard)
+    if (existingCount2Err) return res.status(503).json({ error: 'Could not verify existing super admins. Retry.', code: 'BOOTSTRAP_STATE_UNVERIFIABLE' });
     if ((existingCount2 ?? 0) > 0) {
       await deny('env_credential_already_consumed', ip, ua);
       return res.status(409).json({
@@ -336,10 +338,12 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   // Verify NO existing SUPER_ADMIN — bootstrap mode is single-use by design.
   // user_company_roles uses status='active' + deactivated_at as its lifecycle
   // markers (no revoked_at column on this table).
-  const { count: existingCount } = await ownedDbTable('user_company_roles')
+  const { count: existingCount, error: existingCountErr } = await ownedDbTable('user_company_roles')
     .select('id', { count: 'exact', head: true })
     .eq('role', SUPER_ADMIN_ROLE)
     .eq('status', 'active');
+  // Reads contract (e9 BLOCKING): a FAILED read is not "absent" - refuse retryably instead of acting on a guess. (a null count skipped the single-use guard)
+  if (existingCountErr) return res.status(503).json({ error: 'Could not verify existing super admins. Retry.', code: 'BOOTSTRAP_STATE_UNVERIFIABLE' });
   if ((existingCount ?? 0) > 0) {
     await deny('bootstrap_already_consumed', ip, ua);
     return res.status(409).json({

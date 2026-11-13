@@ -103,12 +103,16 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       // Ensure the user has COMPANY_ADMIN role (never SUPER_ADMIN).
       // If they have no role yet, create one. If they already have one, leave it alone.
       if (request.user_id && request.organization_id) {
-        const { data: existingRole } = await sb
+        const { data: existingRole, error: existingRoleErr } = await sb
           .from('user_company_roles')
           .select('id, role')
           .eq('user_id', request.user_id)
           .eq('company_id', request.organization_id)
           .maybeSingle();
+        // Reads contract (e9 BLOCKING): a FAILED read is not "absent" - refuse retryably instead of acting on a guess.
+        if (existingRoleErr) {
+          return res.status(503).json({ error: 'The user role could not be verified - retry.', code: 'ROLE_UNVERIFIABLE', retryable: true });
+        }
 
         if (!existingRole) {
           // No role at all — create COMPANY_ADMIN

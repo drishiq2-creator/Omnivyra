@@ -131,12 +131,15 @@ export async function resolveOmnivyraWebsiteCompany(): Promise<OmnivyraWebsiteCo
   const pinned = process.env.OMNIVYRA_WEBSITE_COMPANY_ID?.trim() || null;
   let superAdminCompanyIds = new Set<string>();
   if (!pinned) {
-    const { data: roles } = await supabase
+    const { data: roles, error: rolesErr } = await supabase
       .from('user_company_roles')
       .select('company_id')
       .eq('role', 'SUPER_ADMIN')
       .eq('status', 'active')
       .in('company_id', candidates.map((c) => c.id));
+    // Reads contract (e9 BLOCKING): a FAILED read is not "absent" - refuse retryably instead of acting on a guess. Without the ownership signal the ranking would fall back to
+    // the oldest claimant; resolving NOTHING is the safe answer (callers treat null as "no Omnivyra company").
+    if (rolesErr) return null;
     superAdminCompanyIds = new Set(((roles ?? []) as Array<{ company_id: string }>).map((r) => r.company_id));
   }
   return rankOmnivyraClaimants(candidates as Array<OmnivyraWebsiteCompanyRecord & { created_at?: string | null }>, superAdminCompanyIds, pinned);

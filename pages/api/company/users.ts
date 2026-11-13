@@ -128,12 +128,14 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
 
     try {
       if (desiredRole === Role.COMPANY_ADMIN && access.role !== Role.SUPER_ADMIN) {
-        const { count: activeAdminCount } = await supabase
+        const { count: activeAdminCount, error: adminCountErr } = await supabase
           .from('user_company_roles')
           .select('id', { count: 'exact', head: true })
           .eq('company_id', companyId)
           .eq('role', Role.COMPANY_ADMIN)
           .eq('status', 'active');
+        // Reads contract (e9 BLOCKING): a FAILED read is not "absent" - refuse retryably instead of acting on a guess. (a null count read as 0 allowed a second admin)
+        if (adminCountErr) return res.status(503).json({ error: 'ADMIN_STATE_UNVERIFIABLE', retryable: true });
 
         if ((activeAdminCount ?? 0) > 0) {
           return res.status(409).json({
@@ -322,7 +324,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     };
 
     if (desiredRole === Role.COMPANY_ADMIN && access.role !== Role.SUPER_ADMIN) {
-      const { data: anotherAdmin } = await supabase
+      const { data: anotherAdmin, error: anotherAdminErr } = await supabase
         .from('user_company_roles')
         .select('user_id')
         .eq('company_id', companyId)
@@ -332,6 +334,8 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
         .limit(1)
         .maybeSingle();
 
+      // Reads contract (e9 BLOCKING): a FAILED read is not "absent" - refuse retryably instead of acting on a guess. (a failed read promoted a second admin)
+      if (anotherAdminErr) return res.status(503).json({ error: 'ADMIN_STATE_UNVERIFIABLE', retryable: true });
       if (anotherAdmin) {
         return res.status(409).json({
           error: 'ADMIN_TRANSFER_REQUIRED',
