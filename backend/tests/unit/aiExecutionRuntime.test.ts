@@ -11,6 +11,9 @@ let economyMode = 'shadow';
 const resultStore = new Map<string, { v: 1; action: string; saved_at: string; payload: unknown }>();
 let saveShouldFail = false;
 let saveCalls = 0;
+// reads contract: fail the Nth stored-result load (1-based); 0 = never
+let loadFailOnCall = 0;
+let loadCalls = 0;
 
 jest.mock('../../services/creditExecutionService', () => ({
   makeIdempotencyKey: (u: string, a: string, r: string, s: string) => `${u}|${a}|${r}|${s}`,
@@ -29,7 +32,15 @@ jest.mock('../../services/billing/creditEconomyActivation', () => ({
   getCreditEconomyExecutionMode: jest.fn(async () => economyMode),
 }));
 jest.mock('../../services/ai/aiExecutionResultStore', () => ({
-  loadAiExecutionResult: jest.fn(async (key: string) => resultStore.get(key) ?? null),
+  AiResultUnreadableError: jest.requireActual('../../services/ai/aiExecutionResultStore').AiResultUnreadableError,
+  loadAiExecutionResult: jest.fn(async (key: string) => {
+    loadCalls += 1;
+    if (loadFailOnCall === loadCalls) {
+      const { AiResultUnreadableError } = jest.requireActual('../../services/ai/aiExecutionResultStore');
+      throw new AiResultUnreadableError('stored AI result read failed: connection reset');
+    }
+    return resultStore.get(key) ?? null;
+  }),
   saveAiExecutionResult: jest.fn(async (args: any) => {
     saveCalls += 1;
     if (saveShouldFail) return false;
@@ -58,6 +69,8 @@ beforeEach(() => {
   entryResult = { status: 'executed' };
   economyMode = 'shadow';
   resultStore.clear();
+  loadFailOnCall = 0;
+  loadCalls = 0;
   saveShouldFail = false;
   saveCalls = 0;
 });
@@ -151,6 +164,42 @@ describe('blocked outcomes — user language only', () => {
         expect(text).not.toContain(forbidden);
       }
     }
+  });
+});
+
+describe('reads contract (e9 BLOCKING, e1): an UNREADABLE stored result never triggers an uncharged re-run', () => {
+  it('the initial completed-result check FAILS -> 503 temporarily_unavailable, no billing call, executor never run', async () => {
+    loadFailOnCall = 1;
+    const executor = jest.fn(async () => 'OUT');
+    const r = await runAiExecution(baseArgs(executor) as any);
+    expect(r).toMatchObject({ status: 'blocked', code: 'temporarily_unavailable', httpStatus: 503 });
+    expect(executor).not.toHaveBeenCalled();
+    expect(billingCalls).toEqual([]);
+  });
+
+  it('charge already settled + the resume read FAILS -> 503, executor NOT re-run (no uncharged AI spend)', async () => {
+    creditsResult = { status: 'already_confirmed' };
+    loadFailOnCall = 2;   // call 1 = initial check (empty), call 2 = the resume read
+    const executor = jest.fn(async () => 'OUT');
+    const r = await runAiExecution(baseArgs(executor) as any);
+    expect(r).toMatchObject({ status: 'blocked', code: 'temporarily_unavailable', httpStatus: 503 });
+    expect(executor).not.toHaveBeenCalled();
+  });
+
+  it('billing reports state_unreadable (A2/A3) -> 503 temporarily_unavailable, executor never run', async () => {
+    creditsResult = { status: 'state_unreadable', code: 'CREDIT_STATE_UNREADABLE', retryable: true, detail: 'x' };
+    const executor = jest.fn(async () => 'OUT');
+    const r = await runAiExecution(baseArgs(executor) as any);
+    expect(r).toMatchObject({ status: 'blocked', code: 'temporarily_unavailable', httpStatus: 503, userMessage: AI_BLOCKED_MESSAGES.temporarily_unavailable });
+    expect(executor).not.toHaveBeenCalled();
+  });
+
+  it('CONTROL: charge settled + a READ that finds nothing -> the existing uncharged re-run (a real absence)', async () => {
+    creditsResult = { status: 'already_confirmed' };
+    const executor = jest.fn(async () => 'OUT');
+    const r = await runAiExecution(baseArgs(executor) as any);
+    expect(r).toMatchObject({ status: 'completed', result: 'OUT', charged: false, resumed: true });
+    expect(executor).toHaveBeenCalledTimes(1);
   });
 });
 

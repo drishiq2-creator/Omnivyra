@@ -34,7 +34,7 @@ import {
   makeIdempotencyKey,
 } from '../creditExecutionService';
 import { getCreditEconomyExecutionMode } from '../billing/creditEconomyActivation';
-import { loadAiExecutionResult, saveAiExecutionResult } from './aiExecutionResultStore';
+import { loadAiExecutionResult, saveAiExecutionResult, AiResultUnreadableError } from './aiExecutionResultStore';
 
 /* ── Outcome model ── */
 
@@ -52,12 +52,14 @@ export type AiBlockedCode =
   | 'insufficient_credits'
   | 'no_credit_account'
   | 'not_authorized'
-  | 'org_blocked';
+  | 'org_blocked'
+  // Reads contract: billing / result state could not be READ - retryable, nothing ran, nothing charged.
+  | 'temporarily_unavailable';
 
 export interface AiExecutionBlocked {
   status: 'blocked';
   code: AiBlockedCode;
-  httpStatus: 402 | 403;
+  httpStatus: 402 | 403 | 503;
   /** Safe for direct display. No billing vocabulary, ever. */
   userMessage: string;
   required?: number;
@@ -71,13 +73,14 @@ export const AI_BLOCKED_MESSAGES: Record<AiBlockedCode, string> = {
   no_credit_account: 'Your organization has no credit account yet. Contact your administrator.',
   not_authorized: 'You do not have access to run AI actions for this organization.',
   org_blocked: 'AI actions are currently disabled for your organization.',
+  temporarily_unavailable: 'AI actions are temporarily unavailable. Please try again in a moment.',
 };
 
 function blocked(code: AiBlockedCode, extra: { required?: number; available?: number } = {}): AiExecutionBlocked {
   return {
     status: 'blocked',
     code,
-    httpStatus: code === 'not_authorized' || code === 'org_blocked' ? 403 : 402,
+    httpStatus: code === 'temporarily_unavailable' ? 503 : code === 'not_authorized' || code === 'org_blocked' ? 403 : 402,
     userMessage: AI_BLOCKED_MESSAGES[code],
     ...extra,
   };
@@ -86,7 +89,7 @@ function blocked(code: AiBlockedCode, extra: { required?: number; available?: nu
 /** Typed error for chokepoints that must throw (runBilledAiCompletion). The
  *  message IS the user message — safe to surface verbatim. */
 export class AiBillingBlockedError extends Error {
-  readonly httpStatus: 402 | 403;
+  readonly httpStatus: 402 | 403 | 503;
   readonly code: AiBlockedCode;
   constructor(b: AiExecutionBlocked) {
     super(b.userMessage);
@@ -136,7 +139,14 @@ export async function runAiExecution<T>(args: RunAiExecutionArgs<T>): Promise<Ai
   // COMPLETED once; return it. Covers double-click-after-completion,
   // browser refresh, response-lost retries. Zero charge, zero LLM.
   if (persist) {
-    const stored = await loadAiExecutionResult<T>(rootKey);
+    let stored: Awaited<ReturnType<typeof loadAiExecutionResult<T>>>;
+    try {
+      stored = await loadAiExecutionResult<T>(rootKey);
+    } catch (err) {
+      // Reads contract: an unreadable stored result is not "never completed" - refuse retryably, run nothing.
+      if (err instanceof AiResultUnreadableError) return blocked('temporarily_unavailable');
+      throw err;
+    }
     if (stored) return { status: 'completed', result: stored.payload, resumed: true, charged: false };
   }
 
@@ -195,7 +205,15 @@ export async function runAiExecution<T>(args: RunAiExecutionArgs<T>): Promise<Ai
     // (race with a concurrent completer), else UNCHARGED re-run — the
     // established phase2RouteWiring precedent. The user paid once.
     if (persist) {
-      const stored = await loadAiExecutionResult<T>(rootKey);
+      let stored: Awaited<ReturnType<typeof loadAiExecutionResult<T>>>;
+      try {
+        stored = await loadAiExecutionResult<T>(rootKey);
+      } catch (err) {
+        // Reads contract (e9 BLOCKING, e1): refuse BEFORE re-executing - never spend an uncharged AI run on an
+        // unreadable state. The charge is already settled, so a retry recovers the artifact at no cost.
+        if (err instanceof AiResultUnreadableError) return blocked('temporarily_unavailable');
+        throw err;
+      }
       if (stored) return { status: 'completed', result: stored.payload, resumed: true, charged: false };
     }
     const rerun = await args.executor();
@@ -215,6 +233,9 @@ function mapBlocked<T>(outcome: { status: string; required?: number; available?:
       return blocked('not_authorized');
     case 'org_control_blocked':
       return blocked('org_blocked');
+    case 'state_unreadable':
+      // A2/A3: the credit state could not be read - retryable, nothing reserved or run.
+      return blocked('temporarily_unavailable');
     default:
       // Unknown future status — fail CLOSED with user language, never leak.
       return blocked('org_blocked');
