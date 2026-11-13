@@ -333,6 +333,12 @@ export async function processCampaignPlanningJob(job: Job<CampaignPlanningJobPay
       validateMembership: false,
       executor:           () => processCampaignPlanningJobInner(job),
     });
+    // Reads contract (A2/A3, e1 follow-up 2): an UNREADABLE credit state did no work - throw (retryable) so BullMQ
+    // retries; returning would complete the job as a success with nothing done. Other statuses unchanged.
+    if (r.status === 'state_unreadable') {
+      const { CreditStateUnreadableError } = await import('../../repositories/creditExecutionRepository');
+      throw new CreditStateUnreadableError(r.detail);
+    }
     if (r.status !== 'executed' && r.status !== 'already_settled') {
       console.warn('[campaign-planning] entry-consumption non-executed', { orgId, status: r.status });
     }
