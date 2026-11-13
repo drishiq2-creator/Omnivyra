@@ -97,11 +97,16 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       return { id: r.id, duplicate: r.duplicate, processingStatus: r.processingStatus ?? null };
     },
     findPurchaseByProviderEventId: async (providerEventId) => {
-      const { data } = await ownedDbTable('credit_purchases')
+      const { data, error } = await ownedDbTable('credit_purchases')
         .select('id, organization_id, status, fulfillment_status')
         .eq('provider', PROVIDER)
         .or(`provider_event_id.eq.${providerEventId},provider_payment_id.eq.${providerEventId},provider_order_id.eq.${providerEventId}`)
         .maybeSingle();
+      // Reads contract (e9 BLOCKING): a FAILED lookup is not "no purchase". Answered as absent, the event was marked
+      // processed and a paid purchase was never fulfilled (Stripe stops redelivering). Throw instead: the handler
+      // answers 500 BEFORE the event is recorded, so Stripe retries the delivery. (PGRST116 - two purchases matching
+      // the .or() - lands here too: ambiguous is not absent.)
+      if (error) throw new Error(`stripe purchase lookup failed for ${providerEventId}: ${error.message}`);
       if (!data) return null;
       const row = data as { id: string; organization_id: string; status: string; fulfillment_status: string | null };
       return { id: row.id, organization_id: row.organization_id, status: row.status, fulfillment_status: row.fulfillment_status };

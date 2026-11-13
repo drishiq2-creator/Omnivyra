@@ -124,11 +124,20 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     let allocated = false;
     const success = extractSuccess(provider, safeParse(raw));
     if (success) {
-      const { data: purchase } = await supabase
+      const { data: purchase, error: purchaseErr } = await supabase
         .from('credit_purchases')
         .select('id, status, fulfillment_status')
         .eq('provider_order_id', success.orderId)
         .maybeSingle();
+      // Reads contract (e9 BLOCKING): a FAILED lookup is not "unmatched". Answering 200 made the provider stop
+      // redelivering, so a paid order stayed unfulfilled. A retryable 503 makes it redeliver; every delivery re-runs
+      // this lookup and the idempotent fulfillment, so a retry cannot double-grant.
+      if (purchaseErr) {
+        logger.error('payment_webhook_purchase_lookup_failed', {
+          provider, eventId: result.eventId, providerOrderId: success.orderId, message: purchaseErr.message,
+        });
+        return res.status(503).json({ ok: false, error: 'purchase_lookup_failed', retryable: true });
+      }
       if (purchase) {
         const alreadyFulfilled = (purchase as any).status === 'completed'
           && (purchase as any).fulfillment_status === 'completed';
