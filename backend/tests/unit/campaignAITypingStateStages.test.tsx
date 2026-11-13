@@ -91,3 +91,19 @@ describe('CampaignAITypingState shows traced steps', () => {
     expect(screen.queryByText(/Generating day content/)).not.toBeInTheDocument();
   });
 });
+
+describe('CampaignAITypingState plain waiting line is truthful', () => {
+  it.each(['gpt', 'claude'])('provider %s: neutral text, no provider name or unverified claim', (provider) => {
+    render(<CampaignAITypingState {...base} selectedProvider={provider} />);
+    expect(screen.getByText('Thinking about your campaign…')).toBeInTheDocument();
+    expect(screen.queryByText(/Claude|GPT|learning from past campaigns/i)).not.toBeInTheDocument();
+  });
+
+  // The 'demo' provider is retired (2026-11-19, fake-AI retirement): it is no longer a valid AIProvider, so the
+  // former "demo: says it is a demo reply" case is replaced by this check that no demo wording can render.
+  it('no demo wording remains (the demo provider is retired)', () => {
+    render(<CampaignAITypingState {...base} selectedProvider="claude" />);
+    expect(screen.queryByText(/demo/i)).not.toBeInTheDocument();
+    expect(screen.getByText('Thinking about your campaign…')).toBeInTheDocument();
+  });
+});
