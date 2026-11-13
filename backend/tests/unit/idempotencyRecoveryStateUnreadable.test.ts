@@ -128,6 +128,21 @@ describe("e1/e9 BLOCKING: 'confirm_partial' (every token-priced settle) counts a
     st.siblingRows = [{ id: 'cp1', execution_phase: 'confirm_partial' }];
     await expect(svc.checkFinancialDrift('billing_operations', 'bo-1')).resolves.toBe('ok');
   });
+  it('e9: the SETTLED read (:385) itself refuses a confirm_partial op with the correct reason - not via the drift accident', async () => {
+    // HOLD present, its sibling is confirm_partial (so the fixed drift check says 'ok' and does NOT refuse), and the
+    // settlement is confirm_partial. Before the fix this was refused only by accident (drift saw "no sibling" ->
+    // ACTIVE_RESERVATION); the protection must come from :385 as COMPLETED_SETTLEMENT.
+    st.holdRows = HOLD;
+    st.siblingRows = [{ id: 'cp1', execution_phase: 'confirm_partial' }];
+    st.settledRows = [{ id: 'cp1', execution_phase: 'confirm_partial' }];
+    await expect(svc.checkFinancialDrift('billing_operations', 'bo-1')).resolves.toBe('ok');   // drift would let it through
+    st.reads = [];
+    const r = await svc.safeRetryOperation(RETRY);
+    expect(r).toMatchObject({ ok: false, code: 'COMPLETED_SETTLEMENT' });
+    expect(r.message).toContain('completed confirm_partial settlement');
+    expect(st.reads).not.toContain('hold');                 // refused at :385, before the drift check ran
+    expect(st.writes).toEqual([]);
+  });
   it("CONTROL: the fake honours the phase filter - an unrelated phase ('hold') is NOT a sibling -> drift", async () => {
     st.holdRows = HOLD;
     st.siblingRows = [{ id: 'x1', execution_phase: 'hold' }];
