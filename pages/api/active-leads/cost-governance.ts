@@ -17,6 +17,7 @@ import {
   listBudgets,
   recordCost,
   upsertBudget,
+  BudgetUnverifiableError,
 } from '../../../backend/services/costGovernanceService';
 import { COST_CATEGORIES, type CostCategory } from '../../../backend/types/costGovernance';
 import { publishRealtime } from '../../../backend/services/realtimePublisherService';
@@ -99,6 +100,12 @@ async function handlePost(req: NextApiRequest, res: NextApiResponse) {
     });
     return res.status(200).json({ ok: true, event: ev });
   } catch (err: any) {
+    if (err instanceof BudgetUnverifiableError) {
+      // B3 (e9): the budget could not be verified - never "allowed"; retryable.
+      console.error('[cost-governance POST] budget unverifiable:', err.message);
+      res.setHeader('Retry-After', '5');
+      return res.status(503).json({ error: 'Budget could not be verified. Please retry.', code: err.code, retryable: true });
+    }
     console.error('[cost-governance POST] failed:', err?.message);
     return res.status(500).json({ error: err?.message ?? 'Cost governance action failed' });
   }
