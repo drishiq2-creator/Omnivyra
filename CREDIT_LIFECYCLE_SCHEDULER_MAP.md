@@ -18,10 +18,11 @@ DAILY 05:30  /api/cron/subscription-credit-expiry      (runs after status-expiry
                 capped at subscription-allocated (signup credits NOT early-expired);
                 paid + incentive preserved (DB-enforced).
 
-MONTHLY 1st 06:00  /api/cron/subscription-monthly-allocation
+DAILY 06:00  /api/cron/subscription-monthly-allocation   (was monthly on the 1st; daily since B1b)
               → subscriptionAllocationService.runMonthlyAllocationSweep()
               → reallocate subscription FREE credits per plan (ACTIVE/TRIALING only),
-                idempotent per (org, plan, period).
+                idempotent per (org, plan, period) - so a daily run grants at most once per period,
+                and a missed / incomplete run (503 ALLOCATION_INCOMPLETE) self-heals the next day.
 ```
 
 ## How the lock/unlock stays correct (derived, no cron of its own)
