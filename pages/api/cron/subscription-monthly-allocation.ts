@@ -18,6 +18,11 @@ import { runJob } from '../../../backend/services/jobRunner';
 import { getLegacySuperAdminSession } from '@/backend/services/superAdminSession';
 import { bearerTokenMatches } from '../../../backend/security/constantTimeEqual';
 
+/** UTC calendar day (YYYY-MM-DD) - the runJob idempotency unit for this cron. Exported for tests. */
+export function allocationRunDay(now: Date): string {
+  return now.toISOString().slice(0, 10);
+}
+
 async function isAuthorized(req: NextApiRequest): Promise<boolean> {
   const cronSecret = process.env.CRON_SECRET;
   if (cronSecret && bearerTokenMatches(req.headers.authorization, cronSecret)) return true;
@@ -36,8 +41,10 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
 
   const triggeredByCronSecret = bearerTokenMatches(req.headers.authorization, process.env.CRON_SECRET);
   const dryRun = req.query.dryRun === 'true';
-  // Monthly window (~30d) — the underlying sweep is idempotent per (org, plan, period) regardless.
-  const monthWindow = Math.floor(Date.now() / (30 * 24 * 60 * 60 * 1000));
+  // Per-DAY run key (e9, 2026-11-14; was a ~30-day window). The job now runs DAILY, and runJob dead-letter-skips every
+  // later run that reuses a DLQ'd key - with a monthly key ONE failed run locked out the rest of the period and paying
+  // orgs missed their credits. Granting stays idempotent per (org, plan, period), so daily keys never double-grant.
+  const runDay = allocationRunDay(new Date());
 
   const outcome = await runJob(
     {
@@ -45,7 +52,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       triggerSource: triggeredByCronSecret ? 'cron' : 'admin',
       tenantId: null,
       principalKind: triggeredByCronSecret ? 'cron-secret' : 'super-admin',
-      idempotencyKey: `cron:subscription-monthly-allocation:${monthWindow}`,
+      idempotencyKey: `cron:subscription-monthly-allocation:${runDay}`,
     },
     async () => runMonthlyAllocationSweep({ dryRun }),
   );
