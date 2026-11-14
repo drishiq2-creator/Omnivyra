@@ -189,7 +189,7 @@ describe('voice/transcribe', () => {
   describe('voice kill-switch (e9 2026-11-14, BLOCKING - money): off until voice is priced', () => {
     afterEach(() => { process.env.VOICE_TRANSCRIBE_ENABLED = 'true'; });
     // EXACT match only (05/83): every other spelling is OFF.
-    it.each([undefined, '', 'false', 'TRUE', 'True', 'TRUE ', ' true', 'true' + String.fromCharCode(10), '1', 'yes'])('VOICE_TRANSCRIBE_ENABLED=%p (off) -> 503 VOICE_UNAVAILABLE, no guard / provider / cost', async (v) => {
+    it.each([undefined, '', 'false', 'TRUE', 'True', 'TRUE ', ' true', 'true ', 'true' + String.fromCharCode(10), '1', 'yes'])('VOICE_TRANSCRIBE_ENABLED=%p (off) -> 503 VOICE_UNAVAILABLE, no guard / provider / cost', async (v) => {
       if (v === undefined) delete process.env.VOICE_TRANSCRIBE_ENABLED; else process.env.VOICE_TRANSCRIBE_ENABLED = v;
       const r = await invoke(transcribe, { method: 'POST', as: 'A', body: { ...audio, companyId: CO_A } });
       expect(r).toMatchObject({ status: 503, body: { code: 'VOICE_UNAVAILABLE' } });
