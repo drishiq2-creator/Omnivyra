@@ -205,6 +205,19 @@ describe('cancel owns the hold correctly (05)', () => {
     expect(await cancelMarketPulseJob(JOB, 'Cancelled by user')).toEqual({ ok: true, wasPending: true });
     expect(calls.map((c) => c.fn)).toEqual(['release']);
   });
+  test('05: a PENDING cancel whose release FAILS leaves a durable HOLD_RELEASE_PENDING marker (recoverable), not a silent strand', async () => {
+    jobRow = { context_payload: { credit_reservation: handle(16) } };
+    claimWins = true;
+    const mod = require('../../services/creditExecutionService');
+    const orig = mod.releaseCreditReservation;
+    mod.releaseCreditReservation = async () => { throw new Error('ledger down'); };
+    const err = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      expect(await cancelMarketPulseJob(JOB, 'Cancelled by user')).toEqual({ ok: true, wasPending: true });
+      expect(updates).toEqual(expect.arrayContaining([expect.objectContaining({ u: { error: 'Cancelled by user; HOLD_RELEASE_PENDING' } })]));
+      expect(err).toHaveBeenCalledWith('[marketPulse] market_pulse_cancel_release_pending', expect.objectContaining({ jobId: JOB }));
+    } finally { mod.releaseCreditReservation = orig; err.mockRestore(); }
+  });
   test('cancelling a RUNNING job releases nothing (the processor settles completed regions)', async () => {
     jobRow = { context_payload: { credit_reservation: handle(16) } };
     claimWins = false;

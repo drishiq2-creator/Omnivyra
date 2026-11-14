@@ -138,6 +138,9 @@ export function isMarketPulseRunDue(cadence: string | null | undefined, lastRunA
  * processor's conditional PENDING -> RUNNING claim) releases the hold when IT wins. A RUNNING job is cancelled by status
  * only - the processor observes the cancel and its finally settles the completed regions and releases the rest.
  */
+/** Durable marker on a cancelled job whose hold release failed (recoverable: FAILED + this error, release is idempotent). */
+export const MARKET_PULSE_HOLD_RELEASE_PENDING = 'Cancelled by user; HOLD_RELEASE_PENDING';
+
 export async function cancelMarketPulseJob(jobId: string, cancelledError: string): Promise<{ ok: boolean; wasPending: boolean }> {
   const { supabase } = await import('../../db/supabaseClient');
   const patch = { status: 'FAILED', error: cancelledError, completed_at: new Date().toISOString() };
@@ -146,7 +149,16 @@ export async function cancelMarketPulseJob(jobId: string, cancelledError: string
   if (pending.error) return { ok: false, wasPending: false };
   const rows = (pending.data ?? []) as Array<{ context_payload?: unknown }>;
   if (rows.length === 1) {
-    await releaseMarketPulseHold(readPersistedReservation(rows[0].context_payload), 'cancelled before start');
+    try {
+      await releaseMarketPulseHold(readPersistedReservation(rows[0].context_payload), 'cancelled before start');
+    } catch (err) {
+      // 05 (two writes, not atomic): the job is already FAILED, so a PENDING-only sweep could never find this hold
+      // again. Leave a durable marker a recovery pass can select (status FAILED + this error) and retry the
+      // (idempotent) release; log loudly. The atomic form (one RPC) is the PL item.
+      console.error('[marketPulse] market_pulse_cancel_release_pending', { jobId, message: (err as Error)?.message });
+      await supabase.from('market_pulse_jobs_v1').update({ error: MARKET_PULSE_HOLD_RELEASE_PENDING })
+        .eq('id', jobId).eq('status', 'FAILED');
+    }
     return { ok: true, wasPending: true };
   }
   const running = await supabase.from('market_pulse_jobs_v1').update(patch).eq('id', jobId).eq('status', 'RUNNING');
