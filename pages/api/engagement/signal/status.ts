@@ -1,4 +1,5 @@
 import { createApiRoute as __createApiRoute } from '../../../../lib/platform/routeFactory';
+import { SEAM_RETRY_AFTER_SECONDS } from '../../../../backend/db/seamDenial';
 
 /**
  * PATCH /api/engagement/signal/status
@@ -58,6 +59,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     const campaignId = (signal as { campaign_id: string }).campaign_id;
     const ownership = await resolveCampaignOwnership(campaignId);
     if (ownership.status === 'LOOKUP_FAILED') {
+      res.setHeader('Retry-After', String(SEAM_RETRY_AFTER_SECONDS));
       return res.status(503).json({
         error: 'Campaign ownership check is temporarily unavailable. Please try again.',
         code: 'CAMPAIGN_LOOKUP_ERROR',

@@ -52,6 +52,7 @@
  */
 
 import type { NextApiRequest, NextApiResponse } from 'next';
+import { SEAM_RETRY_AFTER_SECONDS } from '../db/seamDenial';
 import { resolvePrincipal } from './IdentityResolver';
 import { supabase } from '../db/supabaseClient';
 import { isPlatformSuperAdmin } from '../services/rbacService';
@@ -632,6 +633,7 @@ export async function requireCampaignTenantAccess(
     return null;
   }
   if (ownership.status === 'LOOKUP_FAILED') {
+    res.setHeader('Retry-After', String(SEAM_RETRY_AFTER_SECONDS));
     res.status(503).json({
       error: 'Campaign ownership check is temporarily unavailable. Please try again.',
       code: 'CAMPAIGN_LOOKUP_ERROR',
