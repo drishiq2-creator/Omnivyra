@@ -7,27 +7,13 @@ import { createApiRoute as __createApiRoute } from '../../../../lib/platform/rou
  */
 
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { supabase } from '../../../../backend/db/supabaseClient';
+import { tenantTable, tenantContextFor, TenantSeamError } from '../../../../backend/db/tenantTable';
+import { seamDenial, SEAM_RETRY_AFTER_SECONDS } from '../../../../backend/db/seamDenial';
+import { resolveCampaignOwnership } from '../../../../backend/services/campaignOwnershipService';
 import { enforceCompanyAccess } from '../../../../backend/services/userContextService';
 import { evaluateAndPersistCampaignHealth } from '../../../../backend/jobs/campaignHealthEvaluationJob';
 
 const HEALTH_TTL_MS = 24 * 60 * 60 * 1000;
-
-async function getCompanyId(campaignId: string): Promise<string | null> {
-  const { data: ver } = await supabase
-    .from('campaign_versions')
-    .select('company_id')
-    .eq('campaign_id', campaignId)
-    .limit(1)
-    .maybeSingle();
-  if (ver?.company_id) return ver.company_id as string;
-  const { data: camp } = await supabase
-    .from('campaigns')
-    .select('company_id')
-    .eq('id', campaignId)
-    .maybeSingle();
-  return camp?.company_id ? (camp.company_id as string) : null;
-}
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'GET') {
@@ -42,12 +28,26 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   const campaignId = id;
 
   try {
-    const companyId =
-      (await getCompanyId(campaignId)) ??
-      (typeof req.query.companyId === 'string' ? req.query.companyId : null);
-    if (!companyId) {
-      return res.status(400).json({ error: 'Campaign must be linked to a company' });
+    // SEC91 A8 / 3AH-113: the owner is the canonical resolver's answer over EVERY owner record (campaigns.company_id
+    // plus every campaign_versions row); never one version row, never a caller-supplied ?companyId=.
+    // Mapping copied from pages/api/campaigns/[id].ts and approve-strategy.ts: a failed lookup is a retryable 503;
+    // CONFLICT, UNOWNED and NOT_FOUND all answer one 404 (no existence oracle).
+    const ownership = await resolveCampaignOwnership(campaignId);
+    if (ownership.status === 'LOOKUP_FAILED') {
+      res.setHeader('Retry-After', String(SEAM_RETRY_AFTER_SECONDS));
+      return res.status(503).json({
+        error: 'Campaign ownership check is temporarily unavailable. Please try again.',
+        code: 'CAMPAIGN_LOOKUP_ERROR',
+        retryable: true,
+      });
     }
+    if (ownership.status === 'INVALID') {
+      return res.status(400).json({ error: 'Campaign ID required' });
+    }
+    if (ownership.status !== 'OWNED') {
+      return res.status(404).json({ error: 'Campaign not found' });
+    }
+    const companyId = ownership.companyId;
 
     const access = await enforceCompanyAccess({
       req,
@@ -58,13 +58,21 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     });
     if (!access) return;
 
-    const { data: row, error } = await supabase
-      .from('campaign_health_reports')
-      .select('report_json, evaluated_at, created_at')
-      .eq('campaign_id', campaignId)
-      .order('created_at', { ascending: false })
-      .limit(1)
-      .maybeSingle();
+    // S2 tenant seam: the tenant is the owner resolveCampaignOwnership derived and enforceCompanyAccess just
+    // authorized for this principal.
+    let healthRead: { data: any; error: any };
+    try {
+      healthRead = await tenantTable('campaign_health_reports', tenantContextFor(access, companyId))
+        .select('report_json, evaluated_at, created_at')
+        .eq('campaign_id', campaignId)
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+    } catch (err) {
+      if (err instanceof TenantSeamError) return seamDenial(res, err, 404, { error: 'Campaign not found' });
+      throw err;
+    }
+    const { data: row, error } = healthRead;
 
     if (error) {
       console.error('[campaigns/health]', error);
