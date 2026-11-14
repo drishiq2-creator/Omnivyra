@@ -77,6 +77,22 @@ describe('e1 (c): UNKNOWN is recoverable within the period', () => {
   });
 });
 
+describe('e9 (2): DAILY runs in one period grant ONCE (idempotent per org, plan, period)', () => {
+  it('runs on the 1st, 2nd and 15th of the same period -> one grant (same key); the next period grants again', async () => {
+    // Faithful to the DB: the credit ledger's idempotency key is unique - a repeated key is a no-op, not a second grant.
+    const granted = new Set<string>();
+    createCredit.mockImplementation(async (cmd: any) => { const dup = granted.has(cmd.idempotencyKey); granted.add(cmd.idempotencyKey); return { status: dup ? 'duplicate' : 'created' }; });
+    const days = ['2026-12-01T06:00:00Z', '2026-12-02T06:00:00Z', '2026-12-15T06:00:00Z'];
+    const results = [];
+    for (const d of days) results.push(await allocateMonthlyCreditsForOrg({ orgId: 'org-1', now: new Date(d) }));
+    expect(new Set(results.map((r: any) => r.idempotencyKey)).size).toBe(1);
+    expect(granted.size).toBe(1);                             // one grant for the period
+    await allocateMonthlyCreditsForOrg({ orgId: 'org-1', now: new Date('2027-01-01T06:00:00Z') });
+    expect(granted.size).toBe(2);                             // CONTROL: a new period grants again
+    createCredit.mockImplementation(async () => ({ status: 'created' }));
+  });
+});
+
 describe("a failed plan read is 'plan_unreadable', never 'no_plan'", () => {
   it.each<[string, () => void]>([
     ['plan assignment read', () => { st.assignment = ERR; }],
