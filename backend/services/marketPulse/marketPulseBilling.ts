@@ -141,6 +141,10 @@ export function isMarketPulseRunDue(cadence: string | null | undefined, lastRunA
 /** Durable marker on a cancelled job whose hold release failed (recoverable: FAILED + this error, release is idempotent). */
 export const MARKET_PULSE_HOLD_RELEASE_PENDING = 'Cancelled by user; HOLD_RELEASE_PENDING';
 
+// WRITE ORDER RULE (05): order the two writes so a partial failure leaves the row where it can do no harm AND can
+// still be found. Here the job HAS been enqueued, so PENDING is NOT a safe resting state (a worker could claim and run the
+// work the user cancelled): FAIL FIRST, then release (a failed release leaves the HOLD_RELEASE_PENDING marker). The
+// never-enqueued paths in the routes do the OPPOSITE order on purpose - see releaseMarketPulseHold's callers.
 export async function cancelMarketPulseJob(jobId: string, cancelledError: string): Promise<{ ok: boolean; wasPending: boolean }> {
   const { supabase } = await import('../../db/supabaseClient');
   const patch = { status: 'FAILED', error: cancelledError, completed_at: new Date().toISOString() };

@@ -121,6 +121,9 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     });
     if (!enqueued) {
       // Shed by backpressure: nothing will process this job - release its hold and close it.
+      // WRITE ORDER RULE (05): this job was never enqueued, so PENDING is a safe resting state (nothing can claim it) -
+      // RELEASE FIRST, then close; a partial failure stays PENDING for the stale-PENDING sweep. cancelMarketPulseJob does the
+      // OPPOSITE order on purpose (its job was enqueued).
       await releaseMarketPulseHold(reservation, 'queue at capacity');
       await supabase.from('market_pulse_jobs_v1').update({ status: 'FAILED', error: 'Queue at capacity' }).eq('id', job.id);
       return res.status(429).json({ error: 'Queue is at capacity. Retry shortly.', jobId: job.id, status: job.status });

@@ -235,6 +235,9 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
             return { mode: 'skipped_credits' as const, code: hold.code };
           }
           const reservation = hold.reservation;
+          // WRITE ORDER RULE (05): this job was never enqueued, so PENDING is a safe resting state (nothing can claim it) -
+          // RELEASE FIRST, then close; a partial failure stays PENDING for the stale-PENDING sweep. cancelMarketPulseJob does the
+          // OPPOSITE order on purpose (its job was enqueued).
           const releaseAndClose = async (reason: string, created: boolean) => {
             await releaseMarketPulseHold(reservation, reason);
             if (created) await ownedDbTable('market_pulse_jobs_v1').update({ status: 'FAILED', error: reason }).eq('id', jobId);
