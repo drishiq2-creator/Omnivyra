@@ -1,5 +1,5 @@
 import { ownedDbTable } from '../db/writeOwner';
-import { resolveTenantOfRow, tenantTable } from '../db/tenantTable';
+import { resolveTenantOfRow, tenantTable, TenantSeamError } from '../db/tenantTable';
 import { trackEvent } from './telemetry/telemetryDispatcher';
 /**
  * Auto Completion Trigger.
@@ -24,9 +24,22 @@ export async function checkAndCompleteCampaignIfEligible(campaignId: string | nu
   if (!campaignId) return;
   try {
     // S2 tenant seam: everything below runs under the campaign's own tenant (campaigns.company_id, read by the seam
-    // from the row). A campaign with no resolvable tenant (missing row / NULL company / failed read) is not completed:
-    // silent return, as before (a NULL-company campaign already stopped at the transition write; this never throws).
-    const campaignCtx = await resolveTenantOfRow('campaigns', campaignId, 'campaign auto-completion: execution_status transition');
+    // from the row). A campaign with no resolvable tenant (missing row / NULL company) is not completed: silent
+    // return, as before (a NULL-company campaign already stopped at the transition write; this never throws).
+    // A FAILED read (retryable TENANT_PARENT_UNREADABLE, e9 2026-11-14) is not "no tenant": it is logged and the check
+    // returns without completing; nothing is written, so the next trigger (publish success / release / schedule)
+    // re-evaluates the campaign. Never rethrown: callers are fire-and-forget after a publish.
+    const reason = 'campaign auto-completion: execution_status transition';
+    let campaignCtx;
+    try {
+      campaignCtx = await resolveTenantOfRow('campaigns', campaignId, reason);
+    } catch (err) {
+      if (err instanceof TenantSeamError && err.retryable) {
+        console.warn('tenant_row_unreadable', { table: 'campaigns', id: campaignId, reason, caller: 'checkAndCompleteCampaignIfEligible', error: err.message });
+        return;
+      }
+      throw err;
+    }
     if (!campaignCtx) return;
     const { data: campaign, error: campError } = await tenantTable('campaigns', campaignCtx)
       .select('id, execution_status')

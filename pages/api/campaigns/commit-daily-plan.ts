@@ -5,6 +5,8 @@ import { syncCampaignVersionStage } from '../../../backend/db/campaignVersionSto
 import { buildDailyExecutionMetadata, parseDailyExecutionMetadata } from '../../../lib/dailyExecutionMetadata';
 import { applyDefaultRetention } from '../../../backend/services/contentRetentionLifecycle';
 import { requireCampaignTenantAccess } from '../../../backend/security/TenantGuard';
+import { TenantSeamError } from '../../../backend/db/tenantTable';
+import { seamDenial } from '../../../backend/db/seamDenial';
 
 type DailyExecutionItem = {
   execution_id: string;
@@ -290,6 +292,9 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     });
 
   } catch (error) {
+    // S2 (resolveTenantOfRow / owner lookups): a tenant-seam error is never echoed in a 500 - a RETRYABLE one (a row
+    // that could not be READ) is 503 + Retry-After; any other seam refusal is the route's generic 500 without the seam text.
+    if (error instanceof TenantSeamError) return seamDenial(res, error, 500, { error: 'Internal server error' });
     console.error('Error in commit-daily-plan API:', error);
     res.status(500).json({ 
       error: 'Internal server error', 

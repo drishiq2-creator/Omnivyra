@@ -71,10 +71,21 @@ function topicGroupKeyForQueue(row: DailyPlanRow): string {
 
 /**
  * S2 tenant seam: the tenant that owns `campaignId`, read from campaigns.company_id by the seam itself (never
- * from a caller-supplied company). Throws TenantSeamError when the campaign has no resolvable tenant.
+ * from a caller-supplied company). Throws TenantSeamError when the campaign has no resolvable tenant. A FAILED read
+ * throws the seam's retryable TENANT_PARENT_UNREADABLE (e9, 2026-11-14), logged here; both callers resolve before
+ * writing anything (queueBoltContentJobs: caught by the scheduler, which falls back to the inline block processor;
+ * processCreatorStructuredSchedule: propagates to the scheduler's caller).
  */
 async function campaignTenant(campaignId: string, reason: string): Promise<TenantContext> {
-  const ctx = await resolveTenantOfRow('campaigns', campaignId, reason);
+  let ctx;
+  try {
+    ctx = await resolveTenantOfRow('campaigns', campaignId, reason);
+  } catch (err) {
+    if (err instanceof TenantSeamError && err.retryable) {
+      console.warn('tenant_row_unreadable', { table: 'campaigns', id: campaignId, reason, caller: 'structuredPlanSchedulerExecWeeklyA.campaignTenant', error: err.message });
+    }
+    throw err;
+  }
   if (!ctx) throw new TenantSeamError('TENANT_CONTEXT_MISSING', `campaign ${campaignId} has no resolvable tenant`);
   return ctx;
 }

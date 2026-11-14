@@ -40,6 +40,7 @@ jest.mock('../../services/campaignReadinessService', () => ({
 }));
 
 import { releaseThemeFromCampaign } from '../../services/companyThemeStateService';
+import { TenantSeamError } from '../../db/tenantTable';
 import { resolveCampaignOwnership } from '../../services/campaignOwnershipService';
 /* eslint-disable @typescript-eslint/no-var-requires */
 const campaignById = require('../../../pages/api/campaigns/[id]').default;
@@ -308,6 +309,22 @@ describe('DELETE', () => {
       expect(rows('campaigns').some((c) => c.id === X)).toBe(true);
       expect(rows('campaign_versions').filter((row) => row.campaign_id === X)).toHaveLength(2);
       expect(await resolveCampaignOwnership(X)).toMatchObject({ status: 'OWNED', companyId: CO_A });
+      expect((await call('DELETE', 'A')).status).toBe(200);
+    });
+
+    // e9 2026-11-14: the theme release could not READ the campaign's tenant (retryable seam error). It runs before any
+    // destructive step, so the DELETE answers 503 + Retry-After (not 500, not a partial delete) and a retry completes.
+    it('the theme release cannot read the campaign tenant → 503 + Retry-After, nothing deleted, retry completes', async () => {
+      world(...OWNED_A);
+      (releaseThemeFromCampaign as jest.Mock).mockRejectedValueOnce(
+        new TenantSeamError('TENANT_PARENT_UNREADABLE', 'campaigns: row tenant unreadable (57014)'));
+      const r = await call('DELETE', 'A');
+      expect(r.status).toBe(503);
+      expect(r.headers['retry-after']).toBe('5');
+      expect(JSON.stringify(r.body)).not.toMatch(/TENANT_PARENT_UNREADABLE|57014/);
+      expect(writeCalls().filter((c) => c.op === 'delete')).toEqual([]);
+      expect(rows('campaigns').some((c) => c.id === X)).toBe(true);
+      expect(ids('daily_content_plans')).toEqual(['dcp-x']);
       expect((await call('DELETE', 'A')).status).toBe(200);
     });
 

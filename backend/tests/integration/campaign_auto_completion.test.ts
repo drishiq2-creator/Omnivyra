@@ -242,4 +242,40 @@ describe('Campaign Auto Completion', () => {
       })
     );
   });
+
+  // e9 2026-11-14: a FAILED tenant read of the campaign is not "no tenant". It never throws (fire-and-forget after a
+  // publish), is logged as tenant_row_unreadable, and writes nothing, so the next trigger re-evaluates the campaign.
+  it('campaign tenant read fails → logged, nothing written, never throws', async () => {
+    const campaignsUpdate = jest.fn();
+    const tablesRead: string[] = [];
+    (supabase.from as jest.Mock).mockImplementation((table: string) => {
+      tablesRead.push(table);
+      if (table === 'campaigns') {
+        const c: any = {
+          select: jest.fn().mockReturnThis(),
+          eq: jest.fn().mockReturnThis(),
+          update: (payload: unknown) => seamUpdate(campaignsUpdate, payload),
+          maybeSingle: jest.fn().mockResolvedValue({ data: null, error: { code: '57014', message: 'statement timeout' } }),
+        };
+        return c;
+      }
+      return chain({ data: [{ id: 'p1', status: 'published', scheduled_for: new Date(0).toISOString() }], error: null });
+    });
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const error = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      await expect(checkAndCompleteCampaignIfEligible(CAMPAIGN_ID)).resolves.toBeUndefined();
+      expect(warn).toHaveBeenCalledWith('tenant_row_unreadable', expect.objectContaining({
+        table: 'campaigns', id: CAMPAIGN_ID, caller: 'checkAndCompleteCampaignIfEligible',
+      }));
+      expect(error).not.toHaveBeenCalled();
+      expect(tablesRead).toEqual(['campaigns']);
+      expect(campaignsUpdate).not.toHaveBeenCalled();
+      expect(recordGovernanceEvent).not.toHaveBeenCalled();
+      expect(recordCampaignCompletedEvent).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+      error.mockRestore();
+    }
+  });
 });

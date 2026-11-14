@@ -1,5 +1,5 @@
 import { ownedDbTable } from '../db/writeOwner';
-import { resolveTenantOfRow, tenantTable } from '../db/tenantTable';
+import { resolveTenantOfRow, tenantTable, TenantSeamError } from '../db/tenantTable';
 /**
  * Company Theme State Service
  * Tracks strategic theme lifecycle per company.
@@ -16,9 +16,19 @@ import { generateThemeKey } from './themeKeyService';
  * S2 tenant seam: company_theme_state writes keyed by campaign run under the CAMPAIGN's own tenant
  * (campaigns.company_id, read by the seam from the campaigns row; never caller input), so a campaign id can only
  * move theme rows of the company that owns that campaign. null when the campaign has no resolvable tenant.
+ * A FAILED campaign read (retryable TENANT_PARENT_UNREADABLE, e9 2026-11-14) is logged here and rethrown - never
+ * "no tenant"; each caller below decides what the throw means.
  */
-async function themeStateOfCampaign(campaignId: string, reason: string) {
-  const ctx = await resolveTenantOfRow('campaigns', campaignId, reason);
+async function themeStateOfCampaign(campaignId: string, reason: string, caller: string) {
+  let ctx;
+  try {
+    ctx = await resolveTenantOfRow('campaigns', campaignId, reason);
+  } catch (err) {
+    if (err instanceof TenantSeamError && err.retryable) {
+      console.warn('tenant_row_unreadable', { table: 'campaigns', id: campaignId, reason, caller, error: err.message });
+    }
+    throw err;
+  }
   return ctx ? tenantTable('company_theme_state', ctx) : null;
 }
 
@@ -34,8 +44,10 @@ export async function markThemeConsumedForCampaign(campaignId: string): Promise<
   if (!campaignId?.trim()) return;
   try {
     // S2 tier 2: the theme rows are read (and updated) only under the campaign's own tenant. A campaign with no
-    // resolvable tenant (missing row, or an unreadable one: resolveTenantOfRow answers null for both) is skipped.
-    const themeState = await themeStateOfCampaign(campaignId, 'theme state: mark CONSUMED on campaign completion');
+    // resolvable tenant (missing row / NULL company) is skipped. An UNREADABLE one throws (logged in
+    // themeStateOfCampaign) into the catch below: nothing is written. No retry is needed for correctness - IN_USE and
+    // CONSUMED are both excluded from recommendations (getExcludedThemeTopicsForCompany), so the theme stays hidden.
+    const themeState = await themeStateOfCampaign(campaignId, 'theme state: mark CONSUMED on campaign completion', 'markThemeConsumedForCampaign');
     if (!themeState) {
       console.warn('companyThemeStateService: mark CONSUMED skipped (campaign has no resolvable tenant)', { campaignId });
       return;
@@ -164,12 +176,15 @@ export async function markThemeInUse(
 
 /**
  * Release IN_USE when campaign is deleted (theme becomes AVAILABLE again).
+ * Best-effort, except: throws a retryable TenantSeamError when the campaign's tenant could not be READ.
  */
 export async function releaseThemeFromCampaign(campaignId: string): Promise<void> {
   if (!campaignId?.trim()) return;
   try {
     // S2: called BEFORE the campaign row is deleted (pages/api/campaigns/[id].ts), so the campaign still resolves.
-    const themeState = await themeStateOfCampaign(campaignId, 'theme state: release on campaign delete');
+    // An UNREADABLE campaign (retryable seam error, logged in themeStateOfCampaign) is rethrown below so the DELETE
+    // answers 503 before any destructive step - otherwise the theme would stay IN_USE (hidden) forever.
+    const themeState = await themeStateOfCampaign(campaignId, 'theme state: release on campaign delete', 'releaseThemeFromCampaign');
     if (!themeState) {
       console.warn('companyThemeStateService: releaseThemeFromCampaign skipped (campaign has no resolvable tenant)', { campaignId });
       return;
@@ -182,6 +197,7 @@ export async function releaseThemeFromCampaign(campaignId: string): Promise<void
       console.warn('companyThemeStateService: releaseThemeFromCampaign failed', error);
     }
   } catch (err) {
+    if (err instanceof TenantSeamError && err.retryable) throw err;
     console.warn('companyThemeStateService: releaseThemeFromCampaign failed', err);
   }
 }

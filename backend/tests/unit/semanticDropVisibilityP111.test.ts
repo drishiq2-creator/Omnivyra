@@ -21,6 +21,8 @@ const scheduledPostInserts: Row[] = [];
 const planWrites: Array<{ payload: Row; filters: string[] }> = [];
 let insertCounter = 0;
 let annotationThrows = false;
+/** e9 2026-11-14: how many of the seam's campaign TENANT reads (select('company_id')) fail with a statement timeout. */
+let campaignTenantReadFailures = 0;
 /** Rows the CAS should treat as already scheduled (scheduled_post_id NOT NULL). */
 const alreadyScheduled = new Set<string>();
 
@@ -64,8 +66,17 @@ jest.mock('../../db/supabaseClient', () => ({
       if (table === 'campaigns') {
         // chainable: the tenant seam reads the campaign (resolveTenantOfRow, then the parent check) with extra .eq()s
         return {
-          select: () => {
-            const b: Record<string, any> = { eq: () => b, maybeSingle: async () => ({ data: { id: 'camp-1', company_id: 'c0100000-0000-4000-8000-000000000001' }, error: null }) };
+          select: (cols?: string) => {
+            const b: Record<string, any> = {
+              eq: () => b,
+              maybeSingle: async () => {
+                if (cols === 'company_id' && campaignTenantReadFailures > 0) {
+                  campaignTenantReadFailures -= 1;
+                  return { data: null, error: { code: '57014', message: 'canceling statement due to statement timeout' } };
+                }
+                return { data: { id: 'camp-1', company_id: 'c0100000-0000-4000-8000-000000000001' }, error: null };
+              },
+            };
             return b;
           },
         };
@@ -135,6 +146,7 @@ beforeEach(() => {
   planWrites.length = 0;
   insertCounter = 0;
   annotationThrows = false;
+  campaignTenantReadFailures = 0;
   alreadyScheduled.clear();
 });
 
@@ -195,6 +207,28 @@ describe('Phase 111 — semantic drops are visible on the plan row', () => {
     // And the campaign is otherwise unaffected.
     expect(result.skipped_count).toBe(1);
     expect(scheduledPostInserts).toHaveLength(1);
+  });
+
+  // e9 2026-11-14: a FAILED campaign tenant read is logged, is not memoised, and the NEXT plan-row write re-reads.
+  test('a failed tenant read on the annotation is logged, not memoised: the later write-back re-resolves', async () => {
+    campaignTenantReadFailures = 1;
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const result = await run(dupRows());
+
+      expect(warn).toHaveBeenCalledWith('tenant_row_unreadable', expect.objectContaining({
+        table: 'campaigns', id: 'camp-1', caller: 'lazyCampaignPlanRows',
+      }));
+      // The failed read was consumed by the annotation: it did not land (best-effort, like a DB error)...
+      expect(annotations()).toHaveLength(0);
+      expect(campaignTenantReadFailures).toBe(0);
+      // ...but it did not poison the run: the accepted row still schedules AND its write-back was written.
+      expect(result.scheduled_count).toBe(1);
+      expect(scheduledPostInserts).toHaveLength(1);
+      expect(planWrites.some((w) => w.filters.includes('eq:id=row-keep') && 'content' in w.payload)).toBe(true);
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   test('an annotation failure is non-fatal — the accepted row still schedules', async () => {
