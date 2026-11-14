@@ -1,4 +1,4 @@
-import { seamDenial } from '../../../backend/db/seamDenial';
+import { seamDenial, SEAM_RETRY_AFTER_SECONDS } from '../../../backend/db/seamDenial';
 import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeFactory';
 
 /**
@@ -123,6 +123,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       }
       const agreement = await campaignOwnerAgreement(campaignId, access.companyId);
       if (agreement === 'lookup_error') {
+        res.setHeader('Retry-After', String(SEAM_RETRY_AFTER_SECONDS));
         return res.status(503).json({ error: 'Campaign ownership check failed. Please retry.', code: 'CAMPAIGN_LOOKUP_ERROR' });
       }
       if (agreement === 'missing') {

@@ -19,7 +19,7 @@ import { runPrePlanning } from '../../../backend/services/CampaignPrePlanningSer
 import { recordGovernanceEvent } from '../../../backend/services/GovernanceEventService';
 import { enforceCompanyAccess } from '../../../backend/services/userContextService';
 import { tenantTable, tenantChildTable, tenantContextFor, ownerOfChildRow, TenantSeamError, type TenantContext } from '../../../backend/db/tenantTable';
-import { seamDenial } from '../../../backend/db/seamDenial';
+import { seamDenial, SEAM_RETRY_AFTER_SECONDS } from '../../../backend/db/seamDenial';
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'POST') {
@@ -188,9 +188,11 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     }
     if (err instanceof PreemptionOwnershipError) {
       // A campaign of another company (or none) is "not found" - never an existence oracle.
-      return err.kind === 'unverified'
-        ? res.status(503).json({ error: 'Campaign ownership check is temporarily unavailable. Please try again.', code: 'CAMPAIGN_LOOKUP_ERROR', retryable: true })
-        : res.status(404).json({ error: 'Campaign not found', code: 'CAMPAIGN_NOT_FOUND' });
+      if (err.kind === 'unverified') {
+        res.setHeader('Retry-After', String(SEAM_RETRY_AFTER_SECONDS));
+        return res.status(503).json({ error: 'Campaign ownership check is temporarily unavailable. Please try again.', code: 'CAMPAIGN_LOOKUP_ERROR', retryable: true });
+      }
+      return res.status(404).json({ error: 'Campaign not found', code: 'CAMPAIGN_NOT_FOUND' });
     }
     if (err instanceof PreemptionValidationError) {
       return res.status(400).json({

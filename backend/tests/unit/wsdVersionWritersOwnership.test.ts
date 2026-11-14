@@ -302,6 +302,7 @@ describe.each(WRITERS)('$name', (w) => {
     const r = await post('A');
     expect(r.status).toBe(503);
     expect(r.body).toMatchObject({ code: 'CAMPAIGN_LOOKUP_ERROR', retryable: true });
+    expect(r.headers['retry-after']).toBe('5');
     expect(allWrites()).toEqual([]);
   });
 

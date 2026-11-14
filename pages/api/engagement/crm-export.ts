@@ -1,4 +1,5 @@
 import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeFactory';
+import { SEAM_RETRY_AFTER_SECONDS } from '../../../backend/db/seamDenial';
 /**
  * POST /api/engagement/crm-export
  *
@@ -65,6 +66,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     // an unowned, conflicting or missing campaign all get the existing 403.
     const ownership = await resolveCampaignOwnership(signal.campaign_id);
     if (ownership.status === 'LOOKUP_FAILED') {
+      res.setHeader('Retry-After', String(SEAM_RETRY_AFTER_SECONDS));
       return res.status(503).json({
         error: 'Campaign ownership check is temporarily unavailable. Please try again.',
         code: 'CAMPAIGN_LOOKUP_ERROR',

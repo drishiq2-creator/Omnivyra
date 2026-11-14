@@ -1,4 +1,5 @@
 import { createApiRoute as __createApiRoute } from '../../../../lib/platform/routeFactory';
+import { SEAM_RETRY_AFTER_SECONDS } from '../../../../backend/db/seamDenial';
 import { NextApiRequest, NextApiResponse } from 'next';
 import { supabase } from '../../../../backend/db/supabaseClient';
 import { getSupabaseUserFromRequest } from '../../../../backend/services/supabaseAuthService';
@@ -63,6 +64,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   // UNOWNED and NOT_FOUND are the same 404; a failed lookup is a retryable 503.
   const ownership = await resolveCampaignOwnership(id);
   if (ownership.status === 'LOOKUP_FAILED') {
+    res.setHeader('Retry-After', String(SEAM_RETRY_AFTER_SECONDS));
     return res.status(503).json({
       error: 'Campaign ownership check is temporarily unavailable. Please try again.',
       code: 'CAMPAIGN_LOOKUP_ERROR',

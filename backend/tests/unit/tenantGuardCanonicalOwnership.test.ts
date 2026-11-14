@@ -293,6 +293,7 @@ describe('LOOKUP_FAILED is a retryable 503, never NOT_FOUND', () => {
         code: 'CAMPAIGN_LOOKUP_ERROR',
         retryable: true,
       });
+      expect(r.headers['retry-after']).toBe('5');
       expect(JSON.stringify(r.body)).not.toMatch(/forced failure|XX000|campaign_versions|campaigns/);
       expect(sideEffects()).toHaveLength(0);
     }

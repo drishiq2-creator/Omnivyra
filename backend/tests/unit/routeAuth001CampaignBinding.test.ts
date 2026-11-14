@@ -98,6 +98,7 @@ describe('enforceCompanyAccess campaign binding', () => {
     const r = await invoke(guard(CO_A, CAMPAIGN_A), { as: 'A' });
     expect(r.status).toBe(503);
     expect(r.body.code).toBe('CAMPAIGN_LOOKUP_ERROR');
+    expect(r.headers['retry-after']).toBe('5');
   });
   it('no campaignId supplied → unchanged company-only behaviour', async () => {
     expect((await invoke(guard(CO_A, null), { as: 'A' })).status).toBe(200);

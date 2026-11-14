@@ -1,4 +1,5 @@
 import { withContract } from '@/lib/api/withContract';
+import { SEAM_RETRY_AFTER_SECONDS } from '../../../backend/db/seamDenial';
 
 /**
  * POST /api/engagement/reply
@@ -338,9 +339,11 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       if (resolved.ok === false) {
         // A failed lookup is retryable, never "not found" (3AH-117 WS-E).
         const retryable = resolved.code === 'CAMPAIGN_LOOKUP_ERROR' || resolved.code === 'SIGNAL_LOOKUP_FAILED';
-        return retryable
-          ? res.status(503).json({ error: resolved.message, code: resolved.code, retryable: true })
-          : res.status(404).json({ error: resolved.message, code: resolved.code });
+        if (retryable) {
+          res.setHeader('Retry-After', String(SEAM_RETRY_AFTER_SECONDS));
+          return res.status(503).json({ error: resolved.message, code: resolved.code, retryable: true });
+        }
+        return res.status(404).json({ error: resolved.message, code: resolved.code });
       }
       if (!platform) platform = resolved.platform;
       resolvedTargetId = resolved.targetId;

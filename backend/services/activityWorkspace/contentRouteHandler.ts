@@ -1,5 +1,6 @@
 /** Part 2/2 of content.ts — verbatim split (barrel preserved; importers unchanged). */
 import { NextApiRequest, NextApiResponse } from 'next';
+import { SEAM_RETRY_AFTER_SECONDS } from '../../db/seamDenial';
 import {
   buildPlatformVariantsFromMaster,
   generateMasterContentFromIntent,
@@ -155,6 +156,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     if (writeTarget && action !== 'generate_master') {
       const ownership = companyId ? await checkCampaignOwnership(writeTarget.campaignId, companyId) : 'foreign';
       if (ownership === 'lookup_error') {
+        res.setHeader('Retry-After', String(SEAM_RETRY_AFTER_SECONDS));
         return res.status(503).json({ error: 'Campaign ownership check is temporarily unavailable. Please try again.', code: 'CAMPAIGN_LOOKUP_ERROR', retryable: true });
       }
       if (ownership !== 'owned') {
@@ -176,6 +178,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     if (bodyCampaignId && companyId && action !== 'generate_master') {
       const ownership = await checkCampaignOwnership(bodyCampaignId, companyId);
       if (ownership === 'lookup_error') {
+        res.setHeader('Retry-After', String(SEAM_RETRY_AFTER_SECONDS));
         return res.status(503).json({ error: 'Campaign ownership check is temporarily unavailable. Please try again.', code: 'CAMPAIGN_LOOKUP_ERROR', retryable: true });
       }
       if (ownership !== 'owned' && ownership !== 'not_found') {
