@@ -11,12 +11,22 @@ jest.mock('../../db/supabaseClient', () => ({
             if (errors[t]) return { data: null, error: errors[t] };
             return { data: tables[t] ?? null, error: null };
           },
+          // S2 tier 2 (fixture): the campaign owner is read through the seam (ownerCompanyOfRow: .eq().limit()),
+          // with the same error injection as maybeSingle (rebase-merged with main's read-failure cases).
+          limit: async () => {
+            if (errors[t] === 'throw') throw new Error('fetch failed');
+            if (errors[t]) return { data: null, error: errors[t] };
+            return { data: tables[t] ? [tables[t]] : [], error: null };
+          },
         }),
       }),
     }),
   },
 }));
 import { resolvePublishingOrganization, PublishingOrgReadError } from '../../services/creator/publishingOrganizationResolver';
+
+// S2 tier 2 (fixture): the seam only answers a uuid owner (campaigns.company_id is a uuid column).
+const ORG_CAMPAIGN = 'c0a00000-0000-4000-8000-00000000c0c1';
 
 beforeEach(() => {
   for (const k of Object.keys(tables)) delete tables[k];
@@ -30,8 +40,8 @@ describe('Canonical publishing organization resolver', () => {
   });
 
   it('falls back to campaigns.company_id when no account', async () => {
-    tables.campaigns = { company_id: 'org-campaign' };
-    expect(await resolvePublishingOrganization({ campaignId: 'c1' })).toBe('org-campaign');
+    tables.campaigns = { company_id: ORG_CAMPAIGN };
+    expect(await resolvePublishingOrganization({ campaignId: 'c1' })).toBe(ORG_CAMPAIGN);
   });
 
   it('returns null when the org genuinely cannot be determined (no userId-as-companyId)', async () => {
@@ -66,7 +76,7 @@ describe('unread-error pkg 2: a FAILED read is never "cannot be determined"', ()
 
   it('CONTROL: the scheduled post bindings still resolve when every read succeeds', async () => {
     tables.scheduled_posts = { social_account_id: null, campaign_id: 'c9' };
-    tables.campaigns = { company_id: 'org-from-post' };
-    expect(await resolvePublishingOrganization({ scheduledPostId: 'p1' })).toBe('org-from-post');
+    tables.campaigns = { company_id: ORG_CAMPAIGN };
+    expect(await resolvePublishingOrganization({ scheduledPostId: 'p1' })).toBe(ORG_CAMPAIGN);
   });
 });

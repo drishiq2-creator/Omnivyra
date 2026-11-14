@@ -21,6 +21,7 @@
  */
 
 import { supabase } from '../../db/supabaseClient';
+import { ownerCompanyOfRow } from '../../db/tenantTable';
 
 export interface PublishingOrgInput {
   socialAccountId?: string | null;
@@ -57,10 +58,14 @@ async function companyOfSocialAccount(id: string): Promise<string | null> {
 }
 
 async function companyOfCampaign(id: string): Promise<string | null> {
-  const data = await readOne<{ company_id?: string }>('campaigns', () =>
-    supabase.from('campaigns').select('company_id').eq('id', id).maybeSingle());
-  const org = data?.company_id;
-  return org ? String(org) : null;
+  // S2 tier 2: "which company owns this campaign" is answered by the seam (campaigns.company_id). A missing / NULL
+  // owner is null. A FAILED read throws a retryable TenantSeamError, which becomes PublishingOrgReadError - never
+  // null (unread-error pkg 2, on main: a failed read is not "cannot be determined"; rebase-merged 2026-11-20).
+  try {
+    return await ownerCompanyOfRow('campaigns', id, 'publishing organization: owner of the campaign');
+  } catch (err) {
+    throw new PublishingOrgReadError('campaigns', err);
+  }
 }
 
 /**
