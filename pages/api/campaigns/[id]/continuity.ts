@@ -1,4 +1,4 @@
-import { seamDenial } from '../../../../backend/db/seamDenial';
+import { seamDenial, SEAM_RETRY_AFTER_SECONDS } from '../../../../backend/db/seamDenial';
 import { createApiRoute as __createApiRoute } from '../../../../lib/platform/routeFactory';
 /**
  * GET /api/campaigns/[id]/continuity
@@ -15,6 +15,7 @@ import { NextApiRequest, NextApiResponse } from 'next';
 import { supabase } from '../../../../backend/db/supabaseClient';
 import { tenantTable, tenantContextFor, TenantSeamError, type TenantContext } from '../../../../backend/db/tenantTable';
 import { enforceRole, Role } from '../../../../backend/services/rbacService';
+import { resolveCampaignOwnership } from '../../../../backend/services/campaignOwnershipService';
 import { resolveUserContext } from '../../../../backend/services/userContextService';
 import { decideNextAction } from '../../../../backend/lib/campaigns/continuityDecisionEngine';
 import { recognizePatterns, type CampaignRecord } from '../../../../backend/lib/campaigns/patternRecognitionEngine';
@@ -57,29 +58,28 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     return res.status(401).json({ error: 'Authentication required. Please sign in again.', code: 'UNAUTHENTICATED' });
   }
 
-  // ── 1. Load campaign + resolve company_id ─────────────────────────────────
-  const [campaignRes, versionRes] = await Promise.all([
-    supabase
-      .from('campaigns')
-      .select('id, name, goal_type, topic_seed, source_blog_id')
-      .eq('id', id)
-      .maybeSingle(),
-    supabase
-      .from('campaign_versions')
-      .select('company_id, campaign_snapshot')
-      .eq('campaign_id', id)
-      .order('version', { ascending: false })
-      .limit(1)
-      .maybeSingle(),
-  ]);
-
-  const campaign = campaignRes.data;
-  if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
-
-  const companyId = versionRes.data?.company_id ?? null;
-  if (!companyId) {
+  // ── 1. Resolve the owning company, authorize it, then load through the seam ─
+  // SEC91 A8 / 3AH-113: the owner is the canonical resolver's answer over EVERY owner record (campaigns.company_id
+  // plus every campaign_versions row), never one "latest" version row and never campaigns.company_id alone.
+  // Mapping copied from pages/api/campaigns/[id].ts and approve-strategy.ts: a failed lookup is a retryable 503;
+  // CONFLICT, UNOWNED and NOT_FOUND all answer the route's existing 404 (no new existence oracle).
+  const ownership = await resolveCampaignOwnership(id);
+  if (ownership.status === 'LOOKUP_FAILED') {
+    res.setHeader('Retry-After', String(SEAM_RETRY_AFTER_SECONDS));
+    return res.status(503).json({
+      error: 'Campaign ownership check is temporarily unavailable. Please try again.',
+      code: 'CAMPAIGN_LOOKUP_ERROR',
+      retryable: true,
+    });
+  }
+  if (ownership.status === 'INVALID') {
+    return res.status(400).json({ error: 'Campaign ID required' });
+  }
+  if (ownership.status !== 'OWNED') {
     return res.status(404).json({ error: 'Campaign not found' });
   }
+  const companyId = ownership.companyId;
+
   // SECURITY: enforce that the caller has an admin role on the campaign's
   // owning company before returning data or persisting decisions. Without
   // this gate (and given this handler also writes), any authenticated user
@@ -93,26 +93,44 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   });
   if (!access) return;
 
-  // S2 tenant seam: the tenant is the campaign's owning company that enforceRole just authorized for access.userId;
-  // never a request value. Made before any write; a company that cannot form a context answers the route's
-  // existing not-found and nothing is written.
+  // S2 tenant seam: the tenant is the campaign's owning company (resolveCampaignOwnership) that enforceRole just
+  // authorized for access.userId; never a request value. Made before any read or write; a company that cannot form a
+  // context answers the route's existing not-found and nothing is read or written.
   let tenant: TenantContext;
+  let campaign: { id: string; name: string | null; goal_type: string | null; topic_seed: string | null; source_blog_id: string | null } | null;
+  let latestVersion: { campaign_snapshot: unknown } | null;
   try {
     tenant = tenantContextFor({ userId: access.userId }, companyId);
+    // Tenant-scoped reads. A campaigns row whose company_id is NULL (owner named only by its versions) is not
+    // visible under the tenant and answers 404 (C36: 0 such rows in production).
+    const [campaignRes, versionRes] = await Promise.all([
+      tenantTable('campaigns', tenant)
+        .select('id, name, goal_type, topic_seed, source_blog_id')
+        .eq('id', id)
+        .maybeSingle(),
+      tenantTable('campaign_versions', tenant)
+        .select('campaign_snapshot')
+        .eq('campaign_id', id)
+        .order('version', { ascending: false })
+        .limit(1)
+        .maybeSingle(),
+    ]);
+    campaign = campaignRes.data ?? null;
+    latestVersion = versionRes.data ?? null;
   } catch (err) {
     if (err instanceof TenantSeamError) return seamDenial(res, err, 404, { error: 'Campaign not found' });
     throw err;
   }
+  if (!campaign) return res.status(404).json({ error: 'Campaign not found' });
 
   // Derive post count from daily_plan for effort signal
-  const snapshot = versionRes.data?.campaign_snapshot as any;
+  const snapshot = latestVersion?.campaign_snapshot as any;
   const postCount: number | null = Array.isArray(snapshot?.daily_plan)
     ? (snapshot.daily_plan as any[]).length
     : null;
 
   // ── 2. Latest performance snapshot ────────────────────────────────────────
-  const { data: perf } = await supabase
-    .from('campaign_performance')
+  const { data: perf } = await tenantTable('campaign_performance', tenant)
     .select('evaluation_status, evaluation_score, evaluation_summary, metric_breakdown, confidence_level, confidence_reason, next_topic, suggested_blog_id, suggested_blog_type')
     .eq('campaign_id', id)
     .order('recorded_at', { ascending: false })
@@ -169,10 +187,8 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
 
   if (companyId) {
     // Fetch last 15 performance records for this company
-    const { data: historyPerf } = await supabase
-      .from('campaign_performance')
+    const { data: historyPerf } = await tenantTable('campaign_performance', tenant)
       .select('campaign_id, evaluation_status, evaluation_score, recorded_at')
-      .eq('company_id', companyId)
       .not('evaluation_status', 'is', null)
       .order('recorded_at', { ascending: false })
       .limit(15);
@@ -180,8 +196,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     if (historyPerf && historyPerf.length > 0) {
       // Join with campaigns to get names, topics, goal_types
       const campIds = [...new Set((historyPerf as any[]).map((p) => p.campaign_id as string))];
-      const { data: histCampaigns } = await supabase
-        .from('campaigns')
+      const { data: histCampaigns } = await tenantTable('campaigns', tenant)
         .select('id, name, goal_type, topic_seed')
         .in('id', campIds);
 
@@ -217,10 +232,8 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
 
   if (companyId) {
     // Fetch recent completed campaigns (excluding current)
-    const { data: recentPerf } = await supabase
-      .from('campaign_performance')
+    const { data: recentPerf } = await tenantTable('campaign_performance', tenant)
       .select('campaign_id, evaluation_status, evaluation_score, recorded_at')
-      .eq('company_id', companyId)
       .not('evaluation_status', 'is', null)
       .neq('campaign_id', id)
       .order('recorded_at', { ascending: false })
@@ -228,8 +241,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
 
     if (recentPerf && recentPerf.length > 0) {
       const prevIds = (recentPerf as any[]).map((p) => p.campaign_id as string);
-      const { data: prevCampaigns } = await supabase
-        .from('campaigns')
+      const { data: prevCampaigns } = await tenantTable('campaigns', tenant)
         .select('id, name, goal_type, topic_seed')
         .in('id', prevIds);
 
@@ -284,19 +296,21 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   let suggestedBlog: { id: string; title: string; slug: string } | null = null;
 
   if (decision.suggested_blog_id) {
-    // Resolve from correct table based on stored type discriminator
+    // Resolve from correct table based on stored type discriminator. A company blog is tenant content, read through
+    // the seam (this company's blogs only); public_blogs is the platform blog (not tenant content) and stays raw.
     const blogType = (perf as any).suggested_blog_type ?? 'public';
-    const blogTable = blogType === 'company' ? 'blogs' : 'public_blogs';
-    const statusFilter = blogType === 'company'
-      ? { status: 'published' }
-      : { status: 'published' };
-
-    const { data: blog } = await supabase
-      .from(blogTable)
-      .select('id, title, slug')
-      .eq('id', decision.suggested_blog_id)
-      .eq('status', statusFilter.status)
-      .maybeSingle();
+    const { data: blog } = blogType === 'company'
+      ? await tenantTable('blogs', tenant)
+          .select('id, title, slug')
+          .eq('id', decision.suggested_blog_id)
+          .eq('status', 'published')
+          .maybeSingle()
+      : await supabase
+          .from('public_blogs')
+          .select('id, title, slug')
+          .eq('id', decision.suggested_blog_id)
+          .eq('status', 'published')
+          .maybeSingle();
     suggestedBlog = blog ?? null;
   }
   if (!suggestedBlog && decision.next_topic) {

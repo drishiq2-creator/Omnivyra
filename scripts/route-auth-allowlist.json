@@ -225,8 +225,8 @@
     },
     "pages/api/campaigns/[id]/continuity.ts": {
       "kind": "inline-binding",
-      "reason": "Company derived from campaign_versions; enforceRole on that company before reads/update.",
-      "evidence": "from\\('campaign_versions'\\)[\\s\\S]*?enforceRole\\("
+      "reason": "3AH-113: company is the canonical owner (resolveCampaignOwnership; only OWNED proceeds); enforceRole SUPER_ADMIN/ADMIN/COMPANY_ADMIN on that company before reads/update.",
+      "evidence": "resolveCampaignOwnership\\(id\\)[\\s\\S]*?const companyId = ownership\\.companyId;[\\s\\S]*?enforceRole\\("
     },
     "pages/api/campaigns/[id]/forecast-vs-actual.ts": {
       "kind": "inline-binding",
