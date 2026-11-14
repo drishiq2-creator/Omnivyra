@@ -12,6 +12,6 @@ Tier 2 (sensitive reads) is **not** complete for the paths below. Each row says 
 
 **Preferred unblocker (05, 2026-11-14):** a versions-derived owner helper. It keeps A8 and still gives these routes the seam. The alternative, amending A8 with a divergence check, gives up the invariant and only detects a divergence after it has happened. e9 to rule.
 
-**Known seam gap:** `resolveTenantOfRow` returns null on a FAILED read, so a job silently skips the row. Proposal: throw retryable. Awaiting e9.
+**Closed 2026-11-14 (598c00356):** `resolveTenantOfRow` now throws a retryable error on a FAILED read; absent / NULL tenant still return null. All 13 callers retry within bounds and log `tenant_row_unreadable`.
 
 Per-site reasons for the other raw tier-2 route sites (campaigns 15, other routes 20) are in the S2 tier-2 work lists. They are pre-authorization bootstrap reads, whose 503/500 split the owner lookups would collapse.
