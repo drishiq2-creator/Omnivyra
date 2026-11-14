@@ -422,6 +422,7 @@ const BASE_FEATURES: MonetizationFeatureRegistryEntry[] = [
       'qualifyLead',
       'qualifyPredictiveLead',
       'generateTrendRecommendationForRegion',
+      // (Name UNQUOTED on purpose: aiOperationMonetizationMappingF0 counts quoted names in these arrays as claims.)
       // generateMarketPulseForRegion moved to intelligence.market_pulse (05, 2026-11-14): Market Pulse AI calls
       // must not be metered as insight_generation - that data feeds the per-key ceiling measurement.
       'consolidateRegionalResults',
