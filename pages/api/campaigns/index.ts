@@ -1,4 +1,4 @@
-import { seamDenial } from '../../../backend/db/seamDenial';
+import { seamDenial, SEAM_RETRY_AFTER_SECONDS } from '../../../backend/db/seamDenial';
 import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeFactory';
 
 // Handle GET/POST requests to /api/campaigns
@@ -400,7 +400,10 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       }
       const requestedId = idSupplied ? String(requestedIdRaw).trim().toLowerCase() : randomUUID();
       const existing = await resolveCampaignOwnership(requestedId);
-      if (existing.status === 'LOOKUP_FAILED') return res.status(503).json(CAMPAIGN_LOOKUP_FAILED);
+      if (existing.status === 'LOOKUP_FAILED') {
+        res.setHeader('Retry-After', String(SEAM_RETRY_AFTER_SECONDS));
+        return res.status(503).json(CAMPAIGN_LOOKUP_FAILED);
+      }
       if (existing.status !== 'NOT_FOUND') return res.status(409).json(CAMPAIGN_ID_TAKEN);
 
       // Hybrid context mode + campaign types (scratch default: no_context)
@@ -570,9 +573,11 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       const bound = await resolveCampaignOwnership((campaign as { id: string }).id);
       if (bound.status !== 'OWNED' || bound.companyId !== ownerCompanyId) {
         await discardCreatedCampaign((campaign as { id: string }).id, ownerCompanyId);
-        return bound.status === 'LOOKUP_FAILED'
-          ? res.status(503).json(CAMPAIGN_LOOKUP_FAILED)
-          : res.status(409).json(CAMPAIGN_ID_TAKEN);
+        if (bound.status === 'LOOKUP_FAILED') {
+          res.setHeader('Retry-After', String(SEAM_RETRY_AFTER_SECONDS));
+          return res.status(503).json(CAMPAIGN_LOOKUP_FAILED);
+        }
+        return res.status(409).json(CAMPAIGN_ID_TAKEN);
       }
 
       const themeTopic =

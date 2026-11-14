@@ -1,4 +1,5 @@
 import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeFactory';
+import { SEAM_RETRY_AFTER_SECONDS } from '../../../backend/db/seamDenial';
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { regenerateContentAsset } from '../../../backend/services/contentAssetService';
 import { getContentAssetById } from '../../../backend/db/contentAssetStore';
@@ -41,6 +42,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     }
     const ownership = await resolveCampaignOwnership(asset.campaign_id);
     if (ownership.status === 'LOOKUP_FAILED') {
+      res.setHeader('Retry-After', String(SEAM_RETRY_AFTER_SECONDS));
       return res.status(503).json({
         error: 'Campaign ownership check is temporarily unavailable. Please try again.',
         code: 'CAMPAIGN_LOOKUP_ERROR',

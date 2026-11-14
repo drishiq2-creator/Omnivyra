@@ -1,4 +1,5 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
+import { SEAM_RETRY_AFTER_SECONDS } from '../db/seamDenial';
 import { supabase } from '../db/supabaseClient';
 import { resolveUserContext as resolveFromLib, type UserContext, type MembershipType } from '../lib/userContext';
 import { getSupabaseUserFromRequest } from './supabaseAuthService';
@@ -194,6 +195,7 @@ export const enforceCompanyAccess = async (input: {
     const ownership = await checkCampaignOwnership(String(input.campaignId), String(input.companyId));
     if (ownership === 'owned' || ownership === 'not_found') return true;
     if (ownership === 'lookup_error') {
+      input.res.setHeader('Retry-After', String(SEAM_RETRY_AFTER_SECONDS));
       input.res.status(503).json({
         error: 'Campaign ownership check is temporarily unavailable. Please try again.',
         code: 'CAMPAIGN_LOOKUP_ERROR',
