@@ -359,6 +359,18 @@ export function assertCanonicalCreditAction(input: {
  * });
  * if (result.status === 'executed') return result.result;
  * ```
+ *
+ * MANUAL HOLD LIFECYCLE (reserveCreditsForWork + confirm / confirmToActual / release) - convention (05/e1 2026-11-14):
+ * executeWithCredits owns the hold for you; when you manage it by hand you own these rules:
+ *   1. Hold BEFORE anything is written; a refusal writes nothing.
+ *   2. Exactly ONE party settles each hold. Make the claim atomic (a conditional status update that must affect one
+ *      row) and make every competing transition (e.g. cancel) conditional on the same status, so ownership is exclusive.
+ *   3. WRITE ORDER: when a status change and a hold release are two writes, order them so a partial failure leaves the
+ *      row where it can do NO HARM and can STILL BE FOUND. PENDING is a safe resting state only when nothing can claim
+ *      it (never enqueued): release first. If it can be claimed (enqueued), change status first, and leave a durable,
+ *      constant-named marker if the release then fails. Better still: one RPC that does both atomically.
+ *   4. A missing persisted handle means "cannot settle", not "nothing to settle": fail closed and log.
+ * Worked example: backend/services/marketPulse/marketPulseBilling.ts.
  */
 export async function reserveCreditsForWork(opts: {
   userId: string;
