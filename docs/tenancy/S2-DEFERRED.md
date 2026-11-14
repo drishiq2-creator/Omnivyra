@@ -4,13 +4,9 @@ Tier 2 (sensitive reads) is **not** complete for the paths below. Each row says 
 
 | Path | Tier | Why raw | Unblocker |
 |---|---|---|---|
-| `pages/api/campaigns/list.ts` | 2 | SEC91 A8: `campaign_versions` owns divergent campaigns; `campaign_company_scope_fix` pins "never filter campaigns by company_id". The ids already come from the authorized company's versions. | Versions-derived owner helper in the seam |
-| `pages/api/campaigns/[id]/continuity.ts` | 2 | Conversion moved ownership to `campaigns.company_id`; reverted by 05 ruling (b), 2026-11-14 (0788d83be). Keeps the old failure behaviour (no 503/404 split). | Same helper |
-| `pages/api/campaigns/[id]/engagement-health.ts` | 2 | Same as above | Same helper |
-| `pages/api/campaigns/[id]/health.ts` | 2 | Same as above | Same helper |
-| `pages/api/campaigns/[id]/strategic-insights.ts` | 2 | Same as above | Same helper |
+| `pages/api/campaigns/list.ts` | 2 | SEC91 A8: `campaign_versions` owns divergent campaigns; `campaign_company_scope_fix` pins "never filter campaigns by company_id". The ids already come from the authorized company's versions. | None: stays raw. campaign_company_scope_fix pins no campaigns.company_id filter; ids come from the authorized company's versions. |
 
-**Preferred unblocker (05, 2026-11-14):** a versions-derived owner helper. It keeps A8 and still gives these routes the seam. The alternative, amending A8 with a divergence check, gives up the invariant and only detects a divergence after it has happened. e9 to rule.
+**Preferred unblocker (05, 2026-11-14):** a versions-derived owner helper. It keeps A8 and still gives these routes the seam. The alternative, amending A8 with a divergence check, gives up the invariant and only detects a divergence after it has happened. e9 ruled 2026-11-14: no A8 amendment; the canonical resolver resolveCampaignOwnership (3AH-113) is the versions-aware owner.
 
 **Closed 2026-11-14 (598c00356):** `resolveTenantOfRow` now throws a retryable error on a FAILED read; absent / NULL tenant still return null. All 13 callers retry within bounds and log `tenant_row_unreadable`.
 
