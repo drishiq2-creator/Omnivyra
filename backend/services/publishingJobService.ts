@@ -136,7 +136,8 @@ export async function claimDuePublishingJobs(input: {
 
 export async function executePublishingJob(jobId: string, workerId = 'inline-worker'): Promise<{ success: boolean; message: string; external_id?: string; external_url?: string }> {
   // S2 tenant seam: the claim runs under the job's own tenant, read from the row by the seam. A job with no
-  // resolvable tenant fails exactly like a missing job.
+  // resolvable tenant fails exactly like a missing job. A FAILED tenant read (retryable TENANT_PARENT_UNREADABLE, e9
+  // 2026-11-14) propagates before the claim: the job stays queued, so runPublishingWorker claims it on its next tick.
   const jobCtx = await resolveTenantOfRow('publishing_jobs', jobId, 'publishing job: inline execute claim');
   if (!jobCtx) throw new Error('Publishing job not found or not claimable');
   const claimed = await tenantTable('publishing_jobs', jobCtx)

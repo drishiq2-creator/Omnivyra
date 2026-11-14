@@ -43,6 +43,8 @@ function log(source: ExecutionSource, msg: string, data?: Record<string, unknown
  * or the row's owner + parent campaign for row-id writes. Every write is then pinned to that campaign under
  * that tenant (a payload naming another campaign is refused). Authorization of the caller stays with the
  * caller (route access checks); this makes the write itself unable to leave the campaign it names.
+ * A FAILED campaign read throws the seam's retryable TENANT_PARENT_UNREADABLE (e9, 2026-11-14), before any delete or
+ * insert; it propagates to the route (seamDenial / routeFactory -> 503) or the job that called the write.
  */
 async function plansOfCampaign(campaignId: string, reason: string) {
   const ctx = await resolveTenantOfRow('campaigns', campaignId, reason);

@@ -4,6 +4,8 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 import { enforceCompanyAccess } from '../../../../backend/services/userContextService';
 import { enforceRole, Role } from '../../../../backend/services/rbacService';
 import { publishBlogPost, getBlog } from '../../../../backend/services/blogService';
+import { TenantSeamError } from '../../../../backend/db/tenantTable';
+import { seamDenial } from '../../../../backend/db/seamDenial';
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
@@ -32,6 +34,9 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     const blog = await getBlog(id, companyId);
     return res.status(200).json({ ...result, blog });
   } catch (err) {
+    // The publishing job's tenant could not be READ (executePublishingJob, before the claim): 503 + Retry-After. The
+    // job stays queued, so the publishing worker also claims it on its next tick (e9, 2026-11-14).
+    if (err instanceof TenantSeamError && err.retryable) return seamDenial(res, err, 500, { success: false, message: 'Publish failed' });
     return res.status(500).json({
       success: false,
       message: err instanceof Error ? err.message : 'Publish failed',

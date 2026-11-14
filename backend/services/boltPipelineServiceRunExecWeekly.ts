@@ -177,7 +177,10 @@ export async function runGenerateWeeklyStructure(
     // (generateWeeklyStructureService is NOT touched). Mirrors the ai/plan
     // substage pattern: fire-and-forget current_stage refresh, never throws.
     const emitWeeklySub = (sub: string) =>
-      void updateRun({ current_stage: `generate-weekly-structure:${sub}` }).catch(() => { /* advisory */ });
+      void updateRun({ current_stage: `generate-weekly-structure:${sub}` }).catch((err: unknown) => {
+      // Advisory progress only (never blocks the run), but a failed write is VISIBLE (e9, 2026-11-14), never silent.
+      console.warn('bolt_progress_update_failed', { stage: `generate-weekly-structure:${sub}`, retryable: (err as { retryable?: unknown })?.retryable === true, error: err instanceof Error ? err.message : String(err) });
+    });
     emitWeeklySub('preparing');
 
           // Resolve format_frequency: always pass it when available so generateWeeklyStructure
@@ -259,7 +262,10 @@ export async function runGenerateWeeklyStructure(
     void updateRun({
       weeks_generated: completedWeeksSoFar.length + batchWeeks.length,
       daily_slots_created: dailySlotsCreated,
-    }).catch(() => { /* advisory */ });
+    }).catch((err: unknown) => {
+      // Advisory progress only (never blocks the run), but a failed write is VISIBLE (e9, 2026-11-14), never silent.
+      console.warn('bolt_progress_update_failed', { stage: 'weekly-progress', retryable: (err as { retryable?: unknown })?.retryable === true, error: err instanceof Error ? err.message : String(err) });
+    });
 
     completedWeeksSoFar = [...completedWeeksSoFar, ...batchWeeks];
   }

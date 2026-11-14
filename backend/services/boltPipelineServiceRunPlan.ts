@@ -643,7 +643,10 @@ async function runAiPlanCore(runId: string, campaignId: string, companyId: strin
     void updateRun(runId, {
       current_stage: `ai/plan:${sub}`,
       ...(typeof pct === 'number' ? { progress_percentage: pct } : {}),
-    }).catch(() => { /* advisory only */ });
+    }).catch((err: unknown) => {
+      // Advisory progress only (never blocks the run), but a failed write is VISIBLE (e9, 2026-11-14), never silent.
+      console.warn('bolt_progress_update_failed', { stage: `ai/plan:${sub}`, retryable: (err as { retryable?: unknown })?.retryable === true, error: err instanceof Error ? err.message : String(err) });
+    });
   };
 
   // Phase 6D-B — Intelligent Mix intelligence-driven planning. Reuses the SAME

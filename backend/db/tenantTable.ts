@@ -448,8 +448,13 @@ async function walkToOwner(table: string, key: string, value: string): Promise<s
  * BOOTSTRAP for background work (queue / worker jobs, reconcilers, webhook processors) whose payload carries only a
  * row id: "which tenant owns this row?". The single by-id read happens HERE, inside the seam (the only place allowed
  * to read a tenant table without a context). It returns a SYSTEM context for the row's own tenant; every later access
- * (including re-reading the same row) goes through tenantTable(..., ctx). A NULL tenant, a missing row or an unreadable
- * row returns null (the caller refuses the job; never "no tenant, so no filter").
+ * (including re-reading the same row) goes through tenantTable(..., ctx). A missing row, a NULL tenant or a non-uuid
+ * tenant returns null (the caller refuses / skips the job; never "no tenant, so no filter").
+ *
+ * A FAILED read is not an absent row (e9 ruling, 2026-11-14): it throws a RETRYABLE
+ * TenantSeamError('TENANT_PARENT_UNREADABLE'), mirroring readSingleLink, so the job's bounded retry (queue attempts,
+ * next cron tick, a 503) runs instead of the row being silently skipped. Callers must route that throw to their
+ * retry path and keep null for the legitimate skip.
  *
  * Request handlers must NOT use this: their tenant comes from the authenticated principal (tenantContextFor). The
  * tenant-seam gate flags resolveTenantOfRow under pages/api (rule R9) unless the call site is allow-listed (webhooks).
@@ -461,7 +466,8 @@ export async function resolveTenantOfRow(table: TenantTableName, id: string, rea
   if (typeof id !== 'string' || id.length === 0) return null;
   const column = columnOf(table);
   const { data, error } = await (ownedDbTable(table) as any).select(column).eq('id', id).maybeSingle();
-  if (error || !data) return null;
+  if (error) throw new TenantSeamError('TENANT_PARENT_UNREADABLE', `${table}: row tenant unreadable (${(error as { code?: string }).code ?? 'error'})`);
+  if (!data) return null;
   const tenant = (data as Record<string, unknown>)[column];
   if (typeof tenant !== 'string' || !UUIDISH.test(tenant)) return null;
   return systemTenantContext(tenant, `${reason.trim()} (resolved from ${table}.${column} of row ${id})`);

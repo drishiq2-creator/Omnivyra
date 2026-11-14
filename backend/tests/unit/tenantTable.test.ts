@@ -346,14 +346,32 @@ describe('resolveTenantOfRow (job bootstrap)', () => {
     expect(ctx?.origin).toBe('system');
     expect(calls.map((c) => [c.op, c.args])).toEqual([['select', ['company_id']], ['eq', ['id', 'row-1']], ['maybeSingle', []]]);
   });
-  it('NULL tenant, missing row or unreadable row -> null (the job refuses); a reason is mandatory', async () => {
+  it('NULL tenant, missing row or non-uuid tenant -> null (the job skips); a reason is mandatory', async () => {
     parentRow = { company_id: null };
     expect(await resolveTenantOfRow('campaigns', 'row-1', 'lead job')).toBeNull();
     parentRow = null;
     expect(await resolveTenantOfRow('campaigns', 'row-1', 'lead job')).toBeNull();
-    parentRow = { company_id: A }; parentError = { code: '57014' };
+    parentRow = { company_id: 'not-a-uuid' };
     expect(await resolveTenantOfRow('campaigns', 'row-1', 'lead job')).toBeNull();
     await expect(resolveTenantOfRow('campaigns', 'row-1', '')).rejects.toThrow(/reason/);
+  });
+  // e9 ruling 2026-11-14: a FAILED read is not an absent row - it throws RETRYABLE (mirrors readSingleLink), so the
+  // job's bounded retry runs instead of the row being silently skipped.
+  it('a failed read throws a retryable TENANT_PARENT_UNREADABLE (never null)', async () => {
+    parentRow = { company_id: A }; parentError = { code: '57014' };
+    const err = await resolveTenantOfRow('campaigns', 'row-1', 'lead job').then(() => null, (e: unknown) => e);
+    expect(err).toBeInstanceOf(TenantSeamError);
+    expect((err as TenantSeamError).code).toBe('TENANT_PARENT_UNREADABLE');
+    expect((err as TenantSeamError).retryable).toBe(true);
+    expect((err as Error).message).toMatch(/campaigns: row tenant unreadable \(57014\)/);
+  });
+  it('absent row -> null, not a throw', async () => {
+    parentRow = null; parentError = null;
+    await expect(resolveTenantOfRow('campaigns', 'row-1', 'lead job')).resolves.toBeNull();
+  });
+  it('NULL tenant -> null, not a throw', async () => {
+    parentRow = { company_id: null }; parentError = null;
+    await expect(resolveTenantOfRow('campaigns', 'row-1', 'lead job')).resolves.toBeNull();
   });
 });
 
