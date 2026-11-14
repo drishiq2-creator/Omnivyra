@@ -12,6 +12,13 @@ import {
 jest.mock('../../db/supabaseClient', () => ({
   supabase: { from: jest.fn() },
 }));
+// Campaign WRITE-role guard (2026-11-13): user-1 holds an ACTIVE, write-capable membership in the test company,
+// so enforceCampaignWriteRole really runs and allows (it is not mocked out).
+jest.mock('../../db/writeOwner', () =>
+  require('../utils/activeCompanyRoleFake').writeOwnerServingRoles([
+    { user_id: 'user-1', company_id: 'company-123', role: 'COMPANY_ADMIN', status: 'active' },
+  ]),
+);
 jest.mock('../../services/GovernanceEventService', () => ({
   recordGovernanceEvent: jest.fn().mockResolvedValue(undefined),
 }));
