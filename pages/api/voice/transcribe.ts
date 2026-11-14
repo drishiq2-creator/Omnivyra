@@ -23,6 +23,7 @@ import {
   exceedsPreCallSizeBound,
   isVoiceTranscribeEnabled,
   VOICE_UNAVAILABLE_BODY,
+  VOICE_UNAVAILABLE_STATUS,
   audioTooLongChargedBody,
 } from '../../../backend/services/voice/transcriptionLimits';
 import { ACTIVITY_CLASS_ECONOMICS } from '../../../backend/services/activityEconomyCatalog';
@@ -65,7 +66,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   // KILL-SWITCH (e9, BLOCKING - money): no transcription - so no provider spend - until voice is priced. Checked after
   // auth and the role gate (so those answers are unchanged) and before any guard, hold or provider call.
   if (!isVoiceTranscribeEnabled()) {
-    return res.status(503).json(VOICE_UNAVAILABLE_BODY);
+    return res.status(VOICE_UNAVAILABLE_STATUS).json(VOICE_UNAVAILABLE_BODY);
   }
 
   try {

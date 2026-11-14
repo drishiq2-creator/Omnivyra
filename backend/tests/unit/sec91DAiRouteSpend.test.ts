@@ -54,15 +54,19 @@ const mockFetch = jest.fn(defaultFetch);
 const SPOOFED = { 'x-forwarded-for': '6.6.6.6, 10.0.0.1' };
 const VERCEL_EDGE = { ...SPOOFED, 'x-real-ip': '203.0.113.7' };
 const ORIGINAL_VERCEL = process.env.VERCEL;
+// The voice kill-switch (e9 2026-11-14) is OFF unless exactly 'true'; this suite exercises the ON path's guard identity.
+const ORIGINAL_VOICE = process.env.VOICE_TRANSCRIBE_ENABLED;
 
 beforeAll(() => {
   global.fetch = mockFetch as never;
   process.env.OPENAI_API_KEY = process.env.OPENAI_API_KEY || 'test-only-platform-openai';
   process.env.ANTHROPIC_API_KEY = 'sk-ant-PLATFORM-KEY-MUST-NOT-LEAVE';
+  process.env.VOICE_TRANSCRIBE_ENABLED = 'true';
 });
 afterAll(() => {
   global.fetch = realFetch;
   if (ORIGINAL_VERCEL === undefined) delete process.env.VERCEL; else process.env.VERCEL = ORIGINAL_VERCEL;
+  if (ORIGINAL_VOICE === undefined) delete process.env.VOICE_TRANSCRIBE_ENABLED; else process.env.VOICE_TRANSCRIBE_ENABLED = ORIGINAL_VOICE;
 });
 beforeEach(() => {
   seed();
@@ -101,7 +105,7 @@ describe('SEC91-D1 resolveTrustedClientIp', () => {
 describe.each([
   ['ai/gpt-chat', () => gptChat, { message: 'hello', apiKey: 'sk-caller-own', stream: false }],
   ['ai/claude-chat (byok)', () => claudeChat, { message: 'hello', apiKey: 'sk-ant-caller-own', credentialMode: 'byok', stream: false }],
-  ['voice/transcribe', () => transcribe, { audioFile: 'data:audio/webm;base64,AAAAAAAA', provider: 'whisper' }],
+  ['voice/transcribe', () => transcribe, { audioFile: 'data:audio/webm;base64,AAAAAAAA', provider: 'whisper', companyId: CO_A }],
 ] as const)('SEC91-D1 %s guard identity', (_name, h, body) => {
   it('guard receives the authenticated userId and the edge-trusted IP, not the spoofed XFF hop', async () => {
     process.env.VERCEL = '1';
@@ -208,7 +212,7 @@ describe('SEC91-D9 provider requests carry an AbortSignal', () => {
     expect(signalOf(0)).toBeInstanceOf(AbortSignal);
   });
   it('voice/transcribe (Whisper)', async () => {
-    await invoke(transcribe, { method: 'POST', as: 'A', body: { audioFile: 'data:audio/webm;base64,AAAA', provider: 'whisper' } });
+    await invoke(transcribe, { method: 'POST', as: 'A', body: { audioFile: 'data:audio/webm;base64,AAAA', provider: 'whisper', companyId: CO_A } });
     expect(providerCalls()[0]).toContain('/audio/transcriptions');
     expect(signalOf(0)).toBeInstanceOf(AbortSignal);
   });
@@ -222,7 +226,7 @@ describe('SEC91-D9 provider requests carry an AbortSignal', () => {
     }) as never);
     jest.useFakeTimers();
     try {
-      const p = invoke(transcribe, { method: 'POST', as: 'A', body: { audioFile: 'data:audio/webm;base64,AAAA', provider: 'assemblyai' } });
+      const p = invoke(transcribe, { method: 'POST', as: 'A', body: { audioFile: 'data:audio/webm;base64,AAAA', provider: 'assemblyai', companyId: CO_A } });
       await jest.advanceTimersByTimeAsync(2_000);
       const r = await p;
       expect(r.status).toBe(200);

@@ -83,7 +83,11 @@ export function isVoiceTranscribeEnabled(): boolean {
   // convention as CREDIT_HOLD_REAP_ENABLED and the settlement gate. 'TRUE', ' true', 'true' + newline are all OFF.
   return process.env.VOICE_TRANSCRIBE_ENABLED === 'true';
 }
+// e9 (2026-11-14): a feature OFF BY POLICY is a 409 with retryable:false (never a 503 inviting retries), matching
+// MARKET_PULSE_AUTOMATION_DISABLED.
+export const VOICE_UNAVAILABLE_STATUS = 409;
 export const VOICE_UNAVAILABLE_BODY = Object.freeze({
   error: 'Voice input is not available yet.',
   code: 'VOICE_UNAVAILABLE',
+  retryable: false,
 });
