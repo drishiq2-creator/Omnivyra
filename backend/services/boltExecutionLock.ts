@@ -23,14 +23,16 @@
  */
 
 import { randomUUID } from 'crypto';
-import { resolveTenantOfRow, tenantTable } from '../db/tenantTable';
+import { resolveTenantOfRow, tenantTable, TenantSeamError } from '../db/tenantTable';
 import { supabase } from '../db/supabaseClient';
 
 /**
  * S2 tenant seam: lock writes for ONE run, under the tenant that owns that run (bolt_execution_runs.company_id,
- * read by the seam from the row itself; never caller input). null when the run is missing, its company is not a
- * uuid, or the owner read failed - each caller maps that onto its existing failure answer (acquire: null,
- * extend: false, release: non-fatal warn).
+ * read by the seam from the row itself; never caller input). null when the run is missing or its company is not a
+ * uuid - each caller maps that onto its existing failure answer (acquire: null, extend: false, release: non-fatal
+ * warn). A FAILED owner read throws a retryable TenantSeamError (e9, 2026-11-14): acquire and extend propagate it
+ * (the bolt job fails visibly - see executeBoltPipelineRuntime - instead of reading as "another worker holds the
+ * lock"); release, which never throws, logs it and leaves the lock to its TTL.
  */
 async function runRowsOf(runId: string, reason: string) {
   const ctx = await resolveTenantOfRow('bolt_execution_runs', runId, reason);
@@ -237,7 +239,19 @@ export async function releaseRunLock(runId: string, token: string): Promise<void
   if (_heldLocks.get(runId) === token) _heldLocks.delete(runId);
   const nowIso = new Date().toISOString();
   // S2 tenant seam: an unresolvable run is a non-fatal release failure (the lock then expires on its TTL).
-  const runs = await runRowsOf(runId, 'bolt run lock: release');
+  let runs: Awaited<ReturnType<typeof runRowsOf>>;
+  try {
+    runs = await runRowsOf(runId, 'bolt run lock: release');
+  } catch (err) {
+    // Never throws (contract above). A failed tenant read is NOT "no tenant": logged as such, and the lock then
+    // expires on its TTL exactly like any other failed release (stale-lock recovery reclaims it).
+    if (err instanceof TenantSeamError && err.retryable) {
+      console.warn('tenant_row_unreadable', { table: 'bolt_execution_runs', id: runId, reason: 'bolt run lock: release', caller: 'releaseRunLock', error: err.message });
+    } else {
+      console.warn('[bolt/lock] release failed (non-fatal)', { runId, error: (err as Error)?.message });
+    }
+    return;
+  }
   if (!runs) {
     console.warn('[bolt/lock] release failed (non-fatal): run has no resolvable tenant', { runId });
     return;

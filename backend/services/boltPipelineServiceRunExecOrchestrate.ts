@@ -107,6 +107,7 @@ import {
   releaseRunLock,
   DEFAULT_LOCK_TTL_MS,
 } from './boltExecutionLock';
+import { TenantSeamError } from '../db/tenantTable';
 
 import { AI_PLAN_TIMEOUT_MS, GENERATE_WEEKLY_TIMEOUT_MS, GENERATE_WEEKLY_HEARTBEAT_MS, withTimeout, type BoltStage, type BoltPayload, updateRun, logEvent, checkStageCompleted, getCompletedStagePlan, assertCampaignValid, runSourceRecommendation } from './boltPipelineServiceModel';
 
@@ -442,6 +443,12 @@ async function executeBoltPipelineRuntime(runId: string): Promise<void> {
         try {
           await assertCampaignValid(campaignId);
         } catch (guardErr) {
+          // A campaign that could not be READ is not a deleted campaign (e9, 2026-11-14): it is not aborted. Logged,
+          // then rethrown to the outer catch (run failed + lock released + job failed) - see assertCampaignValid.
+          if (guardErr instanceof TenantSeamError && guardErr.retryable) {
+            console.warn('tenant_row_unreadable', { table: 'campaigns', id: campaignId, reason: 'bolt pipeline: campaign validity check', caller: 'executeBoltPipelineRuntime', run_id: runId, stage });
+            throw guardErr;
+          }
           // Aborted path (campaign was deleted mid-run, etc.) — still
           // capture raw cause so operators can tell why the run gave up.
           // We re-set status='aborted' AFTER persistPipelineFailure to

@@ -221,6 +221,9 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       });
 
     } catch (error) {
+      // A campaign whose tenant could not be READ (releaseThemeFromCampaign, before any destructive step) is a 503 +
+      // Retry-After, never a 500: nothing was deleted and the delete can simply be retried (e9, 2026-11-14).
+      if (error instanceof TenantSeamError && error.retryable) return seamDenial(res, error, 500, { error: 'Internal server error' });
       console.error('Error in delete campaign API:', error);
       res.status(500).json({ error: 'Internal server error' });
     }

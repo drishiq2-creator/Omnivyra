@@ -260,7 +260,9 @@ export async function updateRun(
   sanitizedUpdates.lock_expires_at = new Date(heartbeatNow.getTime() + 2 * 60 * 1000).toISOString();
 
   // S2 tenant seam: the run is written under its OWN tenant (bolt_execution_runs.company_id, read by the seam from
-  // the row; never caller input). An unresolvable run fails exactly like a failed write (RUN_UPDATE_FAILED).
+  // the row; never caller input). An unresolvable run (missing / non-uuid company) fails exactly like a failed write
+  // (RUN_UPDATE_FAILED); a FAILED tenant read throws the seam's retryable TENANT_PARENT_UNREADABLE (e9, 2026-11-14),
+  // which propagates like any other updateRun failure.
   const runCtx = await resolveTenantOfRow('bolt_execution_runs', runId, 'bolt pipeline: updateRun');
   if (!runCtx) throw new BoltError(
     BOLT_ERROR_CODES.RUN_UPDATE_FAILED,
@@ -324,8 +326,9 @@ export async function getCompletedStagePlan(runId: string, stage: string): Promi
 
 export async function assertCampaignValid(campaignId: string): Promise<void> {
   // S2 tier 2: the BOLT run holds only a campaign id here, so the tenant is derived from the campaign row by the
-  // seam (job pattern). A missing campaign, a NULL-company campaign or a failed read has no context: the same
-  // SCHEDULING_CAMPAIGN_NOT_FOUND as before.
+  // seam (job pattern). A missing campaign or a NULL-company campaign has no context: the same
+  // SCHEDULING_CAMPAIGN_NOT_FOUND as before. A FAILED read is not "not found" (e9, 2026-11-14): the seam's retryable
+  // TENANT_PARENT_UNREADABLE propagates, and executeBoltPipelineRuntime fails the run instead of aborting it.
   const ctx = await resolveTenantOfRow('campaigns', campaignId, 'bolt pipeline: campaign validity check');
   const { data, error } = ctx
     ? await tenantTable('campaigns', ctx)
@@ -367,7 +370,8 @@ export async function runSourceRecommendation(
 
     // S2 tenant seam: the version + campaign writes below run under the campaign's OWN tenant (campaigns.company_id,
     // read by the seam), not the payload's companyId. A campaign with no resolvable tenant, or one the payload's
-    // company does not own, is refused here, before anything is written, with the existing not-found error.
+    // company does not own, is refused here, before anything is written, with the existing not-found error. A FAILED
+    // tenant read propagates the seam's retryable TENANT_PARENT_UNREADABLE (e9, 2026-11-14), never "not found".
     const campaignCtx = await resolveTenantOfRow('campaigns', campaignId, 'bolt pipeline: source-recommendation campaign update');
     if (!campaignCtx || campaignCtx.companyId !== String(companyId ?? '').toLowerCase()) {
       throw new BoltError(

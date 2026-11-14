@@ -156,9 +156,20 @@ function extractTypeMapFromPlatformRules(bundle: any): Record<string, string> | 
  * S2 tenant seam: daily_content_plans writes for ONE campaign, under the tenant that owns that campaign
  * (resolved from campaigns.company_id by the seam itself, never from caller input) and pinned to that
  * campaign. Throws TenantSeamError when the campaign has no resolvable tenant (missing row / NULL company).
+ * A FAILED campaign read throws the seam's retryable TENANT_PARENT_UNREADABLE (e9, 2026-11-14), logged here: every
+ * caller's catch turns it into status 'error' / a warn BEFORE the scheduled_posts insert, so the row stays as it was
+ * and the next scheduler run (or upload trigger) retries it.
  */
 async function campaignTenant(campaignId: string, reason: string): Promise<TenantContext> {
-  const ctx = await resolveTenantOfRow('campaigns', campaignId, reason);
+  let ctx;
+  try {
+    ctx = await resolveTenantOfRow('campaigns', campaignId, reason);
+  } catch (err) {
+    if (err instanceof TenantSeamError && err.retryable) {
+      console.warn('tenant_row_unreadable', { table: 'campaigns', id: campaignId, reason, caller: 'creatorRowScheduler.campaignTenant', error: err.message });
+    }
+    throw err;
+  }
   if (!ctx) throw new TenantSeamError('TENANT_CONTEXT_MISSING', `campaign ${campaignId} has no resolvable tenant`);
   return ctx;
 }

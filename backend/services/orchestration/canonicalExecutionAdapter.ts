@@ -236,11 +236,21 @@ function parseContent(row: Record<string, unknown> | null | undefined): Record<s
  * S2 tenant seam: the write handle for ONE resolved plan row, under the tenant that owns the row's campaign
  * (campaigns.company_id, resolved by the seam) and pinned to that campaign. Throws TenantSeamError when the
  * row has no campaign or the campaign has no resolvable tenant; callers' try/catch turns that into
- * `{ ok: false, reason }` (EXECUTION_WRITE_FAILED), the same path as any other write failure.
+ * `{ ok: false, reason }` (EXECUTION_WRITE_FAILED), the same path as any other write failure. A FAILED campaign
+ * read (retryable TENANT_PARENT_UNREADABLE, e9 2026-11-14) takes that same path - never 'row_not_found' - and is
+ * logged here as tenant_row_unreadable first; nothing is written.
  */
 async function planRowWriteHandle(row: Record<string, unknown>, reason: string) {
   const campaignId = String(row.campaign_id ?? '');
-  const ctx = campaignId ? await resolveTenantOfRow('campaigns', campaignId, reason) : null;
+  let ctx = null;
+  try {
+    ctx = campaignId ? await resolveTenantOfRow('campaigns', campaignId, reason) : null;
+  } catch (err) {
+    if (err instanceof TenantSeamError && err.retryable) {
+      LOG('tenant_row_unreadable', { table: 'campaigns', id: campaignId, reason, caller: 'canonicalExecutionAdapter.planRowWriteHandle', error: err.message });
+    }
+    throw err;
+  }
   if (!ctx) throw new TenantSeamError('TENANT_CONTEXT_MISSING', `daily_content_plans row ${String(row.id ?? '')} has no resolvable tenant`);
   return tenantChildTable('daily_content_plans', ctx, campaignId);
 }

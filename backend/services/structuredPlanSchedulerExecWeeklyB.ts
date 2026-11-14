@@ -70,8 +70,9 @@ async function scheduleStructuredPlanRuntime(
   }
 
   // S2 tier 2: the scheduler starts from a campaign id (BOLT pipeline / release route), so the tenant is derived
-  // from the campaign row by the seam. A missing campaign, a NULL-company campaign or a failed read yields no
-  // context and lands on the same SCHEDULING_CAMPAIGN_NOT_FOUND a failed lookup always raised.
+  // from the campaign row by the seam. A missing campaign or a NULL-company campaign yields no context and lands on
+  // the same SCHEDULING_CAMPAIGN_NOT_FOUND a failed lookup always raised. A FAILED tenant read is not "not found"
+  // (e9, 2026-11-14): the seam's retryable TENANT_PARENT_UNREADABLE propagates before anything is scheduled.
   const campaignTenant = await resolveTenantOfRow('campaigns', campaignId, 'structured plan scheduler: campaign lookup');
   const { data: campaign, error: campaignError } = campaignTenant
     ? await tenantTable('campaigns', campaignTenant)

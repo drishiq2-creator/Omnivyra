@@ -13,6 +13,8 @@ import { createHash } from 'crypto';
 
 import { supabase } from '../../../backend/db/supabaseClient';
 import { getCampaignById } from '../../../backend/db/campaignStore';
+import { TenantSeamError } from '../../../backend/db/tenantTable';
+import { seamDenial } from '../../../backend/db/seamDenial';
 import { getSupabaseUserFromRequest } from '../../../backend/services/supabaseAuthService';
 import { requireTenantAccess } from '../../../backend/security/TenantGuard';
 import { enforceCompanyAccess } from '../../../backend/services/userContextService';
@@ -852,6 +854,9 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
 
     return res.status(200).json({ campaign_id: campaignId });
   } catch (err) {
+    // S2 (resolveTenantOfRow / owner lookups): a tenant-seam error is never echoed in a 500 - a RETRYABLE one (a row
+    // that could not be READ) is 503 + Retry-After; any other seam refusal is the route's generic 500 without the seam text.
+    if (err instanceof TenantSeamError) return seamDenial(res, err, 500, { error: 'Internal server error' });
     console.error('Planner finalize error:', err);
     const msg = err instanceof Error ? err.message : 'Internal server error';
     return res.status(500).json({ error: msg });

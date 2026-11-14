@@ -337,12 +337,25 @@ type CampaignPlanRows = Awaited<ReturnType<typeof tenantChildTable>>;
  * campaigns.company_id by the seam itself, not from the caller's `campaign.company_id`, which may be the
  * version-derived value) and pinned to that campaign. Lazy + memoised per run: resolved on the first write,
  * and a refusal (TenantSeamError) is the same refusal for every later write of the run.
+ *
+ * Except a FAILED tenant read (retryable TENANT_PARENT_UNREADABLE, e9 2026-11-14): it is logged, NOT memoised, and
+ * rethrown, so that write fails through its existing best-effort path and the NEXT write of the run re-reads (one
+ * read per write - bounded by the run's own writes, no loop). A transient blip never poisons the rest of the run.
  */
 function lazyCampaignPlanRows(campaignId: string): () => Promise<CampaignPlanRows> {
   let handle: Promise<CampaignPlanRows> | null = null;
   return () => (handle ??= (async () => {
     const reason = 'bolt block processor: plan-row writes';
-    const ctx = await resolveTenantOfRow('campaigns', campaignId, reason);
+    let ctx;
+    try {
+      ctx = await resolveTenantOfRow('campaigns', campaignId, reason);
+    } catch (err) {
+      if (err instanceof TenantSeamError && err.retryable) {
+        handle = null;
+        console.warn('tenant_row_unreadable', { table: 'campaigns', id: campaignId, reason, caller: 'lazyCampaignPlanRows', error: err.message });
+      }
+      throw err;
+    }
     if (!ctx) throw new TenantSeamError('TENANT_CONTEXT_MISSING', `campaign ${campaignId} has no resolvable tenant`);
     return tenantChildTable('daily_content_plans', ctx, campaignId);
   })());
