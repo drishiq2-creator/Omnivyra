@@ -314,6 +314,50 @@ describe('campaigns/create-12week-plan — tenant binding', () => {
     expect(created[0].payload.company_id).toBe(COMPANY_A);
   });
 
+  // Phase 1 of the deleted-campaign takeover fix (owner ruling 2026-11-18): the 200 response
+  // names the campaign id the route actually used, so clients can continue with it.
+  it('PHASE1: the 200 response carries campaign_id = the id it inserted (valid uuid: the sent id)', async () => {
+    const res = await post(createPlanRoute, MEMBER_A, {
+      campaignId: NEW_CAMPAIGN, companyId: COMPANY_A, campaignName: 'X', ...PLAN,
+    });
+    expect(res.statusCode).toBe(200);
+    const created = tenantWrites().filter(w => w.table === 'campaigns' && w.op === 'insert');
+    expect(created).toHaveLength(1);
+    expect(res.body.campaign_id).toBe(created[0].payload.id);
+    expect(res.body.campaign_id).toBe(NEW_CAMPAIGN);
+    // existing fields unchanged
+    expect(res.body).toMatchObject({ success: true, message: 'Campaign plan created successfully', data: { campaignId: NEW_CAMPAIGN } });
+  });
+
+  it('PHASE1: a malformed id is minted server-side and campaign_id is the MINTED (inserted) id', async () => {
+    const res = await post(createPlanRoute, MEMBER_A, {
+      campaignId: 'not-a-uuid', companyId: COMPANY_A, campaignName: 'X', ...PLAN,
+    });
+    expect(res.statusCode).toBe(200);
+    const created = tenantWrites().filter(w => w.table === 'campaigns' && w.op === 'insert');
+    expect(created).toHaveLength(1);
+    expect(created[0].payload.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+    expect(res.body.campaign_id).toBe(created[0].payload.id);
+    expect(res.body.campaign_id).not.toBe('not-a-uuid');
+  });
+
+  it('PHASE1: planning an EXISTING own campaign returns its id as campaign_id', async () => {
+    const res = await post(createPlanRoute, MEMBER_A, { campaignId: OWN_CAMPAIGN, ...PLAN });
+    expect(res.statusCode).toBe(200);
+    expect(res.body.campaign_id).toBe(OWN_CAMPAIGN);
+  });
+
+  it('PL-38 (04): an EXISTING campaign with a DIFFERENT body company uses the ROW company (the body company is ignored)', async () => {
+    // The /campaign-planning hook now always sends the ACTIVE company. A user who switched to company B and plans
+    // company A's existing campaign must not be refused, and nothing may be written under B.
+    const res = await post(createPlanRoute, MEMBER_A, { campaignId: OWN_CAMPAIGN, companyId: VICTIM, ...PLAN });
+    expect(res.statusCode).toBe(200);
+    expect(res.body.campaign_id).toBe(OWN_CAMPAIGN);
+    const stamped = tenantWrites().filter(w => w.payload && 'company_id' in w.payload).map(w => w.payload.company_id);
+    expect(stamped).not.toContain(VICTIM);
+    expect(tenantWrites().some(w => w.table === 'campaigns' && w.op === 'insert')).toBe(false); // planned, not created
+  });
+
   it('TENANT: creating a campaign with NO companyId is refused and writes nothing (was a company-less campaign)', async () => {
     // Changed contract (e9, 2026-11-12): this used to assert that a company-less campaign was created.
     // That row is the NULL campaigns.company_id defect. The tenant guard does no active-company
