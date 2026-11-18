@@ -10,6 +10,14 @@
  * unset) is off. The flag is turned on only after stage 3's presence check, with owner approval.
  *
  * Kept deliberately tiny so it rebases trivially under stage 3.
+ *
+ * SCOPE (7c review): the gate blocks CONNECTING and SENDING, never REMOVING.
+ *   - pages/api/accounts/[platform].ts takes the platform from the query and is deliberately NOT gated:
+ *     its writes are DELETE and a deactivate (is_active false, tokens nulled), which only reduce
+ *     capability. Gating it would stop a user disconnecting WhatsApp. Do not "complete" the gate there.
+ *   - whatsappAdapter.publish / replyToComment are not gated because nothing calls them: the 4 call
+ *     sites of getPlatformAdapter (3 files: engagementIngestionService.ts :179 and :1071,
+ *     verify-config.ts, test-connection.ts) use only fetchComments / testConnection.
  */
 import type { NextApiResponse } from 'next';
 
