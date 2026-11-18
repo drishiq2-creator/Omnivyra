@@ -88,6 +88,8 @@ it('the fixtures ARE the prod bodies (md5 = C100 prod md5(prosrc))', () => {
   const md5 = (s: string) => crypto.createHash('md5').update(s).digest('hex');
   expect(md5(RESERVATION)).toBe('ad5383bf6ccf24a2c8ddee70db3b1297');
   expect(md5(PARTIAL)).toBe('ff208f60617a7a272305a804037bf47d');
+  // The third live body in the directory (README.md:10). Unpinned until PL-62: it could drift with every case green.
+  expect(md5(read('LIVE-expire_org_free_credits.prosrc.sql'))).toBe('ae410c7ab297eebe2890a7f925d95f04');
 });
 
 it('positive control: the parser finds the phases each live body writes', () => {
