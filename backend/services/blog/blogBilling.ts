@@ -67,7 +67,8 @@ export interface BlogBillingSummary {
   released: number;
   /** 'unpersisted': delivered in this response but could not be stored for replay -> released, not charged (b3). */
   /** 'replayed': the stored result of an earlier, already-charged request with the same key - nothing new charged. */
-  reason: 'completed' | 'failed' | 'quality_refund' | 'replayed' | 'unpersisted';
+  /** 'platform': Omnivyra's own public blog - platform spend, no company wallet charged (b3 item 4a). */
+  reason: 'completed' | 'failed' | 'quality_refund' | 'replayed' | 'unpersisted' | 'platform';
   /** Present when the settle was ambiguous: the hold stays held and reconciles later (the shared 200 + settlementPending contract). */
   settlementPending?: { code: 'CREDIT_SETTLE_AMBIGUOUS' };
 }
@@ -166,15 +167,28 @@ export async function holdBlog(args: { orgId: string; userId: string; referenceI
 
 // ── Replay store (b3 BLOCKING) - the shared billedResultStore (one implementation with wirePhase2Route) ──────────
 export const BLOG_REPLAY_SCOPE = 'blog_post';
+/**
+ * b3 ruling 2026-11-18 (item 4a): Omnivyra's OWN public blog (super-admin /api/admin/blog/generate, public_blogs) is
+ * PLATFORM spend - no company wallet is held or charged. Its result is still stored (this scope) so the required
+ * Idempotency-Key deduplicates a retry. (4b, after a9's 039 merges: attribute its AI usage to the platform ledger.)
+ */
+export const BLOG_PLATFORM_SCOPE = 'blog_post_platform';
+export const BLOG_PLATFORM_BILLING = { charged: 0, released: 0, reason: 'platform' } as const;
+
+/** Store a platform blog for dedup. Best effort: nothing is charged either way. */
+export async function storePlatformBlog(orgId: string, referenceId: string, result: unknown): Promise<void> {
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return;
+  await persistBilledResult({ scope: BLOG_PLATFORM_SCOPE, orgId, key: referenceId, value: result });
+}
 
 /** A stored, already-charged blog for this org + key: replay it; a read error refuses (503, retryable). */
-export async function blogReplay(orgId: string, referenceId: string): Promise<{ ok: true; body: Record<string, unknown> | null } | BlogRefusal> {
+export async function blogReplay(orgId: string, referenceId: string, scope: string = BLOG_REPLAY_SCOPE): Promise<{ ok: true; body: Record<string, unknown> | null } | BlogRefusal> {
   try {
-    const stored = await loadBilledResult({ scope: BLOG_REPLAY_SCOPE, orgId, key: referenceId });
+    const stored = await loadBilledResult({ scope, orgId, key: referenceId });
     if (!stored.found) return { ok: true, body: null };
     const v = stored.value;
     if (!v || typeof v !== 'object' || Array.isArray(v)) throw new Error('stored blog result is not an object');
-    return { ok: true, body: { ...(v as Record<string, unknown>), billing: { charged: 0, released: 0, reason: 'replayed' } } };
+    return { ok: true, body: { ...(v as Record<string, unknown>), billing: { charged: 0, released: 0, reason: scope === BLOG_PLATFORM_SCOPE ? 'platform' : 'replayed' } } };
   } catch (err) {
     logger.error('blog_replay_read_failed', { orgId, message: (err as Error)?.message });
     return { ok: false, status: 503, code: 'BLOG_RESULT_READ_FAILED', retryable: true, error: 'We could not load this blog right now. Please try again.' };

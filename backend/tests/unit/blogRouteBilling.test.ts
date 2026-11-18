@@ -93,24 +93,6 @@ describe.each([['company /api/blogs/generate', route], ['super-admin /api/admin/
     expect(ledger).toEqual([]);
     expect(gens).toEqual([]);
   });
-  test('LOST RESPONSE: a retry with the SAME key gets the SAME blog back (200), one 40 charge, one generation', async () => {
-    const a = await call({ company_id: CO, topic: 'x', mode: 'full' }, KEY, handler);   // pretend this response was lost
-    const b = await call({ company_id: CO, topic: 'x', mode: 'full' }, KEY, handler);
-    expect([a.statusCode, b.statusCode]).toEqual([200, 200]);
-    expect(b.body.blog).toEqual(a.body.blog);
-    expect(b.body.billing).toEqual({ charged: 0, released: 0, reason: 'replayed' });
-    expect(ledger.filter((l) => l.fn === 'confirm')).toEqual([{ fn: 'confirm', n: 40 }]);
-    expect(ledger.filter((l) => l.fn === 'reserve')).toHaveLength(1);   // the replay takes no new hold
-    expect(gens).toHaveLength(1);
-  });
-  test('a different org with the same key -> no replay: its own hold, generation and charge', async () => {
-    const OTHER = '44444444-4444-4444-8444-444444444444';
-    await call({ company_id: CO, topic: 'x', mode: 'full' }, KEY, handler);
-    const b = await call({ company_id: OTHER, topic: 'x', mode: 'full' }, KEY, handler);
-    expect(b.statusCode).toBe(200);
-    expect(b.body.billing).toEqual({ charged: 40, released: 0, reason: 'completed' });
-    expect(gens).toHaveLength(2);
-  });
   test('the replay store cannot be read -> 503 retryable, nothing held, nothing generated', async () => {
     mockStore.failRead = true;
     const r = await call({ company_id: CO, topic: 'x', mode: 'full' }, KEY, handler);
@@ -138,4 +120,53 @@ test('b3: NO mode (the legacy unbilled queue path) -> 400 BLOG_MODE_REQUIRED, no
   expect(mockEnqueued).toEqual([]);
   expect(ledger).toEqual([]);
   expect(gens).toEqual([]);
+});
+
+describe('company /api/blogs/generate (charged)', () => {
+  const handler = route;
+  test('LOST RESPONSE: a retry with the SAME key gets the SAME blog back (200), one 40 charge, one generation', async () => {
+    const a = await call({ company_id: CO, topic: 'x', mode: 'full' }, KEY, handler);   // pretend this response was lost
+    const b = await call({ company_id: CO, topic: 'x', mode: 'full' }, KEY, handler);
+    expect([a.statusCode, b.statusCode]).toEqual([200, 200]);
+    expect(b.body.blog).toEqual(a.body.blog);
+    expect(b.body.billing).toEqual({ charged: 0, released: 0, reason: 'replayed' });
+    expect(ledger.filter((l) => l.fn === 'confirm')).toEqual([{ fn: 'confirm', n: 40 }]);
+    expect(ledger.filter((l) => l.fn === 'reserve')).toHaveLength(1);   // the replay takes no new hold
+    expect(gens).toHaveLength(1);
+  });
+  test('a different org with the same key -> no replay: its own hold, generation and charge', async () => {
+    const OTHER = '44444444-4444-4444-8444-444444444444';
+    await call({ company_id: CO, topic: 'x', mode: 'full' }, KEY, handler);
+    const b = await call({ company_id: OTHER, topic: 'x', mode: 'full' }, KEY, handler);
+    expect(b.statusCode).toBe(200);
+    expect(b.body.billing).toEqual({ charged: 40, released: 0, reason: 'completed' });
+    expect(gens).toHaveLength(2);
+  });
+});
+
+describe('super-admin /api/admin/blog/generate: PLATFORM spend (b3 item 4a)', () => {
+  const handler = adminRoute;
+  test('a public blog run debits NO company wallet: no hold, no confirm, billing says platform', async () => {
+    const r = await call({ company_id: CO, topic: 'x', mode: 'full' }, KEY, handler);
+    expect(r.statusCode).toBe(200);
+    expect(ledger).toEqual([]);
+    expect(r.body.billing).toEqual({ charged: 0, released: 0, reason: 'platform' });
+    expect(gens).toHaveLength(1);
+    expect(gens[0].correlation).toEqual({ referenceType: 'blog_post_platform', referenceId: 'click-key-0001', parentActivityId: null });
+  });
+  test('the Idempotency-Key still deduplicates: the same key replays the stored blog, ONE generation', async () => {
+    const a = await call({ company_id: CO, topic: 'x', mode: 'full' }, KEY, handler);
+    const b = await call({ company_id: CO, topic: 'x', mode: 'full' }, KEY, handler);
+    expect([a.statusCode, b.statusCode]).toEqual([200, 200]);
+    expect(b.body.blog).toEqual(a.body.blog);
+    expect(gens).toHaveLength(1);
+    expect(ledger).toEqual([]);
+  });
+  test('a quality-gate 422 carries platform billing (nothing was charged)', async () => {
+    genOutcome = 'quality';
+    const r = await call({ company_id: CO, topic: 'x', mode: 'full' }, KEY, handler);
+    expect(r.statusCode).toBe(422);
+    expect(r.body.billing).toEqual({ charged: 0, released: 0, reason: 'platform' });
+    expect(ledger).toEqual([]);
+  });
 });
