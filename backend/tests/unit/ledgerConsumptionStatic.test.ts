@@ -14,9 +14,9 @@ const SKIP = new Set(['node_modules', '.next', 'tests', '__tests__']);
 const BAD = /\.eq\(\s*['"]execution_phase['"]\s*,\s*['"]confirm['"]\s*\)|execution_phase\s*===\s*['"]confirm['"]|\[\s*['"]confirm['"]\s*,\s*['"]release['"]\s*\]/;
 /**
  * Reviewed exceptions (not readers of consumption):
- *  - creditExecutionRepository SETTLE_PHASES: the PHASES apply_credit_reservation
- *    accepts for a settlement call (confirm / release); its ledger reads use
- *    SETTLEMENT_ROW_PHASES, which includes confirm_partial.
+ *  - creditExecutionRepository RESERVATION_SETTLE_PHASES: the PHASES
+ *    apply_credit_reservation accepts for a settlement call (confirm / release);
+ *    its ledger reads use the shared SETTLE_PHASES, which includes confirm_partial.
  */
 const ALLOWED = new Set(['backend/repositories/creditExecutionRepository.ts']);
 const strip = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:'"`])\/\/.*$/gm, '$1');

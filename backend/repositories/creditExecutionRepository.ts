@@ -1,6 +1,6 @@
 import { supabase } from '../db/supabaseClient';
 import type { CategorySplit } from '../services/creditPriorityService';
-import { SETTLE_PHASES as SETTLEMENT_ROW_PHASES, REMAINDER_KEY_SUFFIX as REMAINDER_SUFFIX } from '../../shared/billing/creditPhaseVocabulary';
+import { SETTLE_PHASES, REMAINDER_KEY_SUFFIX } from '../../shared/billing/creditPhaseVocabulary';
 
 export interface CreditReservationCommand {
   orgId: string;
@@ -96,9 +96,12 @@ export interface CreditPartialConfirmCommand {
  * by-parent half reads that phase (it did NOT before 2026-11-12 - the key-family
  * half was what saw partial confirms, via the <base>:confirm key).
  */
-const SETTLE_PHASES = ['confirm', 'release'] as const;
-// Ledger phases that settle a hold (incl. the partial confirm) and the guarded remainder-key suffix come from the
-// one execution_phase vocabulary (imported above).
+/**
+ * The phases THIS function may be CALLED with to settle a hold (apply_credit_reservation accepts confirm / release;
+ * a partial confirm goes through apply_credit_partial_confirm, never here). NOT the ledger vocabulary: the ledger
+ * reads below use the shared SETTLE_PHASES (confirm, confirm_partial, release) and REMAINDER_KEY_SUFFIX.
+ */
+const RESERVATION_SETTLE_PHASES = ['confirm', 'release'] as const;
 
 function keyBase(key: string): string | null {
   const m = /^(.*):(confirm|release)$/.exec(key);
@@ -112,7 +115,7 @@ async function findOtherSettlement(holdId: string | null | undefined, ownKey: st
       .from('credit_transactions')
       .select('id, idempotency_key, execution_phase')
       .eq('parent_transaction_id', holdId)
-      .in('execution_phase', [...SETTLEMENT_ROW_PHASES]);
+      .in('execution_phase', [...SETTLE_PHASES]);
     if (error) return { error: new Error(`[creditExecution] settle-once check failed for hold ${holdId}: ${error.message}`), other: null };
     rows.push(...((data ?? []) as typeof rows));
   }
@@ -125,7 +128,7 @@ async function findOtherSettlement(holdId: string | null | undefined, ownKey: st
     if (error) return { error: new Error(`[creditExecution] settle-once check failed for ${base}: ${error.message}`), other: null };
     rows.push(...((data ?? []) as typeof rows));
   }
-  const own = new Set([ownKey, `${ownKey}${REMAINDER_SUFFIX}`]);
+  const own = new Set([ownKey, `${ownKey}${REMAINDER_KEY_SUFFIX}`]);
   const other = rows.find((r) => !own.has(r.idempotency_key)) ?? null;
   return { error: null, other };
 }
@@ -136,14 +139,14 @@ async function postCheckSingleSettlement(holdId: string | null | undefined, key:
     .from('credit_transactions')
     .select('id, idempotency_key')
     .eq('parent_transaction_id', holdId)
-    .in('execution_phase', [...SETTLEMENT_ROW_PHASES]);
+    .in('execution_phase', [...SETTLE_PHASES]);
   if (error) {
     console.error('[creditExecution] settle-once post-check read failed:', holdId, error.message);
     return;
   }
   // A released remainder belongs to its partial confirm: count settlements, not rows.
   const settlements = (Array.isArray(data) ? data : []).filter(
-    (r) => !String((r as { idempotency_key?: string }).idempotency_key ?? '').endsWith(REMAINDER_SUFFIX));
+    (r) => !String((r as { idempotency_key?: string }).idempotency_key ?? '').endsWith(REMAINDER_KEY_SUFFIX));
   if (settlements.length > 1) {
     console.error('[creditExecution] CRITICAL HOLD_DOUBLE_SETTLED: hold has more than one terminal settlement', { holdId, key, settlements: settlements.length });
   }
@@ -153,7 +156,7 @@ export async function callCreditReservation(command: CreditReservationCommand): 
   error: Error | null;
   transactionId: string | null;
 }> {
-  if ((SETTLE_PHASES as readonly string[]).includes(command.phase)) {
+  if ((RESERVATION_SETTLE_PHASES as readonly string[]).includes(command.phase)) {
     const { error: checkErr, other } = await findOtherSettlement(command.parentId, command.idempotencyKey);
     if (checkErr) return { error: checkErr, transactionId: null };
     if (other) {
@@ -180,7 +183,7 @@ export async function callCreditReservation(command: CreditReservationCommand): 
   });
 
   const txId = (data as { id?: string } | null)?.id ?? null;
-  if (!error && (SETTLE_PHASES as readonly string[]).includes(command.phase)) {
+  if (!error && (RESERVATION_SETTLE_PHASES as readonly string[]).includes(command.phase)) {
     await postCheckSingleSettlement(command.parentId, command.idempotencyKey);
   }
   return { error: error as Error | null, transactionId: txId };
