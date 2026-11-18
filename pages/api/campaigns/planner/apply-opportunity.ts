@@ -10,7 +10,7 @@ import { createApiRoute as __createApiRoute } from '../../../../lib/platform/rou
 
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { enforceCompanyAccess } from '../../../../backend/services/userContextService';
-import { tenantTable, tenantContextFor, TenantSeamError } from '../../../../backend/db/tenantTable';
+import { tenantTable, tenantChildTable, tenantContextFor, TenantSeamError, type TenantContext } from '../../../../backend/db/tenantTable';
 import { generateCampaignSuggestions } from '../../../../backend/services/plannerOpportunityAdvisor';
 import { getLatestDraftPlan, saveDraftBlueprint } from '../../../../backend/db/campaignPlanStore';
 import type { CampaignBlueprint } from '../../../../backend/types/CampaignBlueprint';
@@ -40,8 +40,10 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     // principal (and bound campaignId to); opportunity_radar is scoped by organization_id = that company, so another
     // company's opportunity reads as not found and is never updated.
     let opportunities: ReturnType<typeof tenantTable>;
+    let tenant: TenantContext;
     try {
-      opportunities = tenantTable('opportunity_radar', tenantContextFor(access, String(req.body?.companyId)));
+      tenant = tenantContextFor(access, String(req.body?.companyId));
+      opportunities = tenantTable('opportunity_radar', tenant);
     } catch (err) {
       if (err instanceof TenantSeamError) return seamDenial(res, err, 404, { error: 'Opportunity not found' });
       throw err;
@@ -54,6 +56,17 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
 
     if (oppError || !opp) {
       return res.status(404).json({ error: 'Opportunity not found' });
+    }
+
+    // S2-55: enforceCompanyAccess allows a campaignId that matches NO campaign, and campaign_week_plan rows of a
+    // deleted campaign survive (no FK), so the draft read + overwrite below must not be keyed on campaignId alone.
+    // Prove the campaign is the authorized company's own BEFORE any write (the opportunity update included); a
+    // missing or foreign campaign answers the gate's uniform campaign 404 and nothing is written.
+    try {
+      await tenantChildTable('campaign_week_plan', tenant, campaignId);
+    } catch (err) {
+      if (err instanceof TenantSeamError) return seamDenial(res, err, 404, { error: 'Campaign not found', code: 'CAMPAIGN_NOT_FOUND' });
+      throw err;
     }
 
     const suggestions = generateCampaignSuggestions({
@@ -83,7 +96,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     }
 
     let planUpdated = false;
-    const draft = await getLatestDraftPlan(campaignId);
+    const draft = await getLatestDraftPlan(campaignId, tenant);
     if (draft?.weeks?.length) {
       const week = draft.weeks.find(
         (w: { week_number?: number; week?: number }) =>
@@ -99,7 +112,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
             duration_weeks: draft.weeks.length,
             weeks: draft.weeks,
           };
-          await saveDraftBlueprint({ campaignId, blueprint });
+          await saveDraftBlueprint({ campaignId, blueprint, tenant });
           planUpdated = true;
         }
       }
@@ -117,6 +130,9 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       campaignId,
     });
   } catch (err) {
+    // A seam refusal from the draft read / write (e.g. the campaigns row unreadable on re-verification) is a seam
+    // answer, never a 500 carrying the seam message.
+    if (err instanceof TenantSeamError) return seamDenial(res, err, 404, { error: 'Campaign not found', code: 'CAMPAIGN_NOT_FOUND' });
     console.error('[planner/apply-opportunity]', err);
     return res.status(500).json({
       error: (err as Error)?.message ?? 'Failed to apply opportunity',

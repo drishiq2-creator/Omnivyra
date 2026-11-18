@@ -30,6 +30,16 @@ const supabaseMock = {
 };
 
 jest.mock('@/backend/db/supabaseClient', () => ({ supabase: supabaseMock }));
+// S2-55: resolve.ts now proves the campaign is the authorized company's own (tenant seam: the campaigns row is read
+// under that company) and reads daily_content_plans / scheduled_posts through the seam (ownedDbTable). The campaigns
+// read answers the campaign; every other table is the same data-source double as above.
+jest.mock('@/backend/db/writeOwner', () => ({
+  ownedDbTable: (table: string) => {
+    if (table !== 'campaigns') return supabaseMock.from(table);
+    const chain: any = { select: () => chain, eq: () => chain, maybeSingle: async () => ({ data: { id: '11111111-1111-1111-1111-111111111111' }, error: null }) };
+    return chain;
+  },
+}));
 jest.mock('@/backend/services/userContextService', () => ({
   enforceCompanyAccess: jest.fn(async () => ({ userId: 'u1' })),
 }));
@@ -76,7 +86,7 @@ function canonical(legacyRaw: Record<string, any>) {
 async function run(legacyRaw: Record<string, any>, dailyPlanRow: any = null) {
   getExecutionItemRef.value = canonical(legacyRaw);
   dailyPlanRowRef.value = dailyPlanRow;
-  const req: any = { method: 'GET', query: { campaignId: CAMPAIGN, executionId: EXEC, companyId: 'co1' } };
+  const req: any = { method: 'GET', query: { campaignId: CAMPAIGN, executionId: EXEC, companyId: 'c0a00000-0000-4000-8000-00000000000a' } };
   let statusCode = 0;
   let body: any = null;
   const res: any = {

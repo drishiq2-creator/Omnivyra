@@ -90,10 +90,12 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       console.log('PLATFORM EXECUTION PLAN BUILT', { companyId, campaignId, weekNumber });
     }
 
+    // S2-55: both asset lists are pinned to the company enforceCompanyAccess authorized.
     const approvedAssets = await listAssetsWithLatestContent({
       campaignId,
       weekNumber: Number(weekNumber),
       status: 'approved',
+      companyId: String(companyId ?? ''),
     });
     // OPT-010 A6: three batched .in() queries replace 3×N sequential point
     // reads. Same tables, same per-(asset, platform) single-row semantics;
@@ -143,7 +145,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     console.log('AUTOMATION PAYLOAD READY', { jobs: payload.jobs.length });
 
     const resolvedForHealth = await getResolvedCampaignPlanContext(companyId, campaignId, true);
-    const contentAssets = await listAssetsWithLatestContent({ campaignId });
+    const contentAssets = await listAssetsWithLatestContent({ campaignId, companyId: String(companyId ?? '') });
     const healthReport = validateCampaignHealth({
       companyProfile: profile,
       trends: [],

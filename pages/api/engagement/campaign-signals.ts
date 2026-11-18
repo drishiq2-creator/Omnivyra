@@ -48,7 +48,25 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       .order('detected_at', { ascending: false })
       .limit(200);
 
-    if (campaignId) query = query.eq('campaign_id', campaignId);
+    if (campaignId) {
+      // S2-55: enforceCompanyAccess allows a campaignId that matches NO campaign, and signal rows of a deleted
+      // campaign survive, so campaign_id alone could return another company's orphaned signals. Scope it the way the
+      // no-campaign branch below does: only a campaign the company's own campaign_versions name is read; any other
+      // id answers the empty list (no existence oracle).
+      const { data: owned, error: ownedError } = await supabase
+        .from('campaign_versions')
+        .select('campaign_id')
+        .eq('company_id', companyId)
+        .eq('campaign_id', campaignId)
+        .limit(1)
+        .maybeSingle();
+      if (ownedError) {
+        console.warn('[engagement/campaign-signals] campaign scope', ownedError.message);
+        return res.status(500).json({ error: 'Failed to fetch campaign signals' });
+      }
+      if (!owned) return res.status(200).json({ signals: [] });
+      query = query.eq('campaign_id', campaignId);
+    }
     if (activityId) query = query.eq('activity_id', activityId);
     if (platform && PLATFORMS.includes(platform)) {
       query = query.eq('platform', platform === 'x' ? 'twitter' : platform);
@@ -66,7 +84,8 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       query = query.lte('detected_at', dateToBound);
     }
 
-    if (!campaignId && !activityId) {
+    // S2-55: also when only an activityId is given - activity_id alone is not scoped to any company either.
+    if (!campaignId) {
       const { data: versions } = await supabase
         .from('campaign_versions')
         .select('campaign_id')

@@ -21,7 +21,7 @@ export async function getCampaignMemory(input: {
   const dailyPlans = campaignVersion?.campaign_snapshot?.daily_plan ?? [];
   const trends = await getTrendSnapshots(input.companyId, input.campaignId);
   const assets = input.campaignId
-    ? await listAssetsWithLatestContent({ campaignId: input.campaignId })
+    ? await listAssetsWithLatestContent({ campaignId: input.campaignId, companyId: input.companyId })
     : [];
   const analytics = await getLatestAnalyticsReport(input.companyId, input.campaignId);
   const learning = await getLatestLearningInsights(input.companyId, input.campaignId);

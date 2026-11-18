@@ -14,6 +14,8 @@ import {
 import { validateCapacityAndFrequency } from '../../../backend/services/capacityFrequencyValidationGateway';
 import { getCampaignPlanningInputs } from '../../../backend/services/campaignPlanningInputsService';
 import { enforceCompanyAccess } from '../../../backend/services/userContextService';
+import { tenantContextFor, TenantSeamError, type TenantContext } from '../../../backend/db/tenantTable';
+import { seamDenial } from '../../../backend/db/seamDenial';
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'POST') {
@@ -36,6 +38,17 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     // the campaign to it when one is sent (404 for a foreign campaign).
     const ctx = await enforceCompanyAccess({ req, res, companyId, campaignId: campaignId || null });
     if (!ctx) return;
+    // S2-55: the tenant is the company enforceCompanyAccess just authorized for ctx.userId. enforceCompanyAccess
+    // allows a campaignId that matches NO campaign, so the campaign-keyed planning-inputs read and the
+    // campaign_week_plan / campaign_resource_projection writes below are scoped to this company, never keyed on the
+    // campaign id alone.
+    let tenant: TenantContext;
+    try {
+      tenant = tenantContextFor(ctx, String(companyId));
+    } catch (err) {
+      if (err instanceof TenantSeamError) return seamDenial(res, err, 404, { error: 'Campaign not found', code: 'CAMPAIGN_NOT_FOUND' });
+      throw err;
+    }
     const result = await generateCampaignStrategy({
       companyId,
       objective: campaignObjective,
@@ -51,7 +64,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       const derivedWeeklyPlan = blueprint.weeks.map((w) => blueprintWeekToLegacyWeekPlan(w));
 
       if (blueprint.weeks.length > 0) {
-        const planningInputs = await getCampaignPlanningInputs(campaignId ?? '');
+        const planningInputs = await getCampaignPlanningInputs(campaignId ?? '', tenant);
         const validationResult = validateCapacityAndFrequency({
           weekly_capacity: planningInputs?.weekly_capacity,
           available_content: planningInputs?.available_content,
@@ -70,10 +83,13 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
             result,
           });
         }
+        // The seam refuses (TenantSeamError -> the catch below -> 404) unless campaignId is this company's own
+        // campaigns row: the plan is never inserted under a missing or foreign campaign.
         await saveCampaignBlueprintFromRecommendation({
           campaignId: campaignId ?? '',
           companyId,
           blueprint,
+          tenant,
         });
       }
 
@@ -104,6 +120,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
 
     return res.status(200).json(result);
   } catch (error: any) {
+    if (error instanceof TenantSeamError) return seamDenial(res, error, 404, { error: 'Campaign not found', code: 'CAMPAIGN_NOT_FOUND' });
     return res.status(500).json({ error: error?.message || 'Failed to validate company profile' });
   }
 }

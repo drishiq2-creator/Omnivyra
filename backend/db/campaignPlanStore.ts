@@ -3,13 +3,24 @@ import { DecisionResult } from '../services/omnivyreClient';
 import type { WeeklyBlueprintWeek } from '../services/campaignPlanParser';
 import { fromStructuredPlan } from '../services/campaignBlueprintAdapter';
 import type { CampaignBlueprint, CampaignBlueprintWeek } from '../types/CampaignBlueprint';
+import { tenantChildTable, type TenantContext } from './tenantTable';
+
+/*
+ * S2-55 (2026-11-14): the functions below that take an optional `tenant` scope campaign_week_plan /
+ * campaign_resource_projection to the AUTHORIZED company when the caller passes its context.
+ * enforceCompanyAccess({campaignId}) allows an id that matches no campaign at all, and child rows of a DELETED
+ * campaign survive (no FK to campaigns), so a read or write keyed on campaign_id alone can reach another company's
+ * orphaned rows. With a context, tenantChildTable first proves the campaigns row is this tenant's (else it throws a
+ * TenantSeamError, which the route maps through seamDenial) and pins every verb to that campaign. Without one, the
+ * legacy unscoped table (callers not yet converted).
+ */
 
 function totalPostsForWeek(week: { platform_allocation?: Record<string, number> }): number {
   const pa = week.platform_allocation ?? {};
   return Math.max(0, Object.values(pa).reduce((a, b) => a + (typeof b === 'number' ? b : 0), 0)) || 0;
 }
 
-async function upsertCampaignResourceProjection(campaignId: string, blueprint: CampaignBlueprint): Promise<void> {
+async function upsertCampaignResourceProjection(campaignId: string, blueprint: CampaignBlueprint, tenant?: TenantContext): Promise<void> {
   const rows = blueprint.weeks.map((w: CampaignBlueprintWeek) => ({
     campaign_id: campaignId,
     week_number: w.week_number,
@@ -17,7 +28,10 @@ async function upsertCampaignResourceProjection(campaignId: string, blueprint: C
     platform_allocation: w.platform_allocation ?? {},
   }));
   if (rows.length === 0) return;
-  const { error } = await supabase.from('campaign_resource_projection').upsert(rows, {
+  const projection: any = tenant
+    ? await tenantChildTable('campaign_resource_projection', tenant, campaignId)
+    : supabase.from('campaign_resource_projection');
+  const { error } = await projection.upsert(rows, {
     onConflict: 'campaign_id,week_number',
   });
   if (error) {
@@ -149,6 +163,8 @@ export async function saveCampaignBlueprintFromRecommendation(input: {
   campaignId: string;
   companyId: string;
   blueprint: CampaignBlueprint;
+  /** S2-55: the authorized company's context; when given, the insert is refused unless the campaign is its own. */
+  tenant?: TenantContext;
 }): Promise<void> {
   const snapshot_hash = `recommendation-${input.companyId}-${Date.now()}`;
   const weeksForDb = input.blueprint.weeks.map((w) => ({
@@ -169,7 +185,10 @@ export async function saveCampaignBlueprintFromRecommendation(input: {
     resolved_postings: Array.isArray((w as any).resolved_postings) ? (w as any).resolved_postings : undefined,
     week_extras: w.week_extras ?? undefined,
   }));
-  const { error } = await supabase.from('campaign_week_plan').insert({
+  const weekPlan: any = input.tenant
+    ? await tenantChildTable('campaign_week_plan', input.tenant, input.campaignId)
+    : supabase.from('campaign_week_plan');
+  const { error } = await weekPlan.insert({
     campaign_id: input.campaignId,
     snapshot_hash,
     weeks: weeksForDb,
@@ -181,7 +200,7 @@ export async function saveCampaignBlueprintFromRecommendation(input: {
     created_at: new Date().toISOString(),
   } as any);
   if (error) throw new Error(`Failed to save blueprint: ${error.message}`);
-  await upsertCampaignResourceProjection(input.campaignId, input.blueprint);
+  await upsertCampaignResourceProjection(input.campaignId, input.blueprint, input.tenant);
 }
 
 export type PlanStatus = 'draft' | 'committed' | 'edited_committed';
@@ -215,6 +234,8 @@ function weeksForDbFromBlueprint(blueprint: CampaignBlueprint) {
 export async function saveDraftBlueprint(input: {
   campaignId: string;
   blueprint: CampaignBlueprint;
+  /** S2-55: the authorized company's context; when given, the draft read and write are pinned to its own campaign. */
+  tenant?: TenantContext;
 }): Promise<void> {
   const weeksForDb = weeksForDbFromBlueprint(input.blueprint);
   const snapshot_hash = `draft-${input.campaignId}`;
@@ -231,9 +252,11 @@ export async function saveDraftBlueprint(input: {
     updated_at: now,
   };
 
+  // With a tenant, ONE seam handle serves the read, the update and the insert: all three are pinned to this
+  // tenant's campaign, so the draft found (and overwritten) can never be another company's orphaned row.
+  const weekPlan: any = input.tenant ? await tenantChildTable('campaign_week_plan', input.tenant, input.campaignId) : null;
   let existing: { id: number } | null = null;
-  const withStatus = await supabase
-    .from('campaign_week_plan')
+  const withStatus = await (weekPlan ?? supabase.from('campaign_week_plan'))
     .select('id')
     .eq('campaign_id', input.campaignId)
     .eq('status', 'draft')
@@ -247,11 +270,11 @@ export async function saveDraftBlueprint(input: {
   (row as any).status = 'draft';
 
   if (existing?.id) {
-    const { error } = await supabase.from('campaign_week_plan').update(row).eq('id', existing.id);
+    const { error } = await (weekPlan ?? supabase.from('campaign_week_plan')).update(row).eq('id', existing.id);
     if (error) throw new Error(`Failed to update draft blueprint: ${error.message}`);
   } else {
     const insertPayload = { ...row, created_at: now } as any;
-    const { error } = await supabase.from('campaign_week_plan').insert(insertPayload);
+    const { error } = await (weekPlan ?? supabase.from('campaign_week_plan')).insert(insertPayload);
     if (error) throw new Error(`Failed to save draft blueprint: ${error.message}`);
   }
 }
@@ -259,9 +282,10 @@ export async function saveDraftBlueprint(input: {
 /**
  * Get the latest draft plan for a campaign (for restore-on-retry: avoid reprocessing when user says "continue" or "try again").
  */
-export async function getLatestDraftPlan(campaignId: string): Promise<{ weeks: any[] } | null> {
-  const { data } = await supabase
-    .from('campaign_week_plan')
+export async function getLatestDraftPlan(campaignId: string, tenant?: TenantContext): Promise<{ weeks: any[] } | null> {
+  // S2-55: with the authorized company's context, only that company's own campaign's draft (seam-verified parent).
+  const weekPlan: any = tenant ? await tenantChildTable('campaign_week_plan', tenant, campaignId) : supabase.from('campaign_week_plan');
+  const { data } = await weekPlan
     .select('weeks, blueprint')
     .eq('campaign_id', campaignId)
     .eq('status', 'draft')

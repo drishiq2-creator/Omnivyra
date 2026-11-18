@@ -86,6 +86,23 @@ export async function resolveCampaignIdsForCompany(
   }
 }
 
+/**
+ * S2-55 (2026-11-14): the campaign ids a growth-intelligence read may use for an AUTHORIZED company. With no
+ * campaignId, the company's own campaigns (resolveCampaignIdsForCompany). With one, that id ONLY if it is one of the
+ * company's own; otherwise the empty set (the metrics return their zero shape). The request gate allows a campaignId
+ * that matches NO campaign, and the metric tables' rows of a deleted campaign survive, so a supplied id is never
+ * used on its own.
+ */
+export async function scopeCampaignIdsForCompany(
+  supabase: SupabaseClient,
+  companyId: string,
+  campaignId?: string
+): Promise<string[]> {
+  const own = await resolveCampaignIdsForCompany(supabase, companyId);
+  if (!campaignId) return own;
+  return own.includes(campaignId) ? [campaignId] : [];
+}
+
 export async function getGrowthIntelligenceSummary(
   supabase: SupabaseClient,
   companyId: string,
