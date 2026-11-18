@@ -15,7 +15,7 @@ export const fakeDb = {
   calls: [] as string[],
   rpcs: [] as Array<{ fn: string; args: Row }>,
   /** `table:op` keys that return an error: after how many more calls, and how many times. */
-  failures: new Map<string, { skip: number; times: number }>(),
+  failures: new Map<string, { skip: number; times: number; code?: string }>(),
   nextId: 1,
 };
 
@@ -28,8 +28,9 @@ export function resetFakeDb(tables: Record<string, Row[]> = {}): void {
 }
 
 /** The next call of `op` on `table`, after `skip` that succeed, returns a database error. */
-export function failNext(table: string, op: 'select' | 'update' | 'upsert' | 'insert', skip = 0): void {
-  fakeDb.failures.set(`${table}:${op}`, { skip, times: 1 });
+/** The next call of `op` on `table`, after `skip` that succeed, returns a database error (`code`: '08006' by default, e.g. '23505' for a unique violation). */
+export function failNext(table: string, op: 'select' | 'update' | 'upsert' | 'insert', skip = 0, code = '08006'): void {
+  fakeDb.failures.set(`${table}:${op}`, { skip, times: 1, code });
 }
 
 type Op = 'select' | 'update' | 'upsert' | 'insert';
@@ -61,7 +62,7 @@ export function fakeTable(table: string): Row {
       failure.skip -= 1;
     } else if (failure && failure.times > 0) {
       failure.times -= 1;
-      return { data: null, count: null, error: { code: '08006', message: `fake failure on ${key}` } };
+      return { data: null, count: null, error: { code: failure.code ?? '08006', message: `fake failure on ${key}` } };
     }
 
     let out: Row[];
@@ -91,7 +92,11 @@ export function fakeTable(table: string): Row {
     if (st.mode === 'single' && out.length !== 1) {
       return { data: null, count: null, error: { code: 'PGRST116', message: `expected one row, got ${out.length}` } };
     }
-    if (st.mode !== 'many') return { data: out[0] ?? null, count: null, error: null };
+    // A COPY, as PostgREST returns: handing back the live row let a later write (or a test's
+    // concurrent change) silently rewrite a value the caller had already read. SHALLOW, like the
+    // `many` path below: a jsonb column (an object or array value) still aliases the stored row,
+    // so a test asserting on one reads live state (05).
+    if (st.mode !== 'many') return { data: out[0] ? { ...out[0] } : null, count: null, error: null };
     return { data: out.map((r) => ({ ...r })), count: null, error: null };
   };
 
