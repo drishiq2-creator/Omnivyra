@@ -9,6 +9,8 @@ import {
   guidanceForCustomerState,
 } from './customerBillingStatusService';
 import { getOrganizationBetaTag } from './monetizationBetaAccessService';
+import { CONFIRM_PHASES } from '../../shared/billing/creditPhaseVocabulary';
+
 
 export type CustomerBillingEventType =
   | 'purchase'
@@ -98,7 +100,7 @@ function labelFor(row: {
   const phase = row.execution_phase;
   const referenceType = String(row.reference_type ?? '').replace(/_/g, ' ');
   if (phase === 'hold') return `Pending reservation${referenceType ? ` - ${referenceType}` : ''}`;
-  if (phase === 'confirm') return `Credits used${referenceType ? ` - ${referenceType}` : ''}`;
+  if (phase && CONFIRM_PHASES.includes(phase)) return `Credits used${referenceType ? ` - ${referenceType}` : ''}`;
   if (phase === 'release') return `Reservation released${referenceType ? ` - ${referenceType}` : ''}`;
   if (phase === 'grant') return `Credits granted${referenceType ? ` - ${referenceType}` : ''}`;
   if (phase === 'expire' || phase === 'expire_incentive') return 'Credits expired';
@@ -132,7 +134,7 @@ function mapCreditTransaction(row: any): CustomerBillingEvent | null {
       reference_id: row.reference_id ?? null,
     };
   }
-  if (phase === 'confirm') {
+  if (phase && CONFIRM_PHASES.includes(phase)) {
     const guidance = guidanceForCustomerState('credits_used');
     return {
       id: row.id,
