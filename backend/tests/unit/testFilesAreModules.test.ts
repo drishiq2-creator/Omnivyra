@@ -7,6 +7,10 @@
  * After b91900cc7 the class is EMPTY BY CONSTRUCTION, so this guard is purely preventive - hence (7c) a non-empty
  * scan assertion (a moved path / changed glob must fail, not pass vacuously) and a positive control on a real
  * script-style source.
+ * COMMENTS DO NOT COUNT (7c): comments are stripped before the test, matching TypeScript's own definition of module-ness
+ * (the PARSED source) - a commented-out block of imports must not make a script look like a module.
+ * KNOWN LIMIT: a line starting `import ` / `export ` inside a multi-line TEMPLATE LITERAL would still false-match (rare;
+ * not worth a parser).
  */
 export {};
 import fs from 'fs';
@@ -14,9 +18,14 @@ import path from 'path';
 
 const UNIT_DIR = path.resolve(__dirname);
 
-/** A file is a module iff some line STARTS with `import ` or `export ` (top level; comments do not count). */
+/** Remove block comments and whole-line `//` comments (line-start detection only needs these). */
+export function stripComments(src: string): string {
+  return src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^[ \t]*\/\/.*$/gm, '');
+}
+
+/** A file is a module iff, with comments stripped, some line STARTS with `import ` or `export `. */
 export function isModuleSource(src: string): boolean {
-  return /^(?:import|export)\s/m.test(src);
+  return /^(?:import|export)\s/m.test(stripComments(src));
 }
 
 describe('backend/tests/unit test files are ES modules (CI-496 class)', () => {
@@ -36,5 +45,11 @@ describe('backend/tests/unit test files are ES modules (CI-496 class)', () => {
     expect(isModuleSource("// import fs from 'fs'\n/* export {} */\nconst call = 1;")).toBe(false);
     expect(isModuleSource("/** header */\nexport {};\nconst call = 1;")).toBe(true);
     expect(isModuleSource("import fs from 'fs';")).toBe(true);
+  });
+
+  it('(7c) a MULTI-LINE block comment holding import lines does NOT make a script a module', () => {
+    const commentedImports = "/*\nimport { a } from './a';\nexport const b = 1;\n*/\nconst call = 1;\nit('x', () => {});";
+    expect(isModuleSource(commentedImports)).toBe(false);
+    expect(isModuleSource(commentedImports + "\nexport {};")).toBe(true);   // a real marker after it still counts
   });
 });
