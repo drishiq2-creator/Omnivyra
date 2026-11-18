@@ -11,6 +11,7 @@
  * `supports()` / `capabilities()` / `estimateCost()` are PURE.
  */
 
+import { openAIImageModelCandidates } from '../../openAIImageModel';
 import type {
   RenderProvider,
   RenderCapabilityMatrix,
@@ -55,7 +56,8 @@ export interface OpenAIProviderConfig {
 export function createOpenAIRenderProvider(
   cfg: OpenAIProviderConfig = {},
 ): RenderProvider {
-  const model = cfg.model || 'gpt-image-1.5';
+  // The same model choice as the in-request renderer (env override first; gpt-image-1.5 leaves the API 2026-12-01).
+  const model = cfg.model || openAIImageModelCandidates()[0];
 
   const capabilities = (): RenderCapabilityMatrix => ({
     modalities: ['image'],
