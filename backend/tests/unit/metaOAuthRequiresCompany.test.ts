@@ -88,10 +88,10 @@ describe.each([
     expect(decodeURIComponent(String(r.redirect))).toBe('/social-platforms?error=Choose a company first');
   });
 
-  it('the returnTo SIGNED into the state is a same-origin path (so the callback error page cannot be //host)', async () => {
+  it('a //host returnTo never reaches the SIGNED state (main encodeOAuthState sanitises before signing; SEC91-B4)', async () => {
     const r = await invoke(handler, { method: 'GET', as: 'A', query: { companyId: CO_A, returnTo: '//evil.example' } });
     const state = new URL(String(r.redirect)).searchParams.get('state');
-    expect(decodeOAuthState(String(state)).returnTo).toBe('/social-platforms');
+    expect(decodeOAuthState(String(state)).returnTo).toBeUndefined();
   });
 
   it('CONTROL: with a company the user belongs to, the flow redirects to Meta (unchanged)', async () => {

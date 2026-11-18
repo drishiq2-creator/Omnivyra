@@ -5,14 +5,9 @@ import { encodeOAuthState } from '../../../../backend/auth/oauthState';
 import { getOAuthCredentialsForPlatform } from '../../../../backend/auth/oauthCredentialResolver';
 import { getSupabaseUserFromRequest } from '../../../../backend/services/supabaseAuthService';
 import { logOAuthEvent } from '../../../../backend/auth/oauthTelemetry';
+import { safeRelativeRedirectPath } from '../../../../backend/auth/safeRedirect';
 import { enforceCompanyAccess } from '../../../../backend/services/userContextService';
 
-/** A same-origin path, or the default. '//host' (protocol-relative) and '/' + backslash forms are refused. */
-function safeLocalPath(value: unknown, fallback = '/social-platforms'): string {
-  const v = typeof value === 'string' ? value : '';
-  if (!v.startsWith('/') || v.startsWith('//') || v.startsWith('/\\')) return fallback;
-  return v;
-}
 async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'GET') {
     return res.status(405).json({ error: 'Method not allowed' });
@@ -36,7 +31,10 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       // Reached only by a full-page navigation (useSocialPlatforms), so the user is sent back with the message,
       // as the callbacks do - never a raw JSON body in the browser (7c).
       logOAuthEvent({ event: 'oauth_failure', provider: 'facebook', company_id: null, user_id: user.id, failure_point: 'company_required', failure_detail: 'no company selected' });
-      return res.redirect(`${safeLocalPath(req.query.returnTo)}?error=${encodeURIComponent('Choose a company first')}`);
+      // The SHARED sanitiser (control chars, any backslash, length cap, origin re-parse) - the one encodeOAuthState
+      // already applies before signing, so this redirect and the signed state agree by construction (7c).
+      const back = safeRelativeRedirectPath(req.query.returnTo, '/social-platforms') ?? '/social-platforms';
+      return res.redirect(`${back}?error=${encodeURIComponent('Choose a company first')}`);
     }
     const access = await enforceCompanyAccess({ req, res, companyId });
     if (!access) return;
@@ -46,7 +44,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       return res.status(400).json({ error: 'Facebook OAuth not configured — ask your Super Admin to add credentials.' });
     }
 
-    const returnTo = safeLocalPath(req.query.returnTo);
+    const returnTo = (req.query.returnTo as string) || '';
     const state = encodeOAuthState({ companyId, userId: user.id, returnTo });
 
     const params = new URLSearchParams({
