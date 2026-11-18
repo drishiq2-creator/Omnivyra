@@ -100,6 +100,7 @@ jest.mock('../../services/creditExecutionService', () => ({
   executeWithCredits: jest.fn(async (i: any) => {
     mockEvents.push(`credit:${i.orgId}`);
     const out = await i.executor();
+    mockEvents.push(`settled:${i.orgId}`);   // c6: the charge is confirmed only after the executor returns
     return { status: 'executed', result: i.llmPricing ? out.result : out };
   }),
   executeWithEntryConsumption: jest.fn(),
@@ -504,4 +505,30 @@ describe('persistence is typed to the server-bound target', () => {
 afterEach(() => {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   require('../helpers/routeAuthHarness').assertNoHarnessConfigurationError();
+});
+
+// c6 2026-11-18 (b3, BLOCKING-launch): generate_master is billed today - billed-request recovery through the real route.
+describe('generate_master: key required, persisted inside the charge, replayed', () => {
+  test('no Idempotency-Key -> 400 IDEMPOTENCY_KEY_REQUIRED before any credit or AI movement', async () => {
+    const r = await post(BODIES.generate_master(PLAN_A, { companyId: CO_A }), 'A', {});
+    expect(r.status).toBe(400);
+    expect(r.body).toMatchObject({ code: 'IDEMPOTENCY_KEY_REQUIRED' });
+    expect(paid()).toEqual([]);
+    expect(content(PLAN_A)).toBe(ORIGINAL('A'));
+  });
+  test('the SAME key twice -> ONE charge; the 2nd replays the stored master (replayed: true)', async () => {
+    const H = { 'idempotency-key': 'gm-click-key-0001' };
+    const a = await post(BODIES.generate_master(PLAN_A, { companyId: CO_A }), 'A', H);
+    const b = await post(BODIES.generate_master(PLAN_A, { companyId: CO_A }), 'A', H);
+    expect([a.status, b.status]).toEqual([200, 200]);
+    expect(b.body).toMatchObject({ success: true, replayed: true });
+    expect(b.body.master_content).toEqual(a.body.master_content);
+    expect(paid().filter((e) => e.startsWith('credit:'))).toHaveLength(1);
+  });
+  test('the master row is written INSIDE the charge - before it settles, never after', async () => {
+    await post(BODIES.generate_master(PLAN_A, { companyId: CO_A }), 'A', { 'idempotency-key': 'gm-click-key-0002' });
+    expect(content(PLAN_A)).toContain('AI MASTER');
+    expect(first('db:write:daily_content_plans')).toBeGreaterThan(first('credit:'));
+    expect(first('db:write:daily_content_plans')).toBeLessThan(first('settled:'));
+  });
 });
