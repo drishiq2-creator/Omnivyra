@@ -212,6 +212,18 @@ try {
   process.exit(1);
 }
 
+// ── Schedule gates (BLOCKING) ───────────────────────────────────────────────
+// Hold releasers (credit-orphan-hold-reap, monetization-reservation-reconcile) stay unscheduled until 053 and an
+// in-flight-aware resolver ship. No invoice, usage-aggregation or ledger-export job runs until the confirm_partial
+// reader sweep lands. Details and the scanned surfaces: scripts/ci/deploy-schedule-gates.js.
+process.stdout.write(`Verifying schedule gates (hold releasers, usage/invoice jobs)...\n`);
+try {
+  execSync('node scripts/ci/deploy-schedule-gates.js', { stdio: 'inherit' });
+} catch {
+  process.stdout.write(`RESULT: BLOCKED — a schedule gate failed (see VIOLATION / PARSE FAILURE above).\n`);
+  process.exit(1);
+}
+
 // ── OMNI-GOV-002: governance baseline gate ───────────────────────────────────
 // Blocks the deploy if the frozen Governance Runtime v1.0.0 has drifted from its
 // certified byte-for-byte baseline. Verification-only: no network/DB, no secrets,
@@ -289,18 +301,6 @@ try {
     );
     unverified.push(`schema parity WARN (verifier exited ${code}, unrecognized)`);
   }
-}
-
-// ── Schedule gates (BLOCKING) ───────────────────────────────────────────────
-// Hold releasers (credit-orphan-hold-reap, monetization-reservation-reconcile) stay unscheduled until 053 and an
-// in-flight-aware resolver ship. No invoice, usage-aggregation or ledger-export job runs until the confirm_partial
-// reader sweep lands. Details and the scanned surfaces: scripts/ci/deploy-schedule-gates.js.
-process.stdout.write(`Verifying schedule gates (hold releasers, usage/invoice jobs)...\n`);
-try {
-  execSync('node scripts/ci/deploy-schedule-gates.js', { stdio: 'inherit' });
-} catch {
-  process.stdout.write(`RESULT: BLOCKED — a schedule gate failed (see VIOLATION / PARSE FAILURE above).\n`);
-  process.exit(1);
 }
 
 // ── Render parity gate ───────────────────────────────────────────────────────

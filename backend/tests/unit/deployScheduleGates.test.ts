@@ -74,7 +74,10 @@ describe('deploy schedule gates', () => {
   it('predeploy-check calls the gate and blocks on failure', () => {
     const src = read('scripts/predeploy-check.js');
     expect(src).toMatch(/execSync\('node scripts\/ci\/deploy-schedule-gates\.js'/);
-    const block = src.slice(src.indexOf('deploy-schedule-gates.js\''), src.indexOf('Render parity gate'));
+    const start = src.indexOf('deploy-schedule-gates.js\'');
+    const block = src.slice(start, src.indexOf('// ── ', start));
+    // The gate must sit OUTSIDE the schema-parity slice that piProvSchemaGateContract executes with a stubbed execSync.
+    expect(start).toBeLessThan(src.indexOf('Verifying schema parity against production DB'));
     expect(block).toMatch(/RESULT: BLOCKED/);
     expect(block).toMatch(/process\.exit\(1\)/);
   });
