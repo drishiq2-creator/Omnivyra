@@ -26,6 +26,7 @@ import { ownedDbTable } from '../db/writeOwner';
 import { supabase } from '../db/supabaseClient';
 import { createCredit, makeIdempotencyKey } from './creditExecutionService';
 import { logger } from './logger';
+import { NEW_WALLET_CREDIT_RATE_USD } from '../../shared/billing/newWalletCreditRate';
 
 export const INITIAL_FREE_CREDIT_CATEGORY = 'initial_free_credit';
 // Canonical signup grant per approved credit policy: 300 FREE credits, 30-day validity.
@@ -169,7 +170,9 @@ export async function grantInitialFreeCredit(input: {
       incentive_balance:  0,
       lifetime_purchased: 0,
       lifetime_consumed:  0,
-      credit_rate_usd:    0.001,
+      // OWNER 2026-11-18: new wallets start at the owner's rate (was a stray 0.001 literal). With ignoreDuplicates a
+      // pre-existing wallet keeps its rate; one created earlier by an SQL path got the column default - also 0.007.
+      credit_rate_usd:    NEW_WALLET_CREDIT_RATE_USD,
     },
     { onConflict: 'organization_id', ignoreDuplicates: true },
   );
