@@ -37,7 +37,9 @@ import {
 import { checkRateLimit, ONBOARDING_COMPLETE_LIMIT, ONBOARDING_UID_LIMIT } from '../../../lib/auth/rateLimit';
 import { getTrustedClientIp } from '../../../lib/security/clientIp';
 import { notifyAdminAndProspectOfClaimedDomain } from '../../../backend/services/claimedDomainNotifyService';
-import { isFreeEmailDomain } from '../../../backend/services/companyMatchService';
+import { isFreeEmailDomain, findCompaniesByVerifiedEmailDomain } from '../../../backend/services/companyMatchService';
+import { normalizeCompanyDomain } from '../../../lib/shared/domain/companyDomain';
+import { keepAliveAfterResponse } from '../../../lib/runtime/keepAlive';
 import {
   emitSignupEvent,
   ensureSignupCorrelationId,
@@ -233,29 +235,20 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     // rely on that separate classifier.)
     const publicEmailDomain = !emailDomain || isFreeEmailDomain(emailDomain);
     if (!publicEmailDomain) {
-      // Candidates are fetched case-insensitively (pattern characters escaped); the DECISION is exact
-      // equality below, so no pattern character can widen the match.
-      const domainPattern = emailDomain.replace(/[\\%_]/g, (c) => `\\${c}`).replace(/\*/g, '_');
-      const { data: domainCandidates, error: domainErr } = await supabase
-        .from('companies')
-        .select('id, name, admin_email_domain')
-        .ilike('admin_email_domain', domainPattern)
-        .limit(10);
-      if (domainErr) {
-        console.error('[onboarding/complete] company domain lookup failed:', domainErr.message);
-        return res.status(500).json({ error: 'Could not resolve your company. Please try again.' });
+      // The SAME verified-domain lookup as setup-company and company-domain-check (host + registrable
+      // root, both domain columns, case-insensitive, soft-deleted excluded), so the three never disagree.
+      const domainLookup = await findCompaniesByVerifiedEmailDomain(authEmail);
+      if (!domainLookup.ok) {
+        console.error('[onboarding/complete] company domain lookup failed');
+        return res.status(503).json({ error: 'Could not resolve your company. Please try again.' });
       }
-      const exact = (domainCandidates ?? []).filter(
-        (c: { admin_email_domain?: unknown }) =>
-          typeof c.admin_email_domain === 'string' && c.admin_email_domain.trim().toLowerCase() === emailDomain,
-      );
-      if (exact.length > 1) {
-        // Two companies claim the same domain modulo case: ambiguous - never guess which to bind.
-        console.error('[onboarding/complete] ambiguous admin_email_domain', { count: exact.length });
+      if (domainLookup.companies.length > 1) {
+        // Several companies claim this domain: ambiguous - never guess which to bind.
+        console.error('[onboarding/complete] ambiguous company domain', { count: domainLookup.companies.length });
         return res.status(409).json({ code: 'COMPANY_DOMAIN_AMBIGUOUS', error: 'Your company could not be resolved. Please contact support.' });
       }
-      domainCompanyId = exact[0]?.id ?? null;
-      domainCompanyName = exact[0]?.name ?? null;
+      domainCompanyId = domainLookup.companies[0]?.company_id ?? null;
+      domainCompanyName = domainLookup.companies[0]?.company_name ?? null;
     }
 
     if (domainCompanyId) {
@@ -269,7 +262,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
         .maybeSingle();
       if (membershipErr) {
         console.error('[onboarding/complete] membership lookup failed:', membershipErr.message);
-        return res.status(500).json({ error: 'Could not resolve your company. Please try again.' });
+        return res.status(503).json({ error: 'Could not resolve your company. Please try again.' });
       }
       if (!priorMembership) {
         // JOIN REQUEST (owner ruling 2b, option C): no access is granted. The company's active admin
@@ -277,22 +270,27 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
         // about the admins); the admin lets them in through the normal invite flow, choosing the role there.
         // Deduped per prospect email via signup_referrals; best-effort, never throws.
         // Decided BEFORE any write that binds the user to the company.
-        const notice = await notifyAdminAndProspectOfClaimedDomain(supabase, {
-          prospectUserId: userId,
-          prospectEmail:  authEmail.toLowerCase(),
-          emailDomain,
-          companyId:      domainCompanyId,
-          companyName:    domainCompanyName,
-          nowIso:         new Date().toISOString(),
-        });
-        // CI-309 (2026-11-19): the reply never varies with the admin-notice delivery (that would tell
-        // the requester whether their company has a reachable admin). The outcome is logged server-side.
-        console.info('[onboarding/complete] join request admin notice', { adminNotice: notice?.adminNotice ?? 'failed' });
-        return res.status(403).json({
+        // CI-309 (2026-11-19): the reply never varies with the admin-notice delivery - neither in content
+        // nor in latency (the notice is sent AFTER the reply). The outcome is logged server-side only.
+        res.status(403).json({
           code:  'INVITE_REQUIRED',
           joinRequested: true,
           error: "Your organization already uses Omnivyra. Your request to join was sent to your organization's administrator.",
         });
+        const joinCompanyId = domainCompanyId;
+        const work = notifyAdminAndProspectOfClaimedDomain(supabase, {
+          prospectUserId: userId,
+          prospectEmail:  authEmail.toLowerCase(),
+          emailDomain,
+          companyId:      joinCompanyId,
+          companyName:    domainCompanyName,
+          nowIso:         new Date().toISOString(),
+        }).then(
+          (notice) => { console.info('[onboarding/complete] join request admin notice', { adminNotice: notice?.adminNotice ?? 'failed' }); },
+          () => { console.info('[onboarding/complete] join request admin notice', { adminNotice: 'failed' }); },
+        );
+        void keepAliveAfterResponse(work);
+        return;
       }
       companyId = domainCompanyId;
     } else {
@@ -302,7 +300,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
         .insert({
           name:               finalCompanyName,
           website,
-          admin_email_domain: publicEmailDomain ? null : emailDomain,
+          admin_email_domain: publicEmailDomain ? null : (normalizeCompanyDomain(emailDomain) || null),
           industry:           industry || null,
           created_at:         new Date().toISOString(),
         })

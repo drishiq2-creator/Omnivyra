@@ -8,6 +8,17 @@
  */
 export {};
 type Row = Record<string, any>;
+/** Postgres ILIKE over PostgREST (`*` -> `%`), with backslash escapes - so the lookup's escaping is exercised. */
+function ilikeMatch(value: string, pattern: string): boolean {
+  const p = pattern.replace(/\*/g, '%');
+  let re = '^';
+  for (let i = 0; i < p.length; i++) {
+    const c = p[i];
+    if (c === '\\' && i + 1 < p.length) { re += p[++i].replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); continue; }
+    if (c === '%') re += '.*'; else if (c === '_') re += '.'; else re += c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+  return new RegExp(re + '$', 'is').test(value);
+}
 const mockCompanies: Row[] = [];
 let mockFail = false;
 const mockQueries: Array<Record<string, unknown>> = [];
@@ -17,6 +28,8 @@ function mockTable() {
     select: () => b,
     limit: (n: number) => { cap = n; return b; },
     eq: (c: string, v: unknown) => { q[c] = v; tests.push((r) => r[c] === v); return b; },
+    ilike: (c: string, v: string) => { q[c] = v; tests.push((r) => ilikeMatch(String(r[c] ?? ''), v)); return b; },
+    is: (c: string, v: unknown) => { tests.push((r) => (v === null ? r[c] == null : r[c] === v)); return b; },
     then: (ok: any, ko: any) => {
       mockQueries.push(q);
       return Promise.resolve(mockFail
@@ -49,7 +62,8 @@ it('the verified corporate email domain -> that company, once (it holds both col
 it('the comparison is by registrable domain (normalizeCompanyDomain): a mail subdomain reaches its company', async () => {
   const r = await findCompaniesByVerifiedEmailDomain('p@mail.acme.com');
   expect(r).toMatchObject({ ok: true, domain: 'acme.com', companies: [{ company_id: 'c-acme' }] });
-  expect(mockQueries.map((q) => q.website_domain ?? q.admin_email_domain)).toEqual(['acme.com', 'acme.com']);
+  // exact root, then the subdomain suffix, for each column - never the raw host as a wildcard-free key
+  expect(mockQueries.map((q) => q.website_domain ?? q.admin_email_domain)).toEqual(['acme.com', '%.acme.com', 'acme.com', '%.acme.com']);
 });
 
 it('acme.co.uk and foo.co.uk are different domains: x@foo.co.uk matches nothing', async () => {
@@ -82,4 +96,32 @@ it('several companies on the domain are ALL returned (the caller refuses an ambi
 it('a failed read is ok:false - never "no company"', async () => {
   mockFail = true;
   expect(await findCompaniesByVerifiedEmailDomain('p@acme.com')).toEqual({ ok: false });
+});
+
+it('c6 F1: a row stamped with a HOST (legacy) is found from the same host and from the root', async () => {
+  mockCompanies.push({ id: 'c-legacy', name: 'Legacy', status: 'active', website_domain: null, admin_email_domain: 'mail.legacy.io' });
+  for (const email of ['jane2@mail.legacy.io', 'bob@legacy.io', 'eve@eu.legacy.io']) {
+    const r = await findCompaniesByVerifiedEmailDomain(email);
+    expect([email, r]).toEqual([email, { ok: true, domain: 'legacy.io', companies: [{ company_id: 'c-legacy', company_name: 'Legacy' }] }]);
+  }
+});
+
+it('the subdomain suffix never widens to a different registrable domain (notacme.com, acme.com.evil.io)', async () => {
+  mockCompanies.push(
+    { id: 'c-not', name: 'Not Acme', status: 'active', website_domain: 'notacme.com', admin_email_domain: null },
+    { id: 'c-evil', name: 'Evil', status: 'active', website_domain: 'acme.com.evil.io', admin_email_domain: null },
+  );
+  const r = await findCompaniesByVerifiedEmailDomain('p@acme.com');
+  expect(r.ok && r.companies.map((c: { company_id: string }) => c.company_id)).toEqual(['c-acme']);
+});
+
+it('7c: a soft-deleted company is out of the match and the ambiguity count; a suspended one is in', async () => {
+  mockCompanies.push(
+    { id: 'c-dead', name: 'Dead', status: 'inactive', deleted_at: '2026-10-01T00:00:00Z', website_domain: null, admin_email_domain: 'zeta.io' },
+  );
+  const zeta = await findCompaniesByVerifiedEmailDomain('p@zeta.io');
+  expect(zeta.ok && zeta.companies.map((c: { company_id: string }) => c.company_id)).toEqual(['c-zeta']);
+  mockCompanies[1].status = 'suspended';
+  const susp = await findCompaniesByVerifiedEmailDomain('p@zeta.io');
+  expect(susp.ok && susp.companies.map((c: { company_id: string }) => c.company_id)).toEqual(['c-zeta']);
 });

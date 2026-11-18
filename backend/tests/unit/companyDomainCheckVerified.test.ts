@@ -9,6 +9,17 @@
  */
 export {};
 type Row = Record<string, any>;
+/** Postgres ILIKE over PostgREST (`*` -> `%`), with backslash escapes - so the lookup's escaping is exercised. */
+function ilikeMatch(value: string, pattern: string): boolean {
+  const p = pattern.replace(/\*/g, '%');
+  let re = '^';
+  for (let i = 0; i < p.length; i++) {
+    const c = p[i];
+    if (c === '\\' && i + 1 < p.length) { re += p[++i].replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); continue; }
+    if (c === '%') re += '.*'; else if (c === '_') re += '.'; else re += c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+  return new RegExp(re + '$', 'is').test(value);
+}
 const mockDb: Record<string, Row[]> = {};
 const mockReads: string[] = [];
 function mockTable(table: string) {
@@ -16,6 +27,8 @@ function mockTable(table: string) {
   const b: any = {
     select: () => b, limit: () => b,
     eq: (c: string, v: unknown) => { tests.push((r) => r[c] === v); return b; },
+    ilike: (c: string, v: string) => { tests.push((r) => ilikeMatch(String(r[c] ?? ''), v)); return b; },
+    is: (c: string, v: unknown) => { tests.push((r) => (v === null ? r[c] == null : r[c] === v)); return b; },
     or: (expr: string) => {
       const alts = expr.split(',').map((p) => { const [col, , ...rest] = p.split('.'); return [col, rest.join('.')]; });
       tests.push((r) => alts.some(([c, v]) => r[c] === v)); return b;

@@ -24,12 +24,14 @@ function ilikeMatch(value: string, pattern: string): boolean {
   return new RegExp(re + '$', 'is').test(value);
 }
 const mockDb: Record<string, Row[]> = {};
+let mockFailTable: string | null = null;
 const mockWrites: Array<{ table: string; op: string; row: Row }> = [];
 let mockSeq = 0;
 function mockTable(table: string) {
   const tests: Array<(r: Row) => boolean> = []; let one = false; let cap = Infinity;
   let op: 'select' | 'insert' | 'update' | 'upsert' = 'select'; let payload: Row | null = null;
   const run = () => {
+    if (mockFailTable === table && op === 'select') return { data: null, error: { message: 'boom' } };
     const rows = (mockDb[table] ??= []);
     if (op === 'insert' || op === 'upsert') {
       const row = { id: `00000000-0000-4000-8000-${String(++mockSeq).padStart(12, '0')}`, ...payload };
@@ -48,6 +50,7 @@ function mockTable(table: string) {
     eq: (c: string, v: unknown) => { tests.push((r) => r[c] === v); return b; },
     in: (c: string, v: unknown[]) => { tests.push((r) => v.includes(r[c])); return b; },
     not: (c: string, _o: string, v: unknown) => { tests.push((r) => (r[c] ?? null) !== v); return b; },
+    is: (c: string, v: unknown) => { tests.push((r) => (v === null ? r[c] == null : r[c] === v)); return b; },
     ilike: (c: string, v: string) => { tests.push((r) => ilikeMatch(String(r[c] ?? ''), v)); return b; },
     or: (expr: string) => {
       const alts = expr.split(',').map((p) => { const [col, , ...rest] = p.split('.'); return [col, rest.join('.')]; });
@@ -65,10 +68,17 @@ let mockEmail = 'mallory@acme.io';
 const mockGrants: unknown[] = [];
 const mockNotified: Array<Record<string, unknown>> = [];
 let mockAdminNotice: 'sent' | 'already_sent' | 'no_admin' | 'failed' = 'sent';
+let mockNotifyHangs = false;
 jest.mock('../../services/claimedDomainNotifyService', () => ({
-  notifyAdminAndProspectOfClaimedDomain: async (_db: unknown, input: Record<string, unknown>) => { mockNotified.push(input); return { adminNotice: mockAdminNotice }; },
+  notifyAdminAndProspectOfClaimedDomain: async (_db: unknown, input: Record<string, unknown>) => {
+    mockNotified.push(input);
+    if (mockNotifyHangs) await new Promise(() => undefined);
+    return { adminNotice: mockAdminNotice };
+  },
 }));
 jest.mock('../../db/supabaseClient', () => ({ supabase: { from: (t: string) => mockTable(t) } }));
+// The shared verified-domain lookup (findCompaniesByVerifiedEmailDomain) reads through ownedDbTable.
+jest.mock('../../db/writeOwner', () => ({ ownedDbTable: (t: string) => mockTable(t) }));
 jest.mock('../../../lib/platform/routeFactory', () => ({ createApiRoute: (h: unknown) => h }));
 jest.mock('../../services/authResolver', () => ({
   resolveAuthenticatedUser: async () => ({ user: { id: 'ignored', supabaseUid: 'sb-user', email: mockEmail, emailVerified: true }, error: null }),
@@ -102,6 +112,7 @@ const rolesIn = (companyId: string) => mockDb.user_company_roles.filter((r) => r
 beforeEach(() => {
   for (const k of Object.keys(mockDb)) delete mockDb[k];
   mockWrites.length = 0; mockGrants.length = 0; mockNotified.length = 0; mockAdminNotice = 'sent'; mockSeq = 0;
+  mockNotifyHangs = false; mockFailTable = null;
   mockDb.users = [{ id: USER, supabase_uid: 'sb-user', email: 'x', is_deleted: false }];
   // acme.com's company: created by an admin flow, so it has NO initial free-credit claim
   mockDb.companies = [{ id: VICTIM, name: 'Acme', admin_email_domain: 'acme.com' }];
@@ -240,5 +251,38 @@ describe('decision 3: promotion', () => {
     const r = await post();
     expect(r.statusCode).toBe(200);
     expect(rolesIn(VICTIM)).toHaveLength(1);
+  });
+});
+
+describe('CI-309 follow-up (c6 review): the shared verified-domain lookup, and no timing signal', () => {
+  it('a HANGING admin notifier neither delays nor changes the 403 join-request reply', async () => {
+    mockNotifyHangs = true;
+    mockEmail = 'newbie@acme.com';
+    const r = await Promise.race([post(), new Promise((resolve) => setTimeout(() => resolve('TIMED OUT'), 3000))]) as any;
+    expect(r).not.toBe('TIMED OUT');
+    expect([r.statusCode, r.body]).toEqual([403, { code: 'INVITE_REQUIRED', joinRequested: true, error: expect.stringMatching(/sent to your organization's administrator/) }]);
+  });
+
+  it('a MAIL-SUBDOMAIN user (x@mail.acme.com) reaches acme.com by registrable domain: join request, nothing bound', async () => {
+    mockEmail = 'x@mail.acme.com';
+    const r = await post();
+    expect([r.statusCode, r.body.code]).toEqual([403, 'INVITE_REQUIRED']);
+    expect(bindingWrites()).toEqual([]);
+    expect(mockDb.companies).toHaveLength(1);
+  });
+
+  it('a failed company lookup is 503 - never a new company', async () => {
+    mockFailTable = 'companies';
+    mockEmail = 'x@acme.com';
+    const r = await post();
+    expect(r.statusCode).toBe(503);
+    expect(bindingWrites()).toEqual([]);
+  });
+
+  it('a NEW company is stamped with the registrable root (x@mail.newco.io -> newco.io)', async () => {
+    mockEmail = 'x@mail.newco.io';
+    const r = await post();
+    expect(r.statusCode).toBe(200);
+    expect(mockDb.companies.find((c) => c.id !== VICTIM)).toMatchObject({ admin_email_domain: 'newco.io' });
   });
 });

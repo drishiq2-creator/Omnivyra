@@ -51,9 +51,13 @@ jest.mock('../../services/signupEventService', () => ({
   requestUserAgent: () => 'jest',
 }));
 const mockSent: Array<{ kind: string; to: string; payload: unknown }> = [];
+let mockSendHangs = false;
 jest.mock('../../services/emailService', () => ({
   sendCompanyAdminReferral: async (to: string, payload: unknown) => { mockSent.push({ kind: 'referral', to, payload }); },
-  sendInboundSignupNoticeToAdmin: async (to: string, payload: unknown) => { mockSent.push({ kind: 'admin_notice', to, payload }); },
+  sendInboundSignupNoticeToAdmin: async (to: string, payload: unknown) => {
+    mockSent.push({ kind: 'admin_notice', to, payload });
+    if (mockSendHangs) await new Promise(() => undefined);
+  },
 }));
 /* eslint-disable @typescript-eslint/no-var-requires */
 const route = require('../../../pages/api/auth/signup').default;
@@ -74,6 +78,8 @@ async function post(email = PROSPECT) {
 beforeEach(() => {
   for (const k of Object.keys(mockDb)) delete mockDb[k];
   mockSent.length = 0;
+  mockSendHangs = false;
+  delete process.env.VERCEL;
   mockDb.companies = [{ id: 'co-v', name: COMPANY, status: 'active', website_domain: 'victim.test', admin_email_domain: 'victim.test' }];
   mockDb.users = [{ id: 'u-vadmin', email: ADMIN_EMAIL, name: ADMIN_NAME }];
   mockDb.user_company_roles = [{ user_id: 'u-vadmin', company_id: 'co-v', role: 'COMPANY_ADMIN', status: 'active', created_at: '1' }];
@@ -98,8 +104,20 @@ it('a repeat attempt by the same email gets the identical reply (nothing reveals
   expect([second.statusCode, second.body]).toEqual([first.statusCode, first.body]);
 });
 
+const settle = async () => { for (let i = 0; i < 30; i++) await new Promise((r) => setImmediate(r)); };
+
+it('a HANGING admin notice neither delays nor changes the 409 reply (no timing signal)', async () => {
+  const fast = await post();
+  for (const k of Object.keys(mockDb)) if (k === 'signup_referrals') mockDb[k] = [];
+  mockSendHangs = true;
+  const slow = await Promise.race([post(), new Promise((resolve) => setTimeout(() => resolve('TIMED OUT'), 3000))]) as any;
+  expect(slow).not.toBe('TIMED OUT');
+  expect([slow.statusCode, slow.body]).toEqual([fast.statusCode, fast.body]);
+});
+
 it("the prospect is sent nothing; the company's admin is still told (inbound signup notice)", async () => {
   await post();
+  await settle();
   expect(mockSent.filter((m) => m.to === PROSPECT)).toEqual([]);
   expect(mockSent.map((m) => [m.kind, m.to])).toEqual([['admin_notice', ADMIN_EMAIL]]);
   expect(mockSent[0].payload).toMatchObject({ prospectEmail: PROSPECT });

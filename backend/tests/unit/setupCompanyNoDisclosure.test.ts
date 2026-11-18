@@ -90,7 +90,10 @@ jest.mock('../../services/emailService', () => ({
   sendCompanyAdminReferral: (to: string, p: unknown) => mockSend('referral')(to, p),
   sendInboundSignupNoticeToAdmin: (to: string, p: unknown) => mockSend('admin_notice')(to, p),
 }));
-jest.mock('../../services/initialFreeCreditService', () => ({ grantInitialFreeCredit: jest.fn(async () => ({ ok: true })) }));
+jest.mock('../../services/initialFreeCreditService', () => ({
+  grantInitialFreeCredit: jest.fn(async () => ({ ok: true, granted: true, credits: 300, expiresAt: 'x' })),
+  INITIAL_FREE_CREDIT_CATEGORY: 'initial_free_credit', INITIAL_FREE_CREDIT_DEFAULT: 300, INITIAL_FREE_CREDIT_EXPIRY_DAYS_DEFAULT: 30,
+}));
 jest.mock('../../services/earnCreditsService', () => ({ grantEarnCredit: jest.fn(async () => ({ ok: true })) }));
 jest.mock('../../services/companyProfile/refinementHelpers', () => ({
   crawlWebsiteSources: jest.fn(async () => ({ social_links: [], metadata: null })),
@@ -102,10 +105,14 @@ jest.mock('../../services/domainRecordService', () => ({ saveDomainRecord: jest.
 jest.mock('../../services/companyProfile/enrichmentProvenance', () => ({ buildDiscoveredProvenance: jest.fn(() => ({})) }));
 jest.mock('../../services/companyBootstrapService', () => ({ bootstrapCompanyProfile: jest.fn(async () => ({})) }));
 jest.mock('../../services/crawl/crawlEventService', () => ({ emitCrawlEvent: jest.fn(async () => undefined) }));
+// /api/onboarding/complete (third surface of the agreement test): its eligibility probe and client-IP read are I/O.
+jest.mock('../../services/domainEligibilityService', () => ({ checkDomainEligibility: async () => ({ eligible: true, result: 'ELIGIBLE' }) }));
+jest.mock('../../../lib/security/clientIp', () => ({ getTrustedClientIp: () => '127.0.0.1' }));
 
 import setupCompanyRoute from '../../../pages/api/onboarding/setup-company';
 import { emitSignupEvent } from '../../services/signupEventService';
 import domainCheckRoute from '../../../pages/api/onboarding/company-domain-check';
+import completeRoute from '../../../pages/api/onboarding/complete';
 
 // The first company-creation run loads the creation tail's lazy imports (cold ts-jest transpile).
 jest.setTimeout(120_000);
@@ -445,5 +452,154 @@ describe('company-domain-check and setup-company never disagree (one shared veri
       ],
     }, 'x@dup.test');
     expect(await both('x@dup.test')).toEqual({ check: 'COMPANY_DOMAIN_AMBIGUOUS', setup: 'COMPANY_DOMAIN_AMBIGUOUS' });
+  });
+});
+
+describe('F1 (c6 review): a company stamped with the raw HOST (legacy / complete.ts) is still found by [host, root]', () => {
+  const LEGACY = '30930930-0000-4000-8000-0000000000f1';
+  const legacyWorld = (requester: string) => world({
+    companies: [{ id: LEGACY, name: 'Legacy Acme', status: 'active', website: null, website_domain: null, admin_email_domain: 'mail.acme.test' }],
+    users: [{ id: 'u-ladmin', email: 'lena@mail.acme.test', name: 'Lena Legacyadmin', status: 'active' }],
+    roles: [{ id: 'r-ladmin', user_id: 'u-ladmin', company_id: LEGACY, role: 'COMPANY_ADMIN', status: 'active' }],
+  }, requester);
+
+  it('jane2@mail.acme.test (same host) gets the neutral join request - no duplicate company, no 500', async () => {
+    legacyWorld('jane2@mail.acme.test');
+    uniqueKey('companies', 'admin_email_domain');
+    const r = await setup('jane2@mail.acme.test');
+    await settle();
+    expect([r.status, r.body]).toEqual([200, { companyExists: true, joinRequested: true, message: expect.any(String) }]);
+    expect(createdCompanies()).toEqual([]);
+    expect(sentTo('lena@mail.acme.test').map((m) => m.kind)).toEqual(['admin_notice']);
+  });
+
+  it('bob@acme.test (the registrable root) also gets the join request for the host-stamped company', async () => {
+    legacyWorld('bob@acme.test');
+    const r = await setup('bob@acme.test');
+    await settle();
+    expect([r.status, r.body]).toEqual([200, { companyExists: true, joinRequested: true, message: expect.any(String) }]);
+    expect(createdCompanies()).toEqual([]);
+  });
+
+  it('a new company is stamped with the registrable ROOT in both domain columns (x@mail.newco.test -> newco.test)', async () => {
+    world({}, 'x@mail.newco.test');
+    const r = await setup('x@mail.newco.test', { companyName: 'NewCo' });
+    await settle();
+    expect(r.status).toBe(200);
+    expect(createdCompanies()).toEqual([expect.objectContaining({ admin_email_domain: 'newco.test', website_domain: 'newco.test' })]);
+    // the canonical domain registry row is the root too (it was the raw host before)
+    const { saveDomainRecord } = jest.requireMock('../../services/domainRecordService') as { saveDomainRecord: jest.Mock };
+    expect(saveDomainRecord.mock.calls.map((c) => [c[0].input_domain, c[0].final_domain])).toEqual([['newco.test', 'newco.test']]);
+  });
+
+  it('race path, subdomain requester: the winner is found by [host, root] and a join request follows', async () => {
+    const WIN = '30930930-0000-4000-8000-0000000000f2';
+    world({ users: [{ id: 'u-wadmin', email: 'wendy@race2.test', name: 'Wendy Winner', status: 'active' }] }, 'rita@mail.race2.test');
+    uniqueKey('companies', 'admin_email_domain');
+    let raced = false;
+    mockBeforeWrite.fn = (table, op) => {
+      if (table !== 'companies' || op !== 'insert' || raced) return;
+      raced = true;
+      rows('companies').push({ id: WIN, name: 'Race Two Co', status: 'active', website: 'https://www.race2.test', website_domain: 'race2.test', admin_email_domain: 'race2.test' });
+      rows('user_company_roles').push({ id: 'r-wadmin2', user_id: 'u-wadmin', company_id: WIN, role: 'COMPANY_ADMIN', status: 'active' });
+    };
+    const r = await setup('rita@mail.race2.test');
+    await settle();
+    expect(raced).toBe(true);
+    expect([r.status, r.body]).toEqual([200, { companyExists: true, joinRequested: true, message: expect.any(String) }]);
+  });
+});
+
+describe('all three surfaces agree: setup-company, company-domain-check, onboarding/complete', () => {
+  const verdict = (surface: 'check' | 'setup' | 'complete', r: { status?: number; body: any }) => {
+    if (r.status === 409) return r.body?.code;
+    if (surface === 'check') return r.status === 200 ? (r.body?.matched === true ? 'existing' : 'new') : `status ${r.status}`;
+    if (surface === 'setup') return r.status === 200 ? (r.body?.joinRequested === true ? 'existing' : 'new') : `status ${r.status}`;
+    return r.status === 403 && r.body?.joinRequested === true ? 'existing' : r.status === 200 ? 'new' : `status ${r.status} ${r.body?.error ?? ''}`;
+  };
+  const allThree = async (email: string, mkWorld: () => void) => {
+    const headers = { 'x-test-user': REQ, 'x-test-email': email };
+    mkWorld();
+    const check = await invoke(domainCheckRoute as never, { method: 'GET', headers });
+    mkWorld();
+    const setupReply = await setup(email);
+    await settle();
+    mkWorld();
+    for (const t of ['free_credit_profiles', 'users']) resolveUpsertConflicts(t, t === 'users' ? ['id'] : ['organization_id']);
+    const done = await invoke(completeRoute as never, { method: 'POST', headers, body: { fullName: 'Requester Person' } });
+    await settle();
+    return { check: verdict('check', check), setup: verdict('setup', setupReply), complete: verdict('complete', done) };
+  };
+
+  it('a mail-subdomain user of an existing company: existing everywhere', async () => {
+    expect(await allThree('sam@mail.victim.test', () => world({}, 'sam@mail.victim.test')))
+      .toEqual({ check: 'existing', setup: 'existing', complete: 'existing' });
+  });
+
+  it('a user of the host-stamped (legacy) company: existing everywhere', async () => {
+    const mk = () => world({
+      companies: [{ id: '30930930-0000-4000-8000-0000000000f3', name: 'Legacy Co', status: 'active', website: null, website_domain: null, admin_email_domain: 'mail.legacy.test' }],
+    }, 'jo@mail.legacy.test');
+    expect(await allThree('jo@mail.legacy.test', mk)).toEqual({ check: 'existing', setup: 'existing', complete: 'existing' });
+  });
+
+  it('an ambiguous domain: COMPANY_DOMAIN_AMBIGUOUS everywhere', async () => {
+    const mk = () => world({
+      companies: [
+        { id: '30930930-0000-4000-8000-0000000000d1', name: 'Dup Alpha', status: 'active', website: 'https://www.dup.test', website_domain: 'dup.test', admin_email_domain: null },
+        { id: '30930930-0000-4000-8000-0000000000d2', name: 'Dup Beta', status: 'active', website: null, website_domain: null, admin_email_domain: 'dup.test' },
+      ],
+    }, 'x@dup.test');
+    expect(await allThree('x@dup.test', mk)).toEqual({ check: 'COMPANY_DOMAIN_AMBIGUOUS', setup: 'COMPANY_DOMAIN_AMBIGUOUS', complete: 'COMPANY_DOMAIN_AMBIGUOUS' });
+  });
+});
+
+describe('7c merge precondition: soft-deleted companies (deleted_at) are out of the match and the ambiguity count', () => {
+  const DEAD = '30930930-0000-4000-8000-0000000000a1';
+  const LIVE = '30930930-0000-4000-8000-0000000000a2';
+  const deadCo = (domain: string) => ({ id: DEAD, name: 'Dead Co', status: 'inactive', deleted_at: '2026-10-01T00:00:00Z', website: null, website_domain: null, admin_email_domain: domain });
+  const deadAdmin = { users: [{ id: 'u-dadmin', email: 'dora@dead.test', name: 'Dora Deadadmin', status: 'active' }] };
+
+  // (i) The lookup treats a domain held only by a deleted company as NEW (no join request, no notice).
+  // The INSERT that follows is then refused by idx_companies_admin_email_domain_unique, which the
+  // soft-deleted row still occupies (soft_delete_company does not release the domain) - so the company
+  // cannot actually be created until a migration scopes the index to deleted_at IS NULL or releases
+  // domains on soft delete. Modelled here with the real unique key; the assertions are the no-disclosure
+  // ones that hold either way.
+  it('(i) a domain held only by a deleted company is NOT matched: no join request, nobody notified, nothing about it leaks', async () => {
+    world({ companies: [deadCo('dead.test')], ...deadAdmin, roles: [{ id: 'r-dadmin', user_id: 'u-dadmin', company_id: DEAD, role: 'COMPANY_ADMIN', status: 'active' }] }, 'nina@dead.test');
+    uniqueKey('companies', 'admin_email_domain');
+    const r = await setup('nina@dead.test', { companyName: 'Nina Co' });
+    await settle();
+    expect(r.body?.companyExists).toBeUndefined();
+    expect(JSON.stringify(r.body)).not.toMatch(new RegExp(`${DEAD}|Dead Co|Dora`));
+    expect(sentTo('dora@dead.test')).toEqual([]);
+  });
+
+  it('(ii) one live + one deleted company on the domain: a join request to the LIVE one, not a 409', async () => {
+    world({
+      companies: [
+        { ...deadCo(null as unknown as string), website: 'https://www.both.test', website_domain: 'both.test' },
+        { id: LIVE, name: 'Live Co', status: 'active', website: null, website_domain: null, admin_email_domain: 'both.test' },
+      ],
+      users: [{ id: 'u-liveadmin', email: 'liv@both.test', name: 'Liv Liveadmin', status: 'active' }],
+      roles: [{ id: 'r-liveadmin', user_id: 'u-liveadmin', company_id: LIVE, role: 'COMPANY_ADMIN', status: 'active' }],
+    }, 'pat@both.test');
+    const r = await setup('pat@both.test');
+    await settle();
+    expect([r.status, r.body]).toEqual([200, { companyExists: true, joinRequested: true, message: expect.any(String) }]);
+    expect(sentTo('liv@both.test').map((m) => m.kind)).toEqual(['admin_notice']);
+  });
+
+  it('(iii) control: a SUSPENDED (not deleted) company still gets the join request', async () => {
+    world({
+      companies: [{ id: LIVE, name: 'Suspended Co', status: 'suspended', deleted_at: null, website: null, website_domain: null, admin_email_domain: 'susp.test' }],
+      users: [{ id: 'u-sadmin', email: 'sue@susp.test', name: 'Sue Suspadmin', status: 'active' }],
+      roles: [{ id: 'r-sadmin', user_id: 'u-sadmin', company_id: LIVE, role: 'COMPANY_ADMIN', status: 'active' }],
+    }, 'tom@susp.test');
+    const r = await setup('tom@susp.test');
+    await settle();
+    expect([r.status, r.body]).toEqual([200, { companyExists: true, joinRequested: true, message: expect.any(String) }]);
+    expect(createdCompanies()).toEqual([]);
   });
 });

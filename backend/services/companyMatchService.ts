@@ -104,11 +104,16 @@ export type VerifiedDomainLookup =
  * typed never matches anything (the former name / entered-website steps let anyone with a verified
  * non-free email learn another company's id, name and admin).
  *
- * The comparison key is the registrable domain from lib/shared/domain/companyDomain
- * (normalizeCompanyDomain) - the same helper companyIdentityWriter uses to STORE
- * companies.website_domain / admin_email_domain, so equality here is equality of registrable domains
- * (acme.co.uk and foo.co.uk stay distinct). ALL matching companies are returned (bounded) so the
- * caller can refuse an ambiguous domain instead of guessing.
+ * The comparison key is the registrable ROOT from lib/shared/domain/companyDomain
+ * (normalizeCompanyDomain), applied to BOTH sides: the root is what companyIdentityWriter STORES, and a
+ * legacy / pre-writer row stamped with a HOST (mail.acme.com) normalizes to the same root (c6 review,
+ * 2026-11-19: such a row must still be found, or its domain's next user is offered a duplicate company).
+ * acme.co.uk and foo.co.uk stay distinct. Candidates are fetched by the exact root and by the subdomain
+ * suffix `%.<root>` (the root's own % _ \ are escaped, so the leading % is the only wildcard); the
+ * DECISION is normalizeCompanyDomain(stored) === root in code, case-insensitive. Soft-deleted companies (deleted_at set) are out of
+ * both the match and the ambiguity count (7c); inactive / suspended companies stay IN (excluding them
+ * would let a second company appear on their domain). ALL matching companies are returned (bounded) so
+ * the caller can refuse an ambiguous domain instead of guessing.
  */
 const MAX_DOMAIN_CANDIDATES = 10;
 export async function findCompaniesByVerifiedEmailDomain(
@@ -119,16 +124,21 @@ export async function findCompaniesByVerifiedEmailDomain(
   if (!host || !domain || isFreeEmailDomain(host) || isFreeEmailDomain(domain)) {
     return { ok: true, domain: null, companies: [] };
   }
+  const escapedRoot = domain.replace(/[\\%_]/g, (c) => `\\${c}`).replace(/\*/g, '_');
   const byId = new Map<string, VerifiedDomainCompany>();
   for (const column of ['website_domain', 'admin_email_domain'] as const) {
-    const { data, error } = await ownedDbTable('companies')
-      .select('id, name')
-      .eq(column, domain)
-      .limit(MAX_DOMAIN_CANDIDATES);
-    if (error) return { ok: false };
-    for (const row of (data ?? []) as Array<{ id?: unknown; name?: unknown }>) {
-      if (row?.id == null) continue;
-      byId.set(String(row.id), { company_id: String(row.id), company_name: String(row.name ?? '') });
+    for (const pattern of [escapedRoot, `%.${escapedRoot}`]) {
+      const { data, error } = await ownedDbTable('companies')
+        .select(`id, name, ${column}`)
+        .ilike(column, pattern)
+        .is('deleted_at', null)
+        .limit(MAX_DOMAIN_CANDIDATES);
+      if (error) return { ok: false };
+      for (const row of (data ?? []) as Array<Record<string, unknown>>) {
+        const stored = row?.[column];
+        if (row?.id == null || typeof stored !== 'string' || normalizeCompanyDomain(stored) !== domain) continue;
+        byId.set(String(row.id), { company_id: String(row.id), company_name: String(row.name ?? '') });
+      }
     }
   }
   return { ok: true, domain, companies: [...byId.values()] };

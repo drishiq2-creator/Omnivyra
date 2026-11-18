@@ -21,7 +21,7 @@ import {
   extractDomain,
   isFreeEmailDomain,
 } from '../../../backend/services/companyMatchService';
-import { isSameCompanyDomain } from '../../../lib/shared/domain/companyDomain';
+import { isSameCompanyDomain, normalizeCompanyDomain } from '../../../lib/shared/domain/companyDomain';
 import { keepAliveAfterResponse } from '../../../lib/runtime/keepAlive';
 import { logger } from '../../../backend/services/logger';
 import { grantInitialFreeCredit } from '../../../backend/services/initialFreeCreditService';
@@ -400,13 +400,14 @@ async function handler(req: NextApiRequest, res: NextApiResponse<Result>) {
     //   from "www.drishiq.com"). Used for fast indexed lookup when a new user
     //   from the same domain signs up independently.
     // admin_email_domain: fallback for companies created without a real website.
+    // Both stamped as the registrable ROOT (normalizeCompanyDomain), the key every lookup uses.
     const websiteDomain = (() => {
       const d = extractDomain(canonicalWebsite);
-      return d && !isFreeEmailDomain(d) ? d : null;
+      return d && !isFreeEmailDomain(d) ? normalizeCompanyDomain(d) || null : null;
     })();
     const adminEmailDomain = (() => {
       const d = extractDomain(user.email ?? '');
-      return d && !isFreeEmailDomain(d) ? d : null;
+      return d && !isFreeEmailDomain(d) ? normalizeCompanyDomain(d) || null : null;
     })();
 
     // ── STEP 1: Domain-first lookup — prevent duplicate companies per domain ──

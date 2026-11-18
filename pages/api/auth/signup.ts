@@ -34,6 +34,7 @@ import { checkRateLimit, EMAIL_LINK_LIMIT } from '../../../lib/auth/rateLimit';
 import { logger } from '../../../backend/services/logger';
 import { seedRequestContextFromRequest } from '../../../backend/services/requestContext';
 import { notifyAdminAndProspectOfClaimedDomain } from '../../../backend/services/claimedDomainNotifyService';
+import { keepAliveAfterResponse } from '../../../lib/runtime/keepAlive';
 import { verifyCaptchaToken, CAPTCHA_FAILED_RESPONSE } from '../../../lib/auth/captcha';
 import {
   emitSignupEvent,
@@ -214,15 +215,15 @@ async function handler(
     if (claimedCompany) {
       const company = claimedCompany as { id: string; name: string | null };
 
-      // Notify the company's admins (deduped inside the service; never throws). The prospect is
-      // never sent the admin's contact (CI-309).
-      await notifyAdminAndProspectOfClaimedDomain(supabase, {
+      // Notify the company's admins (deduped inside the service; never throws) AFTER the reply, so
+      // latency never reveals the notice outcome. The prospect is never sent the admin's contact (CI-309).
+      const notifyAdmins = () => notifyAdminAndProspectOfClaimedDomain(supabase, {
         prospectEmail: normalizedEmail,
         emailDomain:   domain,
         companyId:     company.id,
         companyName:   company.name,
         nowIso:        new Date().toISOString(),
-      });
+      }).then(() => undefined);
 
       logger.info('auth_signup_company_claimed_blocked', {
         email:     normalizedEmail,
@@ -232,10 +233,16 @@ async function handler(
       });
       await emitOutcome('CompanyExists', 'denied', 'CLAIMED_DOMAIN', company.id);
 
-      return res.status(httpStatusFor('CLAIMED_DOMAIN')).json({
+      // Accepted existence signal (b3 ruling, 2026-11-19): this 409 (vs 200) reveals only that a company
+      // with this domain uses Omnivyra - no PII, nothing about who. It is rate-limited (rl:auth:signup,
+      // 5/hour per IP, at the top of this handler), and it is the signal a legitimate same-domain user
+      // needs to request to join (one company per domain); a constant response would break that flow.
+      res.status(httpStatusFor('CLAIMED_DOMAIN')).json({
         error:            ELIGIBILITY_MESSAGES.CLAIMED_DOMAIN,
         code:             'CLAIMED_DOMAIN',
       });
+      void keepAliveAfterResponse(notifyAdmins());
+      return;
     }
   }
 
