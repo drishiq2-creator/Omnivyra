@@ -59,6 +59,12 @@ jest.mock('../../db/scheduledPostsStore', () => ({
   updatePostPublishStatus: (...a: unknown[]) => (mockUpdatePostPublishStatus as any)(...a),
 }));
 jest.mock('../../services/publishNowService', () => ({ publishNow: (...a: unknown[]) => mockPublishNow(...a) }));
+// Main resolves a post's account through resolvePostSocialAccount (campaign company, NOT the user's account in any
+// company). Its own suites prove it; this suite is about the D8 status writes around it, so it is controlled here.
+type MockResolution = { ok: boolean; socialAccountId: string | null; companyId: string | null; code: string | null; message: string | null; retryable: boolean };
+let mockResolution: MockResolution;
+const RESOLVE_NONE: MockResolution = { ok: false, socialAccountId: null, companyId: null, code: 'NO_ACCOUNT', message: 'No connected account', retryable: false };
+jest.mock('../../services/postSocialAccountResolver', () => ({ resolvePostSocialAccount: async () => mockResolution }));
 let mockRunJobThrows: Error | null = null;
 jest.mock('../../services/jobRunner', () => ({
   runJob: async (_spec: unknown, fn: () => Promise<unknown>) => (mockRunJobThrows
@@ -87,6 +93,7 @@ const due = (id: string): Row => ({
 const ORIGINAL_SECRET = process.env.CRON_SECRET;
 beforeEach(() => {
   jest.clearAllMocks();
+  mockResolution = { ...RESOLVE_NONE };
   process.env.CRON_SECRET = 'cron-test-secret';
   duePosts = [];
   stuckPosts = [];
@@ -183,16 +190,9 @@ describe('CLASS-2 D8 - every cron status write names the status it expects (neve
 
   it('a resolved account is patched only onto a still-`scheduled` post', async () => {
     duePosts = [{ ...due('sp-1'), social_account_id: null }];
-    // The account lookup answers through maybeSingle; give it one.
-    const supa = require('../../db/supabaseClient').supabase;
-    const realFrom = supa.from;
-    supa.from = (t: string) => { const b = realFrom(t); if (t === 'social_accounts') b.maybeSingle = () => Promise.resolve({ data: { id: 'acct-9', company_id: 'org-1' }, error: null }); return b; };
+    mockResolution = { ok: true, socialAccountId: 'acct-9', companyId: 'org-1', code: null, message: null, retryable: false };
     mockPublishNow.mockResolvedValue({ status: 'PUBLISHED', external_post_id: 'e', timestamp: 't' });
-    try {
-      await processScheduledPosts(cronReq(), mockRes());
-    } finally {
-      supa.from = realFrom;
-    }
+    await processScheduledPosts(cronReq(), mockRes());
     const patch = postUpdates.find((u) => u.payload.social_account_id === 'acct-9')!;
     expect(patch.filters).toEqual(expect.arrayContaining([['eq', 'id', 'sp-1'], ['eq', 'status', 'scheduled']]));
   });
