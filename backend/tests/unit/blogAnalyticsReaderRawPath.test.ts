@@ -70,11 +70,11 @@ it('no rollup rows (the table has no writer): the totals come from the RAW event
   expect(res.body.total_views).toBe(7);
 });
 
-it('HAZARD PINNED: a single partial rollup row makes the reader ignore the raw events for the whole window', async () => {
+it('HAZARD CLOSED (7c): a partial rollup row is IGNORED - the totals stay the complete raw events', async () => {
   mockDb.daily = [{ url_slug: 'post-a', views: 1, avg_time: 0, avg_scroll: 0, sessions: 1, date: '2026-11-11' }];
   const res = await call();
-  // 1, not 7: why a rollup must never be re-scheduled without a daily+raw reader.
-  expect(res.body.total_views).toBe(1);
+  // 7, not 1: the reader no longer reads blog_analytics_daily at all.
+  expect(res.body.total_views).toBe(7);
 });
 
 it('the retired cron route is gone, and nothing schedules it', () => {
@@ -91,7 +91,7 @@ describe('a failed read is UNAVAILABLE, never zero views', () => {
   beforeEach(() => { errSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined); });
   afterEach(() => errSpy.mockRestore());
 
-  it.each(['daily', 'pageview:30d', 'pageleave:30d', 'pageview:7d', 'pageleave:7d', 'pageview:prior', 'pageleave:prior'])('%s read fails -> 500 ANALYTICS_UNAVAILABLE, logged', async (which) => {
+  it.each(['pageview:30d', 'pageleave:30d', 'pageview:7d', 'pageleave:7d', 'pageview:prior', 'pageleave:prior'])('%s read fails -> 500 ANALYTICS_UNAVAILABLE, logged', async (which) => {
     mockDb.fail = which;
     const res = await call();
     expect(res.statusCode).toBe(500);
@@ -108,7 +108,7 @@ describe('a failed read is UNAVAILABLE, never zero views', () => {
   });
 });
 
-it('the mock keys every read on its own window - each of the 7 names is hit exactly once per request', async () => {
+it('the mock keys every read on its own window - each of the 6 names is hit exactly once per request; the daily table is never read', async () => {
   const seen: string[] = [];
   for (const which of ['daily', 'pageview:30d', 'pageleave:30d', 'pageview:7d', 'pageleave:7d', 'pageview:prior', 'pageleave:prior']) {
     mockDb.fail = which;
@@ -118,5 +118,5 @@ it('the mock keys every read on its own window - each of the 7 names is hit exac
     if (res.statusCode === 500) seen.push(which);
   }
   mockDb.fail = null;
-  expect(seen).toHaveLength(7);
+  expect(seen).toEqual(['pageview:30d', 'pageleave:30d', 'pageview:7d', 'pageleave:7d', 'pageview:prior', 'pageleave:prior']);
 });
