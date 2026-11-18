@@ -130,6 +130,12 @@ export const seedConnectedAccount = (opts: {
 };
 
 const resolveSelect = (table: string, state: any) => {
+  // PostgREST semantics (PL-31): .eq(col, null|undefined) sends `col=eq.null`, which matches NO row (SQL `col = NULL` is
+  // never true). The per-table branches below used `if (state.filters.x)`, which SKIPPED a null/undefined filter and
+  // returned EVERY tenant's rows - a cross-tenant answer the real database can never give.
+  if (Object.values(state.filters).some((v) => v === null || v === undefined)) {
+    return { data: state.single ? null : [], error: null };
+  }
   if (table === 'community_ai_actions') {
     const id = state.filters.id;
     if (id) {
