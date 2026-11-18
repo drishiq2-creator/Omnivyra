@@ -138,6 +138,35 @@ describe('Community-AI Scheduling', () => {
     expect(actionLogStore.some((log) => log.event_type === 'executed')).toBe(true);
   });
 
+  it('a PERMISSIVE connector response is sent_unverified, never executed (no unconfirmed send counted as sent)', async () => {
+    // OVERCLAIM guard (7c): runApiExecution classifies a response without an explicit success signal as
+    // 'sent_unverified' (communityAiActionExecutorContracts: verified ? 'executed' : 'sent_unverified').
+    // bulkEngagementService counts only 'executed' / 'dispatched' as sent and must NEVER count 'sent_unverified' -
+    // so a permissive `{ ok: true }` classed 'executed' would count an unconfirmed send as dispatched.
+    setRole('CONTENT_PUBLISHER');
+    seedConnectedAccount({ platform: 'linkedin', accessToken: 'token-1' });
+    (executeLinkedinAction as jest.Mock).mockResolvedValueOnce({ ok: true, platform: 'linkedin' });
+    const past = new Date(Date.now() - 1000).toISOString();
+    actionStore.set('action-unverified', {
+      id: 'action-unverified',
+      tenant_id: 'tenant-1',
+      organization_id: 'tenant-1',
+      platform: 'linkedin',
+      action_type: 'reply',
+      target_id: 'post-unverified',
+      suggested_text: 'Appreciate it!',
+      playbook_id: 'playbook-1',
+      status: 'approved',
+      approved_at: '2026-01-01T00:00:00.000Z',
+      scheduled_at: past,
+      requires_human_approval: false,
+    });
+    await runCommunityAiScheduler(new Date());
+    expect(executeLinkedinAction).toHaveBeenCalled();                      // the API path really ran
+    expect(actionStore.get('action-unverified').status).toBe('sent_unverified');
+    expect(actionStore.get('action-unverified').status).not.toBe('executed');
+  });
+
   it('scheduler executes RPA action without API token', async () => {
     playbookStore.length = 0;
     seedPlaybook({
