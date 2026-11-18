@@ -28,6 +28,7 @@
  * signal extraction, link discovery and the persistence contract. The SSRF guard itself is
  * untouched and therefore also unexercised here — that is a deliberate limit of this suite.
  */
+export {}; // a module, not a global script: top-level names must not collide with other test files (CI-496)
 
 const recorded: Array<{ table: string; op: string; rows: unknown; id?: string }> = [];
 const canonicalPagesFor = (companyId: string) =>

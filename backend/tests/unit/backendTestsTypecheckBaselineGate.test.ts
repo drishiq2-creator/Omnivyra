@@ -7,6 +7,7 @@
  * 0. These tests drive the gate's decision with `spawnSync`-shaped doubles — no
  * real compiler, no memory exhaustion.
  */
+export {}; // a module, not a global script: top-level names must not collide with other test files (CI-496)
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { evaluateRun, decide, collect } = require('../../../scripts/backend-tests-typecheck-baseline.js');
 

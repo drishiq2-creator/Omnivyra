@@ -17,6 +17,7 @@
  *   • with no completed baseline the foundation is null — Report 1 is NEVER recomposed as a
  *     fallback, and the existing empty state renders.
  */
+export {}; // a module, not a global script: top-level names must not collide with other test files (CI-496)
 
 // The Report 2 service pulls in the whole analytics/AI surface at import time. Only the report
 // read matters here, so the heavy collaborators are stubbed; the DB seam is the real subject.

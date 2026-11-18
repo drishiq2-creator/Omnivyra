@@ -6,6 +6,7 @@
  * 11 unconditional {public} policies reached production that way. These rules
  * stop the next one at review time.
  */
+export {}; // a module, not a global script: top-level names must not collide with other test files (CI-496)
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { securityViolations, SECURITY_RULES_FROM } = require('../../../scripts/check-migration-quality.js');
 

@@ -8,6 +8,7 @@
  * database whose measured per-hop floor is ~280ms, that ordering dominated the
  * endpoint: sync was 10,455ms of an 11,908ms request.
  */
+export {}; // a module, not a global script: top-level names must not collide with other test files (CI-496)
 const upsertCalls: Array<{ rows: any; opts: any }> = [];
 const selectCalls: string[] = [];
 let priorRows: any[] = [];

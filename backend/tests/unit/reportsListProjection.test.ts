@@ -9,6 +9,7 @@
  * These assert the projection structurally — filter, ordering and returned
  * rows must be untouched.
  */
+export {}; // a module, not a global script: top-level names must not collide with other test files (CI-496)
 const selectSpy = jest.fn();
 const eqSpy = jest.fn();
 const orderSpy = jest.fn();

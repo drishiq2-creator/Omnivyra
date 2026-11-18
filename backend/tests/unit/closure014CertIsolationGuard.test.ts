@@ -2,6 +2,7 @@
  * Closure-014 (F) — certification connection targets are an ALLOW-list (loopback),
  * not only a production deny-list. Pure scan; no network, no env files read.
  */
+export {}; // a module, not a global script: top-level names must not collide with other test files (CI-496)
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { scanCertEnv, assertCertIsolationInProcess, LOOPBACK_REQUIRED_VARS } = require('../../../scripts/lib/certAwareEnv.cjs');
 

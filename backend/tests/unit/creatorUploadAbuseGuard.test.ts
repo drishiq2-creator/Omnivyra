@@ -9,6 +9,7 @@
  *   - FAILS OPEN on DB error
  *   - verifyUploadSession deterministic
  */
+export {}; // a module, not a global script: top-level names must not collide with other test files (CI-496)
 
 type Bucket = { id?: string; scope: string; scope_id: string; bucket_start: string; attempt_count: number; byte_total: number; spoof_count: number; failure_count: number };
 let buckets: Bucket[] = [];

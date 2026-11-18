@@ -11,6 +11,7 @@
  * the sake of that optimization. These tests pin the new fail-open behaviour
  * AND pin that the success path and all runtime behaviour are unchanged.
  */
+export {}; // a module, not a global script: top-level names must not collide with other test files (CI-496)
 
 // react-markdown and the rehype plugins are ESM-only; jest's CJS resolver
 // cannot load them. The page imports them for RENDERING, which these tests do

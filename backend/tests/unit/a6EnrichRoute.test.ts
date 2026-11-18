@@ -12,6 +12,7 @@
  * occurs — a route test that reached a provider would be testing the wrong
  * thing and spending real quota to do it.
  */
+export {}; // a module, not a global script: top-level names must not collide with other test files (CI-496)
 jest.mock('@/config', () => ({ config: {}, getValidatedConfig: () => ({}) }));
 
 // The shared route wrapper is infrastructure with its own coverage; identity

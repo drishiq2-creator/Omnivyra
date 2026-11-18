@@ -6,6 +6,7 @@
  *   - runCronJobWithLease wraps lifecycle correctly
  *   - timeout guard fires when fn doesn't return
  */
+export {}; // a module, not a global script: top-level names must not collide with other test files (CI-496)
 
 let lease: any = null;
 

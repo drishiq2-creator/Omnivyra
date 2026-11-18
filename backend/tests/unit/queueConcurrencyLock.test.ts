@@ -9,6 +9,7 @@
  *   - returns ok:false on lock contention
  *   - returns idempotency key derived from scheduledFor
  */
+export {}; // a module, not a global script: top-level names must not collide with other test files (CI-496)
 
 const mockRpcResponses: Record<string, any> = {};
 const queueOps: { add: any[]; getJob: any[]; remove: number } = { add: [], getJob: [], remove: 0 };

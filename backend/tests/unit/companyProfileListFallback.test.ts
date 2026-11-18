@@ -11,6 +11,7 @@
  * companies.id, so an orphan id can appear and today takes its name from
  * company_profiles.
  */
+export {}; // a module, not a global script: top-level names must not collide with other test files (CI-496)
 type CompanyRow = { id: string; name?: string | null };
 type Profile = { company_id: string; name?: string | null } | null;
 

@@ -14,6 +14,7 @@
  * here against a stubbed `fetch` — the ADAPTER path, and the LEGACY path that
  * runs when no adapter is available.
  */
+export {}; // a module, not a global script: top-level names must not collide with other test files (CI-496)
 
 jest.mock('@/config', () => ({ config: {}, getValidatedConfig: () => ({}) }));
 

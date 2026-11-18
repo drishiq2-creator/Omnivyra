@@ -5,6 +5,7 @@
  *   - runIdempotent skips duplicate keys within TTL
  *   - getQueuePressure returns 'normal' when low
  */
+export {}; // a module, not a global script: top-level names must not collide with other test files (CI-496)
 
 jest.mock('../../queue/bullmqClient', () => ({
   getQueue: jest.fn(() => ({

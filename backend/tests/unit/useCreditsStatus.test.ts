@@ -8,6 +8,7 @@
  *
  * Test 4 is the one that matters: existing data + isValidating must stay ready.
  */
+export {}; // a module, not a global script: top-level names must not collide with other test files (CI-496)
 type Status = 'loading' | 'ready' | 'error' | 'unavailable';
 type Data = { kind: 'ready'; total: number; remaining: number } | { kind: 'unavailable' } | undefined;
 

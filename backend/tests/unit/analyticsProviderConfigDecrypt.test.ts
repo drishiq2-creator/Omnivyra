@@ -6,6 +6,7 @@
  * became the Google OAuth client id/secret and its first characters were shown in
  * the admin summary. Legacy plaintext values must keep working.
  */
+export {}; // a module, not a global script: top-level names must not collide with other test files (CI-496)
 const KEY_A = 'a'.repeat(64);
 const KEY_B = 'b'.repeat(64);
 const mockConfig: { ENCRYPTION_KEY: string } = { ENCRYPTION_KEY: KEY_A };

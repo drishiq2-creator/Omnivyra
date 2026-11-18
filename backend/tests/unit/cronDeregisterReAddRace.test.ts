@@ -26,6 +26,7 @@
  * tail-chain, so deregister()'s ZREM is queued BEHIND any running ZADD and the
  * re-checked latch refuses anything queued afterwards.
  */
+export {}; // a module, not a global script: top-level names must not collide with other test files (CI-496)
 
 const INSTANCE_KEY = 'omnivyra:cron:instances';
 

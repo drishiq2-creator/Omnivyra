@@ -3,6 +3,7 @@
  * first renderAsset() call, so fontconfig is configured before sharp/librsvg
  * resolves any glyph. Uses mocks to observe call order without real rendering.
  */
+export {}; // a module, not a global script: top-level names must not collide with other test files (CI-496)
 const order: string[] = [];
 
 jest.mock('../../services/creatorRenderFonts', () => ({

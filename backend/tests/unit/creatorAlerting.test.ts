@@ -5,6 +5,7 @@
  *   - resolves alerts whose conditions cleared
  *   - returns workflow status
  */
+export {}; // a module, not a global script: top-level names must not collide with other test files (CI-496)
 
 const alertRowsByKey = new Map<string, any>();
 let snapshotResult: any = null;

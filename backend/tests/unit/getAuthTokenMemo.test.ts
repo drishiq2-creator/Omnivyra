@@ -6,6 +6,7 @@
  * a FRESH module instance (jest.isolateModules) because the memo, in-flight
  * dedupe, and subscription flag are module state.
  */
+export {}; // a module, not a global script: top-level names must not collide with other test files (CI-496)
 
 const mockGetSession = jest.fn();
 const mockOnAuthStateChange = jest.fn();

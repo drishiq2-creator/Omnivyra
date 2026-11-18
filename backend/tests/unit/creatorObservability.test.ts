@@ -5,6 +5,7 @@
  *   - detects anomalies vs baseline window
  *   - classifies workflow status (healthy / degraded / incident)
  */
+export {}; // a module, not a global script: top-level names must not collide with other test files (CI-496)
 
 type SyntheticEvent = { event_type: string; latency_ms?: number | null; severity?: string | null; created_at: string };
 

@@ -16,6 +16,7 @@
  * `backend/scheduler/schedulerService` (the module every production caller
  * imports) with the DB / queue seams mocked. Nothing is published.
  */
+export {}; // a module, not a global script: top-level names must not collide with other test files (CI-496)
 
 type QueueJobRow = { id: string; scheduled_post_id: string; status: string };
 

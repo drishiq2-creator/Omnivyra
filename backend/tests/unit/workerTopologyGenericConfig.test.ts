@@ -7,6 +7,7 @@
  * worker is constructed, rather than starting some queues and silently
  * leaving another without a consumer.
  */
+export {}; // a module, not a global script: top-level names must not collide with other test files (CI-496)
 describe('startContentWorkers — generic queue without a config entry', () => {
   it('throws before constructing any worker', async () => {
     const constructed: string[] = [];

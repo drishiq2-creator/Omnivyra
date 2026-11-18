@@ -8,6 +8,7 @@
  * These gate the domain query open and assert reports/role have already been
  * issued while it is still pending.
  */
+export {}; // a module, not a global script: top-level names must not collide with other test files (CI-496)
 const issued: string[] = [];
 let releaseDomain!: () => void;
 let domainGate!: Promise<void>;

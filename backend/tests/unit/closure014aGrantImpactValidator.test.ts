@@ -8,6 +8,7 @@
  * failures — is exercised deterministically. The real end-to-end run against
  * the local certification database is recorded separately.
  */
+export {}; // a module, not a global script: top-level names must not collide with other test files (CI-496)
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const V = require('../../../scripts/cert/validate-grant-impact-query.cjs') as {
   EXPECTED_MATRIX: readonly string[];
