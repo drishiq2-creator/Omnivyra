@@ -32,6 +32,7 @@ import {
 import { getRequestContext } from '../requestContext';
 import type { SettlementPending } from './holdSettlementState';
 import { reportSettlementPending } from './settlementPendingSurface';
+import { loadBilledResult, persistBilledResult } from './billedResultStore';
 import { hasEnoughCredits, type CreditAction } from '../creditDeductionService';
 import { incrCounter } from './billingMetrics';
 import { emitAnomaly } from './billingAuditEmitter';
@@ -89,6 +90,22 @@ export class BilledRouteAlreadyProcessedError extends Error {
  * on every attempt), so this is a 5xx with its own code - never the benign 409 a client may retry into (05 d,
  * 2026-11-13). retryable=false: the SAME Idempotency-Key cannot succeed; nothing was charged.
  */
+/** The stored result of an already-charged request could not be read: retry (never "start a new request"). */
+export class BilledRouteReplayUnavailableError extends Error {
+  readonly code = 'REPLAY_UNAVAILABLE';
+  readonly httpStatus = 503;
+  readonly retryable = true;
+  constructor(public readonly surface: BillingSurface) {
+    super('We could not load the result of this request right now. Please try again.');
+    this.name = 'BilledRouteReplayUnavailableError';
+  }
+}
+
+/** Internal: the work finished but could not be persisted - the engine releases the hold, the route still answers. */
+class BilledResultUnpersistedError extends Error {
+  constructor(public readonly result: unknown) { super('billed result not persisted'); this.name = 'BilledResultUnpersistedError'; }
+}
+
 export class BilledRouteReclaimExhaustedError extends Error {
   readonly code = 'RECLAIM_CAP_EXHAUSTED';
   readonly httpStatus = 500;
@@ -235,6 +252,17 @@ export async function wirePhase2Route<T>(args: WirePhase2RouteArgs<T>): Promise<
         ? `k:${createHash('sha256').update(clientKey).digest('hex').slice(0, 24)}`
         : `r:${ctx.requestId ?? createHash('sha256').update(`${Date.now()}:${Math.random()}`).digest('hex').slice(0, 24)}`;
       const identity = `${args.referenceId}:${requestIdentity}`;
+      // b3 + 7c invariant: never CONFIRM a charge for a work product that exists only in an undelivered response.
+      // The executor persists the result (and reads it back) BEFORE returning, so the engine confirms only a
+      // persisted result; a retry with the same identity replays it (billedResultStore).
+      const resultScope = `phase2:${String(args.surface)}`;
+      const persistingRun = async (): Promise<T> => {
+        const value = await args.run();
+        if (!(await persistBilledResult({ scope: resultScope, orgId: args.organizationId, key: identity, value }))) {
+          throw new BilledResultUnpersistedError(value);   // -> the engine RELEASES (nothing charged)
+        }
+        return value;
+      };
 
       for (let attempt = 0; attempt < MAX_ROUTE_RECLAIM_ATTEMPTS; attempt++) {
         const referenceId = attempt === 0 ? identity : `${identity}:r${attempt}`;
@@ -250,9 +278,15 @@ export async function wirePhase2Route<T>(args: WirePhase2RouteArgs<T>): Promise<
             validateMembership: hasActor, // system/admin context skips membership
             llmPricing: routeLlmPricingFor(args.action, args.unitCalls),
             collectViaCollector: true,
-            executor: args.run,
+            executor: persistingRun,
           });
         } catch (err) {
+          if (err instanceof BilledResultUnpersistedError) {
+            // Delivered in this response but not durably stored: released, NOT charged (the work is still returned).
+            incrCounter('phase2_route_result_unpersisted_total');
+            logger.error('phase2_route_result_unpersisted', { surface: args.surface, org: args.organizationId, action: args.action });
+            return { ok: true, result: err.result as T };
+          }
           if (isPricingMissing(err)) {
             logger.error('phase2_route_pricing_unavailable', {
               surface: args.surface, action: args.action, message: (err as Error)?.message,
@@ -275,11 +309,25 @@ export async function wirePhase2Route<T>(args: WirePhase2RouteArgs<T>): Promise<
               try { args.onSettlementPending?.(result.settlementPending); } catch { /* reporting never fails finished work */ }
             }
             return { ok: true, result: result.result };
-          case 'already_settled':
-            // This exact request was already charged and answered: never re-run it for free.
+          case 'already_settled': {
+            // This exact request was already charged: never re-run it for free - REPLAY its stored result (a lost
+            // response must not mean "paid for nothing"). A read error is 503 retryable; a charged request with no
+            // stored result (before this store existed) stays 409 ALREADY_PROCESSED.
             incrCounter('duplicate_prevention_hits_total');
+            let stored;
+            try {
+              stored = await loadBilledResult({ scope: resultScope, orgId: args.organizationId, key: identity });
+            } catch (readErr) {
+              logger.error('phase2_route_replay_read_failed', { surface: args.surface, org: args.organizationId, message: (readErr as Error)?.message });
+              throw new BilledRouteReplayUnavailableError(args.surface);
+            }
+            if (stored.found) {
+              incrCounter('phase2_route_replayed_total');
+              return { ok: true, result: stored.value as T };
+            }
             logger.info('phase2_route_already_processed', { surface: args.surface, org: args.organizationId });
             throw new BilledRouteAlreadyProcessedError(args.surface);
+          }
           case 'already_released':
             // That attempt failed and was NOT charged: reclaim the next slot so the retry runs (charged once).
             continue;

@@ -8,6 +8,8 @@
  *   500 { error, code: 'RECLAIM_CAP_EXHAUSTED', retryable: false }   every retry slot of this request failed
  *                                               uncharged - OUR failure (critical anomaly raised); start a new request
  *   503 { error, code: 'PRICING_UNAVAILABLE' } the action has no active price - a configuration gap, never "top up"
+ *   503 { error, code: 'REPLAY_UNAVAILABLE', retryable: true }   an already-charged request's stored result could not
+ *                                               be read - retry with the same key (never "start a new request")
  * Returns null for any other error - the route's own handling applies.
  */
 import { PaymentRequiredError } from './phase2EnforcementGate';
@@ -16,6 +18,7 @@ import {
   BilledRouteReclaimExhaustedError,
   BilledRoutePaymentRequiredError,
   BilledRoutePricingUnavailableError,
+  BilledRouteReplayUnavailableError,
 } from './phase2RouteWiring';
 
 export type BilledRouteHttpBody = { error: string; code: string; required?: number; balance?: number; retryable?: boolean };
@@ -36,6 +39,9 @@ export function billedRouteHttpError(err: unknown): { status: number; body: Bill
   }
   if (err instanceof BilledRouteReclaimExhaustedError) {
     return { status: 500, body: { error: err.message, code: 'RECLAIM_CAP_EXHAUSTED', retryable: false } };
+  }
+  if (err instanceof BilledRouteReplayUnavailableError) {
+    return { status: 503, body: { error: err.message, code: 'REPLAY_UNAVAILABLE', retryable: true } };
   }
   if (err instanceof BilledRoutePricingUnavailableError) {
     return { status: 503, body: { error: err.message, code: 'PRICING_UNAVAILABLE' } };
