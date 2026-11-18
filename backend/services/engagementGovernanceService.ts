@@ -26,6 +26,17 @@ const DEFAULTS: EngagementControls = {
   digest_generation_enabled: true,
 };
 
+/** Fail-closed answer when the controls cannot be read: no engagement AI work runs on an unknown setting. */
+const ALL_OFF: EngagementControls = {
+  auto_reply_enabled: false,
+  bulk_reply_enabled: false,
+  ai_suggestions_enabled: false,
+  triage_engine_enabled: false,
+  opportunity_detection_enabled: false,
+  response_strategy_learning_enabled: false,
+  digest_generation_enabled: false,
+};
+
 export async function getControls(organizationId: string): Promise<EngagementControls> {
   if (!organizationId) return DEFAULTS;
 
@@ -34,7 +45,14 @@ export async function getControls(organizationId: string): Promise<EngagementCon
     .eq('organization_id', organizationId)
     .maybeSingle();
 
-  if (error || !data) return DEFAULTS;
+  // Reads contract (c6, F2b 2026-11-18): a FAILED control read is not "no row". Defaulting to DEFAULTS (all ON) on an
+  // error switched every paid engagement AI feature on for the company whenever the read failed. Fail CLOSED: every
+  // control OFF for this call, logged. A genuinely absent row still means DEFAULTS (product decision pending: opt-in).
+  if (error) {
+    console.error('[engagementGovernance] engagement_controls_read_failed', { organizationId, message: error.message });
+    return { ...ALL_OFF };
+  }
+  if (!data) return DEFAULTS;
 
   return {
     auto_reply_enabled: data.auto_reply_enabled ?? true,
