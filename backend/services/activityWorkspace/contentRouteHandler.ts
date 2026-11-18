@@ -26,6 +26,7 @@ import { isUuid } from '@/lib/shared/uuid';
 import { checkRateLimit } from '@/lib/auth/rateLimit';
 import { resolveMonetizationFeature } from '@/shared/monetization/featureRegistry';
 
+import { billedRouteHttpError } from '@/backend/services/billing/billedRouteHttpError';
 import { type WorkspaceAction, type ImprovementType, type ContentWriteTarget, MonetizedWorkflowError, runReservedFixedWorkflow, asObject, persistMasterToDb, persistVariantsToDb, FAILED_VARIANT_PREFIXES } from './contentRouteModel';
 
 /** An 8-4-4-4-12 hex group inside a longer string — a mangled row id, never a transient key. */
@@ -750,7 +751,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         return res.status(400).json({ error: 'companyId required for credit reservation on refine_variant' });
       }
       const { isRefineVariantBillingEnabled, runBilledAiCompletion } = await import('@/backend/services/billing');
-      const activityDbIdForBilling = String((req.body as any)?.activity?.id || `refine-${platform}-${Date.now()}`).trim();
+      // b3 BLOCKING-launch: no Date.now() fallback. On the BILLED path the identity is the client's Idempotency-Key
+      // (required - recovery below); this reference only scopes it.
+      const activityDbIdForBilling = String((req.body as any)?.activity?.id || `refine-${platform}`).trim();
       const refineBilling = await isRefineVariantBillingEnabled({ organizationId: companyId });
 
       if (!refineBilling.enabled) {
@@ -807,7 +810,30 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         });
       }
 
+      const masterForRefine = asObject((dailyExecutionItemRaw as any)?.master_content);
       const billed = await runBilledAiCompletion({
+        // b3/7c: the refined text is post-processed and PERSISTED (variant write, strict; then the result store, read
+        // back) INSIDE the charge; a same-key retry replays it; a lost result is refunded by the system.
+        recovery: {
+          surface: 'activity-workspace.refine_variant',
+          scope: 'activity-workspace:refine_variant',
+          postProcess: async (text: string) => {
+            const raw = String(text || '').trim();
+            if (!raw) throw new Error('AI refinement returned empty output');
+            const out = await processContent({ content: raw, platform, card_type: 'repurpose_card', enforce_char_limit: true });
+            return out.content || raw;
+          },
+          durableWrite: async (value: unknown) => {
+            await persistVariantsToDb(writeTarget, [{
+              platform,
+              content_type: contentType,
+              generated_content: String(value),
+              generation_status: 'generated',
+              refinement_status: 'in_progress',
+              refinement_finalized: false,
+            }], masterForRefine, { strict: true });
+          },
+        },
         module:        'http:activity_workspace_refine_variant',
         userId:        user.id,
         orgId:         companyId,
@@ -857,30 +883,16 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         },
       });
 
-      let refined = String(billed.text || '').trim();
+      // The refined text was post-processed and persisted inside the charge (or replayed, or returned free when it
+      // could not be persisted - billed.unbilled).
+      const refined = String(billed.value ?? '').trim();
       if (!refined) {
         return res.status(500).json({ error: 'AI refinement returned empty output' });
       }
-      const refinedOutput = await processContent({
-        content: refined,
-        platform,
-        card_type: 'repurpose_card',
-        enforce_char_limit: true,
-      });
-      refined = refinedOutput.content || refined;
-
-      const activityDbId = String((req.body as any)?.activity?.id || '').trim();
-      await persistVariantsToDb(writeTarget, [{
-        platform,
-        content_type: contentType,
-        generated_content: refined,
-        generation_status: 'generated',
-        refinement_status: 'in_progress',
-        refinement_finalized: false,
-      }], asObject((dailyExecutionItemRaw as any)?.master_content));
       return res.status(200).json({
         success: true,
         refined_content: refined,
+        ...(billed.replayed ? { replayed: true } : {}),
       });
     }
 
@@ -895,13 +907,17 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       ? (String(creatorAsset.description ?? '').trim() || String(creatorAsset.transcript ?? '').trim() || String(creatorAsset.theme ?? '').trim() || String(item.topic ?? item.title ?? '').trim())
       : '';
 
+    let variantsReplayed = false;
     const generatedVariantResult = await runReservedFixedWorkflow({
       userId: user.id,
       companyId,
       action: 'content_basic',
       referenceType: 'activity_platform_variants',
-      referenceId: activityDbId || String(item.execution_id || Date.now()),
+      // b3 BLOCKING-launch: no Date.now() fallback - the request identity is the client's Idempotency-Key (required,
+      // recovery below); the reference only scopes it.
+      referenceId: activityDbId || String(item.execution_id || 'workspace'),
       note: 'Generated platform variants',
+      recovery: { surface: 'activity-workspace.generate_variants', scope: 'activity-workspace:generate_variants', idempotencyKeyHeader: req.headers['idempotency-key'], onReplay: () => { variantsReplayed = true; } },
       multiplier: Math.max(1, activePlatformTargets.length || schedules.length || 1),
       executor: async () => {
         // Closure Pass — Phase 4. Enrich item with governance before
@@ -910,7 +926,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         let reservedItemWithMaster = governedItem;
         if (!(governedItem as any).master_content && !creatorMasterText) {
           const generatedMaster = await generateMasterContentFromIntent(governedItem as any);
-          await persistMasterToDb(writeTarget, generatedMaster);
+          await persistMasterToDb(writeTarget, generatedMaster, { strict: true });   // a failed write releases the charge
           reservedItemWithMaster = { ...governedItem, master_content: generatedMaster };
         } else if (creatorMasterText) {
           reservedItemWithMaster = {
@@ -937,7 +953,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         await persistVariantsToDb(
           writeTarget,
           reservedSuccessfulVariants as Array<Record<string, unknown>>,
-          ((reservedItemWithMaster as any).master_content ?? null) as Record<string, unknown> | null
+          ((reservedItemWithMaster as any).master_content ?? null) as Record<string, unknown> | null,
+          { strict: true },   // a failed write releases the charge (b3)
         );
 
         return {
@@ -951,6 +968,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       success: true,
       platform_variants: generatedVariantResult.platform_variants,
       master_content: generatedVariantResult.master_content,
+      ...(variantsReplayed ? { replayed: true } : {}),
     });
 
     // If no master yet: auto-generate it now (first repurpose button press on any platform).
@@ -1010,6 +1028,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     if (error instanceof MonetizedWorkflowError) {
       return res.status(error.statusCode).json(error.payload);
     }
+    // b3 2026-11-18: the standard billed shapes (key required, replay unavailable, result unavailable + refund, ended).
+    { const billedErr = billedRouteHttpError(error); if (billedErr) return res.status(billedErr.status).json(billedErr.body); }
     if ((error as Error & { code?: string })?.code === 'VARIANT_GENERATION_FAILED') {
       return res.status(500).json({
         error: 'VARIANT_GENERATION_FAILED',
