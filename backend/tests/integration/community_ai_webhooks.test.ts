@@ -45,6 +45,10 @@ jest.mock('../../../lib/security/safeFetch', () => ({
   safeFetch: jest.fn(async (url: string) => { delivered.push(url); return { ok: true, status: 200 }; }),
 }));
 
+// SCOPE (7c): these cases prove webhook ISOLATION, which lives entirely in sendCommunityAiWebhooks' four .eq filters and
+// is shared by all three of its callers (ActionExecutorContracts, ActionExecutorRuntime, Scheduler). "An action
+// failure emits a webhook" is a PER-CALL-SITE property: only the RPA path is exercised here; the API path is not
+// terminal (API -> browser fallback) and the other call sites are NOT covered by these cases.
 // A TERMINAL failure is needed for the 'failed' webhook: an API failure now falls back once to browser dispatch, which
 // is in-flight and emits no webhook (communityAiActionExecutorRuntime: API -> Browser fallback; terminal events only).
 // RPA mode with a failing RPA task is the deterministic terminal-failure path through the same emitWebhook.

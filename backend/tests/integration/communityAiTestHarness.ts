@@ -132,8 +132,9 @@ export const seedConnectedAccount = (opts: {
 const resolveSelect = (table: string, state: any) => {
   // PostgREST semantics (PL-31): .eq(col, null|undefined) sends `col=eq.null`, which matches NO row (SQL `col = NULL` is
   // never true). The per-table branches below used `if (state.filters.x)`, which SKIPPED a null/undefined filter and
-  // returned EVERY tenant's rows - a cross-tenant answer the real database can never give.
-  if (Object.values(state.filters).some((v) => v === null || v === undefined)) {
+  // returned EVERY tenant's rows - a cross-tenant answer the real database can never give. Scoped to .eq() via
+  // state.eqNull (set in the eq recorder), not to state.filters, so no other operator inherits it.
+  if (state.eqNull) {
     return { data: state.single ? null : [], error: null };
   }
   if (table === 'community_ai_actions') {
@@ -400,7 +401,13 @@ export const buildQuery = (table: string) => {
   } = { filters: {} };
   const query: any = {
     select: jest.fn().mockReturnThis(),
-    eq: jest.fn((field: string, value: any) => { state.filters[field] = value; return query; }),
+    eq: jest.fn((field: string, value: any) => {
+      // Tracked HERE, on .eq() only (7c): PostgREST `col=eq.null` matches nothing, but a future `.is(col, null)` must
+      // still match NULL rows - so the null rule below must never be inherited by another operator via state.filters.
+      if (value === null || value === undefined) state.eqNull = true;
+      state.filters[field] = value;
+      return query;
+    }),
     gte: jest.fn((field: string, value: any) => { state.gteFilter = { field, value }; return query; }),
     limit: jest.fn((value: number) => { state.limitValue = value; return query; }),
     lte: jest.fn((field: string, value: any) => { state.lteFilter = { field, value }; return query; }),
