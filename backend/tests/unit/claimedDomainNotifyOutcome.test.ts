@@ -72,9 +72,16 @@ it("'sent': EVERY active admin of THIS company is notified (no inactive admin, m
   expect(await notifyAdminAndProspectOfClaimedDomain(db, input)).toEqual({ adminNotice: 'sent' });
   expect(mockAdminSends).toEqual(['ada@acme.com', 'bob@acme.com']);
 });
-it('the prospect email carries ONE contact: the oldest active admin', async () => {
+it("CI-309: the prospect is NEVER emailed (no admin contact), on the first attempt or any repeat", async () => {
   await notifyAdminAndProspectOfClaimedDomain(db, input);
-  expect(mockProspectSends).toEqual([expect.objectContaining({ admin: { name: 'Ada', email: 'ada@acme.com' } })]);
+  await notifyAdminAndProspectOfClaimedDomain(db, input);
+  expect(mockProspectSends).toEqual([]);
+  expect(mockAdminSends).toEqual(['ada@acme.com', 'bob@acme.com']);
+});
+it('CI-309: emailService has no prospect referral sender left (the admin-contact email path is gone)', () => {
+  const actual = jest.requireActual('../../services/emailService');
+  expect(actual.sendCompanyAdminReferral).toBeUndefined();
+  expect(typeof actual.sendInboundSignupNoticeToAdmin).toBe('function');
 });
 it("one admin's send failing still counts as notified when another succeeded", async () => {
   mockFailingAddresses.add('ada@acme.com');

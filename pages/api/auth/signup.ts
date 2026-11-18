@@ -222,7 +222,6 @@ async function handler(
         companyId:     company.id,
         companyName:   company.name,
         nowIso:        new Date().toISOString(),
-        notifyProspect: false,
       });
 
       logger.info('auth_signup_company_claimed_blocked', {

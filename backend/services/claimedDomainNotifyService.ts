@@ -2,19 +2,20 @@
  * claimedDomainNotifyService.ts
  *
  * When a verified user from an already-claimed email domain tries to create
- * an account/company, we must NOT auto-join them. Instead both parties are
- * emailed:
- *   1) the prospect gets the existing admin's contact details so they know
- *      who to ask for an invite;
- *   2) EVERY active company admin (bounded) gets a notice that a real, verified
- *      person from their domain just tried to sign up, with a link to invite them.
+ * an account/company, we must NOT auto-join them. Instead EVERY active company
+ * admin (bounded) gets a notice that a person from their domain just tried to
+ * sign up, with a link to invite them.
  *
- * Both emails are deduped per prospect email via `signup_referrals` (one row per prospect):
- *   - the PROSPECT email by `admin_email_sent_at`;
- *   - the ADMIN notice by `admin_user_id`, written ONLY after the notice was actually sent - so a
- *     failed send is retried on the next attempt, and a sent one is never repeated.
- * WARNING - BOTH COLUMN NAMES SAY THE OPPOSITE OF WHAT THEY MARK (a rename is pending; it needs a
- * migration). Do NOT "correct" the code to match the names: that reintroduces the re-notify bug.
+ * CI-309 (2026-11-19): the prospect is sent NOTHING. The former prospect email
+ * ("company referral") carried the admin's name and address and is removed, with
+ * its `admin_email_sent_at` marker (no longer written; the column stays until a
+ * migration retires it).
+ *
+ * The admin notice is deduped per prospect email via `signup_referrals` (one row per prospect) by
+ * `admin_user_id`, written ONLY after the notice was actually sent - so a failed send is retried on
+ * the next attempt, and a sent one is never repeated.
+ * WARNING - THE COLUMN NAME SAYS THE OPPOSITE OF WHAT IT MARKS (a rename is pending; it needs a
+ * migration). Do NOT "correct" the code to match the name: that reintroduces the re-notify bug.
  * `admin_user_id` references users(id) ON DELETE SET NULL, so hard-deleting the notified admin's users
  * row would reset the marker and re-enable the notice (no app path hard-deletes users today).
  * Because callers notify only on a VERIFIED email-domain match, one prospect maps to one company, so
@@ -37,10 +38,7 @@
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { logger } from './logger';
-import {
-  sendCompanyAdminReferral,
-  sendInboundSignupNoticeToAdmin,
-} from './emailService';
+import { sendInboundSignupNoticeToAdmin } from './emailService';
 
 const SUPPORT_EMAIL = 'support@omnivyra.com';
 
@@ -57,12 +55,6 @@ export interface ClaimedDomainNotifyInput {
   companyId: string;
   companyName: string | null;
   nowIso: string;
-  /**
-   * false = do NOT send the prospect the "company referral" email (it carries the admin's name and
-   * email). Onboarding's join request passes false: the requester learns nothing about the company's
-   * admins (CI-309 ruling, 2026-11-19). Omitted = true (the pre-signup gate in pages/api/auth/signup.ts).
-   */
-  notifyProspect?: boolean;
 }
 
 /**
@@ -113,21 +105,16 @@ export async function notifyAdminAndProspectOfClaimedDomain(
     const admins = adminIds
       .map((id) => byId.get(id))
       .filter((u): u is AdminUser & { email: string } => typeof u?.email === 'string' && u.email.length > 0);
-    // The prospect's email carries ONE contact: the oldest active admin.
-    const adminEmail = admins[0]?.email ?? null;
-    const adminName = admins[0]?.name ?? null;
     // A failed admin lookup is 'failed', never 'no_admin' (a null error is not an answer).
     if (!adminRoleErr && !adminUserErr && admins.length === 0) adminNotice = 'no_admin';
 
-    // Dedupe via signup_referrals — one row per (prospect email). Tracks
-    // separately whether each of the two emails has already gone out.
+    // Dedupe via signup_referrals — one row per (prospect email); admin_user_id marks the admin notice.
     const { data: existingReferral } = await db
       .from('signup_referrals')
-      .select('id, admin_email_sent_at, attempt_count, admin_user_id')
+      .select('id, attempt_count, admin_user_id')
       .eq('email', input.prospectEmail)
       .maybeSingle();
 
-    let shouldSendProspectEmail = false;
     let referralId: string | null = (existingReferral as { id?: string } | null)?.id ?? null;
 
     if (!existingReferral) {
@@ -151,7 +138,6 @@ export async function notifyAdminAndProspectOfClaimedDomain(
           message: insertErr.message,
         });
       } else {
-        shouldSendProspectEmail = true;
         referralId = (inserted as { id?: string } | null)?.id ?? null;
       }
     } else {
@@ -162,37 +148,9 @@ export async function notifyAdminAndProspectOfClaimedDomain(
           attempt_count:   ((existingReferral as { attempt_count?: number }).attempt_count ?? 1) + 1,
         })
         .eq('id', (existingReferral as { id: string }).id);
-      shouldSendProspectEmail = !(existingReferral as { admin_email_sent_at?: string | null }).admin_email_sent_at;
     }
 
-    // 1) Prospect email — admin contact details (deduped via admin_email_sent_at). Never for a caller
-    //    that opted out (onboarding join request: no admin contact reaches the requester).
-    if (shouldSendProspectEmail && input.notifyProspect !== false) {
-      try {
-        await sendCompanyAdminReferral(
-          input.prospectEmail,
-          {
-            admin:        adminEmail ? { name: adminName, email: adminEmail } : null,
-            companyName:  input.companyName,
-            supportEmail: SUPPORT_EMAIL,
-          },
-          `company-referral:${input.prospectEmail}`,
-        );
-        if (referralId) {
-          await db
-            .from('signup_referrals')
-            .update({ admin_email_sent_at: input.nowIso })
-            .eq('id', referralId);
-        }
-      } catch (err) {
-        logger.warn('claimed_domain_prospect_email_send_failed', {
-          email:   input.prospectEmail,
-          message: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
-
-    // 2) Admin notification — best-effort, deduped by the admin_user_id marker (the idempotency key
+    // Admin notification — best-effort, deduped by the admin_user_id marker (the idempotency key
     //    below is NOT applied by the email function; it is kept only for log correlation).
     const priorNotifiedAdmin = (existingReferral as { admin_user_id?: string | null } | null)?.admin_user_id ?? null;
     if (priorNotifiedAdmin) {

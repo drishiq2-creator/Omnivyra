@@ -259,9 +259,6 @@ async function extensionLeaseHandout(): Promise<number> {
 /** Row 2: emailService transactional helpers → edge function send-transactional-email. */
 async function transactionalEmail(kind: string): Promise<number> {
   switch (kind) {
-    case 'company_referral':
-      await emailService.sendCompanyAdminReferral(EMAIL, { admin: null, companyName: null, supportEmail: 'support@example.com' });
-      break;
     case 'team_invite':
       await emailService.sendInvite(EMAIL, 'https://example.com/invite');
       break;
@@ -297,7 +294,6 @@ const PATHS: Array<[string, () => Promise<number>]> = [
   ['extension lease handout (GET /api/extension/commands)', extensionLeaseHandout],
   ['WhatsApp broadcast person anchor (whatsappBroadcastService.processBatch)', whatsappPersonAnchor],
   // K-6 is undecided for these; only E4 (domain reminder) is a decided exemption and is not listed.
-  ['transactional company_referral email (emailService.sendCompanyAdminReferral)', () => transactionalEmail('company_referral')],
   ['transactional team_invite email (emailService.sendInvite)', () => transactionalEmail('team_invite')],
   ['transactional inbound_signup_notice email (emailService.sendInboundSignupNoticeToAdmin)', () => transactionalEmail('inbound_signup_notice')],
   ['transactional credit_alert email (emailService.sendCreditAlert)', () => transactionalEmail('credit_alert')],

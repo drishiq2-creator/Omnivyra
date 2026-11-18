@@ -122,7 +122,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse<Result>) {
    * Rule 5 / CI-309 - a verified user whose email domain belongs to an existing company they are not a
    * member of. No auto-join and NO disclosure: the requester gets only the neutral join-request notice,
    * and the company's active admins are emailed (requester's email; they approve by inviting from team
-   * settings). The requester is never sent the admin's contact (notifyProspect: false).
+   * settings). The requester is never sent anything about the admins.
    *
    * Called ONLY with a company reached by the requester's verified email domain. The admin email is sent
    * AFTER the response (keepAliveAfterResponse: the platform's waitUntil, else after the reply is
@@ -143,7 +143,6 @@ async function handler(req: NextApiRequest, res: NextApiResponse<Result>) {
           companyId:      companyIdToJoin,
           companyName:    companyNameToJoin,
           nowIso:         new Date().toISOString(),
-          notifyProspect: false,
         });
         logger.info('onboarding_join_request_admin_notice', { companyId: companyIdToJoin, reason, adminNotice: outcome.adminNotice });
       } catch (err) {

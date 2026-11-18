@@ -5,14 +5,16 @@
  * by Supabase Auth itself via the SMTP configured at the project level —
  * this file does NOT touch those.
  *
- * The three helpers below are for emails Supabase Auth cannot send:
+ * The helpers below are for emails Supabase Auth cannot send:
  *
  *   sendInvite                       — team invitation with our custom token URL
- *   sendCompanyAdminReferral         — "your company is already on Omnivyra"
  *   sendInboundSignupNoticeToAdmin   — admin notice when a prospect from the
  *                                      same domain tries to sign up
  *
- * All three delegate to the `send-transactional-email` Supabase Edge
+ * (CI-309, 2026-11-19: the prospect-facing "company referral" sender, which carried the admin's
+ * name and email, is removed - no caller may email a prospect another person's contact.)
+ *
+ * All of them delegate to the `send-transactional-email` Supabase Edge
  * Function, which holds the SES credentials and renders the HTML. Callers
  * remain best-effort: a delivery failure throws, and the caller decides
  * whether to retry, surface to the user, or swallow it.
@@ -111,14 +113,6 @@ type InvitePayload = {
   inviteUrl: string;
 };
 
-type CompanyReferralPayload = {
-  type: 'company_referral';
-  recipientEmail: string;
-  admin: { name: string | null; email: string } | null;
-  companyName: string | null;
-  supportEmail: string;
-};
-
 type InboundSignupNoticePayload = {
   type: 'inbound_signup_notice';
   recipientEmail: string;
@@ -157,7 +151,6 @@ type CreditAlertPayload = {
 
 type EmailPayload =
   | InvitePayload
-  | CompanyReferralPayload
   | InboundSignupNoticePayload
   | InviteCredentialsPayload
   | ActivationOutreachPayload
@@ -186,27 +179,6 @@ export async function sendInvite(
 ): Promise<void> {
   await invokeEdgeFunction(
     { type: 'team_invite', recipientEmail: email, inviteUrl: inviteLink },
-    { idempotencyKey },
-  );
-}
-
-export async function sendCompanyAdminReferral(
-  recipientEmail: string,
-  opts: {
-    admin: { name: string | null; email: string } | null;
-    companyName: string | null;
-    supportEmail: string;
-  },
-  idempotencyKey?: string,
-): Promise<void> {
-  await invokeEdgeFunction(
-    {
-      type: 'company_referral',
-      recipientEmail,
-      admin: opts.admin,
-      companyName: opts.companyName,
-      supportEmail: opts.supportEmail,
-    },
     { idempotencyKey },
   );
 }

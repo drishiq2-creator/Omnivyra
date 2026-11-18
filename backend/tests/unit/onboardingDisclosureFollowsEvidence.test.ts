@@ -5,7 +5,7 @@
  * CI-309 re-derivation (2026-11-19, owner + coordinator ruling): a name / typed website is no longer a
  * match at all, and even a VERIFIED email-domain match discloses nothing - the requester gets the same
  * neutral join-request notice whatever the admin-notice outcome, the admin is notified after the
- * response, and the requester is never sent the admin's contact (notifyProspect: false).
+ * response, and the requester is never sent the admin's contact (the service has no prospect email).
  * Harness: closure015m's routeAuthHarness wiring (real setup-company over in-memory tables).
  */
 import { seed, calls, invoke } from '../helpers/routeAuthHarness';
@@ -177,7 +177,7 @@ describe('a name / typed website is not a match', () => {
     expect(r.body).toEqual(NEUTRAL);
     expect(leaks(r.body)).toEqual([]);
     expect(mockNotified).toHaveLength(1);
-    expect(mockNotified[0]).toMatchObject({ companyId: CO_W, notifyProspect: false });
+    expect(mockNotified[0]).toMatchObject({ companyId: CO_W });
     expect(membershipWrites()).toEqual([]);
   });
 
@@ -201,7 +201,7 @@ describe('verified email-domain match (domain-first lookup)', () => {
     expect(r.status).toBe(200);
     expect(r.body).toEqual(NEUTRAL);
     expect(leaks(r.body)).toEqual([]);
-    expect(mockNotified).toEqual([expect.objectContaining({ companyId: CO_W, prospectEmail: WORK, notifyProspect: false })]);
+    expect(mockNotified).toEqual([expect.objectContaining({ companyId: CO_W, prospectEmail: WORK })]);
     expect(membershipWrites()).toEqual([]);
   });
 

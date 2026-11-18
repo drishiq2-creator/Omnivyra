@@ -98,11 +98,6 @@ export type VerifiedDomainLookup =
   | { ok: true; domain: string | null; companies: VerifiedDomainCompany[] }
   | { ok: false };
 
-export type CompanyAdmin = {
-  user_id: string;
-  email: string | null;
-};
-
 /**
  * CI-231 exact-domain binding (owner + coordinator ruling, 2026-11-19): the ONLY way a signing-up user
  * reaches an existing company is their own VERIFIED email domain. A company name or a website the user
@@ -137,78 +132,4 @@ export async function findCompaniesByVerifiedEmailDomain(
     }
   }
   return { ok: true, domain, companies: [...byId.values()] };
-}
-
-/**
- * Get all active COMPANY_ADMIN users for a given company (for notifications).
- */
-export async function getCompanyAdmins(companyId: string): Promise<CompanyAdmin[]> {
-  const { data: roles } = await ownedDbTable('user_company_roles')
-    .select('user_id')
-    .eq('company_id', companyId)
-    .eq('role', 'COMPANY_ADMIN')
-    .eq('status', 'active');
-
-  if (!roles?.length) return [];
-
-  const admins: CompanyAdmin[] = [];
-  for (const row of roles) {
-    try {
-      const { data: userData } = await ownedDbTable('users')
-        .select('email')
-        .eq('id', row.user_id)
-        .maybeSingle();
-      admins.push({ user_id: row.user_id, email: (userData as any)?.email ?? null });
-    } catch {
-      admins.push({ user_id: row.user_id, email: null });
-    }
-  }
-  return admins;
-}
-
-/**
- * Insert an in-app notification for every COMPANY_ADMIN of the company,
- * informing them that a new user self-joined via domain match.
- */
-export async function notifyCompanyAdminsOfSelfJoin(params: {
-  companyId: string;
-  companyName: string;
-  newUserId: string;
-  newUserEmail: string | null;
-  matchType: 'website_domain' | 'admin_email_domain' | 'name';
-}): Promise<void> {
-  const { companyId, companyName, newUserId, newUserEmail, matchType } = params;
-
-  const admins = await getCompanyAdmins(companyId);
-  if (!admins.length) return;
-
-  const emailDomain = newUserEmail ? extractDomain(newUserEmail) : null;
-  const matchReason =
-    matchType === 'website_domain'
-      ? `company website (${companyName.toLowerCase().replace(/\s+/g, '')})`
-      : matchType === 'admin_email_domain'
-      ? `email domain (@${emailDomain ?? 'unknown'})`
-      : `company name "${companyName}"`;
-
-  const now = new Date().toISOString();
-  const notifications = admins.map((admin) => ({
-    user_id:    admin.user_id,
-    type:       'self_join',
-    title:      'New user joined your company',
-    message:    `${newUserEmail ?? 'A new user'} signed up and was automatically added to ${companyName} as a Content Creator — matched by ${matchReason}. You can manage their access in Team Settings.`,
-    metadata: {
-      company_id:     companyId,
-      new_user_id:    newUserId,
-      new_user_email: newUserEmail,
-      match_type:     matchType,
-      joined_at:      now,
-    },
-    is_read:    false,
-    created_at: now,
-  }));
-
-  const { error } = await ownedDbTable('notifications').insert(notifications);
-  if (error) {
-    console.error('[companyMatch] notification insert failed:', error.message);
-  }
 }
