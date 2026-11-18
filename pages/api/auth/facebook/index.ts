@@ -21,10 +21,15 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       return res.status(401).json({ error: 'Login session required — please log in and try again' });
     }
     const companyId = (req.query.companyId as string) || undefined;
-    if (companyId) {
-      const access = await enforceCompanyAccess({ req, res, companyId });
-      if (!access) return;
+    // b3 (11-19): a Meta connection is ALWAYS for a company. A company-less connect stored Meta tokens in an
+    // untenanted social_accounts row that publishing never uses (postSocialAccountResolver skips company_id
+    // NULL) - a dormant credential and pure liability. With a company selected the UI uses the community-ai
+    // connectors; this route is refused without one, before any state is minted.
+    if (!companyId) {
+      return res.status(400).json({ error: 'Choose a company first', code: 'COMPANY_REQUIRED' });
     }
+    const access = await enforceCompanyAccess({ req, res, companyId });
+    if (!access) return;
 
     const credentials = await getOAuthCredentialsForPlatform('facebook');
     if (!credentials?.client_id) {

@@ -122,12 +122,16 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       logOAuthEvent({ event: 'oauth_failure', provider: 'facebook', callback_host: callbackHost, company_id: companyId ?? null, user_id: sessionUser.id, state_user_id: stateUserId, failure_point: 'invalid_oauth_state', failure_detail: 'state user does not match session user' });
       return res.redirect(`${errDest}?error=${encodeURIComponent('This connection was started by a different user — please try again')}`);
     }
-    if (companyId) {
-      const tenant = await assertTenantAccess({ userId: sessionUser.id, organizationId: companyId });
-      if (tenant.ok !== true) {
-        logOAuthEvent({ event: 'oauth_failure', provider: 'facebook', callback_host: callbackHost, company_id: companyId, user_id: sessionUser.id, state_user_id: stateUserId ?? null, failure_point: 'unauthorized', failure_detail: `company access denied (${tenant.reason})` });
-        return res.redirect(`${errDest}?error=${encodeURIComponent('You do not have access to this company')}`);
-      }
+    // b3 (11-19): no company, no connection. A state without one (minted before the start route required it)
+    // is refused BEFORE the token exchange, so no untenanted Meta token is ever stored.
+    if (!companyId) {
+      logOAuthEvent({ event: 'oauth_failure', provider: 'facebook', callback_host: callbackHost, company_id: null, user_id: sessionUser.id, state_user_id: stateUserId ?? null, failure_point: 'unauthorized', failure_detail: 'no company in state (COMPANY_REQUIRED)' });
+      return res.redirect(`${errDest}?error=${encodeURIComponent('Choose a company first')}`);
+    }
+    const tenant = await assertTenantAccess({ userId: sessionUser.id, organizationId: companyId });
+    if (tenant.ok !== true) {
+      logOAuthEvent({ event: 'oauth_failure', provider: 'facebook', callback_host: callbackHost, company_id: companyId, user_id: sessionUser.id, state_user_id: stateUserId ?? null, failure_point: 'unauthorized', failure_detail: `company access denied (${tenant.reason})` });
+      return res.redirect(`${errDest}?error=${encodeURIComponent('You do not have access to this company')}`);
     }
     const userId = sessionUser.id;
 
