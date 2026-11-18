@@ -19,7 +19,7 @@ jest.mock('../../services/creditExecutionService', () => ({
     ? { status: 'reserved', orgId: o.orgId, userId: o.userId, action: o.action, referenceType: o.referenceType, referenceId: o.referenceId,
         idempotencyKey: o.idempotencyKey, holdTransactionId: 'hold-1', creditsReserved: o.amountOverride, split: { free: o.amountOverride, paid: 0, incentive: 0 } }
     : reserveResult; },
-  confirmCreditReservationToActual: async (h: any, n: number) => { if (settleThrows) throw new Error('ledger down'); calls.push({ fn: 'confirmToActual', args: [h, n] }); return { status: 'confirmed' }; },
+  confirmCreditReservationToActual: async (h: any, n: number) => { if (settleThrows) throw new Error('ledger down'); calls.push({ fn: 'confirmToActual', args: [h, n], storedAtConfirm: mockStore.rows.length } as any); return { status: 'confirmed' }; },
   releaseCreditReservation: async (h: any) => { if (settleThrows) throw new Error('ledger down'); calls.push({ fn: 'release', args: [h] }); return { status: 'released' }; },
   makeIdempotencyKey: (...p: string[]) => p.join(':'),
 }));
@@ -27,6 +27,9 @@ const mockInfo = jest.fn();
 jest.mock('../../services/logger', () => ({ logger: { info: (...a: unknown[]) => mockInfo(...a), warn: jest.fn(), error: jest.fn() } }));
 let mockSwitch: any = { enabled: true };
 const mockAnomalies: any[] = [];
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const mockStore = require('../helpers/fakeIdempotencyStore').makeFakeIdempotencyStore();
+jest.mock('../../db/writeOwner', () => ({ ownedDbTable: (t: string) => mockStore.ownedDbTable(t) }));
 jest.mock('../../services/billing/billingAuditEmitter', () => ({ emitAnomaly: (a: unknown) => { mockAnomalies.push(a); } }));
 jest.mock('../../services/intelligenceConfigService', () => ({
   getResolvedConfigStrict: async (companyId: string | null, jobType: string) => {
@@ -37,7 +40,7 @@ jest.mock('../../services/intelligenceConfigService', () => ({
 
 import {
   BLOG_CREDITS, holdBlog, isBlogHoldRefusal, partialBlogCredits, runBlogWithBilling, blogBillingOf,
-  blogReferenceId, blogGenerationRefusal, isBlogRefusal, __resetBlogSwitchAbsentReportForTests,
+  blogReferenceId, blogGenerationRefusal, isBlogRefusal, __resetBlogSwitchAbsentReportForTests, blogReplay,
 } from '../../services/blog/blogBilling';
 import { getActiveCreditHandle } from '../../services/billing/aiGatewayBillingGuard';
 
@@ -47,7 +50,8 @@ class QualityGate extends Error {}
 /** Simulates the gateway: each provider dispatch inside the scope calls the handle's onProviderCall. */
 const providerCalls = (n: number) => { for (let i = 0; i < n; i++) getActiveCreditHandle()?.onProviderCall?.(); };
 
-beforeEach(() => { calls.length = 0; reserveResult = { status: 'reserved' }; settleThrows = false; mockSwitch = { enabled: true }; mockInfo.mockClear(); });
+beforeEach(() => { calls.length = 0; reserveResult = { status: 'reserved' }; settleThrows = false; mockSwitch = { enabled: true }; mockInfo.mockClear();
+  mockStore.rows.length = 0; mockStore.failInsert = false; mockStore.failRead = false; mockAnomalies.length = 0; });
 
 async function held() {
   const h = await holdBlog({ orgId: ORG, userId: ORG, referenceId: REF, validateMembership: false });
@@ -66,10 +70,17 @@ describe('hold', () => {
     const r = await holdBlog({ orgId: ORG, userId: ORG, referenceId: REF, validateMembership: true });
     expect(r).toMatchObject({ ok: false, status: 409, code: 'BLOG_ALREADY_IN_PROGRESS', retryable: true });
   });
-  test('a key already settled (already_confirmed) -> 409 RESERVATION_ALREADY_SETTLED (the same click is charged once)', async () => {
+  test('charged earlier but NO stored result -> 409 BLOG_RESULT_UNAVAILABLE + critical anomaly, never "start a new request"', async () => {
     reserveResult = { status: 'already_confirmed' };
     const r = await holdBlog({ orgId: ORG, userId: ORG, referenceId: REF, validateMembership: true });
-    expect(r).toMatchObject({ ok: false, status: 409, code: 'RESERVATION_ALREADY_SETTLED', retryable: false });
+    expect(r).toMatchObject({ ok: false, status: 409, code: 'BLOG_RESULT_UNAVAILABLE', retryable: false });
+    expect((r as any).error).not.toMatch(/start/i);
+    expect(mockAnomalies).toEqual([expect.objectContaining({ kind: 'blog_result_lost', severity: 'critical' })]);
+  });
+  test('a key whose run failed and was released -> 409 BLOG_REQUEST_ENDED (not charged)', async () => {
+    reserveResult = { status: 'already_released' };
+    const r = await holdBlog({ orgId: ORG, userId: ORG, referenceId: REF, validateMembership: true });
+    expect(r).toMatchObject({ ok: false, status: 409, code: 'BLOG_REQUEST_ENDED', retryable: false });
   });
   test('a refused hold is a typed 402 with required/available', async () => {
     reserveResult = { status: 'insufficient_credits', required: 40, available: 12 };
@@ -87,7 +98,23 @@ describe('settle', () => {
     const h = await held();
     const r = await runBlogWithBilling({ reservation: h, run: async () => { providerCalls(3); return { ok: 1 }; }, isQualityGateRefusal: () => false });
     expect(r.billing).toEqual({ charged: 40, released: 0, reason: 'completed' });
-    expect(calls).toEqual([{ fn: 'confirmToActual', args: [expect.anything(), 40] }]);
+    expect(calls).toEqual([{ fn: 'confirmToActual', args: [expect.anything(), 40], storedAtConfirm: 1 }]);   // PERSISTED before the charge
+  });
+
+  test('7c/b3: written but NOT READABLE back -> NOT charged (released)', async () => {
+    const h = await held();
+    mockStore.failRead = true;
+    const r = await runBlogWithBilling({ reservation: h, run: async () => ({ ok: 1 }), isQualityGateRefusal: () => false });
+    expect(r.billing).toEqual({ charged: 0, released: 40, reason: 'unpersisted' });
+    expect(calls.map((c) => c.fn)).toEqual(['release']);
+  });
+  test('b3 invariant: the blog cannot be persisted -> NOT charged (released), still returned', async () => {
+    const h = await held();
+    mockStore.failInsert = true;
+    const r = await runBlogWithBilling({ reservation: h, run: async () => ({ ok: 1 }), isQualityGateRefusal: () => false });
+    expect(r.result).toEqual({ ok: 1 });
+    expect(r.billing).toEqual({ charged: 0, released: 40, reason: 'unpersisted' });
+    expect(calls.map((c) => c.fn)).toEqual(['release']);
   });
 
   test('quality-gate 422 -> REFUNDED IN FULL (owner), the error re-thrown carrying the summary', async () => {
@@ -129,8 +156,34 @@ describe('settle', () => {
   test('the counting scope is per blog: calls outside it are not counted', async () => {
     const h = await held();
     providerCalls(10);   // no active handle here
-    await runBlogWithBilling({ reservation: h, run: async () => { providerCalls(2); return 1; }, isQualityGateRefusal: () => false });
+    await runBlogWithBilling({ reservation: h, run: async () => { providerCalls(2); return { ok: 1 }; }, isQualityGateRefusal: () => false });
     expect(mockInfo).toHaveBeenCalledWith('blog_credit_settled', expect.objectContaining({ reason: 'completed', providerCalls: 2 }));
+  });
+});
+
+describe('replay store (b3 BLOCKING)', () => {
+  test('a charged blog is replayed for the same org + key: same content, billing says nothing new was charged', async () => {
+    const h = await held();
+    await runBlogWithBilling({ reservation: h, run: async () => ({ title: 'T', html: '<p>x</p>' }), isQualityGateRefusal: () => false });
+    const r = await blogReplay(ORG, REF);
+    expect(r).toEqual({ ok: true, body: { title: 'T', html: '<p>x</p>', billing: { charged: 0, released: 0, reason: 'replayed' } } });
+  });
+  test('TENANT-SCOPED: another org with the same key gets no replay', async () => {
+    const h = await held();
+    await runBlogWithBilling({ reservation: h, run: async () => ({ title: 'T' }), isQualityGateRefusal: () => false });
+    expect(await blogReplay('99999999-9999-4999-8999-999999999999', REF)).toEqual({ ok: true, body: null });
+  });
+  test('no stored result -> null (proceed to hold)', async () => {
+    expect(await blogReplay(ORG, REF)).toEqual({ ok: true, body: null });
+  });
+  test('a store READ error -> 503 retryable, never "start a new request"', async () => {
+    mockStore.failRead = true;
+    expect(await blogReplay(ORG, REF)).toMatchObject({ ok: false, status: 503, code: 'BLOG_RESULT_READ_FAILED', retryable: true });
+  });
+  test('a failed run stores nothing (nothing to replay)', async () => {
+    const h = await held();
+    await runBlogWithBilling({ reservation: h, run: async () => { throw new Error('x'); }, isQualityGateRefusal: () => false }).catch(() => undefined);
+    expect(mockStore.rows).toEqual([]);
   });
 });
 

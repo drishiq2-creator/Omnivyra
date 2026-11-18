@@ -15,6 +15,10 @@
  *            used to mint a random one, so a double-click was two charges (7c; b3 BLOCKING).
  *   SWITCH   super-admin activity control 'Blog Create' (intelligence job_type 'blog_generation') gates BOTH blog
  *            routes (403 BLOG_GENERATION_DISABLED); a read error refuses (503, retryable).
+ *   REPLAY   b3 BLOCKING 2026-11-18 (04's question): a blog that finished and was charged is STORED (before the settle)
+ *            in api_idempotency_keys (scope 'blog_post', caller_id 'org:<orgId>' - tenant-scoped, kept indefinitely:
+ *            no job deletes completed rows). The same key replays it (200, no new hold); a store read error is 503
+ *            retryable; a settled key with no stored result is never "start a new request" (critical anomaly).
  *   REF      BLOG_REFERENCE_CALLS (32) and phase2RouteWiring ROUTE_UNIT_CALLS.blog_generation (7) are two values for
  *            the same quantity; this file's 32 is the live one for blogs (7c).
  *   ONE BLOG = ONE HOLD: the routes no longer go through wirePhase2Route('blog_generation'), so the blog_generation
@@ -23,6 +27,7 @@
  * Manual hold lifecycle (convention on reserveCreditsForWork): hold before writes, exactly one settler (this
  * function's finally), a failed settle leaves the hold held (never released on doubt), never echoes internals.
  */
+import { createHash } from 'crypto';
 import {
   confirmCreditReservationToActual,
   makeIdempotencyKey,
@@ -33,6 +38,7 @@ import {
 import { runWithCreditHandle } from '../billing/aiGatewayBillingGuard';
 import { logger } from '../logger';
 import { getResolvedConfigStrict } from '../intelligenceConfigService';
+import { ownedDbTable } from '../../db/writeOwner';
 import { emitAnomaly } from '../billing/billingAuditEmitter';
 
 export const BLOG_ACTION = 'blog_post' as const;
@@ -56,7 +62,9 @@ export function isBlogHoldRefusal(r: BlogHoldResult): r is BlogHoldRefusal {
 export interface BlogBillingSummary {
   charged: number;
   released: number;
-  reason: 'completed' | 'failed' | 'quality_refund';
+  /** 'unpersisted': delivered in this response but could not be stored for replay -> released, not charged (b3). */
+  /** 'replayed': the stored result of an earlier, already-charged request with the same key - nothing new charged. */
+  reason: 'completed' | 'failed' | 'quality_refund' | 'replayed' | 'unpersisted';
   /** Present when the settle was ambiguous: the hold stays held and reconciles later (the shared 200 + settlementPending contract). */
   settlementPending?: { code: 'CREDIT_SETTLE_AMBIGUOUS' };
 }
@@ -125,6 +133,18 @@ export async function holdBlog(args: { orgId: string; userId: string; referenceI
     const { status: _s, ...handle } = r;
     return { ok: true, reservation: handle as CreditReservationHandle };
   }
+  if (r.status === 'already_confirmed') {
+    // Charged earlier under this key, and blogReplay found no stored result (the store write failed, or the run
+    // predates the store). Never "start a new request" (b3): the customer paid. Critical, findable.
+    emitAnomaly({ organizationId: args.orgId, kind: 'blog_result_lost', severity: 'critical', message: 'blog_result_lost',
+      metadata: { referenceId: args.referenceId } });
+    return { ok: false, status: 409, code: 'BLOG_RESULT_UNAVAILABLE', retryable: false,
+      error: 'This blog was already generated and charged, but we could not return it. Please contact support - you will not be charged again for it.' };
+  }
+  if (r.status === 'already_released') {
+    return { ok: false, status: 409, code: 'BLOG_REQUEST_ENDED', retryable: false,
+      error: 'This blog request did not finish and was not charged. Start it again.' };
+  }
   if (r.status === 'already_reserved') {
     // The same key is still held by a run in flight: running it again would generate twice under one charge.
     return { ok: false, status: 409, code: 'BLOG_ALREADY_IN_PROGRESS', retryable: true, error: 'This blog is already being generated.' };
@@ -142,6 +162,62 @@ export async function holdBlog(args: { orgId: string; userId: string; referenceI
     return { ok: false, status: 403, code: r.code, retryable: false, error: r.reason };
   }
   return { ok: false, status: 409, code: 'RESERVATION_ALREADY_SETTLED', retryable: false, error: 'This blog request has already finished. Start a new request to generate again.' };
+}
+
+// ── Replay store (b3 BLOCKING) ───────────────────────────────────────────────────────────────────────────────────
+export const BLOG_REPLAY_SCOPE = 'blog_post';
+const replayCaller = (orgId: string) => `org:${orgId}`;
+
+/** A stored, already-charged blog for this org + key: replay it; a read error refuses (503, retryable). */
+export async function blogReplay(orgId: string, referenceId: string): Promise<{ ok: true; body: Record<string, unknown> | null } | BlogRefusal> {
+  try {
+    const { data, error } = await ownedDbTable('api_idempotency_keys')
+      .select('response_status, response_body')
+      .eq('scope', BLOG_REPLAY_SCOPE)
+      .eq('caller_id', replayCaller(orgId))
+      .eq('idempotency_key', referenceId)
+      .eq('status', 'completed')
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    const body = (data as { response_body?: unknown } | null)?.response_body;
+    if (!data) return { ok: true, body: null };
+    if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error('stored blog result is not an object');
+    return { ok: true, body: { ...(body as Record<string, unknown>), billing: { charged: 0, released: 0, reason: 'replayed' } } };
+  } catch (err) {
+    logger.error('blog_replay_read_failed', { orgId, message: (err as Error)?.message });
+    return { ok: false, status: 503, code: 'BLOG_RESULT_READ_FAILED', retryable: true, error: 'We could not load this blog right now. Please try again.' };
+  }
+}
+
+/** Persist a finished blog BEFORE its settle (b3 invariant: generate -> persist -> settle -> respond). False = not persisted. */
+async function storeBlogResult(h: CreditReservationHandle, result: unknown): Promise<boolean> {
+  try {
+    if (!result || typeof result !== 'object' || Array.isArray(result)) throw new Error('blog result is not an object');
+    const now = new Date().toISOString();
+    const { error } = await ownedDbTable('api_idempotency_keys').insert({
+      scope: BLOG_REPLAY_SCOPE,
+      caller_id: replayCaller(h.orgId),
+      idempotency_key: h.referenceId,
+      request_hash: createHash('sha256').update(`${h.orgId}:${h.referenceId}`).digest('hex'),
+      status: 'completed',
+      response_status: 200,
+      response_body: result,
+      created_at: now,
+      updated_at: now,
+    });
+    if (error && !/duplicate key|23505/i.test(String((error as { message?: string; code?: string }).message ?? '') + String((error as { code?: string }).code ?? ''))) {
+      throw new Error((error as { message?: string }).message ?? 'insert failed');
+    }
+    // 7c/b3: the durable copy must be READABLE before the charge is confirmed - read it back through the replay path.
+    const back = await blogReplay(h.orgId, h.referenceId);
+    if (isBlogRefusal(back) || !back.body) throw new Error('stored blog result is not readable back');
+    return true;
+  } catch (err) {
+    // b3 invariant: never CONFIRM a charge for a work product that exists only in an undelivered response. The
+    // customer still gets this response, but it is NOT charged (the hold is released). Loud, never silent.
+    logger.error('blog_result_store_failed', { orgId: h.orgId, referenceId: h.referenceId, message: (err as Error)?.message });
+    return false;
+  }
 }
 
 /** The ruled price of a DELIVERED partial blog: min(40, ceil(40 x calls / 32)); 0 calls -> 0. No path delivers a partial blog today. */
@@ -168,11 +244,10 @@ export async function runBlogWithBilling<T>(args: {
   const counter = { calls: 0 };
   const h = args.reservation;
 
-  const settle = async (outcome: 'completed' | 'quality_refund' | 'failed'): Promise<BlogBillingSummary> => {
+  const settle = async (outcome: 'completed' | 'quality_refund' | 'failed' | 'unpersisted'): Promise<BlogBillingSummary> => {
     // OWNER 2026-11-18: a failure on our side with nothing delivered is free - only success charges.
     const charge = outcome === 'completed' ? BLOG_CREDITS : 0;
-    const reason: BlogBillingSummary['reason'] = outcome === 'completed' ? 'completed'
-      : outcome === 'quality_refund' ? 'quality_refund' : 'failed';
+    const reason: BlogBillingSummary['reason'] = outcome;
     try {
       if (charge > 0) {
         await confirmCreditReservationToActual({ ...h, note: `Blog: ${reason}, ${counter.calls} provider call(s)` }, charge);
@@ -200,5 +275,7 @@ export async function runBlogWithBilling<T>(args: {
     if (err && typeof err === 'object') (err as { blogBilling?: BlogBillingSummary }).blogBilling = billing;
     throw err;
   }
-  return { result, billing: await settle('completed') };
+  // b3 invariant: generate -> PERSIST -> settle -> respond. Not persisted -> not charged.
+  const persisted = await storeBlogResult(h, result);
+  return { result, billing: await settle(persisted ? 'completed' : 'unpersisted') };
 }

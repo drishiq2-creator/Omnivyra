@@ -39,7 +39,7 @@ import { runUnifiedLongFormGeneration } from '../../../../lib/content/unifiedLon
 import type { BlogAngle } from '../../../../lib/blog/blogGenerationEngine';
 import { buildContentContext } from '../../../../lib/content/buildContentContext';
 import { isValidBlogFormat } from '../../../../lib/blog/blogStructureTemplates';
-import { blogBillingOf, blogGenerationRefusal, blogReferenceId, holdBlog, isBlogHoldRefusal, isBlogRefusal, runBlogWithBilling } from '../../../../backend/services/blog/blogBilling';
+import { blogBillingOf, blogGenerationRefusal, blogReferenceId, blogReplay, holdBlog, isBlogHoldRefusal, isBlogRefusal, runBlogWithBilling } from '../../../../backend/services/blog/blogBilling';
 import { ThoughtLeadershipQualityGateError } from '../../../../backend/services/longForm/thoughtLeadershipQualityGate';
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
@@ -137,6 +137,13 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       return res.status(refStatus).json(refBody);   // no key -> 400, nothing held, no AI call
     }
     const referenceId = ref.referenceId;
+    // b3 BLOCKING: a finished, charged blog is replayed for the same key (no new hold, no new charge).
+    const replay = await blogReplay(company_id, referenceId);
+    if (isBlogRefusal(replay)) {
+      const { status: replayStatus, ...replayBody } = replay;
+      return res.status(replayStatus).json(replayBody);
+    }
+    if (replay.body) return res.status(200).json(replay.body);
     const hold = await holdBlog({ orgId: company_id, userId: roleGate.userId, referenceId, validateMembership: false });
     if (isBlogHoldRefusal(hold)) {
       const { status, ...refusal } = hold;
