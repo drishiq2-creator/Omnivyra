@@ -3,6 +3,7 @@ import { NextApiRequest, NextApiResponse } from 'next';
 import { supabase } from '../../../backend/db/supabaseClient';
 import { requireCampaignAccess, type CampaignAccessResult } from '../../../backend/services/campaignAccessService';
 import { tenantTable, tenantChildTable, tenantContextFor, TenantSeamError } from '../../../backend/db/tenantTable';
+import { reportTenantFanout } from '../../../backend/db/seamDenial';
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method === 'GET') {
@@ -290,6 +291,7 @@ async function updateCampaignCompletion(access: CampaignAccessResult) {
 
   } catch (error) {
     if (error instanceof TenantSeamError) {
+      reportTenantFanout(error); // best-effort path: no response, but a fan-out is still alertable
       console.warn('Campaign completion update refused by the tenant seam:', error.code);
       return;
     }

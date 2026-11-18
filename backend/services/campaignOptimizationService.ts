@@ -8,6 +8,7 @@ import {
   saveWeekVersions,
 } from '../db/campaignVersionStore';
 import { saveCampaignBlueprintFromRecommendation } from '../db/campaignPlanStore';
+import type { TenantContext } from '../db/tenantTable';
 import { getLatestApprovedCampaignVersion } from '../db/campaignApprovedVersionStore';
 import { fromRecommendationPlan, blueprintWeekToLegacyWeekPlan } from './campaignBlueprintAdapter';
 
@@ -119,6 +120,8 @@ ${JSON.stringify(input.platform_rules ?? {}, null, 2)}
 
 export async function optimizeCampaignWeek(input: {
   companyId: string;
+  /** S2-55 (7c): the AUTHORIZED company's context; the blueprint write is refused unless the campaign is its own. */
+  tenant: TenantContext;
   campaignId?: string;
   weekNumber: number;
   reason?: string;
@@ -189,6 +192,7 @@ export async function optimizeCampaignWeek(input: {
       campaignId: input.campaignId ?? '',
       companyId: input.companyId,
       blueprint,
+      tenant: input.tenant,
     });
   }
 

@@ -3,6 +3,8 @@ import { NextApiRequest, NextApiResponse } from 'next';
 import { fromStructuredPlan } from '../../../backend/services/campaignBlueprintAdapter';
 import { saveDraftBlueprint } from '../../../backend/db/campaignPlanStore';
 import { requireCampaignTenantAccess } from '../../../backend/security/TenantGuard';
+import { tenantContextFor, TenantSeamError } from '../../../backend/db/tenantTable';
+import { seamDenial } from '../../../backend/db/seamDenial';
 
 /**
  * POST /api/campaigns/save-draft-plan
@@ -31,13 +33,15 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       campaign_id: campaignId,
     });
 
-    await saveDraftBlueprint({ campaignId, blueprint });
+    // S2-55 (7c): the tenant is the company requireCampaignTenantAccess resolved and authorized for this principal.
+    await saveDraftBlueprint({ campaignId, blueprint, tenant: tenantContextFor({ userId: access.userId }, access.organizationId) });
 
     return res.status(200).json({
       success: true,
       message: 'Draft plan saved',
     });
   } catch (error) {
+    if (error instanceof TenantSeamError) return seamDenial(res, error, 404, { error: 'Campaign not found', code: 'CAMPAIGN_NOT_FOUND' });
     console.error('Error in save-draft-plan:', error);
     return res.status(500).json({
       error: 'Failed to save draft plan',

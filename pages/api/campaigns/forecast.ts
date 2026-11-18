@@ -52,7 +52,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       status: campaignVersion?.status,
     });
     const platformPlan = await getLatestPlatformExecutionPlan({ companyId, campaignId: access.campaignId, weekNumber: 1 });
-    const assets = await listAssetsWithLatestContent({ campaignId: access.campaignId });
+    const assets = await listAssetsWithLatestContent({ campaignId: access.campaignId, companyId });
     const trends = await getTrendSnapshots(companyId, access.campaignId);
     const memory = await getCampaignMemory({ companyId, campaignId: access.campaignId });
     const analytics = await getLatestAnalyticsReport(companyId, access.campaignId);

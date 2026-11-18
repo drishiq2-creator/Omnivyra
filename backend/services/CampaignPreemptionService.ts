@@ -1,5 +1,6 @@
 import { ownedDbTable } from '../db/writeOwner';
 import { ownerOfChildRow, systemTenantContext, tenantChildTable, tenantTable, TenantSeamError } from '../db/tenantTable';
+import { reportTenantFanout } from '../db/seamDenial';
 /**
  * Controlled Preemption Execution Service.
  * Safely executes PREEMPT_LOWER_PRIORITY_CAMPAIGN when explicitly requested.
@@ -428,6 +429,7 @@ async function preemptionRequestsFor(requestId: string, companyId: string, reaso
     return await tenantChildTable('campaign_preemption_requests', systemTenantContext(companyId, reason), owner.parentId);
   } catch (err) {
     if (err instanceof TenantSeamError && !err.retryable) {
+      reportTenantFanout(err); // mapped to "not found" below; a fan-out is still alertable
       throw new PreemptionValidationError('Preemption request not found.');
     }
     throw err;

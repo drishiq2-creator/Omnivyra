@@ -80,7 +80,7 @@ export async function runPrePlanning(input: PrePlanningInput): Promise<DurationE
   const { companyId, campaignId, requested_weeks } = input;
 
   const [contentAssets, campaignVersion, profile, campaignResult] = await Promise.all([
-    listAssetsWithLatestContent({ campaignId }),
+    listAssetsWithLatestContent({ campaignId, companyId }),
     getLatestCampaignVersion(companyId, campaignId),
     getProfile(companyId, { autoRefine: false, languageRefine: true }),
     getCampaignById<{ id: string; budget?: number; start_date?: string; end_date?: string; priority_level?: string; execution_status?: string; blueprint_status?: string; duration_locked?: boolean }>(campaignId, 'id, budget, start_date, end_date, priority_level, execution_status, blueprint_status, duration_locked'),

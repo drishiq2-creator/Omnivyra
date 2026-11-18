@@ -15,6 +15,8 @@ import { listAssetsWithLatestContent } from '../../../backend/db/contentAssetSto
 import { getLatestLearningInsights, getLatestAnalyticsReport } from '../../../backend/db/performanceStore';
 import { sendLearningSnapshot } from '../../../backend/services/omnivyraFeedbackService';
 import { enforceCompanyAccess } from '../../../backend/services/userContextService';
+import { tenantContextFor, TenantSeamError } from '../../../backend/db/tenantTable';
+import { seamDenial } from '../../../backend/db/seamDenial';
 import { Role } from '../../../backend/services/rbacService';
 import { withRBAC } from '../../../backend/middleware/withRBAC';
 
@@ -95,6 +97,8 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       'engagement';
     const optimization = await optimizeCampaignWeek({
       companyId,
+      // S2-55 (7c): the company enforceCompanyAccess authorized for this principal (and bound campaignId to).
+      tenant: tenantContextFor(access, String(companyId)),
       campaignId,
       weekNumber: Number(weekNumber),
       reason,
@@ -107,7 +111,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     const updatedVersion = await getLatestCampaignVersion(companyId, campaignId);
     const weeklyPlans = updatedVersion?.campaign_snapshot?.weekly_plan ?? [];
     const dailyPlans = updatedVersion?.campaign_snapshot?.daily_plan ?? [];
-    const contentAssets = await listAssetsWithLatestContent({ campaignId });
+    const contentAssets = await listAssetsWithLatestContent({ campaignId, companyId: String(companyId) });
     const healthReport = validateCampaignHealth({
       companyProfile: profile,
       trends: trendSignals,
@@ -160,6 +164,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       health_report: healthReport,
     });
   } catch (error: any) {
+    if (error instanceof TenantSeamError) return seamDenial(res, error, 404, { error: 'Campaign not found', code: 'CAMPAIGN_NOT_FOUND' });
     if (error instanceof PrePlanningRequiredError || error?.code === 'PRE_PLANNING_REQUIRED') {
       return res.status(412).json({ code: 'PRE_PLANNING_REQUIRED', message: error?.message });
     }

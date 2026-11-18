@@ -195,7 +195,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       dailyPlans: resolved.daily_plan,
       expectedDurationWeeks: resolved.duration_weeks,
       platformExecutionPlan: plan,
-      contentAssets: await listAssetsWithLatestContent({ campaignId }),
+      contentAssets: await listAssetsWithLatestContent({ campaignId, companyId: operativeCompanyId }),
     });
 
     return res.status(200).json({ plan, healthReport });

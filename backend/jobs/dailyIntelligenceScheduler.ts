@@ -344,7 +344,7 @@ export async function runDailyIntelligence(): Promise<DailyIntelligenceResult> {
           const campaignVersion = await getLatestApprovedCampaignVersion(companyId, campaignId);
           if (campaignVersion?.campaign_snapshot) {
             const platformPlan = await getLatestPlatformExecutionPlan({ companyId, campaignId, weekNumber: 1 });
-            const assets = await listAssetsWithLatestContent({ campaignId });
+            const assets = await listAssetsWithLatestContent({ campaignId, companyId });
             const trends = await getTrendSnapshots(companyId, campaignId);
             const memory = await getCampaignMemory({ companyId, campaignId });
             const analytics = await getLatestAnalyticsReport(companyId, campaignId);
