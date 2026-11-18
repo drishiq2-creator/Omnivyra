@@ -540,6 +540,16 @@ async function handler(req: NextApiRequest, res: NextApiResponse<Result>) {
         // Different user won the race — a join request, exactly like DOMAIN_ALREADY_CLAIMED.
         return respondJoinRequested(raceWinner.id, raceWinner.name, 'DOMAIN_UNIQUE_RACE_LOST');
       }
+
+      if (raceLookup.ok) {
+        // 23505 with NO live company on the domain: a soft-deleted company still holds it in the unique
+        // index. Pending migration: the partial unique index must be scoped to deleted_at IS NULL.
+        console.error('[setup-company] domain held by no live company (deleted?)', { code: companyErr.code, message: companyErr.message });
+        return res.status(409).json({
+          code:  'COMPANY_DOMAIN_UNAVAILABLE',
+          error: 'This domain cannot be used to create a workspace right now. Please contact support.',
+        });
+      }
     }
 
     if (companyErr) throw companyErr;
@@ -853,8 +863,9 @@ async function handler(req: NextApiRequest, res: NextApiResponse<Result>) {
 
     return res.status(200).json({ companyId });
   } catch (err: any) {
+    // The detail stays server-side: no database error text ever reaches the client.
     console.error('[onboarding/setup-company]', err);
-    return res.status(500).json({ error: err?.message ?? 'Internal server error' });
+    return res.status(500).json({ error: 'Something went wrong. Please try again.' });
   }
 }
 

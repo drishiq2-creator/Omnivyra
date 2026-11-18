@@ -434,8 +434,9 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       alreadyClaimed: true,
     });
   } catch (err: any) {
+    // The detail stays server-side: no database error text ever reaches the client.
     console.error('[onboarding/complete]', err);
-    return res.status(500).json({ error: err?.message ?? 'Internal server error' });
+    return res.status(500).json({ error: 'Something went wrong. Please try again.' });
   }
 }
 

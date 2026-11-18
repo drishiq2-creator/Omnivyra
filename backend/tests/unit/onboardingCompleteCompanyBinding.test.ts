@@ -25,6 +25,7 @@ function ilikeMatch(value: string, pattern: string): boolean {
 }
 const mockDb: Record<string, Row[]> = {};
 let mockFailTable: string | null = null;
+let mockFailInsert: string | null = null;
 const mockWrites: Array<{ table: string; op: string; row: Row }> = [];
 let mockSeq = 0;
 function mockTable(table: string) {
@@ -32,6 +33,7 @@ function mockTable(table: string) {
   let op: 'select' | 'insert' | 'update' | 'upsert' = 'select'; let payload: Row | null = null;
   const run = () => {
     if (mockFailTable === table && op === 'select') return { data: null, error: { message: 'boom' } };
+    if (mockFailInsert === table && op === 'insert') return { data: null, error: { message: 'SECRET relation "free_credit_profiles" violates check constraint fcp_chk', code: '23514' } };
     const rows = (mockDb[table] ??= []);
     if (op === 'insert' || op === 'upsert') {
       const row = { id: `00000000-0000-4000-8000-${String(++mockSeq).padStart(12, '0')}`, ...payload };
@@ -112,7 +114,7 @@ const rolesIn = (companyId: string) => mockDb.user_company_roles.filter((r) => r
 beforeEach(() => {
   for (const k of Object.keys(mockDb)) delete mockDb[k];
   mockWrites.length = 0; mockGrants.length = 0; mockNotified.length = 0; mockAdminNotice = 'sent'; mockSeq = 0;
-  mockNotifyHangs = false; mockFailTable = null;
+  mockNotifyHangs = false; mockFailTable = null; mockFailInsert = null;
   mockDb.users = [{ id: USER, supabase_uid: 'sb-user', email: 'x', is_deleted: false }];
   // acme.com's company: created by an admin flow, so it has NO initial free-credit claim
   mockDb.companies = [{ id: VICTIM, name: 'Acme', admin_email_domain: 'acme.com' }];
@@ -284,5 +286,15 @@ describe('CI-309 follow-up (c6 review): the shared verified-domain lookup, and n
     const r = await post();
     expect(r.statusCode).toBe(200);
     expect(mockDb.companies.find((c) => c.id !== VICTIM)).toMatchObject({ admin_email_domain: 'newco.io' });
+  });
+});
+
+describe('no raw database error text in any complete.ts response', () => {
+  it('a thrown DB error (free_credit_profiles insert) gives the generic 500 - not the error text', async () => {
+    mockFailInsert = 'free_credit_profiles';
+    mockEmail = 'x@brandnew.io';
+    const r = await post();
+    expect([r.statusCode, r.body]).toEqual([500, { error: 'Something went wrong. Please try again.' }]);
+    expect(JSON.stringify(r.body)).not.toMatch(/SECRET|free_credit_profiles|constraint/);
   });
 });

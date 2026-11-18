@@ -18,7 +18,7 @@
  * routeAuthHarness tables. FAKED (I/O only): auth identity, rate limits, telemetry, the two email
  * sends (recorded with recipient + payload), credits, crawl / bootstrap.
  */
-import { seed, rows, calls, invoke, uniqueKey, resolveUpsertConflicts } from '../helpers/routeAuthHarness';
+import { seed, rows, calls, invoke, uniqueKey, resolveUpsertConflicts, failTable } from '../helpers/routeAuthHarness';
 
 const mockBeforeWrite: { fn: ((table: string, op: string, payload: unknown) => void) | null } = { fn: null };
 function mockWrap(builder: Record<string, unknown>, table: string) {
@@ -576,6 +576,17 @@ describe('7c merge precondition: soft-deleted companies (deleted_at) are out of 
     expect(sentTo('dora@dead.test')).toEqual([]);
   });
 
+  it('(i) the INSERT refused by the domain index the deleted row holds -> 409 COMPANY_DOMAIN_UNAVAILABLE, no DB text', async () => {
+    world({ companies: [deadCo('dead.test')] }, 'nina@dead.test');
+    uniqueKey('companies', 'admin_email_domain');
+    const r = await setup('nina@dead.test', { companyName: 'Nina Co' });
+    expect([r.status, r.body]).toEqual([409, {
+      code: 'COMPANY_DOMAIN_UNAVAILABLE',
+      error: 'This domain cannot be used to create a workspace right now. Please contact support.',
+    }]);
+    expect(JSON.stringify(r.body)).not.toMatch(/admin_email_domain|website_domain|dead\.test|duplicate|unique|constraint|idx_|23505/i);
+  });
+
   it('(ii) one live + one deleted company on the domain: a join request to the LIVE one, not a 409', async () => {
     world({
       companies: [
@@ -601,5 +612,15 @@ describe('7c merge precondition: soft-deleted companies (deleted_at) are out of 
     await settle();
     expect([r.status, r.body]).toEqual([200, { companyExists: true, joinRequested: true, message: expect.any(String) }]);
     expect(createdCompanies()).toEqual([]);
+  });
+});
+
+describe('no raw database error text in any setup-company response', () => {
+  it('a forced DB failure on the founder role insert gives the generic 500 - not the error text', async () => {
+    world({}, 'founder@newco.test');
+    failTable('user_company_roles', 'insert');
+    const r = await setup('founder@newco.test', { companyName: 'NewCo' });
+    expect([r.status, r.body]).toEqual([500, { error: 'Something went wrong. Please try again.' }]);
+    expect(JSON.stringify(r.body)).not.toMatch(/forced failure|user_company_roles|XX000/);
   });
 });

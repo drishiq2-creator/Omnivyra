@@ -120,5 +120,6 @@ describe('the SAME verified-domain lookup as setup-company (findCompaniesByVerif
     const r = await get();
     expect(r.statusCode).toBe(503);
     expect(r.body.matched).toBeUndefined();
+    expect(JSON.stringify(r.body)).not.toMatch(/boom/);
   });
 });

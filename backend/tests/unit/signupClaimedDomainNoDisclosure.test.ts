@@ -122,3 +122,30 @@ it("the prospect is sent nothing; the company's admin is still told (inbound sig
   expect(mockSent.map((m) => [m.kind, m.to])).toEqual([['admin_notice', ADMIN_EMAIL]]);
   expect(mockSent[0].payload).toMatchObject({ prospectEmail: PROSPECT });
 });
+
+it('control: a DB error on an unclaimed domain (signup_intents insert) never reaches the body', async () => {
+  jest.resetModules();
+  jest.doMock('../../db/supabaseClient', () => ({
+    supabase: {
+      from: (t: string) => {
+        const b: any = mockTable(t);
+        if (t === 'signup_intents') b.insert = () => ({ then: (ok: any) => Promise.resolve({ data: null, error: { message: 'SECRET duplicate key idx_signup_intents' } }).then(ok) });
+        return b;
+      },
+      rpc: async () => ({ data: false, error: null }),
+      auth: { admin: {} },
+    },
+  }));
+  jest.doMock('../../services/companyIdentityValidationService', () => ({
+    validateCompanyIdentity: async () => ({ eligible: true, companyIdentityDomain: 'fresh.test', normalizedWebsiteDomain: 'fresh.test', websiteUrl: 'https://www.fresh.test' }),
+    COMPANY_IDENTITY_VALIDATION_VERSION: 'test',
+  }));
+  const fresh = require('../../../pages/api/auth/signup').default;
+  const res: any = { statusCode: 0, body: null };
+  res.status = (c: number) => { res.statusCode = c; return res; };
+  res.json = (x: unknown) => { res.body = x; return res; };
+  res.setHeader = () => res;
+  await fresh({ method: 'POST', headers: {}, query: {}, body: { email: 'new@fresh.test', companyName: 'Fresh' } }, res);
+  expect(res.statusCode).toBe(500);
+  expect(JSON.stringify(res.body)).not.toMatch(/SECRET|idx_|duplicate/);
+});
