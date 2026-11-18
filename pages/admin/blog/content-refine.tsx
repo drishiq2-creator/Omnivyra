@@ -6,6 +6,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/router';
 import { Loader2, Sparkles, AlertCircle, CheckCircle2 } from 'lucide-react';
 import type { BlogGenerationOutput } from '../../../lib/blog/blogGenerationEngine';
+import { blogGenerateKeys, blogKeyScope, blogRefusalText, keepBlogKey } from '../../../lib/blog/blogGenerateKey';
 import type { BriefInsight, DraftFieldSuggestions, TemplateSessionPayload, EnrichedGap } from '../../blogs.types';
 
 
@@ -140,6 +141,10 @@ export default function AdminBlogContentRefinePage() {
     setError(null);
     setSuccessNote(null);
 
+    // One Idempotency-Key per click, kept only while the outcome is unknown (lib/blog/blogGenerateKey).
+    const scope = blogKeyScope('admin', companyId, topic, reason);
+    const op = blogGenerateKeys.begin(scope);
+    let keepKey = true; // until a response says otherwise
     try {
       const answers: Record<string, string> = {
         ...(brief ? {
@@ -162,7 +167,7 @@ export default function AdminBlogContentRefinePage() {
       const resp = await fetch('/api/admin/blog/generate', {
         method: 'POST',
         credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...op.headers },
         body: JSON.stringify({
           company_id: companyId,
           mode: 'full',
@@ -181,9 +186,10 @@ export default function AdminBlogContentRefinePage() {
         hook_assessment?: { strength: 'strong' | 'moderate' | 'weak'; note: string };
         error?: string;
       };
+      keepKey = keepBlogKey(resp.status, data);
 
       if (!resp.ok || !data.result) {
-        throw new Error(data?.error || 'Draft generation failed');
+        throw new Error(blogRefusalText(data) || data?.error || 'Draft generation failed');
       }
 
       const outToken = `sa_blog_prefill_${Date.now()}`;
@@ -203,6 +209,7 @@ export default function AdminBlogContentRefinePage() {
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not generate draft');
     } finally {
+      if (!keepKey) blogGenerateKeys.end(scope);
       setGenerating(false);
     }
   };
