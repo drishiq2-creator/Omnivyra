@@ -5,9 +5,18 @@ import { createApiRoute as __createApiRoute } from '../../../../lib/platform/rou
  *
  * Query params (GET): company_id, status (optional filter), limit, offset
  * Body (POST): CreateBroadcastInput + contacts[] + enqueue? (bool) + plan?
+ *
+ * POST requires an Idempotency-Key header (CLASS-2, e9): a double-clicked or re-sent create with
+ * enqueue:true used to create TWO broadcasts and message every contact twice. withIdempotency
+ * reserves the key (api_idempotency_keys, unique) before the handler runs, so the second request
+ * replays the first's answer or is refused while it runs. The page mints one key per form
+ * submission (useIdempotencyKey), DERIVED FROM THE FORM on purpose: a cached answer to a form
+ * (a 400 for a missing field) replays only for that exact form, and a corrected form is a new key.
+ * Refusals that depend on state instead are never cached (stateDependentStatuses). GET is unaffected.
  */
 
 import type { NextApiRequest, NextApiResponse } from 'next';
+import { withIdempotency } from '../../../../backend/middleware/withIdempotency';
 import { enforceCompanyAccess } from '../../../../backend/services/userContextService';
 import { enforceRole, Role } from '../../../../backend/services/rbacService';
 import { supabase } from '../../../../backend/db/supabaseClient';
@@ -15,6 +24,8 @@ import {
   createBroadcast,
   expandRecipients,
   enqueueBroadcast,
+  BroadcastPartiallyEnqueuedError,
+  refreshDirtyBroadcastCounts,
   senderAccountRefusalResponse,
   type CreateBroadcastInput,
   type ContactInput,
@@ -39,8 +50,14 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
 
     if (status) query = query.eq('status', status);
 
-    const { data, count, error } = await query;
+    let { data, count, error } = await query;
     if (error) return res.status(500).json({ error: error.message });
+
+    // A debounced (dirty) count is refreshed from the recipient rows, then re-read.
+    if (await refreshDirtyBroadcastCounts((data ?? []) as Array<{ id: string; counts_dirty?: boolean | null }>)) {
+      ({ data, count, error } = await query);
+      if (error) return res.status(500).json({ error: error.message });
+    }
 
     return res.status(200).json({ broadcasts: data ?? [], total: count ?? 0 });
   }
@@ -113,18 +130,23 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
 
     // Optionally enqueue immediately
     if (enqueue && inserted > 0) {
+      let run;
       try {
-        await enqueueBroadcast(broadcastId, plan as string);
+        run = await enqueueBroadcast(broadcastId, plan as string);
       } catch (err) {
+        // A partial run still has queued batches that WILL send: enqueued stays true.
+        const partial = err instanceof BroadcastPartiallyEnqueuedError;
         return res.status(202).json({
           broadcast_id: broadcastId,
           inserted,
           skipped,
-          enqueued: false,
+          enqueued: partial,
+          ...(partial ? { partial: true, uncertain: err.uncertain, batches: err.result.batches } : {}),
           enqueue_error: err instanceof Error ? err.message : String(err),
         });
       }
-      return res.status(201).json({ broadcast_id: broadcastId, inserted, skipped, enqueued: true });
+      // `enqueued: true` only when jobs are known to be queued.
+      return res.status(201).json({ broadcast_id: broadcastId, inserted, skipped, enqueued: run.batches > 0, batches: run.batches });
     }
 
     return res.status(201).json({ broadcast_id: broadcastId, inserted, skipped, enqueued: false });
@@ -135,4 +157,11 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
 }
 
 // W0-1 (Gate A): canonical route pipeline — pass-through observability + request context.
-export default __createApiRoute(handler, { route: '/api/whatsapp/broadcasts' });
+// 404 / 409 / 503 are the sender-account refusals (senderAccountRefusalResponse): not found, sending
+// stopped / shared number / disconnected, lookup unreadable. They depend on state, not on the
+// form, so a resubmit after the condition is fixed must RUN, not replay the refusal (05).
+export default __createApiRoute(withIdempotency(handler, {
+  methods: ['POST'],
+  scope: 'whatsapp-broadcast-create',
+  stateDependentStatuses: [404, 409, 503],
+}), { route: '/api/whatsapp/broadcasts' });

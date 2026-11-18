@@ -25,7 +25,7 @@
  * the platform already owns rather than constructing one.
  */
 
-import { ownedDbTable } from '../../db/writeOwner';
+import { ownedDbRpc, ownedDbTable } from '../../db/writeOwner';
 import type { LimiterLayer } from './types';
 
 /** Window the limiter counts over. Matches the governance evaluator. */
@@ -70,12 +70,28 @@ export function __resetQuotaRedisForTests(): void {
   redisClient = null;
 }
 
+/**
+ * Whether the shared client can take a command now. The shared client is the
+ * BullMQ one: `maxRetriesPerRequest: null`, an offline queue, and a reconnect
+ * strategy that never gives up. While it is not connected, a command is queued
+ * and never rejected, so awaiting it would hang the dispatch until Redis comes
+ * back and the database fallback below would never run. A client that reports
+ * any status other than 'ready' is therefore skipped without being given a
+ * command. (A client with no status field, such as a test double, is used.)
+ *
+ * No timer is used: WS-3 permits a timer only in the email transport.
+ */
+function redisUsable(redis: unknown): boolean {
+  const status = (redis as { status?: unknown }).status;
+  return typeof status !== 'string' || status === 'ready';
+}
+
 const tenantKey = (companyId: string): string => `ws3:quota:tenant:${companyId}`;
 const leadKey = (companyId: string, leadId: string): string => `ws3:quota:lead:${companyId}:${leadId}`;
 
 async function redisIncr(key: string): Promise<number | null> {
   const redis = await getRedis();
-  if (!redis) return null;
+  if (!redis || !redisUsable(redis)) return null;
   try {
     const next = Number(await redis.incrby(key, 1));
     if (next === 1) await redis.expire(key, TTL_SECONDS);
@@ -85,31 +101,38 @@ async function redisIncr(key: string): Promise<number | null> {
   }
 }
 
-async function redisDecr(key: string): Promise<void> {
+/** Whether a Redis command could be issued now (reconcile reports `reconciled` by it when nothing needed raising). */
+async function redisUsableNow(): Promise<boolean> {
   const redis = await getRedis();
-  if (!redis) return;
-  try {
-    await redis.decrby(key, 1);
-  } catch {
-    /* a failed release self-corrects at the next reconciliation */
-  }
+  return !!redis && redisUsable(redis);
 }
 
-async function redisSet(key: string, value: number): Promise<boolean> {
+/** Atomic raise by a positive delta (concurrent increments are kept, never overwritten). */
+async function redisIncrBy(key: string, delta: number): Promise<boolean> {
   const redis = await getRedis();
-  if (!redis) return false;
+  if (!redis || !redisUsable(redis)) return false;
   try {
-    await redis.set(key, String(value));
-    await redis.expire(key, TTL_SECONDS);
-    return true;
+    const next = Number(await redis.incrby(key, delta));
+    if (next === delta) await redis.expire(key, TTL_SECONDS);
+    return Number.isFinite(next);
   } catch {
     return false;
   }
 }
 
+async function redisDecr(key: string): Promise<void> {
+  const redis = await getRedis();
+  if (!redis || !redisUsable(redis)) return;
+  try {
+    await redis.decrby(key, 1);
+  } catch {
+    /* a failed release over-counts (refuses sooner) until the key expires; reconcile never lowers it (D7) */
+  }
+}
+
 async function redisGet(key: string): Promise<number | null> {
   const redis = await getRedis();
-  if (!redis) return null;
+  if (!redis || !redisUsable(redis)) return null;
   try {
     const raw = await redis.get(key);
     if (raw === null || raw === undefined) return null;
@@ -167,7 +190,16 @@ export interface QuotaReservation {
   reason: string;
   /** Set when the reservation incremented Redis and may need releasing. */
   reserved: boolean;
+  /** Set when the DATABASE layer granted (Redis unusable): the reservation row, released on a non-dispatch. */
+  reservationId?: string | null;
 }
+
+/**
+ * How long a database-layer reservation counts without its attempt (CLASS-2 D6, e9). A reservation
+ * lives from the grant to appendAttempt - a few database calls, BEFORE the send - so this bounds
+ * only a dispatcher that crashed in between and never released: its unit frees itself after this.
+ */
+export const DB_RESERVATION_TTL_SECONDS = 300;
 
 /**
  * Reserve one unit of quota before dispatch.
@@ -180,6 +212,8 @@ export interface QuotaReservation {
 export async function reserveQuota(input: {
   companyId: string;
   leadId: string;
+  /** The task the unit is reserved for: the database layer's reservation ends when its attempt exists. */
+  taskId: string;
   at: string;
   dailyLimitTenant: number | null;
   dailyLimitLead: number | null;
@@ -198,6 +232,16 @@ export async function reserveQuota(input: {
   const pendingLead = pendingTenant === null ? null : await redisIncr(leadKey(input.companyId, input.leadId));
   const usedRedis = pendingTenant !== null && pendingLead !== null;
   const layer: LimiterLayer = usedRedis ? 'redis' : 'db';
+
+  if (!usedRedis) {
+    // A half-taken Redis reservation is given back: the database layer decides this one.
+    if (pendingTenant !== null) await redisDecr(tenantKey(input.companyId));
+    // No limit configured: there is nothing to exceed, so nothing to reserve - granted as before.
+    if (input.dailyLimitTenant === null && input.dailyLimitLead === null) {
+      return { granted: true, layer: 'db', reserved: false, reservationId: null, tenantCount: durable.tenantCount + 1, leadCount: durable.leadCount + 1, reason: 'within configured limits' };
+    }
+    return reserveInDatabase(input, durable);
+  }
 
   // A Redis counter can only be trusted when it is at least the durable count;
   // a lower value means it was reset or expired, so the truth wins.
@@ -229,8 +273,69 @@ export async function reserveQuota(input: {
   };
 }
 
+/**
+ * The DATABASE layer (Redis unusable) - CLASS-2 D6 (owner ruling via e9, option 2). It used to grant on
+ * a READ of the durable count, so two dispatchers both read N-1 and both took the last unit. Now one
+ * atomic call (outreach_quota_consume, migration 20270217000009): under a per-tenant advisory lock it
+ * counts attempts + live reservations and, under both limits, WRITES a reservation. WS-3's contract
+ * "Redis down: the database answers and grants" still holds - atomically. Any error refuses.
+ */
+async function reserveInDatabase(
+  input: { companyId: string; leadId: string; taskId: string; at: string; dailyLimitTenant: number | null; dailyLimitLead: number | null },
+  durable: { tenantCount: number; leadCount: number },
+): Promise<QuotaReservation> {
+  const since = new Date(Date.parse(input.at) - QUOTA_WINDOW_HOURS * 3_600_000).toISOString();
+  const refused = (reason: string, tenantCount = durable.tenantCount, leadCount = durable.leadCount): QuotaReservation => ({
+    granted: false, layer: 'db', reserved: false, reservationId: null, tenantCount, leadCount, reason,
+  });
+  let res: { data: unknown; error: unknown };
+  try {
+    res = await ownedDbRpc('outreach_quota_consume', {
+      p_company_id: input.companyId,
+      p_lead_id: input.leadId,
+      p_task_id: input.taskId,
+      p_since: since,
+      p_limit_tenant: input.dailyLimitTenant,
+      p_limit_lead: input.dailyLimitLead,
+      p_ttl_seconds: DB_RESERVATION_TTL_SECONDS,
+    }) as unknown as { data: unknown; error: unknown };
+  } catch (err) {
+    return refused(`the database quota could not be reserved (${err instanceof Error ? err.message : String(err)}); refusing rather than assuming capacity`);
+  }
+  if (res.error) return refused('the database quota could not be reserved; refusing rather than assuming capacity');
+  const row = (Array.isArray(res.data) ? res.data[0] : res.data) as
+    { granted?: unknown; reservation_id?: unknown; tenant_used?: unknown; lead_used?: unknown } | null | undefined;
+  if (!row || typeof row.granted !== 'boolean') return refused('the database quota answered nothing; refusing rather than assuming capacity');
+  const tenantCount = Number(row.tenant_used ?? durable.tenantCount);
+  const leadCount = Number(row.lead_used ?? durable.leadCount);
+  if (!row.granted) {
+    const overLead = input.dailyLimitLead !== null && leadCount + 1 > input.dailyLimitLead;
+    return refused(
+      overLead
+        ? `lead limit of ${input.dailyLimitLead} per ${QUOTA_WINDOW_HOURS}h reached`
+        : `tenant limit of ${input.dailyLimitTenant} per ${QUOTA_WINDOW_HOURS}h reached`,
+      tenantCount, leadCount,
+    );
+  }
+  return {
+    granted: true, layer: 'db', reserved: false,
+    reservationId: typeof row.reservation_id === 'string' ? row.reservation_id : null,
+    tenantCount, leadCount,
+    reason: 'within configured limits',
+  };
+}
+
 /** Release a reservation that will not be consumed. Safe to call when none was taken. */
 export async function releaseQuota(companyId: string, leadId: string, reservation: QuotaReservation): Promise<void> {
+  if (reservation.reservationId) {
+    // A failed release over-counts until the reservation's TTL (refuses sooner), never sends more.
+    try {
+      const { error } = await ownedDbRpc('outreach_quota_release', { p_reservation_id: reservation.reservationId, p_company_id: companyId }) as unknown as { error: unknown };
+      if (error) console.warn('[ws3/quota] database reservation not released; it frees itself after the TTL', { reservation_id: reservation.reservationId });
+    } catch {
+      console.warn('[ws3/quota] database reservation not released; it frees itself after the TTL', { reservation_id: reservation.reservationId });
+    }
+  }
   if (!reservation.reserved) return;
   await redisDecr(tenantKey(companyId));
   await redisDecr(leadKey(companyId, leadId));
@@ -247,10 +352,12 @@ export interface QuotaReconciliation {
 /**
  * Reconcile Redis to the database after an attempt is durably recorded.
  *
- * Deterministic: the database count is read and Redis is SET to it — never
- * adjusted by a delta, which would compound any existing drift. Reports the
- * drift it corrected so a persistent divergence is visible rather than silently
- * papered over on every dispatch.
+ * RAISE-ONLY (CLASS-2 D7; owner ruling via e9, 2026-11-12): the counter is brought UP to the durable
+ * count when it fell below it (reset, expiry) by an atomic INCRBY of the shortfall - never SET. A SET
+ * erased the reservations other dispatchers held but had not yet recorded as attempts, so a third
+ * dispatcher passed the limit. A counter ABOVE the durable count is left alone: the excess is
+ * reservations in flight, or leaked ones (a failed release), which over-count until the key expires
+ * (at most QUOTA_WINDOW_HOURS) - refusing sooner, never sending more. Reports the drift either way.
  */
 export async function reconcileQuota(companyId: string, leadId: string, at: string): Promise<QuotaReconciliation> {
   const durable = await readDurableUsage(companyId, leadId, at);
@@ -259,8 +366,21 @@ export async function reconcileQuota(companyId: string, leadId: string, at: stri
   }
 
   const before = await redisGet(tenantKey(companyId));
-  const wrote = await redisSet(tenantKey(companyId), durable.tenantCount);
-  await redisSet(leadKey(companyId, leadId), durable.leadCount);
+  const beforeLead = await redisGet(leadKey(companyId, leadId));
+  // INCRBY even when the key is absent: a dispatcher may create it between the GET and this write,
+  // and a SET would erase that reservation; an increment keeps it.
+  const raise = async (key: string, current: number | null, durableCount: number): Promise<boolean> => {
+    const shortfall = durableCount - (current ?? 0);
+    if (shortfall < 0) {
+      // NOT lowered (that is unsafe: a leak and a reservation made since the read look alike), but
+      // MEASURED (05): reconcile is the only place that compares the counter with the truth, so this
+      // is the one signal that a release was lost and a tenant is refused below its real limit.
+      console.warn('[ws3/quota] counter above the durable count (reservations in flight, or leaked)', { key, durable: durableCount, counter: current, excess: -shortfall });
+    }
+    return shortfall > 0 ? redisIncrBy(key, shortfall) : redisUsableNow();
+  };
+  const wrote = await raise(tenantKey(companyId), before, durable.tenantCount);
+  await raise(leadKey(companyId, leadId), beforeLead, durable.leadCount);
 
   return {
     reconciled: wrote,
