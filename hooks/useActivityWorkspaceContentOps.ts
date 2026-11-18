@@ -1,5 +1,6 @@
 import { executeMasterContentPipeline } from '@/lib/planning/executeMasterContentPipeline';
 import { apiFetch } from '@/lib/apiFetch';
+import { postGenerateVariants, UnconfirmedOutcomeError } from '@/lib/activity-workspace/postGenerateVariants';
 import type { ScheduleItem } from '../types/activityWorkspace';
 import { asObject, type WorkspacePayload } from '@/lib/activity-workspace/shared';
 
@@ -171,7 +172,8 @@ export function useActivityWorkspaceContentOps({
       notify('success', 'Platform variants generated.');
     } catch (error) {
       console.error('Generate variants failed:', error);
-      notify('error', `Failed to generate variants: ${String((error as any)?.message || error)}`);
+      if (error instanceof UnconfirmedOutcomeError) notify('info', error.message);
+      else notify('error', `Failed to generate variants: ${String((error as any)?.message || error)}`);
     } finally {
       setIsGeneratingVariants(false);
     }
@@ -217,11 +219,8 @@ export function useActivityWorkspaceContentOps({
         }
       }
 
-      const response = await apiFetch('/api/activity-workspace/content', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'generate_variants',
+      // Scope = target + the content it is about: a kept key never carries over to edited content.
+      const data = await postGenerateVariants(`variants:${schedule.id}:${String((activeMasterContent as any)?.content ?? '')}`, {
           activity: buildActivityRequestPayload(payload, schedules),
           schedules: [schedule],
           dailyExecutionItem: {
@@ -231,12 +230,7 @@ export function useActivityWorkspaceContentOps({
           },
           companyId: selectedCompanyId || payload?.companyId || null,
           campaignId: payload?.campaignId || queryCampaignId || null,
-        }),
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(String(data?.message || data?.error || 'Failed to repurpose content'));
-      }
+      }, 'Failed to repurpose content');
 
       const returnedMaster = asObject(data?.master_content);
       if (returnedMaster && !activeMasterContent) {
@@ -274,7 +268,9 @@ export function useActivityWorkspaceContentOps({
       notify('success', `Repurposed content generated for ${schedule.platform}.`);
     } catch (error) {
       console.error('Repurpose generation failed:', error);
-      notify('error', `Failed to repurpose content: ${String((error as any)?.message || error)}`);
+      // Lost-response class: an unknown outcome claims nothing and never says "failed".
+      if (error instanceof UnconfirmedOutcomeError) notify('info', error.message);
+      else notify('error', `Failed to repurpose content: ${String((error as any)?.message || error)}`);
     } finally {
       setRepurposingByScheduleId((prev) => ({ ...prev, [schedule.id]: false }));
     }
@@ -323,11 +319,7 @@ export function useActivityWorkspaceContentOps({
     }
     try {
       setIsGeneratingVariants(true);
-      const response = await apiFetch('/api/activity-workspace/content', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'generate_variants',
+      const data = await postGenerateVariants(`creator-promotion:${executionId}:${JSON.stringify(effectiveCreatorAsset ?? null)}`, {
           activity: buildActivityRequestPayload(payload, schedules),
           schedules: schedules.length > 0 ? schedules : [{ id: 'default', platform: 'linkedin', contentType: 'post' }],
           dailyExecutionItem: {
@@ -338,12 +330,7 @@ export function useActivityWorkspaceContentOps({
           },
           companyId: selectedCompanyId || payload?.companyId || null,
           campaignId: payload?.campaignId || queryCampaignId || null,
-        }),
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(String(data?.message || data?.error || 'Failed to generate promotion content'));
-      }
+      }, 'Failed to generate promotion content');
       const incoming = Array.isArray(data.platform_variants) ? data.platform_variants : [];
       const mergedByKey = new Map<string, Record<string, unknown>>();
       for (const variant of platformVariants) {
@@ -370,7 +357,8 @@ export function useActivityWorkspaceContentOps({
       notify('success', 'Promotion content generated.');
     } catch (error) {
       console.error('Generate creator promotion failed:', error);
-      notify('error', `Failed to generate: ${String((error as any)?.message || error)}`);
+      if (error instanceof UnconfirmedOutcomeError) notify('info', error.message);
+      else notify('error', `Failed to generate: ${String((error as any)?.message || error)}`);
     } finally {
       setIsGeneratingVariants(false);
     }

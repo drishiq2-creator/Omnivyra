@@ -1,6 +1,7 @@
 /** useMultiPlatformSchedulerController — state/handlers, verbatim. */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createIdempotentOperation } from '../lib/idempotency';
+import { postGenerateVariants, UnconfirmedOutcomeError } from '../lib/activity-workspace/postGenerateVariants';
 import Head from 'next/head';
 import Link from 'next/link';
 import { useRouter } from 'next/router';
@@ -825,16 +826,13 @@ export function useMultiPlatformSchedulerController() {
 
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 12000);
-
-      let response: Response;
+      // The ONE keyed generate_variants request (lib/activity-workspace/postGenerateVariants): key
+      // scoped to platform + content, kept on an unknown outcome (our 12s abort included).
+      let data: any;
       try {
-        response = await fetch('/api/activity-workspace/content', {
-          method: 'POST',
-          credentials: 'include',
-          headers: { 'Content-Type': 'application/json' },
-          signal: controller.signal,
-          body: JSON.stringify({
-            action: 'generate_variants',
+        data = await postGenerateVariants(
+          `scheduler:${platform}|${publishContentType}|${sourceContent}`,
+          {
             companyId: selectedCompanyId,
             activity: {
               id: `workspace-${platform}`,
@@ -854,15 +852,12 @@ export function useMultiPlatformSchedulerController() {
                 { platform, content_type: publishContentType },
               ],
             },
-          }),
-        });
+          },
+          'Failed to adapt content for the selected platform.',
+          { signal: controller.signal },
+        );
       } finally {
         clearTimeout(timeout);
-      }
-
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(data.error || data.message || 'Failed to adapt content for the selected platform.');
       }
 
       const variant = Array.isArray(data?.platform_variants) ? data.platform_variants[0] : null;
@@ -890,6 +885,12 @@ export function useMultiPlatformSchedulerController() {
         },
       });
     } catch (error) {
+      // Lost-response class (money): the full repurpose may have run and charged, so do NOT start
+      // a second billed call. Keep the key (a retry replays) and say we couldn't confirm.
+      if (error instanceof UnconfirmedOutcomeError) {
+        updatePlatformState(platform, { busy: false, status: 'idle', message: error.message });
+        return;
+      }
       const isAbort = error instanceof Error && error.name === 'AbortError';
       try {
         const fallback = await requestQuickPlatformAdaptation({

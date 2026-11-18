@@ -26,6 +26,7 @@ const NOTHING_STARTED = new Set([
 /** "Still running / not readable yet": the same key has a future. */
 const STILL_OPEN = new Set([
   'IDEMPOTENCY_IN_PROGRESS',
+  'REQUEST_IN_PROGRESS', // c6: activity-workspace generate_variants / refine_variant, first run in flight
   'BLOG_ALREADY_IN_PROGRESS',
   'REPLAY_UNAVAILABLE',
   'BLOG_RESULT_READ_FAILED',
@@ -46,6 +47,9 @@ export function isUnknownOutcome(status: number, body: unknown): boolean {
   }
   return false;
 }
+
+/* User-facing text comes ONLY from lib/billing/billedResponse (classifyBilledResponse / billedOutcomeText):
+   this module decides keep vs end, nothing else (one source of copy). */
 
 export type KeyOutcome = { lost: true } | { lost?: false; status: number; body: unknown };
 

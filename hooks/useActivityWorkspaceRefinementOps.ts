@@ -6,10 +6,13 @@ import { apiFetch } from '@/lib/apiFetch';
 import type { ScheduleItem } from '../types/activityWorkspace';
 import type { RefineChatMessage, WorkspacePayload } from '@/lib/activity-workspace/shared';
 import { classifyBilledResponse, billedOutcomeText } from '../lib/billing/billedResponse';
-import { createBilledActionKeyGate } from '../lib/idempotency';
+import { createBilledKeyLifetime } from '../lib/billing/billedKeyLifetime';
 
-/** Billed: one Idempotency-Key per refine action, per schedule (lib/idempotency). */
-const refineKeys = createBilledActionKeyGate('activity-refine-variant');
+/**
+ * Billed: one Idempotency-Key per refine action (c6: required, replays for the same key). Kept on an
+ * unknown outcome so a retry replays instead of charging again (lib/billing/billedKeyLifetime).
+ */
+const refineKeys = createBilledKeyLifetime('activity-refine-variant', { replays: true });
 
 type NotifyFn = (type: 'success' | 'error' | 'info', message: string) => void;
 
@@ -120,9 +123,12 @@ export function useActivityWorkspaceRefinementOps({
       notify('info', 'Generate repurposed content first.');
       return;
     }
+    let refineScope = '';
     try {
       setIsRefiningByScheduleId((prev) => ({ ...prev, [schedule.id]: true }));
-      const refineOp = refineKeys.begin(String(schedule.id));
+      // Scope = target + the instruction + the text it refines: a kept key never carries over to an edit.
+      refineScope = `${schedule.id}|${prompt}|${currentContent}`;
+      const refineOp = refineKeys.begin(refineScope);
       const response = await apiFetch('/api/activity-workspace/content', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...refineOp.headers },
@@ -138,6 +144,8 @@ export function useActivityWorkspaceRefinementOps({
         }),
       });
       const data = await response.json().catch(() => ({}));
+      refineKeys.finish(refineScope, { status: response.status, body: data });
+      refineScope = '';
       if (!response.ok) {
         const outcome = classifyBilledResponse(response.status, data, 'Failed to refine content');
         if (outcome.kind === 'already_processed') {
@@ -173,7 +181,8 @@ export function useActivityWorkspaceRefinementOps({
       console.error('Refine with AI failed:', error);
       notify('error', `Failed to refine content: ${String((error as any)?.message || error)}`);
     } finally {
-      refineKeys.end(String(schedule.id));
+      // apiFetch only throws on an abort: the outcome is unknown, keep the key (a retry replays).
+      if (refineScope) refineKeys.finish(refineScope, { lost: true });
       setIsRefiningByScheduleId((prev) => ({ ...prev, [schedule.id]: false }));
     }
   };

@@ -15,6 +15,10 @@ describe('isUnknownOutcome', () => {
     ['503 replay unavailable', 503, { code: 'REPLAY_UNAVAILABLE' }, true],
     ['200', 200, { result: {} }, false],
     ['402', 402, { code: 'INSUFFICIENT_CREDITS' }, false],
+    ['409 REQUEST_IN_PROGRESS (c6 activity-workspace)', 409, { code: 'REQUEST_IN_PROGRESS' }, true],
+    ['409 REQUEST_ENDED (released, not charged)', 409, { code: 'REQUEST_ENDED' }, false],
+    ['409 RESULT_UNAVAILABLE (terminal, refunded)', 409, { code: 'RESULT_UNAVAILABLE' }, false],
+    ['apiFetch synthetic 503 (lost connection)', 503, { error: 'Network unreachable' }, true],
   ])('%s', (_n, status, body, unknown) => {
     expect(isUnknownOutcome(status as number, body)).toBe(unknown);
   });

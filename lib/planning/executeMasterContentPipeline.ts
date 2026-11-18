@@ -8,6 +8,7 @@ import type { MasterContentDocument } from './masterContentDocument';
 import { deriveGenerationBias } from '../intelligence/generationBias';
 import type { StrategicMemoryProfile } from '../intelligence/strategicMemory';
 import { apiFetch } from '../apiFetch';
+import { postGenerateVariants } from '../activity-workspace/postGenerateVariants';
 
 type ActivityLike = {
   id?: string;
@@ -139,24 +140,17 @@ export async function executeMasterContentPipeline({
     platform_variants: (dailyExecutionItem as any)?.platform_variants,
   };
 
-  const resVariants = await apiFetch(CONTENT_API, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      action: 'generate_variants',
+  // Billed + keyed (c6): the shared keyed request; an unknown outcome throws UnconfirmedOutcomeError.
+  const dataVariants = await postGenerateVariants(
+    `pipeline:${String((activity as any)?.id ?? (dailyExecutionItem as any)?.execution_id ?? '')}:${String((master_content as any)?.content ?? '')}`,
+    {
       activity,
       schedules: schedules.length > 0 ? schedules : (masterDocument?.platforms ?? []).map((p) => ({ platform: p, contentType: 'post' })),
       dailyExecutionItem: itemWithMaster,
       companyId: companyId ?? null,
-    }),
-  });
-
-  if (!resVariants.ok) {
-    const err = await resVariants.json().catch(() => ({}));
-    throw new Error(String(err?.message || err?.error || 'Failed to execute content pipeline (generate_variants)'));
-  }
-
-  const dataVariants = await resVariants.json().catch(() => ({}));
+    },
+    'Failed to execute content pipeline (generate_variants)',
+  );
   const platform_variants = Array.isArray(dataVariants?.platform_variants) ? dataVariants.platform_variants : [];
 
   return { master_content, platform_variants };
