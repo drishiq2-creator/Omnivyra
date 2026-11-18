@@ -26,6 +26,8 @@ jest.mock('../../services/creditExecutionService', () => ({
 const mockInfo = jest.fn();
 jest.mock('../../services/logger', () => ({ logger: { info: (...a: unknown[]) => mockInfo(...a), warn: jest.fn(), error: jest.fn() } }));
 let mockSwitch: any = { enabled: true };
+const mockAnomalies: any[] = [];
+jest.mock('../../services/billing/billingAuditEmitter', () => ({ emitAnomaly: (a: unknown) => { mockAnomalies.push(a); } }));
 jest.mock('../../services/intelligenceConfigService', () => ({
   getResolvedConfigStrict: async (companyId: string | null, jobType: string) => {
     if (mockSwitch instanceof Error) throw mockSwitch;
@@ -35,7 +37,7 @@ jest.mock('../../services/intelligenceConfigService', () => ({
 
 import {
   BLOG_CREDITS, holdBlog, isBlogHoldRefusal, partialBlogCredits, runBlogWithBilling, blogBillingOf,
-  blogReferenceId, blogGenerationRefusal, isBlogRefusal,
+  blogReferenceId, blogGenerationRefusal, isBlogRefusal, __resetBlogSwitchAbsentReportForTests,
 } from '../../services/blog/blogBilling';
 import { getActiveCreditHandle } from '../../services/billing/aiGatewayBillingGuard';
 
@@ -154,9 +156,18 @@ describe("kill-switch: super-admin 'Blog Create' (job_type blog_generation)", ()
     mockSwitch = new Error('db down');
     expect(await blogGenerationRefusal(ORG)).toMatchObject({ ok: false, status: 503, code: 'BLOG_SWITCH_UNAVAILABLE', retryable: true });
   });
-  test('no switch row configured -> allowed (logged)', async () => {
+  test('no switch row configured -> ALLOWED (b3), one alertable anomaly per PROCESS, not per request', async () => {
+    __resetBlogSwitchAbsentReportForTests(); mockAnomalies.length = 0;
     mockSwitch = null;
     expect(await blogGenerationRefusal(ORG)).toBeNull();
+    expect(await blogGenerationRefusal(ORG)).toBeNull();
+    expect(await blogGenerationRefusal(null)).toBeNull();
+    expect(mockAnomalies).toEqual([expect.objectContaining({ kind: 'blog_kill_switch_row_absent', severity: 'critical' })]);
+  });
+  test('control: a present row never reports the anomaly', async () => {
+    __resetBlogSwitchAbsentReportForTests(); mockAnomalies.length = 0;
+    await blogGenerationRefusal(ORG);
+    expect(mockAnomalies).toEqual([]);
   });
 });
 

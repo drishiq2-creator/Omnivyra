@@ -33,6 +33,7 @@ import {
 import { runWithCreditHandle } from '../billing/aiGatewayBillingGuard';
 import { logger } from '../logger';
 import { getResolvedConfigStrict } from '../intelligenceConfigService';
+import { emitAnomaly } from '../billing/billingAuditEmitter';
 
 export const BLOG_ACTION = 'blog_post' as const;
 export const BLOG_CREDITS = 40;
@@ -71,7 +72,14 @@ export function blogReferenceId(idempotencyKeyHeader: unknown): { ok: true; refe
 /** The intelligence job_type super-admin 'Blog Create' toggles; both blog routes honour it. */
 export const BLOG_KILL_SWITCH_JOB_TYPE = 'blog_generation';
 
-/** null = allowed. companyId null = the global switch only. A read error refuses (never read as "on"). */
+let switchRowAbsentReported = false;
+/** Test seam: re-arm the once-per-process report. */
+export function __resetBlogSwitchAbsentReportForTests(): void { switchRowAbsentReported = false; }
+
+/**
+ * null = allowed. companyId null = the global switch only. A read error refuses (never read as "on").
+ * b3 ruling 2026-11-18: an ABSENT global row = not disabled -> ALLOW, reported as an alertable anomaly ONCE per process.
+ */
 export async function blogGenerationRefusal(companyId: string | null): Promise<BlogRefusal | null> {
   let cfg;
   try {
@@ -81,8 +89,12 @@ export async function blogGenerationRefusal(companyId: string | null): Promise<B
     return { ok: false, status: 503, code: 'BLOG_SWITCH_UNAVAILABLE', retryable: true, error: 'Blog generation is temporarily unavailable. Please try again.' };
   }
   if (!cfg) {
-    // No switch row configured: nothing to honour (logged so an absent seed row is visible).
-    logger.warn('blog_kill_switch_row_absent', { companyId, jobType: BLOG_KILL_SWITCH_JOB_TYPE });
+    // No switch row configured: absence = not disabled (b3). Alertable, once per process (not per request).
+    if (!switchRowAbsentReported) {
+      switchRowAbsentReported = true;
+      emitAnomaly({ kind: 'blog_kill_switch_row_absent', severity: 'critical', message: 'blog_kill_switch_row_absent',
+        metadata: { jobType: BLOG_KILL_SWITCH_JOB_TYPE } });
+    }
     return null;
   }
   if (cfg.enabled === false) {
