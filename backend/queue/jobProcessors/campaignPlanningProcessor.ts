@@ -20,6 +20,7 @@
  *   F   — Campaign metrics recorded after generation
  */
 
+import { billedQueueJobId } from '../../services/billing/billedRequestRecovery';
 import type { Job } from 'bullmq';
 import { supabase } from '../../db/supabaseClient';
 import { buildDeterministicWeeklySkeleton } from '../../services/deterministicWeeklySkeleton';
@@ -345,7 +346,7 @@ export async function processCampaignPlanningJob(job: Job<CampaignPlanningJobPay
   const wrapped = await withQueueBilling(
     {
       queueName:      'campaign-planning',
-      jobId:          String(job.id ?? job.data?.jobId ?? `inline-${Date.now()}`),
+      jobId:          billedQueueJobId(job.id ?? job.data?.jobId),
       payload:        { jobId: job.data?.jobId, campaignId: job.data?.campaignId, planTier: job.data?.planTier },
       organizationId: orgId,
       userId:         orgId,

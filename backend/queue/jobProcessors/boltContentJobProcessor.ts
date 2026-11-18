@@ -1,3 +1,4 @@
+import { billedQueueJobId } from '../../services/billing/billedRequestRecovery';
 import { ownedDbTable } from '../../db/writeOwner';
 /**
  * BOLT Content Job Processor
@@ -361,7 +362,7 @@ export async function processBoltContentJob(job: Job): Promise<void> {
   const wrapped = await withQueueBilling(
     {
       queueName:      'bolt-content',
-      jobId:          String(job.id ?? d.bolt_job_id ?? `inline-${Date.now()}`),
+      jobId:          billedQueueJobId(job.id ?? d.bolt_job_id),
       payload:        { bolt_job_id: d.bolt_job_id, run_id: d.run_id, content_type: d.content_type },
       organizationId: orgId,
       userId:         String(d.campaign?.user_id ?? orgId),
