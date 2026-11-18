@@ -14,7 +14,7 @@ import {
 } from '../../../backend/services/marketPulseV2Service';
 import { processMarketPulseJobV1 } from '../../../backend/services/marketPulseJobProcessor';
 import { randomUUID } from 'crypto';
-import { holdMarketPulseRun, releaseMarketPulseHold } from '../../../backend/services/marketPulse/marketPulseBilling';
+import { holdMarketPulseRun, isMarketPulseHoldRefusal, releaseMarketPulseHold } from '../../../backend/services/marketPulse/marketPulseBilling';
 
 function shouldProcessMarketPulseInline(): boolean {
   if (!config.ENABLE_AUTO_WORKERS) return true;
@@ -94,7 +94,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       insightSource: resolvedInput.source_strategy,
       validateMembership: true,
     });
-    if (!hold.ok) {
+    if (isMarketPulseHoldRefusal(hold)) {
       const { status, ...refusal } = hold;
       return res.status(status).json(refusal);
     }

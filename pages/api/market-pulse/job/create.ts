@@ -5,7 +5,7 @@ import { supabase } from '../../../../backend/db/supabaseClient';
 import { jobQueue } from '../../../../backend/queue/jobQueue';
 import { safeEnqueue } from '../../../../backend/middleware/queueBackpressure';
 import { randomUUID } from 'crypto';
-import { holdMarketPulseRun, releaseMarketPulseHold } from '../../../../backend/services/marketPulse/marketPulseBilling';
+import { holdMarketPulseRun, isMarketPulseHoldRefusal, releaseMarketPulseHold } from '../../../../backend/services/marketPulse/marketPulseBilling';
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'POST') {
@@ -88,7 +88,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       insightSource: resolvedInsightSource,
       validateMembership: true,
     });
-    if (!hold.ok) {
+    if (isMarketPulseHoldRefusal(hold)) {
       const { status, ...refusal } = hold;
       return res.status(status).json(refusal);
     }

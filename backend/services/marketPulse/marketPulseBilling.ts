@@ -34,9 +34,15 @@ export function billableRegionCount(regions: readonly string[], insightSource: M
   return Math.max(1, regions.length);
 }
 
+export type MarketPulseHoldRefusal = { ok: false; status: 402 | 403 | 409 | 503; code: string; retryable: boolean; error: string; required?: number; available?: number };
 export type MarketPulseHoldResult =
   | { ok: true; reservation: CreditReservationHandle | null; credits: number }
-  | { ok: false; status: 402 | 403 | 409 | 503; code: string; retryable: boolean; error: string; required?: number; available?: number };
+  | MarketPulseHoldRefusal;
+
+/** Type guard - the repo compiles with strict:false, where `!r.ok` does not narrow the boolean discriminant. */
+export function isMarketPulseHoldRefusal(r: MarketPulseHoldResult): r is MarketPulseHoldRefusal {
+  return r.ok === false;
+}
 
 /**
  * Reserve the run's credits. `jobId` is the pre-generated market_pulse_jobs_v1 id (the hold precedes the insert).

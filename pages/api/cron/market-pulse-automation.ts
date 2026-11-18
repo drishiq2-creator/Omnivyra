@@ -45,7 +45,7 @@ import {
 import { processMarketPulseJobV1 } from '../../../backend/services/marketPulseJobProcessor';
 import { bearerTokenMatches } from '../../../backend/security/constantTimeEqual';
 import { randomUUID } from 'crypto';
-import { holdMarketPulseRun, isMarketPulseRunDue, releaseMarketPulseHold } from '../../../backend/services/marketPulse/marketPulseBilling';
+import { holdMarketPulseRun, isMarketPulseHoldRefusal, isMarketPulseRunDue, releaseMarketPulseHold } from '../../../backend/services/marketPulse/marketPulseBilling';
 import { checkCreditAlerts } from '../../../backend/services/creditAlertService';
 
 const BATCH_SIZE = 50;
@@ -230,7 +230,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
             insightSource: resolvedInput.source_strategy,
             validateMembership: false,
           });
-          if (!hold.ok) {
+          if (isMarketPulseHoldRefusal(hold)) {
             await checkCreditAlerts(companyId).catch(() => undefined);
             return { mode: 'skipped_credits' as const, code: hold.code };
           }
