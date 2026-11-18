@@ -47,6 +47,18 @@ describe('settlementPending reaches the route', () => {
     expect(mockCounters).toContain('phase2_route_settlement_pending_total');
     expect(mockWarn).toHaveBeenCalledWith('phase2_route_settlement_pending', expect.objectContaining({ holdId: 'hold-9' }));
   });
+  test('EVERY route (no callback needed): inside the route surface, the 2xx body gains settlementPending', async () => {
+    const { runWithSettlementSurface } = jest.requireActual('../../services/billing/settlementPendingSurface');
+    engine.executeWithEntryConsumption.mockImplementation(async (o: any) => ({ status: 'executed', result: await o.executor(), settlementPending: PENDING }));
+    const res: any = { statusCode: 200, body: undefined };
+    res.status = (c: number) => { res.statusCode = c; return res; };
+    res.json = (b: any) => { res.body = b; return res; };
+    await runWithSettlementSurface(res, async () => {
+      const out = await wirePhase2Route({ ...ARGS, run: async () => 'WORK' });   // no onSettlementPending
+      res.status(200).json({ out });
+    });
+    expect(res.body).toEqual({ out: 'WORK', settlementPending: { code: 'CREDIT_SETTLE_AMBIGUOUS' } });
+  });
   test('control: executed WITHOUT pending never calls onSettlementPending', async () => {
     engine.executeWithEntryConsumption.mockImplementation(async (o: any) => ({ status: 'executed', result: await o.executor() }));
     const cb = jest.fn();
