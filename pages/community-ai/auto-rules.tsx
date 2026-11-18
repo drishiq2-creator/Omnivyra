@@ -142,6 +142,9 @@ export default function CommunityAiAutoRules() {
 
   return (
     <CommunityAiLayout title="Auto-Rules">
+      <p className="mb-3 text-sm text-gray-600">
+        Rules that are on like, reply and share by themselves. What they do is posted publicly, without your review.
+      </p>
       <SectionCard title="Create Auto-Rule">
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 text-sm">
           <div className="flex flex-col gap-2">
@@ -228,7 +231,7 @@ export default function CommunityAiAutoRules() {
                         className="px-2 py-1 text-xs rounded border border-gray-300"
                         onClick={() => handleToggle(rule)}
                       >
-                        {rule.is_active ? 'Enabled' : 'Disabled'}
+                        {rule.is_active ? 'On: runs automatically' : 'Off'}
                       </button>
                     </td>
                     <td className="py-2 pr-3">

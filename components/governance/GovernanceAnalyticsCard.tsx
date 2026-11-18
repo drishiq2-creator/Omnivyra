@@ -390,7 +390,7 @@ export function GovernanceAnalyticsCard({
             <span className="text-sm text-slate-700">Enable Autonomous Optimization</span>
           </label>
           <p className="text-xs text-slate-500 mt-1">
-            When eligible, the system may automatically apply optimization proposals. Fully auditable and reversible.
+            When eligible, the system may change this campaign’s length (number of weeks) by itself, without asking you first. Each change is recorded in the governance log.
           </p>
         </div>
       )}

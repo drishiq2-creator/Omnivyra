@@ -84,6 +84,18 @@ const StatusIcon = ({ status }: { status: string }) => {
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
+/**
+ * b3 (consent pass, B2, BLOCKING-launch): a bulk external send must be confirmed with the
+ * recipient count and the fact that WhatsApp may charge per message.
+ */
+export function broadcastConfirmText(count: number, duplicatesRemoved: number): string {
+  const who = `${count} contact${count === 1 ? '' : 's'}`;
+  const dupes = duplicatesRemoved > 0
+    ? ` (${duplicatesRemoved} duplicate number${duplicatesRemoved === 1 ? '' : 's'} removed)`
+    : '';
+  return `Send this message to ${who}${dupes} now? It goes out straight away, and WhatsApp may charge per message.`;
+}
+
 export default function WhatsAppBroadcastsPage() {
   const { selectedCompanyId } = useCompanyContext();
   const companyId = selectedCompanyId || '';
@@ -200,10 +212,17 @@ export default function WhatsAppBroadcastsPage() {
       return;
     }
 
-    const contacts = valid.map((phone) => ({ phone_number: phone }));
+    // b3 (consent pass, B2): dedupe before counting, then confirm the count and the charges.
+    const unique = Array.from(new Set(valid));
+    const contacts = unique.map((phone) => ({ phone_number: phone }));
 
     if (contacts.length === 0) {
       setError('Enter at least one recipient phone number');
+      setCreating(false);
+      return;
+    }
+
+    if (typeof window !== 'undefined' && !window.confirm(broadcastConfirmText(contacts.length, valid.length - unique.length))) {
       setCreating(false);
       return;
     }

@@ -331,7 +331,7 @@ function CardBoltProgress({ progress, theme, startedAt, contentJobs, outcomeView
           {/* Stats row */}
           <div className="flex gap-3 mt-1.5">
             {contentJobs.posts_scheduled > 0 && (
-              <span className="text-[10px] text-green-600 font-medium">{contentJobs.posts_scheduled} posts live</span>
+              <span className="text-[10px] text-green-600 font-medium">{contentJobs.posts_scheduled} posts scheduled</span>
             )}
             {contentJobs.active > 0 && (
               <span className="text-[10px] text-amber-600">{contentJobs.active} generating</span>

@@ -783,7 +783,7 @@ export default function CampaignDailyPlanPage() {
               <div>
                 <h2 className="text-base font-semibold text-gray-900 mb-1">Schedule entire campaign?</h2>
                 <p className="text-sm text-gray-600">
-                  This will generate platform-adapted content for every activity in all {totalWeeks} weeks and add them to your posting calendar. Activities already scheduled will be skipped.
+                  This will generate platform-adapted content for every activity in all {totalWeeks} weeks and add them to your posting calendar. Posts publish automatically at their scheduled times. Activities already scheduled will be skipped.
                 </p>
               </div>
             </div>
