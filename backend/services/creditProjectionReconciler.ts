@@ -247,9 +247,17 @@ async function reconcileImpl(organizationId: string): Promise<ReconcileResult> {
   if (ledger === null) {
     return { outcome: 'failed', organizationId };
   }
-  // The scan must describe ONE ledger state: the count did not move during it, and the scan saw exactly that many rows
-  // (a row inserted mid-scan below the keyset cursor is missed by the scan but not by the count). Otherwise ABORT and
-  // write nothing - an absolute rebuild from a moving ledger is a wrong balance.
+  // The scan must describe ONE ledger state, or ABORT and write nothing. Two checks, and they are NOT redundant (7c):
+  //   1. countAfter === countBefore - DID THE POPULATION CHANGE. Append-only means the count only grows, so equal counts
+  //      imply no insert anywhere in the window spanning countBefore, every page of the scan, and countAfter - what a
+  //      transaction would give, without one. Do not drop either count read.
+  //   2. ledger.length === countAfter - DID WE SEE ALL OF IT. A completeness check on the scan itself: it catches a
+  //      keyset paging bug, a page-boundary off-by-one, a .limit() interaction or a row sorting before the cursor -
+  //      all of which give a SHORT sum over a STABLE ledger that check 1 can never see.
+  // Because the sum is taken over exactly the counted rows, a correct count implies a correct population (no sum check
+  // needed under append-only). The append-only premise is two layers: 20260663's immutability triggers (live-in-prod
+  // is cb read-pack #6) AND no application UPDATE/DELETE of ledger rows; if the triggers were not live, only the second
+  // layer would hold.
   const countAfter = await countLedger(organizationId);
   if (countAfter === null) return { outcome: 'failed', organizationId };
   if (countAfter !== countBefore || ledger.length !== countAfter) {
