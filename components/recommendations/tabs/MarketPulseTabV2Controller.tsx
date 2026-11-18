@@ -33,6 +33,9 @@ export function useMarketPulseTabController(props: OpportunityTabProps) {
   const [automationLoading, setAutomationLoading] = useState(false);
   const [cancelLoading, setCancelLoading] = useState(false);
   const [automationEnabled, setAutomationEnabled] = useState(false);
+  // Automation cadence (b3/c6): WEEKLY by default, daily optional. Honoured server-side by c6's MP
+  // billing release (isMarketPulseRunDue + migration 055); main still forces daily, so this ships with it.
+  const [cadence, setCadence] = useState<'weekly' | 'daily'>('weekly');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   // 55's charging: a 402 on run start is shown as a credit notice, never as a raw code.
   const [creditNotice, setCreditNotice] = useState<CreditNotice | null>(null);
@@ -82,6 +85,7 @@ export function useMarketPulseTabController(props: OpportunityTabProps) {
         if (data?.settings) {
           setAutomationEnabled(Boolean(data.settings.is_active));
           setCreditAcknowledged(Boolean(data.settings.credit_acknowledged));
+          setCadence(data.settings.cadence === 'daily' ? 'daily' : 'weekly');
         }
       } catch {
         // ignore
@@ -529,7 +533,7 @@ export function useMarketPulseTabController(props: OpportunityTabProps) {
         body: JSON.stringify({
           companyId,
           is_active: automationEnabled,
-          cadence: 'daily',
+          cadence,
           objective,
           categories: selectedCategories,
           region_scope: regionScope,
@@ -624,6 +628,7 @@ export function useMarketPulseTabController(props: OpportunityTabProps) {
     setErrorMessage, setFindingStateOverrides, setHistory, setLoadingContext, setMode, setObjective,
     setPendingRun, setRegionScope, setRunId, setRunResult, setRunning, setScanSetupAutoOpened,
     setScanSetupOpen, setSelectedCategories, setSourceStrategy, shownRecordedRef, sourceStrategy, stopScan,
+    cadence, setCadence,
     tieredFindings, toggleCategory, visibleRankedFindings
   };
 }
