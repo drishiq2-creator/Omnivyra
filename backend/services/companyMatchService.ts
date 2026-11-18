@@ -133,6 +133,10 @@ export async function findCompaniesByVerifiedEmailDomain(
     logger.warn('verified_domain_lookup_public_suffix', { host });
     return { ok: true, domain: domain || host, companies: [], ambiguous: true };
   }
+  // Not dead code: this second free-mail check is on the ROOT (mail.provider.com -> provider.com). Order matters:
+  // a free-mail provider whose HOST is unlisted but whose root is itself a public suffix is refused above (409)
+  // before this check can rescue it, so isFreeEmailDomain's completeness also decides whether such individuals
+  // can onboard (fail closed; 7c, 2026-11-19).
   if (isFreeEmailDomain(domain)) return { ok: true, domain: null, companies: [] };
   // `*` -> `_`: PostgREST accepts `*` as an alias of the `%` wildcard in like/ilike, so a literal `*`
   // must not reach the pattern. A domain cannot contain `*`, and `_` matches exactly one character, so
