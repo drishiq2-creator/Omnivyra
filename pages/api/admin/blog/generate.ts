@@ -135,7 +135,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       run: () => runGeneration({ referenceType: 'blog_post', referenceId, parentActivityId: null }),
       isQualityGateRefusal: (e) => e instanceof ThoughtLeadershipQualityGateError,
     });
-    return res.status(200).json({ ...(result as object), billing });
+    return res.status(200).json({ ...(result as object), billing, ...(billing.settlementPending ? { settlementPending: billing.settlementPending } : {}) });
   } catch (err) {
     // Enterprise quality gate: failed blog drafts are blocked instead of
     // being returned as usable generation output (owner: refunded in full).

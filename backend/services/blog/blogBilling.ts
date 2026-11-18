@@ -43,6 +43,8 @@ export interface BlogBillingSummary {
   charged: number;
   released: number;
   reason: 'completed' | 'partial' | 'not_started' | 'quality_refund';
+  /** Present when the settle was ambiguous: the hold stays held and reconciles later (the shared 200 + settlementPending contract). */
+  settlementPending?: { code: 'CREDIT_SETTLE_AMBIGUOUS' };
 }
 
 /** A blog's per-request reference: the caller's Idempotency-Key when sent (a client retry reuses the hold), else new. */
@@ -127,7 +129,7 @@ export async function runBlogWithBilling<T>(args: {
     } catch (e) {
       // Ambiguous settle: the hold stays held (never released on doubt); surfaced for reconciliation.
       logger.error('blog_credit_settle_pending', { referenceId: h.referenceId, charge, calls: counter.calls, message: (e as Error)?.message });
-      return { charged: 0, released: 0, reason };
+      return { charged: 0, released: 0, reason, settlementPending: { code: 'CREDIT_SETTLE_AMBIGUOUS' } };
     }
   };
 

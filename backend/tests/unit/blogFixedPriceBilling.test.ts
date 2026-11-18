@@ -98,7 +98,7 @@ describe('settle', () => {
     const h = await held();
     settleThrows = true;
     const r = await runBlogWithBilling({ reservation: h, run: async () => ({ ok: 1 }), isQualityGateRefusal: () => false });
-    expect(r.billing).toEqual({ charged: 0, released: 0, reason: 'completed' });
+    expect(r.billing).toEqual({ charged: 0, released: 0, reason: 'completed', settlementPending: { code: 'CREDIT_SETTLE_AMBIGUOUS' } });
   });
 
   test('the counting scope is per blog: calls outside it are not counted', async () => {
