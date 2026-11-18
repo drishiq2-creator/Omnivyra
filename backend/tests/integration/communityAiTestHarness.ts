@@ -23,6 +23,13 @@ export const playbookStore: Array<any> = [];
 export const webhookStore: Array<any> = [];
 export const autoRuleStore: Array<any> = [];
 export const networkIntelligenceStore: Array<any> = [];
+/**
+ * Prompt 3 (OD-1): tenant execution policy rows, by organization. A tenant with
+ * no row is POLICY_MISSING (fail closed); there is no global fallback.
+ */
+export const executionPolicyStore = new Map<string, { execution_enabled: boolean; auto_rules_enabled: boolean }>();
+/** Governance refusal records (record_community_execution_refusal). */
+export const refusalStore: Array<any> = [];
 
 export const mockJsonResponse = (payload: any, ok = true, status = 200) => ({
   ok,
@@ -64,6 +71,7 @@ export const seedPlaybook = (overrides?: Record<string, any>) => {
 };
 
 export const resetCommunityAiStores = () => {
+  guardrailRow = { ...DEFAULT_GUARDRAIL_ROW };
   actionStore.clear();
   actionLogStore.length = 0;
   roleStore.length = 0;
@@ -76,6 +84,136 @@ export const resetCommunityAiStores = () => {
   webhookStore.length = 0;
   autoRuleStore.length = 0;
   networkIntelligenceStore.length = 0;
+  executionPolicyStore.clear();
+  refusalStore.length = 0;
+};
+
+/** Open the tenant's execution policy (production: two-person confirmed). */
+export const seedExecutionPolicy = (opts: { tenantId?: string; executionEnabled?: boolean; autoRulesEnabled?: boolean } = {}) => {
+  executionPolicyStore.set(opts.tenantId ?? 'tenant-1', {
+    execution_enabled: opts.executionEnabled !== false,
+    auto_rules_enabled: opts.autoRulesEnabled === true,
+  });
+};
+
+/** A complete human approval of record on an action fixture (see communityApprovalEvidenceFixture). */
+export { withApprovalEvidence } from '../helpers/communityApprovalEvidenceFixture';
+
+/** Store `row` as a human-approved action (approved, with its approval of record) and return it. */
+export const storeApproved = (row: Record<string, any>) => {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { withApprovalEvidence: withEvidence } = jest.requireActual('../helpers/communityApprovalEvidenceFixture');
+  const r = withEvidence({ status: 'approved', ...row });
+  actionStore.set(r.id, r);
+  return r;
+};
+
+const policyDecision = (org: unknown, tenant: unknown) => {
+  if (typeof org !== 'string' || !org || org !== tenant) return { allowed: false, code: 'POLICY_SCOPE_INVALID', auto_rules_enabled: null, policy_version: null };
+  const row = executionPolicyStore.get(org);
+  if (!row) return { allowed: false, code: 'POLICY_MISSING', auto_rules_enabled: null, policy_version: null };
+  if (!row.execution_enabled) return { allowed: false, code: 'POLICY_EXECUTION_DISABLED', auto_rules_enabled: null, policy_version: 'v1' };
+  return { allowed: true, code: null, auto_rules_enabled: row.auto_rules_enabled, policy_version: 'v1' };
+};
+
+/**
+ * The ONE execution_guardrails row the fake knows, read by the select AND by the atomic claim (so the two can never
+ * disagree). `null` = no guardrail row for the company: production then applies NO limits (the select answers no
+ * row; the SQL wraps every limit in IF FOUND) - the one path where the safety mechanism is absent, so it must be
+ * reachable (7c). resetCommunityAiStores() restores the default.
+ */
+export const DEFAULT_GUARDRAIL_ROW = Object.freeze({ auto_execution_enabled: true, daily_platform_limit: 999, per_post_reply_limit: 999, per_evaluation_limit: 999 });
+let guardrailRow: Record<string, any> | null = { ...DEFAULT_GUARDRAIL_ROW };
+export const setGuardrailRow = (row: Record<string, any> | null) => { guardrailRow = row === null ? null : { ...row }; };
+
+/**
+ * Emulates the Prompt 3 database functions for the in-memory harness (the SQL
+ * itself is proven in the real-schema suites): the tenant policy decision, the
+ * single approved -> executing claim (policy -> approval evidence + 7 days ->
+ * CAS; a refusal leaves the row and records once; a lost race records nothing)
+ * and the refusal recorder. Install with
+ * `(supabase.rpc as jest.Mock).mockImplementation(communityRpc)`.
+ */
+export const communityRpc = async (name: string, args: Record<string, any>) => {
+  if (name === 'community_execution_policy_decision') return { data: [policyDecision(args.p_org, args.p_tenant)], error: null };
+  if (name === 'record_community_execution_refusal') {
+    refusalStore.push({ action_id: args.p_action_id, organization_id: args.p_org, tenant_id: args.p_tenant, claim_point: args.p_claim_point, code: args.p_code });
+    return { data: true, error: null };
+  }
+  if (name === 'claim_community_ai_action_for_execution') {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { evaluateCommunityApprovalEvidence } = jest.requireActual('../../services/communityApprovalBinding');
+    const row = actionStore.get(args.p_action_id);
+    if (!row) return { data: [{ claimed: false, code: 'ACTION_NOT_FOUND', current_status: null }], error: null };
+    if (row.organization_id !== args.p_org || row.tenant_id !== args.p_tenant) {
+      return { data: [{ claimed: false, code: 'TENANT_SCOPE_VIOLATION', current_status: null }], error: null };
+    }
+    const decision = policyDecision(args.p_org, args.p_tenant);
+    let code: string | null = null;
+    if (!decision.allowed) code = decision.code;
+    else if (args.p_claim_point === 'auto' && decision.auto_rules_enabled !== true) code = 'POLICY_AUTO_RULES_DISABLED';
+    else {
+      const ev = evaluateCommunityApprovalEvidence(row);
+      if (!ev.ok) code = ev.code === 'HUMAN_APPROVAL_REQUIRED' ? 'APPROVAL_REQUIRED' : ev.code === 'APPROVAL_EXPIRED' ? 'APPROVAL_EXPIRED' : 'APPROVAL_EVIDENCE_REQUIRED';
+    }
+    if (code) {
+      refusalStore.push({ action_id: row.id, organization_id: row.organization_id, tenant_id: row.tenant_id, claim_point: args.p_claim_point, code });
+      return { data: [{ claimed: false, code, current_status: row.status }], error: null };
+    }
+    if (row.status !== 'approved' || row.cancel_requested_at) {
+      return { data: [{ claimed: false, code: 'CLAIM_CONFLICT', current_status: row.status }], error: null };
+    }
+    // As the SQL does: a well-formed correlation id is stamped with the claim.
+    const corr = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(args.p_correlation_id ?? ''))
+      ? args.p_correlation_id : row.execution_correlation_id;
+    actionStore.set(row.id, { ...row, status: 'executing', execution_mode: args.p_execution_mode || row.execution_mode, execution_correlation_id: corr });
+    return { data: [{ claimed: true, code: null, current_status: 'executing' }], error: null };
+  }
+  if (name === 'community_ai_claim_within_limits') {
+    // CLASS-2 A19 (97aba0bf9, migration 20270217000021): the claim THROUGH the guardrails, atomically.
+    // As the SQL does: refuse a bad source; then, with a guardrail row, the limits counted over
+    // executed (in the window) + executing actions; a hit refuses with GUARDRAIL_* (one refusal record,
+    // nothing claimed); otherwise delegate to the plain claim. The fake's guardrail row is the same
+    // constant resolveSelect answers for execution_guardrails. Stage 0 (a9): this RPC had no fake, so
+    // every scheduler / evaluation claim failed CLAIM_RPC_ERROR.
+    if (args.p_source !== 'evaluation' && args.p_source !== 'scheduler') {
+      // As the SQL: RAISE EXCEPTION ... ERRCODE '22023' - the caller sees an RPC error, not a refusal row (7c).
+      return { data: null, error: { code: '22023', message: 'community_ai_claim_within_limits: invalid arguments' } };
+    }
+    const row = actionStore.get(args.p_action_id);
+    // As the SQL (:152-153): the guardrails are evaluated ONLY for a found, in-scope row whose status is 'approved';
+    // anything else delegates straight to the plain claim and returns ITS answer (7c finding: without the status
+    // test the fake could answer GUARDRAIL_* for an executing / executed / failed action, which production never does).
+    const g = guardrailRow;
+    if (row && row.organization_id === args.p_org && row.tenant_id === args.p_tenant && row.status === 'approved' && g) {
+      const platform = String(row.platform ?? '').trim().toLowerCase();
+      const counted = (since: string | null, extra: (a: any) => boolean) => Array.from(actionStore.values()).filter((a) =>
+        a.organization_id === args.p_org && String(a.platform ?? '').trim().toLowerCase() === platform && extra(a)
+        && ((a.status === 'executed' && a.executed_at && (!since || a.executed_at >= since)) || a.status === 'executing')).length;
+      const dayStart = new Date(); dayStart.setUTCHours(0, 0, 0, 0);
+      let code: string | null = null;
+      if (g.auto_execution_enabled === false) code = 'GUARDRAIL_AUTO_DISABLED';
+      if (!code && g.daily_platform_limit != null && counted(dayStart.toISOString(), () => true) >= g.daily_platform_limit) {
+        code = 'GUARDRAIL_DAILY_PLATFORM_LIMIT';
+      }
+      // Gate as the SQL: lower(btrim(coalesce(action_type, ''))) = 'reply'; the count below matches action_type exactly,
+      // as the SQL's does (community_ai_actions_action_type_check pins lower-case values, so the two cannot diverge).
+      if (!code && String(row.action_type ?? '').trim().toLowerCase() === 'reply' && g.per_post_reply_limit != null
+        && counted(null, (a) => a.target_id === row.target_id && a.action_type === 'reply') >= g.per_post_reply_limit) {
+        code = 'GUARDRAIL_PER_POST_LIMIT';
+      }
+      if (!code && args.p_source === 'evaluation' && g.per_evaluation_limit != null
+        && counted(new Date(Date.now() - 10 * 60 * 1000).toISOString(), () => true) >= g.per_evaluation_limit) {
+        code = 'GUARDRAIL_PER_EVALUATION_LIMIT';
+      }
+      if (code) {
+        refusalStore.push({ action_id: row.id, organization_id: row.organization_id, tenant_id: row.tenant_id, claim_point: args.p_claim_point, code });
+        return { data: [{ claimed: false, code, current_status: row.status }], error: null };
+      }
+    }
+    return communityRpc('claim_community_ai_action_for_execution', args);
+  }
+  return { data: null, error: { message: `communityRpc: unexpected rpc ${name}` } };
 };
 
 /**
@@ -143,10 +281,20 @@ const resolveSelect = (table: string, state: any) => {
     if (state.filters.action_type) rows = rows.filter((row) => row.action_type === state.filters.action_type);
     if (state.filters.target_id) rows = rows.filter((row) => row.target_id === state.filters.target_id);
     if (state.filters.status) rows = rows.filter((row) => row.status === state.filters.status);
+    for (const f of state.notNull || []) rows = rows.filter((row) => row[f] !== null && row[f] !== undefined);
     if (state.lteFilter) {
       rows = rows.filter((row) => {
         const value = row[state.lteFilter.field];
         return value && value <= state.lteFilter.value;
+      });
+    }
+    // The guardrail's windowed counts (executed_at >= start of day / ten minutes ago) need gte too. A STRING compare:
+    // correct only because every stored timestamp is uniform ISO-8601 UTC (toISOString), so lexical == chronological.
+    // Seed timestamps the same way (7c).
+    if (state.gteFilter) {
+      rows = rows.filter((row) => {
+        const value = row[state.gteFilter.field];
+        return value && value >= state.gteFilter.value;
       });
     }
     return { data: rows, error: null };
@@ -283,7 +431,8 @@ const resolveSelect = (table: string, state: any) => {
     return { data: rows, error: null };
   }
   if (table === 'execution_guardrails') {
-    const value = { auto_execution_enabled: true, daily_platform_limit: 999, per_post_reply_limit: 999, per_evaluation_limit: 999 };
+    if (guardrailRow === null) return { data: state.single ? null : [], error: null };
+    const value = { ...guardrailRow };
     return { data: state.single ? value : [value], error: null };
   }
   if (table === 'organization_plan_assignments' || table === 'pricing_plans') return { data: state.single ? null : [], error: null };
@@ -391,20 +540,37 @@ export const buildQuery = (table: string) => {
     insertRows?: any[];
     limitValue?: number;
     single?: boolean;
+    notNull?: string[];
+    count?: { head: boolean };
   } = { filters: {} };
+  // PostgREST's `select(cols, { count: 'exact', head: true })` answers { data: null, count: <n> }. The fake
+  // used to answer { data: rows } with no `count`, so a caller that (correctly) treats a missing count as
+  // unreadable - the CLASS-2 A19 guardrail, which fails CLOSED - refused every action (stage 0, a9).
+  const answer = (r: any) => {
+    if (!state.count) return r;
+    if (r?.error) return { data: null, count: null, error: r.error };
+    const rows = Array.isArray(r?.data) ? r.data : r?.data ? [r.data] : [];
+    return { data: state.count.head ? null : r.data, count: rows.length, error: null };
+  };
   const query: any = {
-    select: jest.fn().mockReturnThis(),
+    select: jest.fn((_cols?: string, options?: { count?: string; head?: boolean }) => {
+      if (options?.count) state.count = { head: options.head === true };
+      return query;
+    }),
     eq: jest.fn((field: string, value: any) => { state.filters[field] = value; return query; }),
     gte: jest.fn((field: string, value: any) => { state.gteFilter = { field, value }; return query; }),
     limit: jest.fn((value: number) => { state.limitValue = value; return query; }),
     lte: jest.fn((field: string, value: any) => { state.lteFilter = { field, value }; return query; }),
     in: jest.fn((field: string, values: any[]) => { state.inFilter = { field, values }; return query; }),
     order: jest.fn((field: string, options?: any) => { state.order = { field, ascending: options?.ascending !== false }; return query; }),
-    single: jest.fn(async () => { state.single = true; return resolveSelect(table, state); }),
-    maybeSingle: jest.fn(async () => { state.single = true; return resolveSelect(table, state); }),
-    not: jest.fn(() => query),
+    single: jest.fn(async () => { state.single = true; return answer(resolveSelect(table, state)); }),
+    maybeSingle: jest.fn(async () => { state.single = true; return answer(resolveSelect(table, state)); }),
+    not: jest.fn((field: string, op: string, value: any) => {
+      if (op === 'is' && value === null) state.notNull = [...(state.notNull || []), field];
+      return query;
+    }),
     or: jest.fn(() => query),
-    then: (resolve: any, reject: any) => Promise.resolve(resolveSelect(table, state)).then(resolve, reject),
+    then: (resolve: any, reject: any) => Promise.resolve(answer(resolveSelect(table, state))).then(resolve, reject),
     update: jest.fn((values: any) => {
       state.update = values;
       // Chainable update — supports .eq().in().select().maybeSingle() / .single()
@@ -419,6 +585,8 @@ export const buildQuery = (table: string) => {
           state.inFilter = { field, values };
           return updateChain;
         }),
+        // The claim also requires `cancel_requested_at IS NULL`; no fixture sets it.
+        is: jest.fn(() => updateChain),
         select: jest.fn(() => updateChain),
         single: jest.fn(async () => resolveUpdateWithFilters(table, state)),
         maybeSingle: jest.fn(async () => resolveUpdateWithFilters(table, state)),

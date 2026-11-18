@@ -78,6 +78,33 @@ jest.mock('../../db/writeOwner', () => ({
     };
     return b;
   },
+  // The DATABASE limiter layer (CLASS-2 D6): what outreach_quota_consume does (migration
+  // 20270217000009) over these tables - attempts in the window + live reservations, and a grant WRITES
+  // a reservation. Real concurrency is proven against Postgres in the migration replay.
+  ownedDbRpc: async (fn: string, args: Record<string, unknown>) => {
+    const reservations = (db.tables.outreach_quota_reservations ??= []);
+    if (fn === 'outreach_quota_release') {
+      const r = reservations.find((x) => x.id === args.p_reservation_id && !x.released_at);
+      if (r) r.released_at = new Date().toISOString();
+      return { data: !!r, error: null };
+    }
+    if (fn !== 'outreach_quota_consume') return { data: null, error: { message: `no function ${fn}` } };
+    if (db.failTable === 'outreach_attempts') return { data: null, error: { message: 'attempts unreadable' } };
+    const since = String(args.p_since);
+    const attempts = (db.tables.outreach_attempts ?? []).filter((a) => a.company_id === args.p_company_id && String(a.started_at ?? '') >= since);
+    const leadTaskIds = new Set((db.tables.outreach_tasks ?? []).filter((t) => t.company_id === args.p_company_id && t.lead_id === args.p_lead_id).map((t) => t.id));
+    const live = reservations.filter((r) => r.company_id === args.p_company_id && !r.released_at && !attempts.some((a) => a.task_id === r.task_id));
+    const tenantUsed = attempts.length + live.length;
+    const leadUsed = attempts.filter((a) => leadTaskIds.has(a.task_id)).length + live.filter((r) => r.lead_id === args.p_lead_id).length;
+    const lt = args.p_limit_tenant as number | null;
+    const ll = args.p_limit_lead as number | null;
+    if ((lt !== null && tenantUsed + 1 > lt) || (ll !== null && leadUsed + 1 > ll)) {
+      return { data: [{ granted: false, reservation_id: null, tenant_used: tenantUsed, lead_used: leadUsed }], error: null };
+    }
+    const id = `res-${reservations.length + 1}`;
+    reservations.push({ id, company_id: args.p_company_id, lead_id: args.p_lead_id, task_id: args.p_task_id, released_at: null });
+    return { data: [{ granted: true, reservation_id: id, tenant_used: tenantUsed + 1, lead_used: leadUsed + 1 }], error: null };
+  },
 }));
 
 /** Fake Redis. `available=false` models the fast path being absent. */
@@ -118,6 +145,10 @@ import {
   setOutreachTaskState,
   type NewOutreachTask,
 } from '../../services/leadOutreachExecution';
+// D-02 — the one approval path (with its passkey ceremony), used by the approved-task fixture.
+import { approveWithPasskey } from '../helpers/approvalPasskeyDouble';
+// D-02 (S-02) — external approvals need a passkey proof: the real ceremony over a WebAuthn double.
+jest.mock('../../security/webauthn/WebAuthnAuthenticationService', () => require('../helpers/approvalPasskeyDouble').webauthnDouble);
 
 const NOW = '2026-08-05T12:00:00.000Z';
 
@@ -141,7 +172,11 @@ const configureTenant = (over: Row = {}) => {
 const approvedTask = async (over: Partial<NewOutreachTask> = {}): Promise<string> => {
   const res = await insertOutreachTask(newTask(over));
   const id = res.data!.id as string;
-  await setOutreachTaskState('co-a', id, { status: 'approved' });
+  // D-02 — an approved status alone no longer authorises a send: approve through the one
+  // approval path, which records the content binding the dispatch gate re-checks.
+  await setOutreachTaskState('co-a', id, { status: 'awaiting_approval' });
+  // An external (non-internal) task's approval names the address it authorises (Outreach L-2); ignored for internal.
+  await approveWithPasskey('co-a', id, 'u-approver', { recipient: 'person@example.test' });
   return id;
 };
 
@@ -404,20 +439,20 @@ describe('WS-3 M5A (5) — durable rate limiter', () => {
   });
 
   it('grants a reservation within limits and reports the layer', async () => {
-    const r = await reserveQuota({ companyId: 'co-a', leadId: 'L1', at: NOW, dailyLimitTenant: 10, dailyLimitLead: 5 });
+    const r = await reserveQuota({ companyId: 'co-a', leadId: 'L1', taskId: 't-1', at: NOW, dailyLimitTenant: 10, dailyLimitLead: 5 });
     expect(r).toMatchObject({ granted: true, layer: 'redis' });
   });
 
   it('falls back to the database when Redis is unavailable', async () => {
     fakeRedis.available = false;
     __resetQuotaRedisForTests();
-    const r = await reserveQuota({ companyId: 'co-a', leadId: 'L1', at: NOW, dailyLimitTenant: 10, dailyLimitLead: 5 });
+    const r = await reserveQuota({ companyId: 'co-a', leadId: 'L1', taskId: 't-1', at: NOW, dailyLimitTenant: 10, dailyLimitLead: 5 });
     // Correctness is unchanged; only the layer differs.
     expect(r).toMatchObject({ granted: true, layer: 'db' });
   });
 
   it('refuses a reservation over the limit and RELEASES what it took', async () => {
-    const r = await reserveQuota({ companyId: 'co-a', leadId: 'L1', at: NOW, dailyLimitTenant: 0, dailyLimitLead: null });
+    const r = await reserveQuota({ companyId: 'co-a', leadId: 'L1', taskId: 't-1', at: NOW, dailyLimitTenant: 0, dailyLimitLead: null });
     expect(r).toMatchObject({ granted: false });
     // The reservation must not leak — the counter is back where it started.
     expect(fakeRedis.store.get('ws3:quota:tenant:co-a') ?? 0).toBe(0);
@@ -425,7 +460,7 @@ describe('WS-3 M5A (5) — durable rate limiter', () => {
 
   it('REFUSES rather than assuming capacity when durable usage is unreadable', async () => {
     db.failTable = 'outreach_attempts';
-    const r = await reserveQuota({ companyId: 'co-a', leadId: 'L1', at: NOW, dailyLimitTenant: 10, dailyLimitLead: 5 });
+    const r = await reserveQuota({ companyId: 'co-a', leadId: 'L1', taskId: 't-1', at: NOW, dailyLimitTenant: 10, dailyLimitLead: 5 });
     db.failTable = null;
     expect(r).toMatchObject({ granted: false, layer: 'db' });
     expect(r.reason).toContain('refusing rather than assuming');
@@ -437,22 +472,32 @@ describe('WS-3 M5A (5) — durable rate limiter', () => {
     await dispatchInternalOutreachTask('co-a', id, { now: NOW }); // 1 durable attempt
     fakeRedis.store.set('ws3:quota:tenant:co-a', 0); // Redis reset / expired
 
-    const r = await reserveQuota({ companyId: 'co-a', leadId: 'L1', at: NOW, dailyLimitTenant: 1, dailyLimitLead: null });
+    const r = await reserveQuota({ companyId: 'co-a', leadId: 'L1', taskId: 't-1', at: NOW, dailyLimitTenant: 1, dailyLimitLead: null });
     // An optimization must never authorize what the truth refuses.
     expect(r.granted).toBe(false);
   });
 
-  it('reconciles Redis to the durable count and reports drift', async () => {
+  // CONTRACT CHANGED (CLASS-2 D7; owner ruling via e9, 2026-11-12): reconcile is RAISE-ONLY. It used
+  // to SET the counter to the durable count, which erased reservations other dispatchers held but had
+  // not yet recorded - a third dispatcher then passed the limit.
+  it('reconciles Redis UP to the durable count and reports drift; a counter above it is left alone (in-flight reservations)', async () => {
     configureTenant();
     const id = await approvedTask();
     await dispatchInternalOutreachTask('co-a', id, { now: NOW });
 
-    fakeRedis.store.set('ws3:quota:tenant:co-a', 99); // artificial drift
+    fakeRedis.store.set('ws3:quota:tenant:co-a', 99); // above the truth: reservations in flight (or leaked)
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
     const rec = await reconcileQuota('co-a', 'L1', NOW);
+    // Not lowered, but MEASURED (05): the one signal that a release was lost.
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('counter above the durable count'), expect.objectContaining({ key: 'ws3:quota:tenant:co-a', durable: 1, counter: 99, excess: 98 }));
+    warn.mockRestore();
     expect(rec).toMatchObject({ reconciled: true, tenantCount: 1 });
     expect(rec.drift).toBe(98);
-    // SET to the truth, never adjusted by a delta.
-    expect(fakeRedis.store.get('ws3:quota:tenant:co-a')).toBe(1);
+    expect(fakeRedis.store.get('ws3:quota:tenant:co-a')).toBe(99); // never lowered
+
+    fakeRedis.store.set('ws3:quota:tenant:co-a', 0); // below the truth: reset / expired
+    await reconcileQuota('co-a', 'L1', NOW);
+    expect(fakeRedis.store.get('ws3:quota:tenant:co-a')).toBe(1); // raised to it
   });
 
   it('dispatch reconciles the fast path to the truth', async () => {
