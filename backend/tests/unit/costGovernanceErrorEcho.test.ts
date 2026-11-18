@@ -4,6 +4,7 @@
  * constraint names). Now the detail is logged and the client gets a generic message.
  * Real route; company access and the service are faked.
  */
+export {}; // a module, not a global script: top-level names must not collide with other test files (CI-496)
 const st: { record: () => Promise<unknown> } = { record: async () => ({ id: 'ev-1' }) };
 
 jest.mock('../../services/userContextService', () => ({ enforceCompanyAccess: async () => ({ userId: 'u-1' }) }));
