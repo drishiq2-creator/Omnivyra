@@ -32,8 +32,12 @@ import {
 import { getRequestContext } from '../requestContext';
 import type { SettlementPending } from './holdSettlementState';
 import { reportSettlementPending } from './settlementPendingSurface';
-import { persistBilledResult, replayBilledResult } from './billedResultStore';
-import { readOriginalCharge, refundOriginalCharge, type RefundOutcome } from './owedRefunds';
+import {
+  BilledResultUnpersistedError, BilledRouteReplayUnavailableError, BilledRouteResultUnavailableError, BilledRouteRefundPendingError,
+  persistBilledResultOrThrow, replayOrRefund,
+} from './billedRequestRecovery';
+// Re-exported: billedRouteHttpError and the routes import these from here.
+export { BilledRouteReplayUnavailableError, BilledRouteResultUnavailableError, BilledRouteRefundPendingError };
 import { hasEnoughCredits, type CreditAction } from '../creditDeductionService';
 import { incrCounter } from './billingMetrics';
 import { emitAnomaly } from './billingAuditEmitter';
@@ -91,48 +95,6 @@ export class BilledRouteAlreadyProcessedError extends Error {
  * on every attempt), so this is a 5xx with its own code - never the benign 409 a client may retry into (05 d,
  * 2026-11-13). retryable=false: the SAME Idempotency-Key cannot succeed; nothing was charged.
  */
-/** The stored result of an already-charged request could not be read: retry (never "start a new request"). */
-export class BilledRouteReplayUnavailableError extends Error {
-  readonly code = 'REPLAY_UNAVAILABLE';
-  readonly httpStatus = 503;
-  readonly retryable = true;
-  constructor(public readonly surface: BillingSurface) {
-    super('We could not load the result of this request right now. Please try again.');
-    this.name = 'BilledRouteReplayUnavailableError';
-  }
-}
-
-/** Internal: the work finished but could not be persisted - the engine releases the hold, the route still answers. */
-class BilledResultUnpersistedError extends Error {
-  constructor(public readonly result: unknown) { super('billed result not persisted'); this.name = 'BilledResultUnpersistedError'; }
-}
-
-/**
- * The stored result of an already-CHARGED request cannot be returned (its re-read failed durably - 3 times or for 24h;
- * b3/7c): the original charge is refunded by the system (owedRefunds) and the request ends. `refund` says what
- * happened so the text never promises more than was done.
- */
-export class BilledRouteResultUnavailableError extends Error {
-  readonly code = 'RESULT_UNAVAILABLE';
-  readonly retryable = false;
-  constructor(public readonly surface: BillingSurface, public readonly refund: 'granted' | 'owed' | 'none' | 'protected', public readonly credits: number) {
-    super(refund === 'granted' ? `We couldn't recover this result, so your ${credits} credits have been returned.`
-      : refund === 'owed' ? `We couldn't recover this result, so your ${credits} credits are being returned to your account.`
-      : refund === 'protected' ? "We couldn't recover this result. We will review the charge."
-      : "We couldn't recover this result. You were not charged for it.");
-    this.name = 'BilledRouteResultUnavailableError';
-  }
-}
-/** The refund for an unrecoverable result could not be recorded yet: retry (nothing is promised). */
-export class BilledRouteRefundPendingError extends Error {
-  readonly code = 'REFUND_PENDING';
-  readonly retryable = true;
-  constructor(public readonly surface: BillingSurface) {
-    super('We could not recover this result and could not record the refund yet. Please try again in a moment.');
-    this.name = 'BilledRouteRefundPendingError';
-  }
-}
-
 export class BilledRouteReclaimExhaustedError extends Error {
   readonly code = 'RECLAIM_CAP_EXHAUSTED';
   readonly httpStatus = 500;
@@ -204,31 +166,6 @@ export interface WirePhase2RouteArgs<T> {
    *  reserved for resolution. The route surfaces it as 200 + `settlementPending: { code }` (owner contract) so a later
    *  resolver charge is never unexplained. Optional: a route that omits it still has the log + counter below. */
   onSettlementPending?: (pending: SettlementPending) => void;
-}
-
-/**
- * Refund the original charges of a charged slot whose stored result cannot be returned. Entry consumption confirms up to
- * two rows (the entry fee, then the exposure settle); each is a separate original charge with its own owed record.
- * Returns the error to throw: RESULT_UNAVAILABLE (with what was done) or REFUND_PENDING (nothing could be recorded).
- */
-async function refundUnrecoverable(surface: BillingSurface, orgId: string, performedBy: string, slotKey: string, referenceId: string): Promise<Error> {
-  emitAnomaly({ organizationId: orgId, kind: 'billed_result_lost', severity: 'critical', message: 'billed_result_lost', metadata: { surface: String(surface), referenceId } });
-  const outcomes: RefundOutcome[] = [];
-  try {
-    for (const confirmKey of [`${slotKey}:entry:confirm`, `${slotKey}:exposure:confirm`]) {
-      const charge = await readOriginalCharge(confirmKey);
-      if (!charge) continue;
-      outcomes.push(await refundOriginalCharge({ orgId, performedBy, charge, reason: 'billed_result_unavailable', grantKeyPrefix: 'billed_refund', referenceId }));
-    }
-  } catch (err) {
-    logger.error('billed_result_unavailable_charge_unreadable', { surface, orgId, message: (err as Error)?.message });
-    return new BilledRouteRefundPendingError(surface);
-  }
-  if (outcomes.some((o) => o.status === 'unrecorded')) return new BilledRouteRefundPendingError(surface);
-  if (outcomes.some((o) => o.status === 'protected')) return new BilledRouteResultUnavailableError(surface, 'protected', 0);
-  const credits = outcomes.reduce((n, o) => n + ('credits' in o ? o.credits : 0), 0);
-  if (outcomes.length === 0) return new BilledRouteResultUnavailableError(surface, 'none', 0);
-  return new BilledRouteResultUnavailableError(surface, outcomes.every((o) => o.status === 'granted') ? 'granted' : 'owed', credits);
 }
 
 /**
@@ -310,9 +247,7 @@ export async function wirePhase2Route<T>(args: WirePhase2RouteArgs<T>): Promise<
       const resultScope = `phase2:${String(args.surface)}`;
       const persistingRun = async (): Promise<T> => {
         const value = await args.run();
-        if (!(await persistBilledResult({ scope: resultScope, orgId: args.organizationId, key: identity, value }))) {
-          throw new BilledResultUnpersistedError(value);   // -> the engine RELEASES (nothing charged)
-        }
+        await persistBilledResultOrThrow({ scope: resultScope, orgId: args.organizationId, key: identity, value });   // throws -> the engine RELEASES
         return value;
       };
 
@@ -366,17 +301,16 @@ export async function wirePhase2Route<T>(args: WirePhase2RouteArgs<T>): Promise<
             // response must not mean "paid for nothing"). A read error is 503 retryable; a charged request with no
             // stored result (before this store existed) stays 409 ALREADY_PROCESSED.
             incrCounter('duplicate_prevention_hits_total');
-            const stored = await replayBilledResult({ scope: resultScope, orgId: args.organizationId, key: identity });
-            if (stored.kind === 'found') {
+            // b3/7c: transient read failure -> 503; durably TERMINAL -> THIS slot's original charges (entry confirm +
+            // exposure settle) are refunded by the system (owedRefunds) and the request ends (billedRequestRecovery).
+            const slotKey = makeIdempotencyKey(effectiveUserId, args.action, referenceId);
+            const stored = await replayOrRefund({
+              surface: args.surface, scope: resultScope, orgId: args.organizationId, key: identity, performedBy: effectiveUserId,
+              confirmKeys: [`${slotKey}:entry:confirm`, `${slotKey}:exposure:confirm`], referenceId,
+            });
+            if (stored) {
               incrCounter('phase2_route_replayed_total');
               return { ok: true, result: stored.value as T };
-            }
-            if (stored.kind === 'transient') throw new BilledRouteReplayUnavailableError(args.surface);
-            if (stored.kind === 'terminal') {
-              // b3/7c: a durable read failure is not "try again" forever - refund THIS slot's original charges
-              // (entry confirm + exposure settle), recorded and paid by the system (owedRefunds), then end the request.
-              const slotKey = makeIdempotencyKey(effectiveUserId, args.action, referenceId);
-              throw await refundUnrecoverable(args.surface, args.organizationId, effectiveUserId, slotKey, referenceId);
             }
             logger.info('phase2_route_already_processed', { surface: args.surface, org: args.organizationId });
             throw new BilledRouteAlreadyProcessedError(args.surface);

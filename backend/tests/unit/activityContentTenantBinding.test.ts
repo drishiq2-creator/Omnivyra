@@ -106,7 +106,17 @@ jest.mock('../../services/creditExecutionService', () => ({
 }));
 jest.mock('../../services/billing', () => ({
   isRefineVariantBillingEnabled: jest.fn(async () => ({ enabled: true, reason: null })),
-  runBilledAiCompletion: jest.fn(async (i: any) => { mockEvents.push(`credit:${i.orgId}`); mockEvents.push(`ai:${i.completion.companyId}`); return { text: 'AI REFINED' }; }),
+  runBilledAiCompletion: jest.fn(async (i: any) => { mockEvents.push(`credit:${i.orgId}`); mockEvents.push(`ai:${i.completion.companyId}`);
+    // c6 2026-11-18: behaves like the real helper with billed-request recovery - post-process, then the route's
+    // durable write, INSIDE the charge (the route now persists through recovery, not after the confirm).
+    const text = 'AI REFINED';
+    if (i.recovery) {
+      const value = i.recovery.postProcess ? await i.recovery.postProcess(text) : text;
+      if (i.recovery.durableWrite) await i.recovery.durableWrite(value);
+      return { text, value };
+    }
+    return { text };
+  }),
 }));
 jest.mock('../../services/creditDeductionService', () => ({ getCreditCost: jest.fn(async () => 1) }));
 jest.mock('../../services/billing/creditEconomyActivation', () => ({ getCreditEconomyExecutionMode: jest.fn(async () => 'shadow') }));
@@ -175,7 +185,8 @@ const BODIES: Record<string, (activityId: string, extra?: Record<string, unknown
 };
 const ACTIONS = Object.keys(BODIES);
 const WRITE_ACTIONS = ACTIONS.filter((a) => a !== 'generate_master'); // generate_master ignores body.companyId
-const post = (body: Record<string, unknown>, as: 'A' | 'B' | null = 'A', headers: Record<string, string> = {}) =>
+// c6 2026-11-18 (b3): billed generate_variants / refine_variant REQUIRE the client's Idempotency-Key - sent by default.
+const post = (body: Record<string, unknown>, as: 'A' | 'B' | null = 'A', headers: Record<string, string> = { 'idempotency-key': `test-key-${Math.random().toString(36).slice(2, 10)}` }) =>
   invoke(handler as any, { method: 'POST', body, as, headers });
 const content = (id: string) => String(rows('daily_content_plans').find((r) => r.id === id)?.content ?? '');
 const paid = () => mockEvents.filter((e) => e.startsWith('ai:') || e.startsWith('credit:'));

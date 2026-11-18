@@ -14,6 +14,8 @@
  *                                               failures): the original charge is refunded by the system; the text says
  *                                               'have been returned' / 'are being returned' / 'not charged' truthfully
  *   503 { error, code: 'REFUND_PENDING', retryable: true }   the refund could not be recorded yet - retry; nothing promised
+ *   400 { error, code: 'IDEMPOTENCY_KEY_REQUIRED', retryable: false }   a billed request with no client key (never minted)
+ *   409 { error, code: 'REQUEST_ENDED', retryable: false }   this key's run failed and was released (not charged)
  * Returns null for any other error - the route's own handling applies.
  */
 import { PaymentRequiredError } from './phase2EnforcementGate';
@@ -22,10 +24,14 @@ import {
   BilledRouteReclaimExhaustedError,
   BilledRoutePaymentRequiredError,
   BilledRoutePricingUnavailableError,
-  BilledRouteReplayUnavailableError,
-  BilledRouteResultUnavailableError,
-  BilledRouteRefundPendingError,
 } from './phase2RouteWiring';
+import {
+  BilledRouteKeyRequiredError,
+  BilledRouteRefundPendingError,
+  BilledRouteReplayUnavailableError,
+  BilledRouteRequestEndedError,
+  BilledRouteResultUnavailableError,
+} from './billedRequestRecovery';
 
 export type BilledRouteHttpBody = { error: string; code: string; required?: number; balance?: number; retryable?: boolean };
 
@@ -45,6 +51,12 @@ export function billedRouteHttpError(err: unknown): { status: number; body: Bill
   }
   if (err instanceof BilledRouteReclaimExhaustedError) {
     return { status: 500, body: { error: err.message, code: 'RECLAIM_CAP_EXHAUSTED', retryable: false } };
+  }
+  if (err instanceof BilledRouteKeyRequiredError) {
+    return { status: 400, body: { error: err.message, code: 'IDEMPOTENCY_KEY_REQUIRED', retryable: false } };
+  }
+  if (err instanceof BilledRouteRequestEndedError) {
+    return { status: 409, body: { error: err.message, code: 'REQUEST_ENDED', retryable: false } };
   }
   if (err instanceof BilledRouteResultUnavailableError) {
     return { status: 409, body: { error: err.message, code: 'RESULT_UNAVAILABLE', retryable: false } };

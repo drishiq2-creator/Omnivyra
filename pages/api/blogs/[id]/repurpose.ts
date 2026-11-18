@@ -152,19 +152,26 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   });
 
   try {
-    // Public blogs have no company → nothing to charge; passthrough (honest).
-    const result = companyId
-      ? await wirePhase2Route({
-          surface:        'blogs.repurpose',
-          organizationId: companyId,
-          action:         'content_repurpose',
-          referenceType:  'content_repurpose',
-          referenceId:    createHash('sha256')
-            .update([companyId, String(id), String(tone)].join('|'))
-            .digest('hex').slice(0, 40),
-          run: runAi,
-        })
-      : await runAi();
+    // Public blogs have no company -> nothing to charge; passthrough (honest). The billed call is reached ONLY on the
+    // company path, after enforceCompanyAccess (c6 2026-11-18: an explicit early branch, so the route-auth ordering
+    // analysis - path-insensitive - sees the billed writes behind authentication, as they always were).
+    let result: Awaited<ReturnType<typeof runAi>>;
+    if (source !== 'company' || !companyId) {
+      result = await runAi();
+    } else {
+      const access = await enforceCompanyAccess({ req, res, companyId });   // re-asserted on this path (cheap, cached)
+      if (!access) return;
+      result = await wirePhase2Route({
+        surface:        'blogs.repurpose',
+        organizationId: companyId,
+        action:         'content_repurpose',
+        referenceType:  'content_repurpose',
+        referenceId:    createHash('sha256')
+          .update([companyId, String(id), String(tone)].join('|'))
+          .digest('hex').slice(0, 40),
+        run: runAi,
+      });
+    }
 
     const raw = result.output ? JSON.parse(result.output) : null;
     output = validateRepurposeOutput(raw);
