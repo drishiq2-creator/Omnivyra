@@ -22,7 +22,8 @@ function rpcCalls(src: string): Array<{ name: string; text: string }> {
 }
 
 it('positive control: the scanner finds BOTH settle RPC calls', () => {
-  expect(rpcCalls(SRC).map((c) => c.name).sort()).toEqual(['apply_credit_partial_confirm', 'apply_credit_reservation']);
+  // Re-land (c6 11-19): the settle RPCs are the GUARDED functions (20270217000023, a4686b439); same invariant.
+  expect(rpcCalls(SRC).map((c) => c.name).sort()).toEqual(['apply_credit_partial_confirm_guarded', 'apply_credit_reservation_guarded']);
 });
 
 it('no settle RPC call requests a singular response (.single() / .maybeSingle())', () => {
@@ -30,7 +31,7 @@ it('no settle RPC call requests a singular response (.single() / .maybeSingle())
 });
 
 it('the scanner WOULD catch it (mutation of a copy)', () => {
-  const mutated = SRC.replace("rpc('apply_credit_partial_confirm', {", "rpc('apply_credit_partial_confirm', {").replace(/(rpc\('apply_credit_partial_confirm'[\s\S]*?\})\)/, '$1).single()');
-  const hit = rpcCalls(mutated).find((c) => c.name === 'apply_credit_partial_confirm');
+  const mutated = SRC.replace("rpc('apply_credit_partial_confirm_guarded', {", "rpc('apply_credit_partial_confirm_guarded', {").replace(/(rpc\('apply_credit_partial_confirm_guarded'[\s\S]*?\})\)/, '$1).single()');
+  const hit = rpcCalls(mutated).find((c) => c.name === 'apply_credit_partial_confirm_guarded');
   expect(hit && /\.(single|maybeSingle)\(/.test(hit.text)).toBe(true);
 });
