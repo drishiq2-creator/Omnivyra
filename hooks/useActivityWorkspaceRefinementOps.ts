@@ -145,7 +145,7 @@ export function useActivityWorkspaceRefinementOps({
           notify('success', 'This refinement was already applied.');
           return;
         }
-        notify(outcome.kind === 'retry' ? 'info' : 'error', billedOutcomeText(outcome));
+        notify(outcome.kind === 'error' || outcome.kind === 'credits' ? 'error' : 'info', billedOutcomeText(outcome));
         return;
       }
       const refinedContent = String(data?.refined_content || '').trim();

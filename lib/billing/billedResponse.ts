@@ -25,7 +25,24 @@ export type BilledOutcome =
   | { kind: 'credits'; code: string; message: string; required?: number; available?: number }
   | { kind: 'already_processed'; message: string }
   | { kind: 'retry'; message: string }
+  /** The work is DONE (2xx) but its charge is still being finalised: show the result, never re-run. */
+  | { kind: 'settlement_pending'; message: string }
+  /**
+   * A server-side failure (5xx) we can't classify. The work MAY have happened (and may be
+   * charged), so tell the user to check before trying again, never a plain "failed" that
+   * invites a re-click (a new key, a new hold, a second charged run). (7c review.)
+   */
+  | { kind: 'uncertain'; message: string }
   | { kind: 'error'; message: string };
+
+export const SETTLEMENT_PENDING_MESSAGE = 'Done. Billing for this is still being finalised. You won’t be charged twice, so there’s no need to run it again.';
+export const RECLAIM_MESSAGE = 'This request failed repeatedly, so we stopped retrying it. Any attempt that had already started used a small start fee; nothing more will be charged for it.';
+export const UNCERTAIN_MESSAGE = 'We’re not sure this went through. Please check the result before trying again.';
+/** c6's agreed contract (2026-11-13): a 2xx `executed` body may carry settlementPending. */
+export const SETTLE_AMBIGUOUS_CODE = 'CREDIT_SETTLE_AMBIGUOUS';
+const isSettlementPendingBody = (b: Record<string, unknown>) =>
+  !!b.settlementPending && typeof b.settlementPending === 'object' &&
+  (b.settlementPending as { code?: unknown }).code === SETTLE_AMBIGUOUS_CODE;
 
 const CREDIT_CODES = new Set(['insufficient_credits', 'no_credit_account', 'pricing_unavailable']);
 
@@ -52,7 +69,13 @@ const isCodeLike = (s: string) => /^[A-Za-z0-9_]+$/.test(s) && /_/.test(s);
  * 2xx → ok.
  */
 export function classifyBilledResponse(status: number, body: unknown, fallback: string): BilledOutcome {
-  if (status >= 200 && status < 300) return { kind: 'ok' };
+  if (status >= 200 && status < 300) {
+    // The work is DONE; only its charge is unresolved. Render the result normally plus the
+    // quiet note, and never resubmit (b3 + 7c, 2026-11-18). Never shows holdId / detail.
+    const ok = (body && typeof body === 'object' ? body : {}) as Record<string, unknown>;
+    if (isSettlementPendingBody(ok)) return { kind: 'settlement_pending', message: SETTLEMENT_PENDING_MESSAGE };
+    return { kind: 'ok' };
+  }
   const b = (body && typeof body === 'object' ? body : {}) as Record<string, unknown>;
   const code = typeof b.code === 'string' ? b.code : '';
   const errorField = typeof b.error === 'string' ? b.error : '';
@@ -68,8 +91,34 @@ export function classifyBilledResponse(status: number, body: unknown, fallback: 
   if (status === 409 && code === 'ALREADY_PROCESSED') {
     return { kind: 'already_processed', message: 'This was already done. Refreshing to show the result.' };
   }
+  if (code === 'SETTLEMENT_PENDING') {
+    return { kind: 'settlement_pending', message: SETTLEMENT_PENDING_MESSAGE };
+  }
+  // c6 (MP billing): a refused credit hold creates nothing; billing being down is retryable.
+  if (code === 'BILLING_UNAVAILABLE') {
+    return { kind: 'retry', message: 'Billing is unavailable right now, so nothing was started. Please try again shortly.' };
+  }
+  // Matched on the code alone, deliberately: it is unique to the reclaim path. c6 (2026-11-18):
+  // NOT "you weren't charged" - earlier failed attempts may each have used a small
+  // non-refundable start fee. Wording is c6's proposal, pending b3's confirmation.
   if (code === 'RECLAIM_CAP_EXHAUSTED') {
-    return { kind: 'retry', message: 'That didn’t finish on our side and you weren’t charged. Please try again.' };
+    return { kind: 'retry', message: RECLAIM_MESSAGE };
+  }
+  // The server says EXACTLY what was charged (c6's `billing` object, e.g. blogs): state that
+  // fact rather than "uncertain". Only for refusals/failures; a 2xx returned above.
+  const billing = b.billing as { charged?: unknown; released?: unknown; reason?: unknown } | undefined;
+  if (billing && typeof billing === 'object' && typeof billing.charged === 'number') {
+    const charged = billing.charged;
+    const released = typeof billing.released === 'number' ? billing.released : 0;
+    if (billing.reason === 'quality_refund') {
+      return { kind: 'error', message: 'This didn’t pass our quality check, so you weren’t charged.' };
+    }
+    if (billing.reason === 'partial' && charged > 0) {
+      return { kind: 'error', message: `You were charged ${charged} of ${charged + released} credits; ${released} were returned.` };
+    }
+    if (charged === 0) {
+      return { kind: 'error', message: `${human || fallback}${/[.!?]$/.test(human || fallback) ? '' : '.'} You weren’t charged.` };
+    }
   }
   if (isUnverifiableCode(code)) {
     return { kind: 'retry', message: UNVERIFIABLE_MESSAGE };
@@ -86,6 +135,9 @@ export function classifyBilledResponse(status: number, body: unknown, fallback: 
       ...(available !== undefined ? { available } : {}),
     };
   }
+  // An unclassified SERVER failure may have done (and charged for) the work: never a plain
+  // "failed". A 4xx means the request was refused before any work, so a plain error is honest.
+  if (status >= 500) return { kind: 'uncertain', message: UNCERTAIN_MESSAGE };
   return { kind: 'error', message: human || fallback };
 }
 
@@ -97,7 +149,7 @@ export function billedOutcomeText(outcome: BilledOutcome): string {
     case 'credits': {
       const numbers =
         typeof outcome.required === 'number' && typeof outcome.available === 'number'
-          ? ` (needs ${outcome.required} credits; you have ${outcome.available})`
+          ? ` (${outcome.required} credits are reserved up front; you’ll only be charged for what’s used. You have ${outcome.available})`
           : '';
       const topUp = outcome.code === 'pricing_unavailable' ? '' : ' Top up credits on the Billing page.';
       const sentence = `${outcome.message}${numbers}`;

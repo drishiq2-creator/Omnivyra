@@ -36,10 +36,12 @@ describe('parseRunStartError', () => {
   );
 
   it('non-credit errors keep a human message but hide snake_case codes', () => {
-    expect(parseRunStartError(500, { error: 'Database is down' })).toEqual({ kind: 'error', message: 'Database is down' });
+    // a 5xx may have started the run: say so, never a bare server message (7c)
+    expect(parseRunStartError(500, { error: 'Database is down' })).toEqual({ kind: 'error', message: 'We’re not sure this went through. Please check the result before trying again.' });
     expect(parseRunStartError(403, { error: 'MARKET_PULSE_ADMIN_REQUIRED', message: 'Market Pulse scan console is for company admins' }))
       .toEqual({ kind: 'error', message: 'Market Pulse scan console is for company admins' });
-    expect(parseRunStartError(500, { error: 'some_internal_code' })).toEqual({ kind: 'error', message: 'Failed to start Market Pulse run' });
+    expect(parseRunStartError(500, { error: 'some_internal_code' })).toEqual({ kind: 'error', message: 'We’re not sure this went through. Please check the result before trying again.' });
+    expect(parseRunStartError(400, { error: 'some_internal_code' })).toEqual({ kind: 'error', message: 'Failed to start Market Pulse run' });
   });
 });
 
