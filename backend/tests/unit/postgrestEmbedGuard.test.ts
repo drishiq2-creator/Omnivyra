@@ -64,7 +64,6 @@ const ALLOWLIST: Record<string, { cls: EmbedClass; why: string; since?: string }
   'pages/api/analytics/posts.ts::scheduled_posts': { cls: 'TENANT_CHECK', why: 'requireCompanyAccess + !inner company filter (attribution repaired in 78d272efb)' },
   'pages/api/analytics/summary.ts::scheduled_posts': { cls: 'TENANT_CHECK', why: 'requireCompanyAccess + !inner company filter (attribution repaired in 78d272efb)' },
   'pages/api/blog/[slug]/series.ts::blog_series_posts': { cls: 'GLOBAL', why: 'public platform blog tables; titles re-resolved from published public_blogs' },
-  'pages/api/campaigns/12week-plans.ts::daily_content_plans': { cls: 'PARENT_SCOPED_CHILD', why: 'count of children of the campaign\'s own refinements after requireCampaignAccess' },
   'pages/api/campaigns/weekly-alignments.ts::users!content_plans_reviewed_by_fkey': { cls: 'PENDING_FIX', why: 'non-existent FK; removed in 78d272efb', since: '2026-11-18' },
   'pages/api/community-ai/content-kpis.ts::scheduled_posts': { cls: 'TENANT_CHECK', why: '!inner chain on the post\'s account company (0ca211d1f)' },
   'pages/api/community-ai/content-kpis.ts::social_accounts': { cls: 'TENANT_CHECK', why: '!inner, filtered on the authorized company' },
