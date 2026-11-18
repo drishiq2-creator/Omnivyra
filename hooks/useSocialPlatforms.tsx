@@ -128,7 +128,7 @@ function isStale(result: CheckResult): boolean {
 
 /** a9's server text for a company-less Facebook / Instagram connect. */
 export const CHOOSE_COMPANY_FIRST = 'Choose a company first';
-const META_AUTH_PATH = /^\/api\/auth\/(facebook|instagram)(\/|\?|$)/;
+export const META_AUTH_PATH = /^\/api\/auth\/(facebook|instagram)(\/|\?|$)/;
 
 export function useSocialPlatforms() {
   const router = useRouter();

@@ -15,7 +15,7 @@ jest.mock('../../../components/CompanyContext', () => ({
 jest.mock('../../../lib/apiFetch', () => ({ apiFetch: jest.fn(async () => ({ ok: true, status: 200, json: async () => ({ accounts: [] }) })) }));
 jest.mock('../../../lib/supabaseBrowser', () => ({ getSupabaseBrowser: () => ({ auth: { getSession: async () => ({ data: { session: null } }) } }) }));
 
-import { useSocialPlatforms, CHOOSE_COMPANY_FIRST } from '../../../hooks/useSocialPlatforms';
+import { useSocialPlatforms, CHOOSE_COMPANY_FIRST, META_AUTH_PATH } from '../../../hooks/useSocialPlatforms';
 
 let assigned: string[] = [];
 beforeAll(() => {
@@ -53,5 +53,20 @@ describe('connect without a selected company', () => {
     await act(async () => { await result.current.handleConnect(platform('facebook', '/api/auth/facebook')); });
     expect(assigned).toHaveLength(1);
     expect(assigned[0]).toMatch(/^\/api\/community-ai\/connectors\/facebook\/auth\?/);
+  });
+});
+
+describe('pinned to the LIVE producer (7c)', () => {
+  // auth_path comes from the server catalog; a fixture copy would share the assumption. Read the real one.
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { SUPPORTED_PLATFORMS } = require('../../../pages/api/social-accounts/status');
+  const authPathOf = (key: string) => (SUPPORTED_PLATFORMS as Array<{ key: string; authPath: string | null }>).find((p) => p.key === key)?.authPath ?? null;
+  it.each(['facebook', 'instagram', 'threads'])('the catalog authPath for %s is one the guard recognises', (key) => {
+    const path = authPathOf(key);
+    expect(path).not.toBeNull();
+    expect(META_AUTH_PATH.test(path as string)).toBe(true);
+  });
+  it('control: a non-Meta catalog path is not matched', () => {
+    expect(META_AUTH_PATH.test(authPathOf('pinterest') as string)).toBe(false);
   });
 });
