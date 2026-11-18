@@ -986,6 +986,17 @@ export async function claimCommunityActionForExecution(input: {
     ? await ownedDbRpc('community_ai_claim_within_limits', { ...claimArgs, p_source: input.guardrailSource })
     : await ownedDbRpc('claim_community_ai_action_for_execution', claimArgs);
   if (error) {
+    // b3 (stage 3 window): an unavailable claim function - e.g. the code deployed before the community CONTRACT
+    // migrations applied - refuses (fails CLOSED), and must be VISIBLE, distinct from a policy or guardrail refusal.
+    // Every claim point comes through here (scheduler, auto evaluation, manual execute, RPA retry, orchestration).
+    // Reason and driver code only: no message, no payload (as COMMUNITY_AI_POLICY_UNREADABLE_FAIL_CLOSED).
+    const driverCode = (error as { code?: unknown }).code;
+    console.warn('COMMUNITY_AI_CLAIM_RPC_ERROR_FAIL_CLOSED', {
+      claim_point: input.claimPoint,
+      rpc: input.guardrailSource ? 'community_ai_claim_within_limits' : 'claim_community_ai_action_for_execution',
+      code: typeof driverCode === 'string' || typeof driverCode === 'number' ? String(driverCode) : null,
+      action_id: input.actionId,
+    });
     return { claimed: false, code: 'CLAIM_RPC_ERROR', currentStatus: null, error: (error as { message?: string }).message || 'claim failed' };
   }
   const row = (Array.isArray(data) ? data[0] : data) as { claimed?: boolean; code?: string | null; current_status?: string | null } | null;
