@@ -12,6 +12,8 @@
  * Real batchAiProcessor + real fragmentCache + real contentBlueprintCache; only the LLM, the prompt text and the
  * template layer are faked. The LLM fake records every prompt it receives.
  */
+// A module, not a script (CI-568 / CI-496 class): top-level names stay local to this file.
+export {};
 const prompts: Array<Array<{ topic: string }>> = [];
 jest.mock('../../services/aiGateway', () => ({
   runCompletionWithOperation: jest.fn(async (req: any) => {

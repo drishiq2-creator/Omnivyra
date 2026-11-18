@@ -12,6 +12,8 @@
  * Each content_analytics query records the rows it returned; the assertions are on those rows (the DB boundary) and,
  * for content-kpis, on the HTTP answer too.
  */
+// A module, not a script (CI-568 / CI-496 class): top-level names stay local to this file.
+export {};
 type Row = Record<string, any>;
 const CO_A = 'c0a00000-0000-4000-8000-00000000000a';
 const CO_B = 'c0b00000-0000-4000-8000-00000000000b';
@@ -165,7 +167,7 @@ describe('community-ai content_analytics reads return ONLY the authorized compan
   it('content-kpis HTTP answer totals are A’s alone (one post: 10 likes, 100 views)', async () => {
     currentSite = 'kpi-answer';
     const res = await call(contentKpis);
-    const linkedin = (res.body.by_platform as any[]).find((p) => p.platform === 'linkedin');
+    const linkedin = ((res.body as { by_platform: any[] }).by_platform).find((p) => p.platform === 'linkedin');
     expect(linkedin).toMatchObject({ total_posts: 1 });
     expect(JSON.stringify(res.body)).not.toMatch(/"total_views":\s*[2-9]\d\d/);
   });
