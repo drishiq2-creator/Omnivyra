@@ -18,6 +18,18 @@ import { emitAnomaly } from './billingAuditEmitter';
 import { logger } from '../logger';
 import { supabase } from '../../db/supabaseClient';
 
+/**
+ * The billing identity of a queue job. BullMQ always assigns job.id; the old fallback minted `inline-${Date.now()}`,
+ * which is a unique id wearing an idempotency key's name (7c) - a retry would be a new key and a second charge. A
+ * billed job with no stable id is REFUSED (thrown before any billing or model call), never given a synthetic one.
+ */
+export function billedQueueJobId(...candidates: unknown[]): string {
+  for (const c of candidates) {
+    if (c !== undefined && c !== null && String(c).trim() !== '') return String(c);
+  }
+  throw new Error('[billing] a billed queue job has no stable id - refusing rather than minting a synthetic idempotency key');
+}
+
 /** The client's Idempotency-Key when usable (>= 8 chars after trim), else null. Never synthesises one. */
 export function clientIdempotencyKey(header: unknown): string | null {
   const k = Array.isArray(header) ? header[0] : header;
@@ -88,6 +100,9 @@ export class BilledRouteRequestInProgressError extends Error {
 }
 
 /**
+ * 053-COUPLED (7c): revisit when the orphan-hold reapers are scheduled - a takeover at this age and a reaper working
+ * the same hold could race. Registered with the leaked-entry-hold row.
+ *
  * How long an unsettled hold counts as "in flight". Longer than any billed route's own timeout; an OLDER unsettled hold
  * is a run that died (the orphan reapers are unscheduled until 053), so the engine's resume path takes it over rather
  * than leaving the key refused forever.
@@ -110,6 +125,9 @@ export async function refuseIfInFlight(a: { surface: BillingSurface | string; ba
     if (error) throw new Error(error.message);
     rows = (data ?? []) as typeof rows;
   } catch (err) {
+    // FAIL-OPEN IS CORRECT ONLY CONDITIONALLY (7c): proceeding is safe because the ENGINE is single-charge per key
+    // (executeWithCredits resumes the same hold; the confirm key is unique). This 409 is a UX / load guard, NOT the
+    // money guard. Never remove or weaken engine-level idempotency believing this check covers it.
     logger.warn('billed_in_flight_check_failed', { surface: a.surface, message: (err as Error)?.message });
     return;
   }
