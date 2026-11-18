@@ -105,12 +105,15 @@ export const durableIntelligencePort: IndividualIntelligencePort = {
     // caller with a different shape must re-check A's empty-reads branch.
     const loaded = await loadTenantGovernanceRecords(organizationId, [channel]);
     if (!loaded.ok) return null;                  // unreadable → unknown → fail closed
+    // The REQUIRED third argument (A2 review, contactGovernanceAggregation.ts:171-185): the loader's flat record
+    // count, so "the producer returned rows but no read reported any" is indeterminate (fail closed), never
+    // "nothing applies". Same as every other caller (contactGovernanceEvaluation, readiness).
     const decided = evaluateGovernanceReads(loaded.reads, {
       organizationId,
       personId,
       targetNormalized: normalizeGovernanceTarget(channel, target),
       channel,
-    });
+    }, loaded.records.length);
     if (decided.ok === false) return null;        // indeterminate (no instant, failed read) → unknown → fail closed
     return decided.verdict.decision === 'allowed';
   },

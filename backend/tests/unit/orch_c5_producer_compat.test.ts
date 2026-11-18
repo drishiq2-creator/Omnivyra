@@ -58,13 +58,15 @@ jest.mock('../../services/prospectIdentity/contactGovernanceWriter', () => {
   };
 });
 jest.mock('../../services/prospectIdentity/contactGovernanceRepository', () => ({
-  loadGovernanceRecords: async (l: { organizationId: string; personId: string | null; target: string | null }) => ({
-    ok: true,
-    records: mockGov.records
+  // Faithful to the real loader (govclock, 2dc4dc423): it REPORTS its read with that read's database instant, and the
+  // journey judges records at that instant. A loader that reports no reads is indeterminate (fail closed).
+  loadGovernanceRecords: async (l: { organizationId: string; personId: string | null; target: string | null }) => {
+    const records = mockGov.records
       .filter((r) => r.organizationId === l.organizationId)
       .filter((r) => (r.personId != null && r.personId === l.personId) || (r.target != null && r.target === l.target))
-      .map((r) => ({ governanceType: r.governanceType, effectiveFrom: '2000-01-01T00:00:00.000Z', effectiveUntil: null })),
-  }),
+      .map((r) => ({ governanceType: r.governanceType, effectiveFrom: '2000-01-01T00:00:00.000Z', effectiveUntil: null }));
+    return { ok: true, records, reads: [{ anchor: 'person', ok: true, records, readAt: new Date().toISOString() }] };
+  },
 }));
 jest.mock('../../services/leadOutreachExecution/unsubscribeService', () => ({ isTerminalGovernanceError: () => false }));
 // G-11: after the whatsapp record the producer holds every channel and opens the admin review

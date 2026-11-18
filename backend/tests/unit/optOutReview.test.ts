@@ -72,6 +72,13 @@ const mockTable = (table: string) => {
     for (const [col, asc] of [...st.order].reverse()) out = [...out].sort((x, y) => (String(x[col]) < String(y[col]) ? -1 : String(x[col]) > String(y[col]) ? 1 : 0) * (asc ? 1 : -1));
     if (st.limit !== null) out = out.slice(0, st.limit);
     const copy = out.map((r) => JSON.parse(JSON.stringify(r)) as Row);
+    // read_at is PostgREST's computed field public.read_at(contact_governance_records): the READ's own instant, the
+    // same on every row of one request (govclock). Without it the real loader rightly reports the rows as having no
+    // database instant and the journey fails closed.
+    if (table === 'contact_governance_records' && st.op === 'select') {
+      const at = new Date().toISOString();
+      for (const r of copy) r.read_at = at;
+    }
     if (st.mode === 'single' && copy.length !== 1) return { data: null, error: { code: 'PGRST116', message: 'not one row' } };
     if (st.mode !== 'many') return { data: copy[0] ?? null, error: null };
     return { data: copy, error: null };
