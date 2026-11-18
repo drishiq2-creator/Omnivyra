@@ -17,6 +17,10 @@ suites assert on, each preceded by its source line range and the md5 of those li
 
 Not runnable, not shipped, not the source of truth. No secrets (scanned before vendoring).
 
+WHERE THE SOURCE IS (owner, 2026-11-19): the Chrome extension has its OWN version-controlled repository. Verify
+against a checkout of that repository at the pinned tag `v1.4.0` - never against a copy on someone's machine.
+`<extensionSrcDir>` below is the `extension/` folder of that checkout.
+
 `fixture-tool.js` rebuilds and verifies them from the real source:
 
     node backend/tests/fixtures/chrome-extension-v1.4.0/fixture-tool.js <extensionSrcDir>          # verify
