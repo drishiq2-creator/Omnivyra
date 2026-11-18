@@ -31,6 +31,7 @@ import {
 } from '../creditExecutionService';
 import { getRequestContext } from '../requestContext';
 import type { SettlementPending } from './holdSettlementState';
+import { reportSettlementPending } from './settlementPendingSurface';
 import { hasEnoughCredits, type CreditAction } from '../creditDeductionService';
 import { incrCounter } from './billingMetrics';
 import { emitAnomaly } from './billingAuditEmitter';
@@ -269,6 +270,8 @@ export async function wirePhase2Route<T>(args: WirePhase2RouteArgs<T>): Promise<
                 surface: args.surface, org: args.organizationId, action: args.action,
                 holdId: result.settlementPending.holdId, state: result.settlementPending.state,
               });
+              // Every route: the route factory adds settlementPending to the 2xx body (settlementPendingSurface).
+              reportSettlementPending({ surface: args.surface, org: args.organizationId, action: args.action });
               try { args.onSettlementPending?.(result.settlementPending); } catch { /* reporting never fails finished work */ }
             }
             return { ok: true, result: result.result };
