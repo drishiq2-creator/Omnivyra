@@ -164,7 +164,9 @@ describe('marketPulseReadFromBody', () => {
 describe('saveProfile wiring (6.4b + 05 review)', () => {
   const hook = require('fs').readFileSync(require('path').join(process.cwd(), 'hooks/useCompanyProfileState.tsx'), 'utf8') as string;
   const save = hook.slice(hook.indexOf('const saveProfile = async'));
-  const post = save.indexOf("fetchWithAuth('/api/company-profile', {");
+  // The POST now goes through saveProfileWithListEdits (D2 list deletion, lib/companyProfile/listReplace);
+  // the payload is still built here first, so "before the POST" = before that call.
+  const post = save.indexOf('saveProfileWithListEdits({');
   it('re-reads market_pulse from the server before building the payload', () => {
     const reread = save.indexOf("fetchWithAuth(`/api/company-profile?companyId=${encodeURIComponent(companyId)}`)");
     expect(reread).toBeGreaterThan(0);
