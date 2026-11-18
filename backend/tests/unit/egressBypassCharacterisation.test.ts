@@ -303,6 +303,16 @@ const PATHS: Array<[string, () => Promise<number>]> = [
   ['transactional credit_alert email (emailService.sendCreditAlert)', () => transactionalEmail('credit_alert')],
 ];
 
+// Launch gate (b3, 11-18): WhatsApp is default-OFF on main (WHATSAPP_CONNECT_ENABLED === 'true' only).
+// This suite exercises the ENABLED behaviour, so it turns the gate on for this file and restores it after;
+// the OFF behaviour is pinned in whatsappConnectGate.test.ts.
+const PRIOR_WA_GATE = process.env.WHATSAPP_CONNECT_ENABLED;
+beforeAll(() => { process.env.WHATSAPP_CONNECT_ENABLED = 'true'; });
+afterAll(() => {
+  if (PRIOR_WA_GATE === undefined) delete process.env.WHATSAPP_CONNECT_ENABLED;
+  else process.env.WHATSAPP_CONNECT_ENABLED = PRIOR_WA_GATE;
+});
+
 describe('egress bypass characterisation (GD-3 undecided)', () => {
   describe.each(PATHS)('%s', (path, run) => {
     it(`CURRENT: ${path} sends to a suppressed recipient`, async () => {

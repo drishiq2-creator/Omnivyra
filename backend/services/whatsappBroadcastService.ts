@@ -22,6 +22,7 @@ import { getActiveTemplate } from './whatsappTemplateService';
 import { checkAndConsume, getBroadcastChunkStrategy } from './whatsappRateLimiter';
 import { getValidAccessToken } from '../auth/metaAuthService';
 import { requireEncryptionKey } from '../auth/credentialEncryption';
+import { assertWhatsAppEnabled } from './whatsappAvailability';
 
 // W0-C — the canonical contact-governance evaluator. `mayContact` is pure; the
 // tenant-scoped read is the only I/O this adds, and it happens once per batch.
@@ -232,6 +233,7 @@ export async function enqueueBroadcast(
   broadcastId: string,
   plan:        string,
 ): Promise<void> {
+  assertWhatsAppEnabled();   // launch gate (b3, 11-18), under the routes: nothing is queued while disabled
   const { data: broadcast, error } = await ownedDbTable('whatsapp_broadcasts')
     .select('*')
     .eq('id', broadcastId)
@@ -340,6 +342,9 @@ export async function processBatch(
   broadcastId:  string,
   recipientIds: string[],
 ): Promise<void> {
+  // Launch gate (b3, 11-18) at the ONLY Meta send seam: a job queued before the flag went off sends
+  // nothing; its recipients stay `pending` (the read below never runs) and the job fails loudly.
+  assertWhatsAppEnabled();
   const { data: broadcast } = await ownedDbTable('whatsapp_broadcasts')
     .select('*')
     .eq('id', broadcastId)
@@ -483,6 +488,7 @@ function buildMessageBody(broadcast: any, toPhone: string): Record<string, unkno
 // ── Retry failed recipients ───────────────────────────────────────────────────
 
 export async function retryFailed(broadcastId: string): Promise<void> {
+  assertWhatsAppEnabled();   // launch gate (b3, 11-18): no row is reset to `pending` while disabled
   const { data: failed } = await ownedDbTable('whatsapp_broadcast_recipients')
     .select('id')
     .eq('broadcast_id', broadcastId)
