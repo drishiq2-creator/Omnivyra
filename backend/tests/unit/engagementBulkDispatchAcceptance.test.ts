@@ -256,6 +256,20 @@ describe('§8 failure safety', () => {
     expect(outgoing('A')).toHaveLength(0);
   });
 
+  it('a sent_unverified result is NEVER counted as sent, and the thread is not closed', async () => {
+    // The exact regression in this suite's header: the simulation lane reports { ok: true, status: 'sent_unverified' }
+    // and was once counted as sent while posting nothing (bulkEngagementService: 'sent_unverified' is specifically NOT
+    // accepted). ok:true must not be enough - only 'executed' / 'dispatched' count.
+    seed('A'); actionable.add('A');
+    executeActionMock.mockResolvedValueOnce({ ok: true, status: 'sent_unverified', response: {} } as never);
+    const r = await bulkReplyThreads(ORG, ['A'], textFor, USER);
+    expect(executeActionMock).toHaveBeenCalledTimes(1);   // the dispatch really happened
+    expect(r.sent).toBe(0);
+    expect(r.outcomes.sent ?? 0).toBe(0);
+    expect(r.outcomes.failed_dispatch).toBe(1);
+    expect(outgoing('A')).toHaveLength(0);                // no mirror -> the thread stays actionable
+  });
+
   it('an unknown terminal status is treated as failure, not success', async () => {
     seed('A'); actionable.add('A');
     executeActionMock.mockResolvedValueOnce({ ok: true, status: 'pending', response: {} } as never);
