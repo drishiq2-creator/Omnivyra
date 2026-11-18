@@ -38,3 +38,39 @@ export const KEY_REQUIRED_ROUTES: ReadonlyArray<{
   // Omnivyra's own public blog: platform spend, but the key still dedups (b3 4a); every mode except 'angles'.
   { route: '/api/admin/blog/generate', field: 'mode', values: { except: ['angles'] }, surfaces: [KEY_REQUIRED_SURFACE.platformBlog] },
 ];
+
+/**
+ * Routes that ACCEPT the client's Idempotency-Key (and replay a lost response with it) but do NOT require it - without
+ * a key they fall back to a per-request id (wirePhase2Route: a retry is a NEW request and a new charge) or a content
+ * hash (the assist routes: an identical re-ask replays). For these, lost-response protection exists ONLY if the client
+ * sends a key, so "accepted but unsent" is the residual exposure 04 tracks from this list (7c 2026-11-18).
+ * Exact-set pinned on the engagement-replies branch against the code (the wirePhase2Route callers + the assist routes
+ * that opt out with requireClientKey: false).
+ */
+export const KEY_ACCEPTED_ROUTES: ReadonlyArray<{ route: string; fallback: 'per-request' | 'content-hash' }> = [
+  // wirePhase2Route callers (fallback: the per-request id)
+  { route: '/api/admin/blog/brief-suggestions', fallback: 'per-request' },
+  { route: '/api/admin/blog/rewrite-hook', fallback: 'per-request' },
+  { route: '/api/ai/content-suggestions', fallback: 'per-request' },
+  { route: '/api/blogs/[id]/repurpose', fallback: 'per-request' },
+  { route: '/api/bolt/campaign-chat', fallback: 'per-request' },
+  { route: '/api/campaigns/planner/suggest-update', fallback: 'per-request' },
+  { route: '/api/campaigns/run-preplanning', fallback: 'per-request' },
+  { route: '/api/campaigns/suggest-duration', fallback: 'per-request' },
+  { route: '/api/campaigns/[id]/virality/assess', fallback: 'per-request' },
+  { route: '/api/company/blog/brief-suggestions', fallback: 'per-request' },
+  { route: '/api/content/quick-platform-adapt', fallback: 'per-request' },
+  { route: '/api/engagement/refine-suggestion', fallback: 'per-request' },
+  { route: '/api/engagement/suggestions', fallback: 'per-request' },
+  { route: '/api/engagement/thread/bulk-ai-reply', fallback: 'per-request' },
+  { route: '/api/planner/chat-themes', fallback: 'per-request' },
+  { route: '/api/planner/skeleton-command', fallback: 'per-request' },
+  { route: '/api/recommendations/detected-opportunities', fallback: 'per-request' },
+  { route: '/api/recommendations/generate', fallback: 'per-request' },
+  { route: '/api/recommendations/group-preview', fallback: 'per-request' },
+  { route: '/api/recommendations/[id]/preview-strategy', fallback: 'per-request' },
+  // the assist routes (runBilledAiCompletion recovery, requireClientKey: false; fallback: the request's content hash)
+  { route: '/api/campaign-content/assist', fallback: 'content-hash' },
+  { route: '/api/creator-templates/field-assist', fallback: 'content-hash' },
+  { route: '/api/creator-templates/chat-brief', fallback: 'content-hash' },
+];
