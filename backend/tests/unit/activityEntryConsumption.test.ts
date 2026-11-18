@@ -419,6 +419,27 @@ describe('executeWithEntryConsumption — Phase 12E first-consumable entry trigg
     expect(repo.callCreditPartialConfirm).not.toHaveBeenCalled();
   });
 
+  it('C4 (7c, money). the entry CONFIRM throws AFTER the work succeeded -> executed + settlementPending, never a rejection', async () => {
+    pricing.resolveLlmCost.mockResolvedValue({ credits: 9 });
+    repo.callCreditReservation.mockImplementation(async (cmd: any) => {
+      if (cmd.phase === 'confirm' && /:entry:confirm$/.test(cmd.idempotencyKey)) throw new Error('socket hang up');
+      return { error: null, transactionId: `${cmd.phase}:${cmd.idempotencyKey}` };
+    });
+    const res = await executeWithEntryConsumption({
+      userId: USER, orgId: ORG, action: ACTION as any, referenceType: 'content', referenceId: REF,
+      idempotencyKey: IDEM, validateMembership: false, llmPricing: LLM, collectViaCollector: true,
+      executor: async () => { recordProviderUsage(300, 100); return 'DONE'; },
+    });
+    expect(res.status).toBe('executed');
+    if (res.status !== 'executed') throw new Error('unreachable');
+    expect(res.result).toBe('DONE');
+    expect(res.settlementPending).toMatchObject({ code: 'CREDIT_SETTLE_AMBIGUOUS' });
+    // nothing released on doubt: no entry release, no exposure release, no exposure settle
+    const calls = repo.callCreditReservation.mock.calls.map((c) => c[0]);
+    expect(calls.some((r) => r.phase === 'release')).toBe(false);
+    expect(repo.callCreditPartialConfirm).not.toHaveBeenCalled();
+  });
+
   it('entryFeeOnFailure() is exactly 0 (the value the failure path returns; pinned by dependent clients)', () => {
     expect(entryFeeOnFailure()).toBe(0);
   });
