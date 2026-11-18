@@ -167,7 +167,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       }
       const referenceId = ref.referenceId;
       // b3 BLOCKING: a finished, charged blog is replayed for the same key (no new hold, no new charge).
-      const replay = await blogReplay(company_id, referenceId);
+      const replay = await blogReplay(company_id, referenceId, { userId: roleGate.userId });
       if (isBlogRefusal(replay)) {
         const { status: replayStatus, ...replayBody } = replay;
         return res.status(replayStatus).json(replayBody);

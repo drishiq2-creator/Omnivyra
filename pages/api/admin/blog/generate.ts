@@ -142,7 +142,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     // NOTE: these AI calls carry no credit handle (nothing is billed); the gateway guard records them in shadow mode.
     // Attributing them to the platform ledger (4b) needs a9's 039 on main, and must land before BILLING_REQUIRE_AI_HANDLE
     // is enforced.
-    const replay = await blogReplay(company_id, referenceId, BLOG_PLATFORM_SCOPE);
+    const replay = await blogReplay(company_id, referenceId, { scope: BLOG_PLATFORM_SCOPE, userId: roleGate.userId });
     if (isBlogRefusal(replay)) {
       const { status: replayStatus, ...replayBody } = replay;
       return res.status(replayStatus).json(replayBody);

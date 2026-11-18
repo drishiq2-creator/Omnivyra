@@ -23,24 +23,25 @@ jest.mock('../../services/creditExecutionService', () => ({
   releaseCreditReservation: async (h: any) => { if (settleThrows) throw new Error('ledger down'); calls.push({ fn: 'release', args: [h] }); return { status: 'released' }; },
   makeIdempotencyKey: (...p: string[]) => p.join(':'),
   getReservationKeys: (k: string) => ({ holdKey: `${k}:hold`, confirmKey: `${k}:confirm`, releaseKey: `${k}:release` }),
-  // ledger-faithful grant: idempotent on its key (a repeated key grants nothing more)
-  createCredit: async (o: any) => {
-    if (mockGrantThrows) throw new Error('[createCredit] grant failed: timeout');
-    if (!mockGrants.some((g) => g.idempotencyKey === o.idempotencyKey)) mockGrants.push(o);
-  },
 }));
-const mockGrants: any[] = [];
-let mockGrantThrows = false;
-// credit_transactions: the ORIGINAL confirm rows, by idempotency key
-const mockConfirmRows = new Map<string, any>();
-let mockLedgerReadFails = false;
+// The base module owedRefunds is tested in its own suite (once, durable debt, the job pays). Here: what the blog does
+// with each of its outcomes.
+let mockCharge: any = { confirmTxnId: 'confirm-1', free: 30, paid: 10, incentive: 0 };
+let mockChargeReadThrows = false;
+let mockRefundOutcome: any = { status: 'granted', credits: 40 };
+const mockRefundCalls: any[] = [];
+jest.mock('../../services/billing/owedRefunds', () => ({
+  readOriginalCharge: async (confirmKey: string) => { if (mockChargeReadThrows) throw new Error('timeout'); return confirmKey.startsWith(`${mockOrgId}:`) ? mockCharge : null; },
+  refundOriginalCharge: async (a: any) => { mockRefundCalls.push(a); return mockRefundOutcome; },
+}));
+const mockOrgId = '11111111-1111-4111-8111-111111111111';
+// the durable replay-failure counter (record_billed_result_replay_failure)
+const mockReplayFailures = new Map<string, number>();
 jest.mock('../../db/supabaseClient', () => ({
-  supabase: { from: (t: string) => {
-    if (t !== 'credit_transactions') throw new Error(`unexpected table ${t}`);
-    const f: Record<string, unknown> = {};
-    const chain: any = { select: () => chain, eq: (c: string, v: unknown) => { f[c] = v; return chain; },
-      maybeSingle: async () => (mockLedgerReadFails ? { data: null, error: { message: 'timeout' } } : { data: mockConfirmRows.get(String(f.idempotency_key)) ?? null, error: null }) };
-    return chain;
+  supabase: { rpc: async (_fn: string, a: any) => {
+    const k = `${a.p_scope}|${a.p_caller_id}|${a.p_key}`;
+    const n = (mockReplayFailures.get(k) ?? 0) + 1; mockReplayFailures.set(k, n);
+    return { data: [{ failures: n, first_failed_at: new Date().toISOString() }], error: null };
   } },
 }));
 const mockInfo = jest.fn();
@@ -65,7 +66,7 @@ jest.mock('../../services/intelligenceConfigService', () => ({
 import {
   BLOG_CREDITS, holdBlog, isBlogHoldRefusal, partialBlogCredits, runBlogWithBilling, blogBillingOf,
   blogReferenceId, blogGenerationRefusal, isBlogRefusal, __resetBlogSwitchAbsentReportForTests, blogReplay,
-  blogUnavailableRefundsOriginalCharge, blogUnavailableRefundedText,
+  blogUnavailableRefundsOriginalCharge, blogUnavailableRefundedText, blogUnavailableReturningText,
 } from '../../services/blog/blogBilling';
 import { getActiveCreditHandle } from '../../services/billing/aiGatewayBillingGuard';
 
@@ -77,7 +78,8 @@ const providerCalls = (n: number) => { for (let i = 0; i < n; i++) getActiveCred
 
 beforeEach(() => { calls.length = 0; reserveResult = { status: 'reserved' }; settleThrows = false; mockSwitch = { enabled: true }; mockInfo.mockClear();
   mockStore.rows.length = 0; mockStore.failInsert = false; mockStore.failRead = false; mockAnomalies.length = 0;
-  mockGrants.length = 0; mockGrantThrows = false; mockConfirmRows.clear(); mockLedgerReadFails = false; mockAudits.length = 0; });
+  mockCharge = { confirmTxnId: 'confirm-1', free: 30, paid: 10, incentive: 0 }; mockChargeReadThrows = false;
+  mockRefundOutcome = { status: 'granted', credits: 40 }; mockRefundCalls.length = 0; mockReplayFailures.clear(); mockAudits.length = 0; });
 
 async function held() {
   const h = await holdBlog({ orgId: ORG, userId: ORG, referenceId: REF, validateMembership: false });
@@ -96,68 +98,64 @@ describe('hold', () => {
     const r = await holdBlog({ orgId: ORG, userId: ORG, referenceId: REF, validateMembership: true });
     expect(r).toMatchObject({ ok: false, status: 409, code: 'BLOG_ALREADY_IN_PROGRESS', retryable: true });
   });
-  // b3 ruling 2026-11-18 replaces "-> 409 BLOG_RESULT_UNAVAILABLE + contact support": AUTO-REFUND, exactly once.
-  const ORIGINAL_CONFIRM_KEY = `${ORG}:blog_post:${REF}:confirm`;
-  const armOriginalCharge = () => mockConfirmRows.set(ORIGINAL_CONFIRM_KEY,
-    { id: 'confirm-1', execution_phase: 'confirm_partial', free_delta: -30, paid_delta: -10, incentive_delta: 0 });
-  test('charged earlier, NO stored copy -> the ORIGINAL charge is credited back per category, keyed on the original confirm; 409 says so', async () => {
-    armOriginalCharge();
+  // b3 rulings 2026-11-18: AUTO-REFUND = the system pays without the user acting. The blog records the debt through
+  // owedRefunds (one row per ORIGINAL confirm; paid now or by the grant-only job) and tells the truth about its state.
+  test('charged earlier, NO stored copy -> the ORIGINAL charge is refunded via the owed-refund record; 409 says it has been returned', async () => {
     reserveResult = { status: 'already_confirmed' };
     const r = await holdBlog({ orgId: ORG, userId: ORG, referenceId: REF, validateMembership: true });
     expect(r).toEqual({ ok: false, status: 409, code: 'BLOG_RESULT_UNAVAILABLE', retryable: false,
       error: "We couldn't recover this blog, so your 40 credits have been returned. You can write it again." });
-    expect(mockGrants.map((g) => [g.category, g.amount, g.idempotencyKey, g.referenceType, g.referenceId])).toEqual([
-      ['free', 30, 'blog_refund:confirm-1:free', 'blog_refund', 'confirm-1'],
-      ['paid', 10, 'blog_refund:confirm-1:paid', 'blog_refund', 'confirm-1'],
-    ]);
-    expect(mockAudits).toEqual([expect.objectContaining({ actionType: 'system_refund', reason: 'blog_result_unavailable', amountCredits: 40 })]);
+    expect(mockRefundCalls).toEqual([expect.objectContaining({ orgId: ORG, performedBy: ORG, charge: mockCharge,
+      reason: 'blog_result_unavailable', grantKeyPrefix: 'blog_refund', referenceId: REF })]);
     expect(mockAnomalies).toEqual([expect.objectContaining({ kind: 'blog_result_lost', severity: 'critical' })]);
   });
-  test('N retries of the same key -> ONE refund (the grant keys are the original confirm)', async () => {
-    armOriginalCharge();
+  test('the grant failed NOW but the debt is RECORDED -> the system pays it (job): 409 says the credits ARE BEING returned', async () => {
     reserveResult = { status: 'already_confirmed' };
-    for (let i = 0; i < 4; i++) await holdBlog({ orgId: ORG, userId: ORG, referenceId: REF, validateMembership: true });
-    expect(mockGrants.reduce((n, g) => n + g.amount, 0)).toBe(40);
-  });
-  test('another org with the same key -> its own (absent) original charge: nothing refunded, 503 retryable', async () => {
-    armOriginalCharge();
-    reserveResult = { status: 'already_confirmed' };
-    const OTHER = '99999999-9999-4999-8999-999999999999';
-    const r = await holdBlog({ orgId: OTHER, userId: OTHER, referenceId: REF, validateMembership: true });
-    expect(r).toMatchObject({ ok: false, status: 503, code: 'BLOG_REFUND_PENDING', retryable: true });
-    expect(mockGrants).toEqual([]);
-  });
-  test('a refund WRITE failure -> 503 retryable, and the text claims NO refund (never a promise not kept)', async () => {
-    armOriginalCharge(); mockGrantThrows = true;
-    reserveResult = { status: 'already_confirmed' };
-    const r = await holdBlog({ orgId: ORG, userId: ORG, referenceId: REF, validateMembership: true });
-    expect(r).toMatchObject({ ok: false, status: 503, code: 'BLOG_REFUND_PENDING', retryable: true });
-    expect((r as any).error).not.toMatch(/have been returned/);
-    expect(mockAudits).toEqual([]);
-  });
-  test('the original charge cannot be READ -> 503 retryable, nothing granted', async () => {
-    armOriginalCharge(); mockLedgerReadFails = true;
-    reserveResult = { status: 'already_confirmed' };
-    expect(await holdBlog({ orgId: ORG, userId: ORG, referenceId: REF, validateMembership: true })).toMatchObject({ status: 503, retryable: true });
-    expect(mockGrants).toEqual([]);
-  });
-  test('a protected org (Embrosales) is never auto-refunded - review text, no grant', async () => {
-    const EMB = '73e5fa6f-0000-4000-8000-000000000000';
-    mockConfirmRows.set(`${EMB}:blog_post:${REF}:confirm`, { id: 'c-emb', execution_phase: 'confirm', free_delta: -40, paid_delta: 0, incentive_delta: 0 });
-    reserveResult = { status: 'already_confirmed' };
-    const r = await holdBlog({ orgId: EMB, userId: EMB, referenceId: REF, validateMembership: true });
-    expect(r).toMatchObject({ status: 409, code: 'BLOG_RESULT_UNAVAILABLE' });
-    expect((r as any).error).not.toMatch(/returned/);
-    expect(mockGrants).toEqual([]);
-  });
-  test('COUPLING (04/7c): the user-facing refund sentence is produced ONLY with a written refund equal to the charge', async () => {
-    expect(blogUnavailableRefundsOriginalCharge()).toBe(true);
-    armOriginalCharge();
-    reserveResult = { status: 'already_confirmed' };
+    mockRefundOutcome = { status: 'owed', credits: 40 };
     const r: any = await holdBlog({ orgId: ORG, userId: ORG, referenceId: REF, validateMembership: true });
-    const claimed = Number(/your (\d+) credits have been returned/.exec(r.error)?.[1]);
-    expect(claimed).toBe(mockGrants.reduce((n, g) => n + g.amount, 0));
-    expect(blogUnavailableRefundedText(claimed)).toBe(r.error);
+    expect(r).toMatchObject({ status: 409, code: 'BLOG_RESULT_UNAVAILABLE', retryable: false });
+    expect(r.error).toBe(blogUnavailableReturningText(40));
+    expect(r.error).not.toMatch(/have been returned/);
+  });
+  test('the debt cannot even be RECORDED -> 503 BLOG_REFUND_PENDING retryable, NO refund claim', async () => {
+    reserveResult = { status: 'already_confirmed' };
+    mockRefundOutcome = { status: 'unrecorded' };
+    const r: any = await holdBlog({ orgId: ORG, userId: ORG, referenceId: REF, validateMembership: true });
+    expect(r).toMatchObject({ status: 503, code: 'BLOG_REFUND_PENDING', retryable: true });
+    expect(r.error).not.toMatch(/returned/);
+  });
+  test('the original charge cannot be READ -> 503 retryable, nothing recorded', async () => {
+    reserveResult = { status: 'already_confirmed' };
+    mockChargeReadThrows = true;
+    expect(await holdBlog({ orgId: ORG, userId: ORG, referenceId: REF, validateMembership: true })).toMatchObject({ status: 503, retryable: true });
+    expect(mockRefundCalls).toEqual([]);
+  });
+  test('no confirmed charge under this key -> 409 "you were not charged", nothing recorded', async () => {
+    reserveResult = { status: 'already_confirmed' };
+    mockCharge = null;
+    const r: any = await holdBlog({ orgId: ORG, userId: ORG, referenceId: REF, validateMembership: true });
+    expect(r).toMatchObject({ status: 409, code: 'BLOG_RESULT_UNAVAILABLE' });
+    expect(r.error).toMatch(/not charged/);
+    expect(mockRefundCalls).toEqual([]);
+  });
+  test('a protected org (owedRefunds says protected) -> review text, no refund claim', async () => {
+    reserveResult = { status: 'already_confirmed' };
+    mockRefundOutcome = { status: 'protected' };
+    const r: any = await holdBlog({ orgId: ORG, userId: ORG, referenceId: REF, validateMembership: true });
+    expect(r).toMatchObject({ status: 409, code: 'BLOG_RESULT_UNAVAILABLE' });
+    expect(r.error).not.toMatch(/returned/);
+  });
+  test('COUPLING (04/7c): a "returned" sentence is produced ONLY from a granted refund, with ITS credit figure', async () => {
+    expect(blogUnavailableRefundsOriginalCharge()).toBe(true);
+    reserveResult = { status: 'already_confirmed' };
+    mockRefundOutcome = { status: 'granted', credits: 37 };
+    const r: any = await holdBlog({ orgId: ORG, userId: ORG, referenceId: REF, validateMembership: true });
+    expect(r.error).toBe(blogUnavailableRefundedText(37));
+    for (const status of ['owed', 'unrecorded', 'protected']) {
+      mockRefundOutcome = status === 'owed' ? { status, credits: 37 } : { status };
+      const x: any = await holdBlog({ orgId: ORG, userId: ORG, referenceId: REF, validateMembership: true });
+      expect([status, /have been returned/.test(x.error)]).toEqual([status, false]);
+    }
   });
   test('a key whose run failed and was released -> 409 BLOG_REQUEST_ENDED (not charged)', async () => {
     reserveResult = { status: 'already_released' };
@@ -247,20 +245,37 @@ describe('replay store (b3 BLOCKING)', () => {
   test('a charged blog is replayed for the same org + key: same content, billing says nothing new was charged', async () => {
     const h = await held();
     await runBlogWithBilling({ reservation: h, run: async () => ({ title: 'T', html: '<p>x</p>' }), isQualityGateRefusal: () => false });
-    const r = await blogReplay(ORG, REF);
+    const r = await blogReplay(ORG, REF, { userId: ORG });
     expect(r).toEqual({ ok: true, body: { title: 'T', html: '<p>x</p>', billing: { charged: 0, released: 0, reason: 'replayed' } } });
   });
   test('TENANT-SCOPED: another org with the same key gets no replay', async () => {
     const h = await held();
     await runBlogWithBilling({ reservation: h, run: async () => ({ title: 'T' }), isQualityGateRefusal: () => false });
-    expect(await blogReplay('99999999-9999-4999-8999-999999999999', REF)).toEqual({ ok: true, body: null });
+    expect(await blogReplay('99999999-9999-4999-8999-999999999999', REF, { userId: ORG })).toEqual({ ok: true, body: null });
   });
   test('no stored result -> null (proceed to hold)', async () => {
-    expect(await blogReplay(ORG, REF)).toEqual({ ok: true, body: null });
+    expect(await blogReplay(ORG, REF, { userId: ORG })).toEqual({ ok: true, body: null });
   });
-  test('a store READ error -> 503 retryable, never "start a new request"', async () => {
+  test('a store READ error -> 503 retryable while the DURABLE count is below 3, never "start a new request"', async () => {
     mockStore.failRead = true;
-    expect(await blogReplay(ORG, REF)).toMatchObject({ ok: false, status: 503, code: 'BLOG_RESULT_READ_FAILED', retryable: true });
+    expect(await blogReplay(ORG, REF, { userId: ORG })).toMatchObject({ ok: false, status: 503, code: 'BLOG_RESULT_READ_FAILED', retryable: true });
+    expect(await blogReplay(ORG, REF, { userId: ORG })).toMatchObject({ status: 503, retryable: true });
+    expect(mockRefundCalls).toEqual([]);
+  });
+  test('b3: the 3rd durable read failure is TERMINAL -> the refund path (the loop ends; no endless "try again")', async () => {
+    mockStore.failRead = true;
+    await blogReplay(ORG, REF, { userId: ORG }); await blogReplay(ORG, REF, { userId: ORG });
+    const r: any = await blogReplay(ORG, REF, { userId: ORG });
+    expect(r).toMatchObject({ ok: false, status: 409, code: 'BLOG_RESULT_UNAVAILABLE', retryable: false });
+    expect(r.error).toBe(blogUnavailableRefundedText(40));
+    expect(mockRefundCalls).toHaveLength(1);
+  });
+  test('terminal on the PLATFORM scope refunds nothing (nothing was charged)', async () => {
+    mockStore.failRead = true;
+    for (let i = 0; i < 2; i++) await blogReplay(ORG, REF, { scope: 'blog_post_platform', userId: ORG });
+    const r: any = await blogReplay(ORG, REF, { scope: 'blog_post_platform', userId: ORG });
+    expect(r).toMatchObject({ status: 409, code: 'BLOG_RESULT_UNAVAILABLE' });
+    expect(mockRefundCalls).toEqual([]);
   });
   test('a failed run stores nothing (nothing to replay)', async () => {
     const h = await held();
@@ -291,12 +306,14 @@ describe("kill-switch: super-admin 'Blog Create' (job_type blog_generation)", ()
     mockSwitch = new Error('db down');
     expect(await blogGenerationRefusal(ORG)).toMatchObject({ ok: false, status: 503, code: 'BLOG_SWITCH_UNAVAILABLE', retryable: true });
   });
-  test('no switch row configured -> ALLOWED (b3), one alertable anomaly per PROCESS, not per request', async () => {
+  // b3 2026-11-18 (adopting 7c) replaces "no switch row configured -> ALLOWED": migration 060 guarantees the row, so an
+  // ABSENT row is a deliberate delete - the incident switch - and blogs FAIL CLOSED.
+  test('the switch row ABSENT -> FAIL CLOSED (403), one alertable anomaly per PROCESS, not per request', async () => {
     __resetBlogSwitchAbsentReportForTests(); mockAnomalies.length = 0;
     mockSwitch = null;
-    expect(await blogGenerationRefusal(ORG)).toBeNull();
-    expect(await blogGenerationRefusal(ORG)).toBeNull();
-    expect(await blogGenerationRefusal(null)).toBeNull();
+    expect(await blogGenerationRefusal(ORG)).toMatchObject({ ok: false, status: 403, code: 'BLOG_GENERATION_DISABLED' });
+    expect(await blogGenerationRefusal(ORG)).toMatchObject({ status: 403 });
+    expect(await blogGenerationRefusal(null)).toMatchObject({ status: 403 });
     expect(mockAnomalies).toEqual([expect.objectContaining({ kind: 'blog_kill_switch_row_absent', severity: 'critical' })]);
   });
   test('control: a present row never reports the anomaly', async () => {
@@ -320,7 +337,7 @@ describe('source pins', () => {
     expect(s).not.toMatch(/holdBlog\(|runBlogWithBilling\(|wirePhase2Route\(/);
     expect(s).toMatch(/blogGenerationRefusal\(company_id\)/);
     expect(s).toMatch(/if \(isBlogRefusal\(ref\)\)/);
-    expect(s).toMatch(/blogReplay\(company_id, referenceId, BLOG_PLATFORM_SCOPE\)/);
+    expect(s).toMatch(/blogReplay\(company_id, referenceId, \{ scope: BLOG_PLATFORM_SCOPE, userId: roleGate\.userId \}\)/);
   });
   test.each(['pages/api/blogs/generate.ts'])('%s: one blog = one hold - blogBilling only, no wirePhase2Route', (f) => {
     const s = read(f);
