@@ -994,6 +994,8 @@ export async function claimCommunityActionForExecution(input: {
     // the window, and tell one action failing a thousand times from a thousand failing once. It is an internal
     // UUID, inert without DB access. NEVER add suggested_text (content) or target_id: target_id is a PLATFORM
     // post identifier, resolvable from outside with no DB access - a different risk class (7c).
+    // RULE (both fail-closed logs): log the identifier of the failure's UNIT - a claim fails per action ->
+    // action_id; the policy decision fails per tenant -> organization_id. Not more, not less.
     const driverCode = (error as { code?: unknown }).code;
     console.warn('COMMUNITY_AI_CLAIM_RPC_ERROR_FAIL_CLOSED', {
       claim_point: input.claimPoint,

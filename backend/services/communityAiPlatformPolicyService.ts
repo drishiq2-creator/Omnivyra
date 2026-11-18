@@ -62,6 +62,8 @@ const unreadable = (reason: string, code: unknown, organizationId: string): Comm
   // organization id is what lets an operator see which tenant went dark (every one of its actions refuses) -
   // without it this log is the same silent-skip problem one service over (7c). It is an internal UUID, inert
   // without DB access; never add content or an externally resolvable id here.
+  // RULE (both fail-closed logs): log the identifier of the failure's UNIT - the policy decision fails per
+  // tenant -> organization_id; a claim fails per action -> action_id. Not more, not less (7c).
   console.warn('COMMUNITY_AI_POLICY_UNREADABLE_FAIL_CLOSED', {
     reason,
     code: typeof code === 'string' || typeof code === 'number' ? String(code) : null,
