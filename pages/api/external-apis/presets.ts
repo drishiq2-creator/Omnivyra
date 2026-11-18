@@ -231,7 +231,11 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
 
     // The explicit column list is a built string, so supabase-js cannot parse it and types the rows as GenericStringError;
     // the rows are ExternalApiSource column subsets (CI-499).
-    const dbPresets = ((data || []) as unknown as ExternalApiSource[]).map((preset: ExternalApiSource) => ({
+    // 7c (2026-11-18): type the rows as EXACTLY the template columns, never the whole ExternalApiSource (which declares
+    // is_active etc. that this select does not fetch). TENANT_PRESET_TEMPLATE_COLUMNS is a security boundary, so a read of
+    // a field outside the list must be a COMPILE error, not a silently-undefined value.
+    type PresetTemplateRow = Pick<ExternalApiSource, 'id' | 'name' | 'category' | 'purpose' | 'base_url' | 'method' | 'headers' | 'query_params' | 'auth_type'>;
+    const dbPresets = ((data || []) as unknown as PresetTemplateRow[]).map((preset: PresetTemplateRow) => ({
       id: preset.id,
       name: preset.name,
       description: preset.category || preset.purpose || 'Custom preset',
