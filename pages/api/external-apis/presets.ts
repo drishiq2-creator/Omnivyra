@@ -127,7 +127,9 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
           detail: scopedResult.error?.message ?? 'Unknown error',
         });
       }
-      const rows = scopedResult.error ? fallbackData?.data || [] : scopedResult.data || [];
+      // The explicit column list is a built string, so supabase-js cannot parse it and types the rows as GenericStringError;
+      // the rows are ExternalApiSource column subsets (CI-499).
+      const rows = (scopedResult.error ? fallbackData?.data || [] : scopedResult.data || []) as unknown as ExternalApiSource[];
       const globalOnly = rows.filter((row: any) => row.company_id == null);
       const dbPresets = globalOnly.map((preset: ExternalApiSource) => ({
         id: preset.id,
@@ -227,7 +229,9 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       return res.status(200).json({ presets: externalApiPresets, hidden_ids: [] });
     }
 
-    const dbPresets = (data || []).map((preset: ExternalApiSource) => ({
+    // The explicit column list is a built string, so supabase-js cannot parse it and types the rows as GenericStringError;
+    // the rows are ExternalApiSource column subsets (CI-499).
+    const dbPresets = ((data || []) as unknown as ExternalApiSource[]).map((preset: ExternalApiSource) => ({
       id: preset.id,
       name: preset.name,
       description: preset.category || preset.purpose || 'Custom preset',
