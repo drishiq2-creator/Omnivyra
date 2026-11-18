@@ -9,8 +9,7 @@ import {
   getCompanyRoleIncludingInvited,
   hasPermission,
   isSuperAdmin,
-  isPlatformSuperAdmin,
-} from '../../../../backend/services/rbacService';
+  isPlatformSuperAdmin, ROLE_LOOKUP_FAILED, respondRoleRefusal } from '../../../../backend/services/rbacService';
 import { getLegacySuperAdminSession } from '../../../../backend/services/superAdminSession';
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
@@ -56,6 +55,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
         return res.status(403).json({ error: 'FORBIDDEN_ROLE' });
       }
       let { role, error: roleError } = await getUserRole(user.id, companyId);
+      if (roleError === ROLE_LOOKUP_FAILED) return respondRoleRefusal(res, roleError);   // a FAILED read is a retryable 503 (getUserRole class)
       if (!role && (roleError === 'COMPANY_ACCESS_DENIED' || roleError === null)) {
         const fallbackRole = await getCompanyRoleIncludingInvited(user.id, companyId);
         if (fallbackRole && (await hasPermission(fallbackRole, 'MANAGE_EXTERNAL_APIS'))) {

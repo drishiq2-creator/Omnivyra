@@ -20,8 +20,7 @@ import {
   hasPermission,
   isPlatformSuperAdmin,
   isSuperAdmin,
-  Role,
-} from '../../../backend/services/rbacService';
+  Role, ROLE_LOOKUP_FAILED, respondRoleRefusal } from '../../../backend/services/rbacService';
 
 const normalizeRecord = (value: any): Record<string, any> => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
@@ -81,6 +80,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       canManageExternalApis = true;
     } else {
       let { role, error: roleError } = await getUserRole(user.id, companyId);
+      if (roleError === ROLE_LOOKUP_FAILED) return respondRoleRefusal(res, roleError);   // a FAILED read is a retryable 503 (getUserRole class)
       if (!role && (roleError === 'COMPANY_ACCESS_DENIED' || roleError === null)) {
         const fallbackRole = await getCompanyRoleIncludingInvited(user.id, companyId);
         if (fallbackRole) {

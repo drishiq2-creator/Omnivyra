@@ -2,7 +2,7 @@ import { createApiRoute as __createApiRoute } from '../../../../lib/platform/rou
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { supabase } from '../../../../backend/db/supabaseClient';
 import { getSupabaseUserFromRequest } from '../../../../backend/services/supabaseAuthService';
-import { getUserRole } from '../../../../backend/services/rbacService';
+import { getUserRole, ROLE_LOOKUP_FAILED, respondRoleRefusal } from '../../../../backend/services/rbacService';
 import { compareLatestVersionFirst, type getLatestCampaignVersion } from '../../../../backend/db/campaignVersionStore';
 import { resolveCampaignOwnership } from '../../../../backend/services/campaignOwnershipService';
 import { computePlatformAllocationAdvice } from '../../../../backend/services/campaignPlatformAllocationAdviceService';
@@ -99,6 +99,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
 
   const companyId = ownership.companyId;
   const { role, error: roleError } = await getUserRole(user.id, companyId);
+  if (roleError === ROLE_LOOKUP_FAILED) return respondRoleRefusal(res, roleError);   // a FAILED read is a retryable 503 (getUserRole class)
   if (roleError === 'COMPANY_ACCESS_DENIED') {
     return res.status(403).json({ error: 'COMPANY_ACCESS_DENIED' });
   }

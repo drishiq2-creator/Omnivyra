@@ -6,8 +6,7 @@ import { getLegacySuperAdminSession } from '../../../backend/services/superAdmin
 import {
   getUserRole,
   getCompanyRoleIncludingInvited,
-  isSuperAdmin,
-} from '../../../backend/services/rbacService';
+  isSuperAdmin, ROLE_LOOKUP_FAILED, respondRoleRefusal } from '../../../backend/services/rbacService';
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'GET') {
@@ -32,6 +31,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   const isPlatformOrSuperAdmin = legacySession || (await isSuperAdmin(user.id));
   if (!isPlatformOrSuperAdmin) {
     let { role, error: roleError } = await getUserRole(user.id, companyId);
+    if (roleError === ROLE_LOOKUP_FAILED) return respondRoleRefusal(res, roleError);   // a FAILED read is a retryable 503 (getUserRole class)
     if (!role && (roleError === 'COMPANY_ACCESS_DENIED' || roleError === null)) {
       const fallbackRole = await getCompanyRoleIncludingInvited(user.id, companyId);
       if (fallbackRole) {

@@ -17,8 +17,7 @@ import {
   hasPermission,
   isPlatformSuperAdmin,
   isSuperAdmin,
-  Role,
-} from '../../../../backend/services/rbacService';
+  Role, ROLE_LOOKUP_FAILED, respondRoleRefusal } from '../../../../backend/services/rbacService';
 
 const requirePlatformAdmin = async (req: NextApiRequest, res: NextApiResponse) => {
   const legacySession = getLegacySuperAdminSession(req);
@@ -53,6 +52,7 @@ const requireExternalApiAccess = async (
   if (await isPlatformSuperAdmin(user.id)) return { userId: user.id };
   if (await isSuperAdmin(user.id)) return { userId: user.id };
   let { role, error: roleError } = await getUserRole(user.id, companyId);
+  if (roleError === ROLE_LOOKUP_FAILED) { respondRoleRefusal(res, roleError); return null; }   // a FAILED read is a retryable 503 (getUserRole class)
   if (!role && (roleError === 'COMPANY_ACCESS_DENIED' || roleError === null)) {
     const fallbackRole = await getCompanyRoleIncludingInvited(user.id, companyId);
     if (fallbackRole === Role.COMPANY_ADMIN || fallbackRole === Role.ADMIN || fallbackRole === Role.SUPER_ADMIN) {

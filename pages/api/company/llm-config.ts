@@ -21,8 +21,7 @@ import {
   hasPermission,
   isPlatformSuperAdmin,
   isSuperAdmin,
-  Role,
-} from '../../../backend/services/rbacService';
+  Role, ROLE_LOOKUP_FAILED, respondRoleRefusal } from '../../../backend/services/rbacService';
 import {
   getCompanyLlmConfig,
   setCompanyLlmConfig,
@@ -51,6 +50,7 @@ async function requireCompanyLlmAccess(
   if (await isSuperAdmin(user.id)) return { userId: user.id, role: 'SUPER_ADMIN' };
 
   let { role, error: roleError } = await getUserRole(user.id, companyId);
+  if (roleError === ROLE_LOOKUP_FAILED) { respondRoleRefusal(res, roleError); return null; }   // a FAILED read is a retryable 503 (getUserRole class)
   if (!role && (roleError === 'COMPANY_ACCESS_DENIED' || roleError === null)) {
     const fallback = await getCompanyRoleIncludingInvited(user.id, companyId);
     if (fallback === Role.COMPANY_ADMIN || fallback === Role.ADMIN || fallback === Role.SUPER_ADMIN) {
