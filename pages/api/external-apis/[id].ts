@@ -129,7 +129,9 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       .select('*')
       .eq('api_source_id', id)
       .single();
-    return res.status(200).json({ api: { ...data, health: healthData || null } });
+    // The explicit column list is a built string, so supabase-js cannot parse it and types the rows as GenericStringError;
+    // the row is the selected columns (CI-499 TS2698).
+    return res.status(200).json({ api: { ...(data as unknown as Record<string, unknown>), health: healthData || null } });
   }
 
   if (req.method === 'PUT') {
