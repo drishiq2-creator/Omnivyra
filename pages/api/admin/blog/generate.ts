@@ -39,9 +39,7 @@ import { runUnifiedLongFormGeneration } from '../../../../lib/content/unifiedLon
 import type { BlogAngle } from '../../../../lib/blog/blogGenerationEngine';
 import { buildContentContext } from '../../../../lib/content/buildContentContext';
 import { isValidBlogFormat } from '../../../../lib/blog/blogStructureTemplates';
-import { createHash } from 'crypto';
-import { wirePhase2Route } from '../../../../backend/services/billing/phase2RouteWiring';
-import { billedRouteHttpError } from '../../../../backend/services/billing/billedRouteHttpError';
+import { blogBillingOf, blogReferenceId, holdBlog, isBlogHoldRefusal, runBlogWithBilling } from '../../../../backend/services/blog/blogBilling';
 import { ThoughtLeadershipQualityGateError } from '../../../../backend/services/longForm/thoughtLeadershipQualityGate';
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
@@ -106,49 +104,47 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     // Profile context enrichment is best-effort and must not block generation.
   }
 
-  // ── 2. Generate (Phase 2 Task 4: routed through the canary gate) ────────────
-  // OFF (default/prod) → runs verbatim, ZERO behavior change. SHADOW → +
-  // would-block telemetry. ENFORCE (canary orgs only) → HOLD-before-execute
-  // with action_key 'blog_generation'. referenceId is deterministic per
-  // request so retries reuse the same HOLD (no double-charge).
-  const referenceId = createHash('sha256')
-    .update([
-      company_id,
-      generationRequest.mode,
-      generationRequest.topic,
-      String(generationRequest.formatType ?? 'standard'),
-    ].join('|'))
-    .digest('hex')
-    .slice(0, 40);
+  // ── 2. Generate - OWNER 2026-11-18: a blog is a FIXED 40 credits (backend/services/blog/blogBilling) ─────────────
+  // Replaces the former phase-2 route wiring for blog_generation: ONE blog = ONE hold, so the blog_generation pricing row can never
+  // charge the same run a second time. Held BEFORE any AI call; a refusal writes nothing. 'angles' is not a blog and is
+  // not billed as one. Every AI call carries the blog's reference id (b3: measure the real cost per blog).
+  const runGeneration = (correlation?: { referenceType: string; referenceId: string; parentActivityId: null }) =>
+    runUnifiedLongFormGeneration({
+      ...generationRequest,
+      contentType: 'blog',
+      formatType: typeof generationRequest.formatType === 'string' ? generationRequest.formatType : undefined,
+      templateBlocks: generationRequest.template_blocks,
+      targetWordCount: generationRequest.answers?.target_word_count
+        ? Number.parseInt(String(generationRequest.answers.target_word_count), 10) || undefined
+        : generationRequest.target_words,
+      ...(correlation ? { correlation } : {}),
+    });
 
   try {
-    const result = await wirePhase2Route({
-      surface:        'admin.blog.generate',
-      organizationId: company_id,
-      action:         'blog_generation',
-      referenceType:  'blog_generation',
-      referenceId,
-      run: () => runUnifiedLongFormGeneration({
-        ...generationRequest,
-        contentType: 'blog',
-        formatType: typeof generationRequest.formatType === 'string' ? generationRequest.formatType : undefined,
-        templateBlocks: generationRequest.template_blocks,
-        targetWordCount: generationRequest.answers?.target_word_count
-          ? Number.parseInt(String(generationRequest.answers.target_word_count), 10) || undefined
-          : generationRequest.target_words,
-        correlation: { referenceType: 'blog_generation', referenceId, parentActivityId: null },
-      }),
+    if (generationRequest.mode === 'angles') {
+      return res.status(200).json(await runGeneration());
+    }
+    const referenceId = blogReferenceId(req.headers['idempotency-key']);
+    const hold = await holdBlog({ orgId: company_id, userId: roleGate.userId, referenceId, validateMembership: false });
+    if (isBlogHoldRefusal(hold)) {
+      const { status, ...refusal } = hold;
+      return res.status(status).json(refusal);
+    }
+    const { result, billing } = await runBlogWithBilling({
+      reservation: hold.reservation,
+      run: () => runGeneration({ referenceType: 'blog_post', referenceId, parentActivityId: null }),
+      isQualityGateRefusal: (e) => e instanceof ThoughtLeadershipQualityGateError,
     });
-    return res.status(200).json(result);
+    return res.status(200).json({ ...(result as object), billing });
   } catch (err) {
-    { const billedErr = billedRouteHttpError(err); if (billedErr) return res.status(billedErr.status).json(billedErr.body); }
     // Enterprise quality gate: failed blog drafts are blocked instead of
-    // being returned as usable generation output.
+    // being returned as usable generation output (owner: refunded in full).
     if (err instanceof ThoughtLeadershipQualityGateError) {
       return res.status(422).json({
         error: err.message,
         quality_passed: false,
         thought_leadership_quality: err.report,
+        ...(blogBillingOf(err) ? { billing: blogBillingOf(err) } : {}),
       });
     }
     throw err;
