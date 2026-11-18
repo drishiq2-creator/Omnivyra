@@ -166,8 +166,18 @@ describe.each(START_ROUTES)('OAuth start /api/auth/%s', (route, providerUrl) => 
     expect(st.companyId).toBe(UCO_A);
   });
 
-  it('no companyId → provider redirect for the session user only (user-scoped connection)', async () => {
+  // b3 ruling 2026-11-19: a META connection (facebook / instagram) always requires a company - a company-less one
+  // stored tokens in an untenanted row publishing never uses. The other providers keep the user-scoped connect.
+  const META = route === 'facebook' || route === 'instagram';
+  it(META
+    ? 'META: no companyId → sent back with "Choose a company first", no provider redirect, no state'
+    : 'no companyId → provider redirect for the session user only (user-scoped connection)', async () => {
     const r = await invoke(handler, { method: 'GET', as: 'A', query: { userId: USER_B } });
+    if (META) {
+      expect(String(r.redirect)).not.toMatch(providerUrl);
+      expect(decodeURIComponent(String(r.redirect))).toBe('/social-platforms?error=Choose a company first');
+      return;
+    }
     expect(r.redirect).toMatch(providerUrl);
     const st = stateFromRedirect(r.redirect);
     expect(st.userId).toBe(USER_A);

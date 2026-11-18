@@ -22,7 +22,8 @@ jest.mock('../../auth/oauthCredentialResolver', () => ({
   getOAuthCredentialsForPlatform: jest.fn(async () => ({ client_id: 'cid', client_secret: 'csec', source: 'test' })),
 }));
 jest.mock('../../auth/getBaseUrl', () => ({ getBaseUrl: () => 'http://localhost:3000' }));
-jest.mock('../../auth/oauthTelemetry', () => ({ logOAuthEvent: jest.fn(), safeHost: () => 'localhost' }));
+const mockLog = jest.fn();
+jest.mock('../../auth/oauthTelemetry', () => ({ logOAuthEvent: (...a: unknown[]) => mockLog(...a), safeHost: () => 'localhost' }));
 jest.mock('../../auth/oauthScopePersistence', () => ({
   normaliseScopes: () => [],
   persistGrantedScopes: jest.fn(async () => undefined),
@@ -39,7 +40,7 @@ jest.mock('../../services/metaDerivedAccountsService', () => ({
 }));
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { encodeOAuthState } = require('../../auth/oauthState');
+const { encodeOAuthState, decodeOAuthState } = require('../../auth/oauthState');
 /* eslint-disable @typescript-eslint/no-var-requires */
 const fbStart = require('../../../pages/api/auth/facebook/index').default;
 const igStart = require('../../../pages/api/auth/instagram').default;
@@ -65,6 +66,7 @@ beforeEach(() => {
   });
   providerCalls.length = 0;
   fetchMock.mockClear();
+  mockLog.mockClear();
 });
 
 const tokenExchanges = () => providerCalls.filter((u) => u.includes('oauth/access_token'));
@@ -74,11 +76,22 @@ describe.each([
   ['facebook', fbStart],
   ['instagram', igStart],
 ])('start route /api/auth/%s', (_name, handler) => {
-  it('NO company: 400 COMPANY_REQUIRED, nothing minted, no redirect to Meta', async () => {
+  it('NO company: sent BACK with "Choose a company first" (a redirect, not a JSON body), never to Meta', async () => {
     const r = await invoke(handler, { method: 'GET', as: 'A', query: { returnTo: '/social-platforms' } });
-    expect(r.status).toBe(400);
-    expect(r.body).toEqual({ error: 'Choose a company first', code: 'COMPANY_REQUIRED' });
-    expect(r.redirect).toBeNull();
+    expect(decodeURIComponent(String(r.redirect))).toBe('/social-platforms?error=Choose a company first');
+    expect(String(r.redirect)).not.toContain('facebook.com');
+    expect(mockLog).toHaveBeenCalledWith(expect.objectContaining({ event: 'oauth_failure', failure_point: 'company_required', company_id: null }));
+  });
+
+  it('a protocol-relative returnTo (//host) never leaves the site: the refusal goes to the default page', async () => {
+    const r = await invoke(handler, { method: 'GET', as: 'A', query: { returnTo: '//evil.example' } });
+    expect(decodeURIComponent(String(r.redirect))).toBe('/social-platforms?error=Choose a company first');
+  });
+
+  it('the returnTo SIGNED into the state is a same-origin path (so the callback error page cannot be //host)', async () => {
+    const r = await invoke(handler, { method: 'GET', as: 'A', query: { companyId: CO_A, returnTo: '//evil.example' } });
+    const state = new URL(String(r.redirect)).searchParams.get('state');
+    expect(decodeOAuthState(String(state)).returnTo).toBe('/social-platforms');
   });
 
   it('CONTROL: with a company the user belongs to, the flow redirects to Meta (unchanged)', async () => {
@@ -100,6 +113,7 @@ describe.each([
   it('a company-less state is refused BEFORE the token exchange: no provider call, nothing written', async () => {
     const r = await run(undefined);
     expect(decodeURIComponent(String(r.redirect))).toContain('error=Choose a company first');
+    expect(mockLog).toHaveBeenCalledWith(expect.objectContaining({ failure_point: 'company_required' }));
     expect(tokenExchanges()).toEqual([]);
     expect(socialWrites()).toEqual([]);
   });

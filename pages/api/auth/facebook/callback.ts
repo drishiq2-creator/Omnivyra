@@ -125,7 +125,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     // b3 (11-19): no company, no connection. A state without one (minted before the start route required it)
     // is refused BEFORE the token exchange, so no untenanted Meta token is ever stored.
     if (!companyId) {
-      logOAuthEvent({ event: 'oauth_failure', provider: 'facebook', callback_host: callbackHost, company_id: null, user_id: sessionUser.id, state_user_id: stateUserId ?? null, failure_point: 'unauthorized', failure_detail: 'no company in state (COMPANY_REQUIRED)' });
+      logOAuthEvent({ event: 'oauth_failure', provider: 'facebook', callback_host: callbackHost, company_id: null, user_id: sessionUser.id, state_user_id: stateUserId ?? null, failure_point: 'company_required', failure_detail: 'no company in state' });
       return res.redirect(`${errDest}?error=${encodeURIComponent('Choose a company first')}`);
     }
     const tenant = await assertTenantAccess({ userId: sessionUser.id, organizationId: companyId });

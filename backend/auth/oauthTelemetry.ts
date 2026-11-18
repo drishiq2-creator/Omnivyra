@@ -26,7 +26,8 @@ export type OAuthFailurePoint =
   | 'token_exchange_failed'  // provider rejected the token-exchange POST
   | 'property_fetch_failed'  // post-token API call (sites.list / accounts.list) failed
   | 'persistence_failed'     // DB write to integrations/tokens/properties failed
-  | 'callback_exception';    // unhandled throw inside the callback handler
+  | 'callback_exception'     // unhandled throw inside the callback handler
+  | 'company_required';      // the flow has no company: a Meta connection is always for a company (b3, 11-19)
 
 export interface OAuthLogFields {
   event: OAuthEvent;
