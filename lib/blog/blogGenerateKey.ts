@@ -17,7 +17,11 @@
  *
  * DO NOT "FIX" THE KEPT KEY (7c, 2026-11-18). If a finished, charged blog's response is lost, the
  * retry with the kept key can only be answered from the SERVER (owner ruling via b3: replay the
- * same result, one charge; c6 builds it). Ending the key on a lost connection so the retry
+ * same result, one charge; c6 builds it, BLOCKING for c6's feat/blog-fixed-40-20261118).
+ * CURRENT STATE (2026-11-18, until that replay ships): the generate routes do not store the draft,
+ * so a lost response after the charge is settled means a charged blog the user CANNOT recover.
+ * The replay closes this only if the stored copy is written BEFORE the charge is confirmed (7c).
+ * Ending the key on a lost connection so the retry
  * regenerates would turn lost data into a SECOND charge. The UI line "Trying again won't charge you
  * twice" (BlogGenerateModalMain BILLED_NETWORK_UNCERTAIN) is true only because of this rule;
  * blogCostUi.test.tsx pins the two together.
