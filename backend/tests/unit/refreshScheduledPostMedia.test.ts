@@ -69,6 +69,16 @@ describe('Worker media snapshot refresh (shared resolution path)', () => {
     expect(p.media_urls).toEqual(['stale.png']);
   });
 
+  it('a truly ABSENT organization (null) skips the refresh: never resolves media under company "" (7c)', async () => {
+    mockResolveOrg.mockResolvedValueOnce(null);
+    mockResolve.mockResolvedValue({ mediaUrls: ['fresh.png'], resolvedCount: 1, totalRefs: 1, usedFallback: false });
+    const p = post(['stale.png']);
+    await refreshScheduledPostMediaFromRefs({ scheduledPostId: 'sp1', userId: 'u', post: p });
+    expect(mockResolve).not.toHaveBeenCalled();
+    expect(mockUpdate).not.toHaveBeenCalled();
+    expect(p.media_urls).toEqual(['stale.png']);
+  });
+
   it('CONTROL: the resolved organization is what media resolution receives', async () => {
     mockResolve.mockResolvedValue({ mediaUrls: ['same.png'], resolvedCount: 1, totalRefs: 1, usedFallback: false });
     await refreshScheduledPostMediaFromRefs({ scheduledPostId: 'sp1', userId: 'u', post: post(['same.png']) });
