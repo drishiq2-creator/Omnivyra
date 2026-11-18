@@ -57,11 +57,15 @@ const cache = new Map<string, CacheEntry>();
 
 const cacheKey = (scope: CommunityExecutionPolicyScope) => `${scope.organizationId}:${scope.tenantId}`;
 
-const unreadable = (reason: string, code: unknown): CommunityExecutionPolicyDecision => {
-  // Reason and driver code only: no message, no payload.
+const unreadable = (reason: string, code: unknown, organizationId: string): CommunityExecutionPolicyDecision => {
+  // Reason, driver code and the TENANT only: no message, no payload. The decision is per tenant, so the
+  // organization id is what lets an operator see which tenant went dark (every one of its actions refuses) -
+  // without it this log is the same silent-skip problem one service over (7c). It is an internal UUID, inert
+  // without DB access; never add content or an externally resolvable id here.
   console.warn('COMMUNITY_AI_POLICY_UNREADABLE_FAIL_CLOSED', {
     reason,
     code: typeof code === 'string' || typeof code === 'number' ? String(code) : null,
+    organization_id: organizationId,
   });
   return { ok: false, code: COMMUNITY_POLICY_UNREADABLE };
 };
@@ -109,14 +113,14 @@ export const getCommunityExecutionPolicy = async (
   let decision: CommunityExecutionPolicyDecision | null;
   try {
     const { data, error } = await supabase.rpc(POLICY_DECISION_RPC, { p_org: organizationId, p_tenant: tenantId });
-    if (error) return unreadable('rpc_error', (error as { code?: unknown })?.code);
+    if (error) return unreadable('rpc_error', (error as { code?: unknown })?.code, organizationId);
     const rows = Array.isArray(data) ? data : data == null ? [] : [data];
-    if (rows.length !== 1) return unreadable('rpc_row_count', rows.length);
+    if (rows.length !== 1) return unreadable('rpc_row_count', rows.length, organizationId);
     decision = toDecision(rows[0]);
   } catch (error) {
-    return unreadable('rpc_threw', (error as { code?: unknown })?.code);
+    return unreadable('rpc_threw', (error as { code?: unknown })?.code, organizationId);
   }
-  if (!decision) return unreadable('rpc_malformed', null);
+  if (!decision) return unreadable('rpc_malformed', null, organizationId);
 
   if (cache.size >= CACHE_MAX_ENTRIES) {
     const oldest = cache.keys().next().value;

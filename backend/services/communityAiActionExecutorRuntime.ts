@@ -990,6 +990,10 @@ export async function claimCommunityActionForExecution(input: {
     // migrations applied - refuses (fails CLOSED), and must be VISIBLE, distinct from a policy or guardrail refusal.
     // Every claim point comes through here (scheduler, auto evaluation, manual execute, RPA retry, orchestration).
     // Reason and driver code only: no message, no payload (as COMMUNITY_AI_POLICY_UNREADABLE_FAIL_CLOSED).
+    // action_id is what makes this log useful: it lets an operator enumerate and re-run the actions skipped in
+    // the window, and tell one action failing a thousand times from a thousand failing once. It is an internal
+    // UUID, inert without DB access. NEVER add suggested_text (content) or target_id: target_id is a PLATFORM
+    // post identifier, resolvable from outside with no DB access - a different risk class (7c).
     const driverCode = (error as { code?: unknown }).code;
     console.warn('COMMUNITY_AI_CLAIM_RPC_ERROR_FAIL_CLOSED', {
       claim_point: input.claimPoint,

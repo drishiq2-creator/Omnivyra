@@ -91,6 +91,22 @@ describe('community execution policy — unreadable store fails closed (H-1, OD-
     expect(logged).not.toContain('secret-ish');
   });
 
+  it('7c: the unreadable log names the TENANT (the blast-radius unit) for every reason', async () => {
+    const reasons: Array<[string, () => Promise<unknown>]> = [
+      ['rpc_error', async () => ({ data: null, error: { code: '42501', message: 'x' } })],
+      ['rpc_threw', async () => { throw new Error('boom'); }],
+      ['rpc_row_count', async () => ({ data: [], error: null })],
+    ];
+    for (const [reason, rpc] of reasons) {
+      __resetCommunityAiPlatformPolicyCacheForTests();
+      warn.mockClear();
+      policyRpc = rpc as typeof policyRpc;
+      await getCommunityExecutionPolicy(scope);
+      const ev = warn.mock.calls.find((c) => c[0] === 'COMMUNITY_AI_POLICY_UNREADABLE_FAIL_CLOSED');
+      expect(ev?.[1]).toMatchObject({ reason, organization_id: scope.organizationId });
+    }
+  });
+
   it('a thrown RPC refuses, without the error text in the log', async () => {
     policyRpc = async () => { throw new Error('connect ECONNREFUSED'); };
     expect(await getCommunityExecutionPolicy(scope)).toEqual({ ok: false, code: 'POLICY_UNREADABLE' });
