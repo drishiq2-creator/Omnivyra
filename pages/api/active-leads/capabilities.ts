@@ -20,7 +20,7 @@ import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeF
 
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { enforceCompanyAccess } from '../../../backend/services/userContextService';
-import { getUserRole } from '../../../backend/services/rbacService';
+import { getUserRole, respondRoleRefusal } from '../../../backend/services/rbacService';
 import { hasCommunityAiCapability } from '../../../backend/services/rbac/communityAiCapabilities';
 import {
   enableCapability,
@@ -189,7 +189,7 @@ async function handlePost(req: NextApiRequest, res: NextApiResponse) {
   // publishing alone does not let any user enable listening.
   const { role, error: roleError } = await getUserRole(ctx.userId, companyId);
   if (roleError || !role) {
-    return res.status(403).json({ error: roleError ?? 'FORBIDDEN_ROLE' });
+    return respondRoleRefusal(res, roleError);
   }
   if (!hasCommunityAiCapability(role, 'MANAGE_LISTENING_CAPABILITIES')) {
     return res.status(403).json({ error: 'FORBIDDEN_ROLE' });

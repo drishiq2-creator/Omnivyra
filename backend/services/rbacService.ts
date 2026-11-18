@@ -494,6 +494,25 @@ export const hasPermission = async (role: string | null, action: string): Promis
 /** getUserRole's typed READ-FAILURE marker: the role is UNKNOWN (retryable), never "no role". */
 export const ROLE_LOOKUP_FAILED = 'ROLE_LOOKUP_FAILED';
 
+/**
+ * The ONE response for a getUserRole refusal at a route (c6, 2026-11-18; the error-echo class, flagged by 89/a9/7c).
+ * Routes used to answer `403 { error: roleError ?? 'FORBIDDEN_ROLE' }`, which (a) turned a FAILED role read
+ * (ROLE_LOOKUP_FAILED) into a 403 the client treats as final, and (b) echoed whatever getUserRole returned. Now:
+ * a lookup failure is a retryable 503 (same shape as enforceRole); the one known denial code keeps its existing 403
+ * contract; anything else is the generic 403 FORBIDDEN_ROLE - never echoed text.
+ */
+export function respondRoleRefusal(res: NextApiResponse, roleError: string | null | undefined): void {
+  if (roleError === ROLE_LOOKUP_FAILED) {
+    res.status(503).json({ error: 'ROLE_LOOKUP_FAILED', retryable: true });
+    return;
+  }
+  if (roleError === 'COMPANY_ACCESS_DENIED') {
+    res.status(403).json({ error: 'COMPANY_ACCESS_DENIED' });
+    return;
+  }
+  res.status(403).json({ error: 'FORBIDDEN_ROLE' });
+}
+
 export const getUserRole = async (
   userId: string,
   companyId: string
