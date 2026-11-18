@@ -77,6 +77,11 @@ export interface CreditHandle {
   action:         string;
   source:         'orchestrator' | 'queue_middleware' | 'http';
   amountReserved?: number;
+  /**
+   * Called once per request that is actually DISPATCHED to an AI provider inside this scope (not for cache hits or
+   * coalesced duplicates). Lets a fixed-price feature settle a stopped run by work done (owner 2026-11-18: blogs).
+   */
+  onProviderCall?: () => void;
 }
 
 export interface AiBillingGuardResult {

@@ -37,6 +37,7 @@ import {
   type BlogGenerationRequest,
 } from '../../../lib/blog/runBlogGeneration';
 import { runUnifiedLongFormGeneration } from '../../../lib/content/unifiedLongFormEngine';
+import { blogBillingOf, blogReferenceId, holdBlog, isBlogHoldRefusal, runBlogWithBilling } from '../../../backend/services/blog/blogBilling';
 import type { BlogAngle } from '../../../lib/blog/blogGenerationEngine';
 import { isValidBlogFormat } from '../../../lib/blog/blogStructureTemplates';
 import { ThoughtLeadershipQualityGateError } from '../../../backend/services/longForm/thoughtLeadershipQualityGate';
@@ -129,29 +130,53 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
         companyProfile: builtContext?.companyProfile as BlogGenerationRequest['companyProfile'],
       };
 
-      const result = await runUnifiedLongFormGeneration({
-        ...generationRequest,
-        contentType: 'blog',
-        formatType: typeof generationRequest.formatType === 'string' ? generationRequest.formatType : undefined,
-        templateBlocks: generationRequest.template_blocks,
-        targetWordCount: generationRequest.answers?.target_word_count
-          ? Number.parseInt(String(generationRequest.answers.target_word_count), 10) || undefined
-          : generationRequest.target_words,
+      const runGeneration = (correlation?: { referenceType: string; referenceId: string; parentActivityId: null }) =>
+        runUnifiedLongFormGeneration({
+          ...generationRequest,
+          contentType: 'blog',
+          formatType: typeof generationRequest.formatType === 'string' ? generationRequest.formatType : undefined,
+          templateBlocks: generationRequest.template_blocks,
+          targetWordCount: generationRequest.answers?.target_word_count
+            ? Number.parseInt(String(generationRequest.answers.target_word_count), 10) || undefined
+            : generationRequest.target_words,
+          ...(correlation ? { correlation } : {}),
+        });
+
+      // 'angles' produces angle options, not a blog - not billed as a blog (owner: 40 per blog).
+      if (resolvedMode === 'angles') {
+        return res.status(200).json(await runGeneration());
+      }
+
+      // OWNER 2026-11-18: a blog is a FIXED 40 credits - held BEFORE any AI call; a refusal writes nothing
+      // (backend/services/blog/blogBilling). Every AI call carries the blog's reference id (b3: measure cost per blog).
+      const referenceId = blogReferenceId(req.headers['idempotency-key']);
+      const hold = await holdBlog({ orgId: company_id, userId: roleGate.userId, referenceId, validateMembership: true });
+      if (isBlogHoldRefusal(hold)) {
+        const { status, ...refusal } = hold;
+        return res.status(status).json(refusal);
+      }
+      const { result, billing } = await runBlogWithBilling({
+        reservation: hold.reservation,
+        run: () => runGeneration({ referenceType: 'blog_post', referenceId, parentActivityId: null }),
+        isQualityGateRefusal: (e) => e instanceof ThoughtLeadershipQualityGateError,
       });
-      return res.status(200).json(result);
+      return res.status(200).json({ ...(result as object), billing });
     } catch (error) {
       // Enterprise quality gate: failed blog drafts are blocked instead of
-      // being returned as usable generation output.
+      // being returned as usable generation output (owner: refunded in full).
       if (error instanceof ThoughtLeadershipQualityGateError) {
         return res.status(422).json({
           error: error.message,
           quality_passed: false,
           thought_leadership_quality: error.report,
+          ...(blogBillingOf(error) ? { billing: blogBillingOf(error) } : {}),
         });
       }
       console.error('[blogs/generate] runBlogGeneration error:', error);
+      // Never echo internal error text to the client.
       return res.status(500).json({
-        error: error instanceof Error ? error.message : 'Failed to generate blog',
+        error: 'Failed to generate blog',
+        ...(blogBillingOf(error) ? { billing: blogBillingOf(error) } : {}),
       });
     }
   }
