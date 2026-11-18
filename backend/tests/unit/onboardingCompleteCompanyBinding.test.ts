@@ -115,7 +115,7 @@ describe('decision 1+2: matching and binding', () => {
     const r = await post();
     expect(r.statusCode).toBe(403);
     expect(r.body).toMatchObject({ code: 'INVITE_REQUIRED', joinRequested: true });
-    expect(r.body.error).toMatch(/asked your admin/);
+    expect(r.body.error).toMatch(/sent to your organization's administrator/);
     expect(bindingWrites()).toEqual([]);
     expect(mockDb.user_company_roles ?? []).toEqual([]); // parity with the pre-rename test: no role row at all
     expect(mockGrants).toEqual([]);
@@ -127,7 +127,7 @@ describe('decision 1+2: matching and binding', () => {
     mockEmail = 'newbie@acme.com';
     const r = await post();
     expect(r.body.joinRequested).toBe(true);
-    expect(r.body.error).toMatch(/asked your admin/);
+    expect(r.body.error).toMatch(/sent to your organization's administrator/);
   });
 
   it('a public-provider domain is evidence of nothing, even if a company row carries it', async () => {
@@ -140,14 +140,16 @@ describe('decision 1+2: matching and binding', () => {
     expect(mockDb.companies.filter((c) => c.admin_email_domain === 'gmail.com')).toHaveLength(1);
   });
 
-  it('same domain, admin notice NOT sent: never claims a join request was made', async () => {
-    for (const notice of ['failed', 'no_admin'] as const) {
+  it('CI-309 parity: sent / already_sent / failed / no_admin give the IDENTICAL reply (delivery is server-side only)', async () => {
+    const replies: unknown[] = [];
+    for (const notice of ['sent', 'already_sent', 'failed', 'no_admin'] as const) {
       mockAdminNotice = notice;
       mockEmail = 'newbie@acme.com';
       const r = await post();
-      expect([notice, r.statusCode, r.body.joinRequested]).toEqual([notice, 403, false]);
-      expect(r.body.error).not.toMatch(/asked your admin/);
+      replies.push([r.statusCode, r.body]);
     }
+    expect(replies[0]).toEqual([403, { code: 'INVITE_REQUIRED', joinRequested: true, error: expect.stringMatching(/sent to your organization's administrator/) }]);
+    for (const reply of replies.slice(1)) expect(reply).toEqual(replies[0]);
     expect(bindingWrites()).toEqual([]);
   });
 

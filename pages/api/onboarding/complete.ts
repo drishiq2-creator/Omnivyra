@@ -273,8 +273,8 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       }
       if (!priorMembership) {
         // JOIN REQUEST (owner ruling 2b, option C): no access is granted. The company's active admin
-        // is emailed that this verified person from their domain wants in (and the person is told who
-        // to ask); the admin lets them in through the normal invite flow, choosing the role there.
+        // is emailed that this verified person from their domain wants in (the person learns nothing
+        // about the admins); the admin lets them in through the normal invite flow, choosing the role there.
         // Deduped per prospect email via signup_referrals; best-effort, never throws.
         // Decided BEFORE any write that binds the user to the company.
         const notice = await notifyAdminAndProspectOfClaimedDomain(supabase, {
@@ -285,15 +285,13 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
           companyName:    domainCompanyName,
           nowIso:         new Date().toISOString(),
         });
-        // Only claim a request was made when the admin notice actually went out (05 review).
-        // A request is genuinely in place only when the admin was notified, now or on an earlier attempt.
-        const joinRequested = notice?.adminNotice === 'sent' || notice?.adminNotice === 'already_sent';
+        // CI-309 (2026-11-19): the reply never varies with the admin-notice delivery (that would tell
+        // the requester whether their company has a reachable admin). The outcome is logged server-side.
+        console.info('[onboarding/complete] join request admin notice', { adminNotice: notice?.adminNotice ?? 'failed' });
         return res.status(403).json({
           code:  'INVITE_REQUIRED',
-          joinRequested,
-          error: joinRequested
-            ? "Your company already uses Omnivyra; we've asked your admin to let you in."
-            : 'Your company already uses Omnivyra, but we could not reach your admin. Please ask them to invite you, or contact support.',
+          joinRequested: true,
+          error: "Your organization already uses Omnivyra. Your request to join was sent to your organization's administrator.",
         });
       }
       companyId = domainCompanyId;
