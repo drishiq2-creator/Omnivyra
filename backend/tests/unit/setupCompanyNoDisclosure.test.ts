@@ -52,6 +52,14 @@ jest.mock('../../services/supabaseAuthService', () => ({
   },
 }));
 jest.mock('../../services/logger', () => ({ logger: { warn: jest.fn(), info: jest.fn(), error: jest.fn(), debug: jest.fn() } }));
+// /api/onboarding/company-domain-check authenticates through authResolver (same test identity headers).
+jest.mock('../../services/authResolver', () => ({
+  resolveAuthenticatedUser: async (req: { headers?: Record<string, unknown> }) => {
+    const id = req?.headers?.['x-test-user'];
+    if (typeof id !== 'string' || !id) return { user: null, error: 'NO_TOKEN' };
+    return { user: { id, supabaseUid: `sb-${id}`, email: req?.headers?.['x-test-email'] as string, emailVerified: true }, error: null };
+  },
+}));
 jest.mock('../../../lib/auth/rateLimit', () => ({ checkRateLimit: async () => ({ allowed: true }) }));
 jest.mock('../../../lib/platform/routeFactory', () => ({ createApiRoute: (h: unknown) => h }));
 jest.mock('../../services/signupEventService', () => ({
@@ -97,6 +105,7 @@ jest.mock('../../services/crawl/crawlEventService', () => ({ emitCrawlEvent: jes
 
 import setupCompanyRoute from '../../../pages/api/onboarding/setup-company';
 import { emitSignupEvent } from '../../services/signupEventService';
+import domainCheckRoute from '../../../pages/api/onboarding/company-domain-check';
 
 // The first company-creation run loads the creation tail's lazy imports (cold ts-jest transpile).
 jest.setTimeout(120_000);
@@ -403,5 +412,38 @@ describe('the denial is recorded server-side (signup.CompanyExists audit event)'
     await setup('mallory@attacker.test', { companyName: VICTIM_NAME });
     await settle();
     expect(companyExistsEvents()).toEqual([]);
+  });
+});
+
+describe('company-domain-check and setup-company never disagree (one shared verified-domain lookup)', () => {
+  const verdictOf = (check: { status?: number; body: any }, setupReply: { status?: number; body: any }) => ({
+    check: check.status === 409 ? check.body.code : check.body?.matched === true ? 'existing' : 'new',
+    setup: setupReply.status === 409 ? setupReply.body.code : setupReply.body?.joinRequested === true ? 'existing' : 'new',
+  });
+  const both = async (email: string) => {
+    const check = await invoke(domainCheckRoute as never, { method: 'GET', headers: { 'x-test-user': REQ, 'x-test-email': email } });
+    const setupReply = await setup(email);
+    await settle();
+    return verdictOf(check, setupReply);
+  };
+
+  it('a MAIL-SUBDOMAIN user (sam@mail.victim.test) gets the same verdict from both: existing company', async () => {
+    world({}, 'sam@mail.victim.test');
+    expect(await both('sam@mail.victim.test')).toEqual({ check: 'existing', setup: 'existing' });
+  });
+
+  it('an unrelated domain gets the same verdict from both: new company', async () => {
+    world({}, 'founder@unrelated.test');
+    expect(await both('founder@unrelated.test')).toEqual({ check: 'new', setup: 'new' });
+  });
+
+  it('an ambiguous domain gets the same verdict from both: COMPANY_DOMAIN_AMBIGUOUS', async () => {
+    world({
+      companies: [
+        { id: '30930930-0000-4000-8000-0000000000d1', name: 'Dup Alpha', status: 'active', website: 'https://www.dup.test', website_domain: 'dup.test', admin_email_domain: null },
+        { id: '30930930-0000-4000-8000-0000000000d2', name: 'Dup Beta', status: 'active', website: null, website_domain: null, admin_email_domain: 'dup.test' },
+      ],
+    }, 'x@dup.test');
+    expect(await both('x@dup.test')).toEqual({ check: 'COMPANY_DOMAIN_AMBIGUOUS', setup: 'COMPANY_DOMAIN_AMBIGUOUS' });
   });
 });

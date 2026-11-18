@@ -10,6 +10,9 @@ import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeF
  * Returns { matched: true } ONLY (CI-309, 2026-11-19): the requester learns that their own VERIFIED
  * email domain already has a workspace - never the company's id or name, nor anything about its admins.
  * The domain is always the session's verified email; the endpoint takes no domain from the caller.
+ * The match is decided by the SAME lookup setup-company uses (findCompaniesByVerifiedEmailDomain:
+ * registrable domain, both domain columns), so the two can never disagree; several companies on the
+ * domain answer the same 409 COMPANY_DOMAIN_AMBIGUOUS, and a failed read is 503, never "not matched".
  *
  * Returns { matched: false } for:
  *   - free/public email providers (gmail, yahoo, …)
@@ -22,7 +25,7 @@ import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeF
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { supabase } from '../../../backend/db/supabaseClient';
 import { resolveAuthenticatedUser } from '../../../backend/services/authResolver';
-import { extractDomain, isFreeEmailDomain } from '../../../backend/services/companyMatchService';
+import { findCompaniesByVerifiedEmailDomain } from '../../../backend/services/companyMatchService';
 
 type MatchedResponse = { matched: true };
 type NoMatchResponse  = { matched: false };
@@ -48,11 +51,15 @@ async function handler(
     return res.status(403).json({ error: 'Please verify your email address first.', code: 'EMAIL_NOT_VERIFIED' });
   }
 
-  // ── 2. Skip free / public email domains ───────────────────────────────────
-  const emailDomain = extractDomain(email);
-  if (!emailDomain || isFreeEmailDomain(emailDomain)) {
-    return res.status(200).json({ matched: false });
+  // ── 2. The verified-domain lookup shared with setup-company ───────────────
+  // Free / public email domains look nothing up and match nothing.
+  const domainLookup = await findCompaniesByVerifiedEmailDomain(email);
+  if (!domainLookup.ok) return res.status(503).json({ error: 'Could not check your company.' });
+  if (domainLookup.companies.length > 1) {
+    return res.status(409).json({ code: 'COMPANY_DOMAIN_AMBIGUOUS', error: 'Your company could not be resolved. Please contact support.' });
   }
+  const company = domainLookup.companies[0] ? { id: domainLookup.companies[0].company_id } : null;
+  if (!company) return res.status(200).json({ matched: false });
 
   // ── 3. Resolve the user's internal ID ────────────────────────────────────
   // Two exact reads - never an interpolated .or() filter string. A read error refuses.
@@ -60,34 +67,21 @@ async function handler(
   const byEmail = byUid.data || byUid.error
     ? { data: null, error: null }
     : await supabase.from('users').select('id').eq('email', email.toLowerCase()).maybeSingle();
-  if (byUid.error || byEmail.error) return res.status(500).json({ error: 'Could not check your company.' });
+  if (byUid.error || byEmail.error) return res.status(503).json({ error: 'Could not check your company.' });
   const userRow = byUid.data ?? byEmail.data;
 
   // If the user has no DB row yet (edge case during onboarding), let setup-company handle it
   if (!userRow) return res.status(200).json({ matched: false });
 
-  // ── 4. Find a company whose domain matches the user's email domain ────────
-  // Check both website_domain and admin_email_domain.
-  // website_domain first, then admin_email_domain - two exact reads, no interpolated .or().
-  const byWebsite = await supabase
-    .from('companies').select('id').eq('status', 'active').eq('website_domain', emailDomain).maybeSingle();
-  const byAdminDomain = byWebsite.data || byWebsite.error
-    ? { data: null, error: null }
-    : await supabase
-        .from('companies').select('id').eq('status', 'active').eq('admin_email_domain', emailDomain).maybeSingle();
-  if (byWebsite.error || byAdminDomain.error) return res.status(500).json({ error: 'Could not check your company.' });
-  const company = byWebsite.data ?? byAdminDomain.data;
-
-  if (!company) return res.status(200).json({ matched: false });
-
-  // ── 5. If the user is already a member (any status), skip — they don't
+  // ── 4. If the user is already a member (any status), skip — they don't
   //    need the "contact admin" screen; setup-company will resolve their role.
-  const { data: existingMembership } = await supabase
+  const { data: existingMembership, error: membershipErr } = await supabase
     .from('user_company_roles')
     .select('id')
     .eq('user_id', userRow.id)
     .eq('company_id', company.id)
     .maybeSingle();
+  if (membershipErr) return res.status(503).json({ error: 'Could not check your company.' });
 
   if (existingMembership) return res.status(200).json({ matched: false });
 

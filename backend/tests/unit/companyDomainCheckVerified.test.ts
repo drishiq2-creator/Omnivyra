@@ -23,6 +23,7 @@ function mockTable(table: string) {
     maybeSingle: () => { one = true; return b; },
     then: (ok: any, ko: any) => {
       mockReads.push(table);
+      if (mockFailTable === table) return Promise.resolve({ data: null, error: { message: 'boom' } }).then(ok, ko);
       const hit = (mockDb[table] ?? []).filter((r) => tests.every((t) => t(r)));
       const res = one && hit.length > 1 ? { data: null, error: { code: 'PGRST116' } } : { data: one ? hit[0] ?? null : hit, error: null };
       return Promise.resolve(res).then(ok, ko);
@@ -31,10 +32,14 @@ function mockTable(table: string) {
   return b;
 }
 let mockVerified = true;
+let mockEmail = 'p@acme.com';
+let mockFailTable: string | null = null;
 jest.mock('../../db/supabaseClient', () => ({ supabase: { from: (t: string) => mockTable(t) } }));
+// The shared verified-domain lookup (findCompaniesByVerifiedEmailDomain) reads through ownedDbTable.
+jest.mock('../../db/writeOwner', () => ({ ownedDbTable: (t: string) => mockTable(t) }));
 jest.mock('../../../lib/platform/routeFactory', () => ({ createApiRoute: (h: unknown) => h }));
 jest.mock('../../services/authResolver', () => ({
-  resolveAuthenticatedUser: async () => ({ user: { id: 'x', supabaseUid: 'sb-p', email: 'p@acme.com', emailVerified: mockVerified }, error: null }),
+  resolveAuthenticatedUser: async () => ({ user: { id: 'x', supabaseUid: 'sb-p', email: mockEmail, emailVerified: mockVerified }, error: null }),
 }));
 /* eslint-disable @typescript-eslint/no-var-requires */
 const route = require('../../../pages/api/onboarding/company-domain-check').default;
@@ -47,7 +52,7 @@ async function get(query: Record<string, unknown> = {}) {
   return res;
 }
 beforeEach(() => {
-  mockVerified = true; mockReads.length = 0;
+  mockVerified = true; mockReads.length = 0; mockEmail = 'p@acme.com'; mockFailTable = null;
   mockDb.users = [{ id: 'u-p', supabase_uid: 'sb-p', email: 'p@acme.com' }, { id: 'u-admin', name: 'Ada Admin', email: 'ada@acme.com' }];
   mockDb.companies = [{ id: 'c-acme', name: 'Acme', status: 'active', website_domain: 'acme.com', admin_email_domain: 'acme.com' }];
   mockDb.user_company_roles = [{ user_id: 'u-admin', company_id: 'c-acme', role: 'COMPANY_ADMIN', status: 'active' }];
@@ -80,4 +85,27 @@ it("control: a domain passed by the caller is ignored - only the session's verif
   mockDb.companies = mockDb.companies.filter((c) => c.id !== 'c-acme');
   const r = await get({ domain: 'other.com', email: 'x@other.com' });
   expect(r.body).toEqual({ matched: false });
+});
+
+describe('the SAME verified-domain lookup as setup-company (findCompaniesByVerifiedEmailDomain)', () => {
+  it('a mail-subdomain user (p@mail.acme.com) is matched by registrable domain, as setup-company matches them', async () => {
+    mockEmail = 'p@mail.acme.com';
+    mockDb.users[0].email = 'p@mail.acme.com';
+    const r = await get();
+    expect([r.statusCode, r.body]).toEqual([200, { matched: true }]);
+  });
+  it('several companies on the domain: the same 409 COMPANY_DOMAIN_AMBIGUOUS setup-company gives, nothing revealed', async () => {
+    mockDb.companies.push({ id: 'c-acme-2', name: 'Acme Two', status: 'active', website_domain: null, admin_email_domain: 'acme.com' });
+    mockDb.companies[0].admin_email_domain = null;
+    const r = await get();
+    expect(r.statusCode).toBe(409);
+    expect(r.body.code).toBe('COMPANY_DOMAIN_AMBIGUOUS');
+    expect(JSON.stringify(r.body)).not.toMatch(/c-acme|Acme Two|"Acme"/);
+  });
+  it('a failed company read is 503 - never "not matched"', async () => {
+    mockFailTable = 'companies';
+    const r = await get();
+    expect(r.statusCode).toBe(503);
+    expect(r.body.matched).toBeUndefined();
+  });
 });
