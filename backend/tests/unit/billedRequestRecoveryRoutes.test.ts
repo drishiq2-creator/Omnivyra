@@ -181,3 +181,21 @@ describe('refine_variant: runBilledAiCompletion with recovery', () => {
     expect(charges).toBe(0);
   });
 });
+
+describe('billed queue jobs: a stable id or a refusal - never a synthetic key (7c rule)', () => {
+  const { billedQueueJobId } = jest.requireActual('../../services/billing/billedRequestRecovery');
+  test('the first stable candidate is the id', () => {
+    expect(billedQueueJobId('42')).toBe('42');
+    expect(billedQueueJobId(undefined, 'bolt-7')).toBe('bolt-7');
+  });
+  test.each([[[]], [[undefined]], [[null, '']], [['  ']]])('no stable id %p -> THROWS (refused before billing), no Date.now() key', (c) => {
+    expect(() => billedQueueJobId(...c)).toThrow(/no stable id/);
+  });
+  test('no billed queue processor still mints an inline-${Date.now()} job id', () => {
+    const fs = require('fs') as typeof import('fs');
+    for (const f of ['boltContentJobProcessor', 'campaignPlanningProcessor', 'contentGenerationProcessor', 'creatorContentProcessor']) {
+      const s = fs.readFileSync(`backend/queue/jobProcessors/${f}.ts`, 'utf8');
+      expect([f, s.includes('inline-${Date.now()}'), /billedQueueJobId\(/.test(s)]).toEqual([f, false, true]);
+    }
+  });
+});
