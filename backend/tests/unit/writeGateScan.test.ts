@@ -17,6 +17,15 @@ describe('insideWriteGate: containment for every conditional shape', () => {
     ['gate ? <A/> : <B>…</B>  (marker in B, no parens)', `<div>{showMore ? <hr /> : <p>${M}</p>}</div>`],
     ['nested elements of the same tag', `{showMore && <div><div>a</div><div>${M}</div></div>}`],
     ['an expression attribute containing >', `{showMore && <p title={a > b ? 'x' : 'y'}>${M}</p>}`],
+    // 7c, re-review of b88577ea8: these FAILED there (first branch not JSX -> B-branch lost)
+    ['gate ? null : ( B )', `<div>{showMore ? null : (<p>${M}</p>)}</div>`],
+    ["gate ? '' : <B/>", `<div>{showMore ? '' : <p>${M}</p>}</div>`],
+    ['gate ? undefined : <B/>', `<div>{showMore ? undefined : <p>${M}</p>}</div>`],
+    ['gate ? <></> : ( B )', `<div>{showMore ? <></> : (<p>${M}</p>)}</div>`],
+    ['nested ternary in A, marker in B', `{showMore ? (flag ? <i>a</i> : null) : (<p>${M}</p>)}`],
+    // member-expression gates (7c): invisible to b88577ea8's lookbehind
+    ['d.gate && ( ... )', `<div>{d.showMore && (<p>${M}</p>)}</div>`],
+    ['props.gate ? null : ( B )', `<div>{props.showMore ? null : (<p>${M}</p>)}</div>`],
   ])('%s -> gated', (_shape, src) => {
     expect(insideWriteGate(src, M, 'showMore')).toBe(true);
   });
@@ -28,6 +37,18 @@ describe('insideWriteGate: containment for every conditional shape', () => {
     ['a gate mentioned only in a comment far away', `{/* showMore toggles extras */}\n<p>${M}</p>`],
   ])('%s -> not gated', (_shape, src) => {
     expect(insideWriteGate(src, M, 'showMore')).toBe(false);
+  });
+
+  it.each([
+    ['plain boolean logic', `const ok = showMore && other;\n<p>${M}</p>`],
+    ['optional chaining is not a ternary', `const v = showMore?.x;\n<p>${M}</p>`],
+    ['nullish coalescing is not a ternary', `const v = showMore ?? false;\n<p>${M}</p>`],
+  ])('%s -> not gated, and no throw', (_shape, src) => {
+    expect(insideWriteGate(src, M, 'showMore')).toBe(false);
+  });
+
+  it('an unparseable ternary on the gate throws (never guesses "not gated")', () => {
+    expect(() => insideWriteGate(`{showMore ? (<p>a</p>)}\n<p>${M}</p>`, M, 'showMore')).toThrow(/can't find the ':'/);
   });
 
   it('throws when the marker is missing (never passes vacuously)', () => {

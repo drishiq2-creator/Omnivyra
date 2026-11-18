@@ -6,11 +6,17 @@
  * Containment, not proximity (7c review, 2026-11-18). Every conditional shape counts:
  *   gate && ( ... )        gate && <El ...>...</El>
  *   !gate && ( ... )       !gate && <El />
- *   gate ? ( A ) : ( B )   gate ? <A/> : <B/>   gate ? ( A ) : null
- * Both ternary branches are gated (each renders only for one value of `gate`).
- * The original helper only knew `gate && (`, so a fold rewritten as a ternary read as
- * "not gated" and a negative assertion ("this stays visible") passed while the field was
- * in fact folded.
+ *   gate ? ( A ) : ( B )   gate ? <A/> : <B/>   gate ? ( A ) : null   gate ? null : ( B )
+ * Both ternary branches are gated (each renders only for one value of `gate`), including
+ * when the OTHER branch is not JSX (null, '', undefined, a call).
+ * Member-expression gates (`d.showMore`, `props.mayRecord`) are recognised too.
+ *
+ * Fails LOUD rather than guessing: a ternary on the gate whose ':' or second branch it can't
+ * parse throws. A non-JSX `&&` operand (plain boolean logic such as `const ok = gate && x;`)
+ * renders nothing that could contain a JSX marker, so it is not a region.
+ *
+ * Known limit: the opening tag's end is found at the first '>' outside `{...}`, so a '>' inside
+ * a QUOTED attribute (`<El title="a > b">`) would end it early. Not used that way in this repo.
  */
 
 type Range = { start: number; end: number };
@@ -34,7 +40,8 @@ function elementEnd(src: string, open: number): number {
   const m = /^<([A-Za-z][\w.]*)/.exec(src.slice(open));
   if (!m) throw new Error('writeGateScan: expected a JSX element');
   const tag = m[1];
-  const re = new RegExp(`<${tag.replace(/\./g, '\\.')}(?=[\\s>/])|</${tag.replace(/\./g, '\\.')}>`, 'g');
+  const t = tag.replace(/\./g, '\\.');
+  const re = new RegExp(`<${t}(?=[\\s>/])|</${t}>`, 'g');
   re.lastIndex = open;
   let depth = 0;
   for (let hit = re.exec(src); hit; hit = re.exec(src)) {
@@ -43,7 +50,6 @@ function elementEnd(src: string, open: number): number {
       if (depth === 0) return hit.index + hit[0].length;
       continue;
     }
-    // end of this opening tag (skip over {...} expressions inside it)
     let k = hit.index + hit[0].length;
     let braces = 0;
     for (; k < src.length; k++) {
@@ -60,32 +66,69 @@ function elementEnd(src: string, open: number): number {
   throw new Error(`writeGateScan: unbalanced <${tag}>`);
 }
 
-/** The region of one conditional branch starting at or after `i` (skips whitespace). */
-function branchAt(src: string, i: number): Range | null {
+const skipWs = (src: string, i: number) => {
   let j = i;
   while (j < src.length && /\s/.test(src[j])) j++;
+  return j;
+};
+
+/** A JSX-shaped branch (paren group or element) starting at or after `i`; null otherwise. */
+function jsxBranchAt(src: string, i: number): Range | null {
+  const j = skipWs(src, i);
   if (src[j] === '(') return { start: j, end: parenEnd(src, j) };
-  if (src[j] === '<') return { start: j, end: elementEnd(src, j) };
-  return null; // e.g. `null`, a string, an identifier: nothing JSX-shaped to contain a marker
+  if (src[j] === '<' && /[A-Za-z]/.test(src[j + 1] ?? '')) return { start: j, end: elementEnd(src, j) };
+  return null;
+}
+
+/** Index of the ':' that closes the ternary whose '?' is just before `i` (depth- and nesting-aware). */
+function ternaryColon(src: string, i: number): number {
+  let depth = 0;
+  let pendingQ = 0;
+  let quote: string | null = null;
+  for (let k = i; k < src.length; k++) {
+    const c = src[k];
+    if (quote) {
+      if (c === '\\') k++;
+      else if (c === quote) quote = null;
+      continue;
+    }
+    if (c === '"' || c === "'" || c === '`') quote = c;
+    else if (c === '(' || c === '[' || c === '{') depth++;
+    else if (c === ')' || c === ']' || c === '}') {
+      if (depth === 0) break; // left the enclosing expression without finding ':'
+      depth--;
+    } else if (depth === 0 && c === '?' && src[k + 1] !== '.' && src[k + 1] !== '?') pendingQ++;
+    else if (depth === 0 && c === ':') {
+      if (pendingQ === 0) return k;
+      pendingQ--;
+    }
+  }
+  return -1;
 }
 
 /** Every region whose rendering depends on `gate`. */
 export function gatedRegions(src: string, gate: string): Range[] {
   const out: Range[] = [];
   const name = gate.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const re = new RegExp(`(?<![\\w.$])!?${name}(?![\\w$])\\s*(&&|\\?)`, 'g');
+  // optional `!`, optional member prefix (`d.`, `props.`), the gate, then `&&` or `?` (not `?.` / `??`)
+  const re = new RegExp(`(?<![\\w$.])!?(?:[\\w$]+\\.)*${name}(?![\\w$])\\s*(&&|\\?(?![.?]))`, 'g');
   for (let m = re.exec(src); m; m = re.exec(src)) {
     const after = m.index + m[0].length;
-    const first = branchAt(src, after);
-    if (!first) continue;
-    out.push(first);
-    if (m[1] === '?') {
-      let j = first.end;
-      while (j < src.length && /\s/.test(src[j])) j++;
-      if (src[j] === ':') {
-        const second = branchAt(src, j + 1);
-        if (second) out.push(second);
-      }
+    if (m[1] === '&&') {
+      const body = jsxBranchAt(src, after);
+      if (body) out.push(body); // a non-JSX operand is boolean logic, not a render region
+      continue;
+    }
+    // ternary: BOTH branches are gated, whatever shape the other one has
+    const first = jsxBranchAt(src, after);
+    if (first) out.push(first);
+    const colon = ternaryColon(src, first ? first.end : after);
+    if (colon < 0) throw new Error(`writeGateScan: can't find the ':' of a ternary on ${gate}`);
+    const second = jsxBranchAt(src, colon + 1);
+    if (second) out.push(second);
+    if (!first && !second) {
+      // neither branch is JSX (e.g. `gate ? 'a' : 'b'`): nothing to contain a JSX marker
+      continue;
     }
   }
   return out;
