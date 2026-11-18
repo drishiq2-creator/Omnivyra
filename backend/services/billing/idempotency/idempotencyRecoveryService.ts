@@ -44,6 +44,7 @@ import {
   type IdempotencyState,
 } from './idempotencyStateMachine';
 import { CreditStateUnreadableError } from '../../../repositories/creditExecutionRepository';
+import { CONFIRM_PHASES, SETTLE_PHASES } from '../../../../shared/billing/creditPhaseVocabulary';
 
 // ── Configurable expiry windows (seconds) ─────────────────────────────────────
 
@@ -400,8 +401,8 @@ export async function safeRetryOperation(args: SafeRetryArgs): Promise<SafeRetry
     .select('id, execution_phase')
     .in('idempotency_key', [idemKey, `${idemKey}:confirm`])
     // e1/e9 (BLOCKING for A8): the live apply_credit_partial_confirm settles with 'confirm_partial' - every
-    // token-priced op. TODO: use CONFIRM_PHASES from billing/holdSettlementState.ts once e1's settle fix is on main.
-    .in('execution_phase', ['confirm', 'confirm_partial', 'grant'])
+    // token-priced op. The confirm set comes from the shared vocabulary (058), so a new confirm phase reaches here.
+    .in('execution_phase', [...CONFIRM_PHASES, 'grant'])
     .limit(1);
   if (settledErr) return unreadable(`settlement read failed: ${settledErr.message}`);
   if (settled && settled.length > 0) {
@@ -607,8 +608,8 @@ async function checkFinancialDriftReads(surface: StuckOperation['surface'], id: 
     .from('credit_transactions')
     .select('id, execution_phase')
     .eq('parent_transaction_id', holdId)
-    // e1/e9: include 'confirm_partial' (token-priced settles). TODO: CONFIRM_PHASES (billing/holdSettlementState.ts).
-    .in('execution_phase', ['confirm', 'confirm_partial', 'release'])
+    // e1/e9: every settling phase (confirm, confirm_partial, release) - the shared vocabulary's SETTLE_PHASES (058).
+    .in('execution_phase', [...SETTLE_PHASES])
     .limit(1);
   if (siblingsErr) throw new CreditStateUnreadableError(`HOLD ${holdId} sibling read failed: ${siblingsErr.message}`);
 

@@ -14,8 +14,12 @@
 export {}; // a module, not a global script: top-level names must not collide with other test files (CI-496)
 type Res = { data: unknown; error: { message: string } | null };
 type Step = 'key' | 'settled' | 'hold' | 'sibling' | 'current';
-const st: { fail: Set<Step>; holdRows: unknown[]; siblingRows: unknown[]; settledRows: unknown[]; reads: Step[]; writes: string[] } = {
-  fail: new Set(), holdRows: [], siblingRows: [], settledRows: [], reads: [], writes: [],
+const st: {
+  fail: Set<Step>; holdRows: unknown[]; siblingRows: unknown[]; settledRows: unknown[]; reads: Step[]; writes: string[];
+  /** The execution_phase IN-list each credit_transactions read actually sent (pinned against the 058 vocabulary). */
+  phaseSets: Partial<Record<'settled' | 'sibling', string[]>>;
+} = {
+  fail: new Set(), holdRows: [], siblingRows: [], settledRows: [], reads: [], writes: [], phaseSets: {},
 };
 const ERR = { message: 'connection reset' };
 
@@ -37,9 +41,12 @@ jest.mock('../../db/supabaseClient', () => ({
         if (table !== 'credit_transactions') return { data: [], error: null };
         // Faithful to PostgREST: an IN filter on execution_phase only returns rows whose phase is in the list.
         const phaseIn = (rows: unknown[]) => rows.filter((x: any) => (f.execution_phase as string[]).includes(x.execution_phase));
-        if (f.parent_transaction_id) return answer('sibling', phaseIn(st.siblingRows));
+        if (f.parent_transaction_id) { st.phaseSets.sibling = [...(f.execution_phase as string[])]; return answer('sibling', phaseIn(st.siblingRows)); }
         if (f.execution_phase === 'hold') return answer('hold', st.holdRows);
-        if (Array.isArray(f.execution_phase) && (f.execution_phase as string[]).includes('grant')) return answer('settled', phaseIn(st.settledRows));
+        if (Array.isArray(f.execution_phase) && (f.execution_phase as string[]).includes('grant')) {
+          st.phaseSets.settled = [...(f.execution_phase as string[])];
+          return answer('settled', phaseIn(st.settledRows));
+        }
         return { data: [], error: null };
       };
       b.maybeSingle = async (): Promise<Res> => {
@@ -66,7 +73,7 @@ const RECOVER = { surface: 'billing_operations', id: 'bo-1', action: 'expire', a
 const RETRY = { surface: 'billing_operations', id: 'bo-1', actorUserId: 'admin-1', reason: 'stuck' };
 const HOLD = [{ id: 'h1' }];
 
-beforeEach(() => { st.fail = new Set(); st.holdRows = []; st.siblingRows = []; st.settledRows = []; st.reads = []; st.writes = []; });
+beforeEach(() => { st.fail = new Set(); st.holdRows = []; st.siblingRows = []; st.settledRows = []; st.reads = []; st.writes = []; st.phaseSets = {}; });
 
 describe('recoverOperation - a failed safety read expires NOTHING', () => {
   it.each<[Step, unknown[]]>([
@@ -114,6 +121,20 @@ describe('safeRetryOperation - a failed safety read mints NO retry key', () => {
     const r = await svc.safeRetryOperation(RETRY);
     expect(r).toMatchObject({ ok: true });
     expect(r.newIdempotencyKey).toMatch(/^retry:op-1:/);
+  });
+});
+
+describe('058: both settlement reads take their phase set from the shared vocabulary (c6)', () => {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const vocab = require('../../../shared/billing/creditPhaseVocabulary');
+  it('the SETTLED read sends exactly CONFIRM_PHASES + grant', async () => {
+    await svc.safeRetryOperation(RETRY);
+    expect([...(st.phaseSets.settled ?? [])].sort()).toEqual([...vocab.CONFIRM_PHASES, 'grant'].sort());
+  });
+  it('the SIBLING read sends exactly SETTLE_PHASES', async () => {
+    st.holdRows = HOLD;
+    await svc.checkFinancialDrift('billing_operations', 'bo-1');
+    expect([...(st.phaseSets.sibling ?? [])].sort()).toEqual([...vocab.SETTLE_PHASES].sort());
   });
 });
 
