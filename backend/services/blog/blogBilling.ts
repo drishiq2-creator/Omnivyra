@@ -29,20 +29,18 @@
  */
 import {
   confirmCreditReservationToActual,
-  createCredit,
   getReservationKeys,
   makeIdempotencyKey,
   releaseCreditReservation,
   reserveCreditsForWork,
   type CreditReservationHandle,
 } from '../creditExecutionService';
-import type { CreditCategory } from '../creditExecutionServiceContracts';
 import { runWithCreditHandle } from '../billing/aiGatewayBillingGuard';
 import { logger } from '../logger';
 import { getResolvedConfigStrict } from '../intelligenceConfigService';
-import { emitAnomaly, emitFinancialAudit } from '../billing/billingAuditEmitter';
-import { loadBilledResult, persistBilledResult } from '../billing/billedResultStore';
-import { supabase } from '../../db/supabaseClient';
+import { emitAnomaly } from '../billing/billingAuditEmitter';
+import { persistBilledResult, replayBilledResult } from '../billing/billedResultStore';
+import { readOriginalCharge, refundOriginalCharge } from '../billing/owedRefunds';
 
 export const BLOG_ACTION = 'blog_post' as const;
 export const BLOG_CREDITS = 40;
@@ -90,7 +88,8 @@ export function __resetBlogSwitchAbsentReportForTests(): void { switchRowAbsentR
 
 /**
  * null = allowed. companyId null = the global switch only. A read error refuses (never read as "on").
- * b3 ruling 2026-11-18: an ABSENT global row = not disabled -> ALLOW, reported as an alertable anomaly ONCE per process.
+ * b3 ruling 2026-11-18 (adopting 7c): migration 20270217000060 GUARANTEES the global row, so an ABSENT row means
+ * someone deleted it - the incident switch - and blogs FAIL CLOSED (403). Still an alertable anomaly, once per process.
  */
 export async function blogGenerationRefusal(companyId: string | null): Promise<BlogRefusal | null> {
   let cfg;
@@ -101,19 +100,17 @@ export async function blogGenerationRefusal(companyId: string | null): Promise<B
     return { ok: false, status: 503, code: 'BLOG_SWITCH_UNAVAILABLE', retryable: true, error: 'Blog generation is temporarily unavailable. Please try again.' };
   }
   if (!cfg) {
-    // No switch row configured: absence = not disabled (b3). Alertable, once per process (not per request).
     if (!switchRowAbsentReported) {
       switchRowAbsentReported = true;
       emitAnomaly({ kind: 'blog_kill_switch_row_absent', severity: 'critical', message: 'blog_kill_switch_row_absent',
         metadata: { jobType: BLOG_KILL_SWITCH_JOB_TYPE } });
     }
-    return null;
+    return BLOG_DISABLED;
   }
-  if (cfg.enabled === false) {
-    return { ok: false, status: 403, code: 'BLOG_GENERATION_DISABLED', retryable: false, error: 'Blog generation is turned off for this account.' };
-  }
+  if (cfg.enabled === false) return BLOG_DISABLED;
   return null;
 }
+const BLOG_DISABLED: BlogRefusal = { ok: false, status: 403, code: 'BLOG_GENERATION_DISABLED', retryable: false, error: 'Blog generation is turned off for this account.' };
 
 export async function holdBlog(args: { orgId: string; userId: string; referenceId: string; validateMembership: boolean }): Promise<BlogHoldResult> {
   let r;
@@ -181,18 +178,32 @@ export async function storePlatformBlog(orgId: string, referenceId: string, resu
   await persistBilledResult({ scope: BLOG_PLATFORM_SCOPE, orgId, key: referenceId, value: result });
 }
 
-/** A stored, already-charged blog for this org + key: replay it; a read error refuses (503, retryable). */
-export async function blogReplay(orgId: string, referenceId: string, scope: string = BLOG_REPLAY_SCOPE): Promise<{ ok: true; body: Record<string, unknown> | null } | BlogRefusal> {
-  try {
-    const stored = await loadBilledResult({ scope, orgId, key: referenceId });
-    if (!stored.found) return { ok: true, body: null };
-    const v = stored.value;
-    if (!v || typeof v !== 'object' || Array.isArray(v)) throw new Error('stored blog result is not an object');
-    return { ok: true, body: { ...(v as Record<string, unknown>), billing: { charged: 0, released: 0, reason: scope === BLOG_PLATFORM_SCOPE ? 'platform' : 'replayed' } } };
-  } catch (err) {
-    logger.error('blog_replay_read_failed', { orgId, message: (err as Error)?.message });
+/**
+ * A stored, already-charged blog for this org + key: replay it. A failed read is counted DURABLY (billedResultStore):
+ * transient -> 503 retryable; TERMINAL (3 failures or 24h from the first) -> the refund path (b3/7c), never an endless
+ * "try again". The platform scope charged nothing, so its terminal case refunds nothing.
+ */
+export async function blogReplay(
+  orgId: string, referenceId: string, opts: { scope?: string; userId: string },
+): Promise<{ ok: true; body: Record<string, unknown> | null } | BlogRefusal> {
+  const scope = opts.scope ?? BLOG_REPLAY_SCOPE;
+  const r = await replayBilledResult({ scope, orgId, key: referenceId });
+  if (r.kind === 'absent') return { ok: true, body: null };
+  if (r.kind === 'found') {
+    const v = r.value;
+    if (v && typeof v === 'object' && !Array.isArray(v)) {
+      return { ok: true, body: { ...(v as Record<string, unknown>), billing: { charged: 0, released: 0, reason: scope === BLOG_PLATFORM_SCOPE ? 'platform' : 'replayed' } } };
+    }
+    logger.error('blog_replay_stored_value_invalid', { orgId, referenceId });
+  }
+  if (r.kind === 'transient') {
     return { ok: false, status: 503, code: 'BLOG_RESULT_READ_FAILED', retryable: true, error: 'We could not load this blog right now. Please try again.' };
   }
+  // terminal (or an unusable stored value): the blog cannot be returned.
+  if (scope === BLOG_PLATFORM_SCOPE) {
+    return { ok: false, status: 409, code: 'BLOG_RESULT_UNAVAILABLE', retryable: false, error: "We couldn't recover this blog. Nothing was charged; you can write it again." };
+  }
+  return refundUnavailableBlog({ orgId, userId: opts.userId, referenceId });
 }
 
 /** Persist a finished blog and read it back BEFORE its settle (b3 invariant). False = not persisted -> not charged. */
@@ -219,58 +230,49 @@ async function storeBlogResult(h: CreditReservationHandle, result: unknown): Pro
  * auto-refunded (a critical anomaly asks for review instead).
  */
 export function blogUnavailableRefundsOriginalCharge(): true { return true; }
-export const BLOG_REFUND_REFERENCE_TYPE = 'blog_refund';
-const PROTECTED_ORG_PREFIXES = ['73e5fa6f'];   // Embrosales: never touched by automation
 export function blogUnavailableRefundedText(credits: number): string {
   return `We couldn't recover this blog, so your ${credits} credits have been returned. You can write it again.`;
+}
+/** The refund is RECORDED and the system is paying it (the grant-only job completes it; no action needed). */
+export function blogUnavailableReturningText(credits: number): string {
+  return `We couldn't recover this blog, so your ${credits} credits are being returned to your account. You can write it again.`;
 }
 
 async function refundUnavailableBlog(args: { orgId: string; userId: string; referenceId: string }): Promise<BlogRefusal> {
   const confirmKey = getReservationKeys(makeIdempotencyKey(args.orgId, BLOG_ACTION, args.referenceId)).confirmKey;
   emitAnomaly({ organizationId: args.orgId, kind: 'blog_result_lost', severity: 'critical', message: 'blog_result_lost',
     metadata: { referenceId: args.referenceId } });
-  if (PROTECTED_ORG_PREFIXES.some((p) => args.orgId.toLowerCase().startsWith(p))) {
+  const pending: BlogRefusal = { ok: false, status: 503, code: 'BLOG_REFUND_PENDING', retryable: true,
+    error: 'We could not recover this blog and could not record the refund yet. Please try again in a moment.' };
+  let charge;
+  try {
+    charge = await readOriginalCharge(confirmKey);
+  } catch (err) {
+    logger.error('blog_result_unavailable_charge_unreadable', { orgId: args.orgId, referenceId: args.referenceId, message: (err as Error)?.message });
+    return pending;
+  }
+  if (!charge) {
+    // No confirmed charge under this key: nothing was taken (a hold may still be pending; the resolver owns it).
+    logger.error('blog_result_unavailable_no_original_charge', { orgId: args.orgId, referenceId: args.referenceId });
+    return { ok: false, status: 409, code: 'BLOG_RESULT_UNAVAILABLE', retryable: false, error: "We couldn't recover this blog. You were not charged for it; you can write it again." };
+  }
+  // b3: "auto-refund" = the system pays without the user acting. The debt is RECORDED (one row per original confirm);
+  // paid now if possible, else by the grant-only job 'billing-owed-refund-complete'.
+  const out = await refundOriginalCharge({
+    orgId: args.orgId, performedBy: args.userId, charge, reason: 'blog_result_unavailable',
+    grantKeyPrefix: 'blog_refund', referenceId: args.referenceId,
+  });
+  if (out.status === 'granted') {
+    return { ok: false, status: 409, code: 'BLOG_RESULT_UNAVAILABLE', retryable: false, error: blogUnavailableRefundedText(out.credits) };
+  }
+  if (out.status === 'owed') {
+    return { ok: false, status: 409, code: 'BLOG_RESULT_UNAVAILABLE', retryable: false, error: blogUnavailableReturningText(out.credits) };
+  }
+  if (out.status === 'protected') {
     return { ok: false, status: 409, code: 'BLOG_RESULT_UNAVAILABLE', retryable: false,
       error: 'This blog was already generated and charged, but we could not return it. We will review the charge.' };
   }
-  const retry: BlogRefusal = { ok: false, status: 503, code: 'BLOG_REFUND_PENDING', retryable: true,
-    error: 'We could not recover this blog and are returning your credits. Please try again in a moment.' };
-  try {
-    const { data, error } = await supabase
-      .from('credit_transactions')
-      .select('id, execution_phase, free_delta, paid_delta, incentive_delta')
-      .eq('idempotency_key', confirmKey)
-      .maybeSingle();
-    if (error) throw new Error(error.message);
-    const row = data as { id: string; execution_phase: string | null; free_delta: number | null; paid_delta: number | null; incentive_delta: number | null } | null;
-    if (!row || !['confirm', 'confirm_partial'].includes(String(row.execution_phase))) throw new Error('original confirm row not found');
-    const parts: Array<[CreditCategory, number]> = [
-      ['free', Math.abs(Number(row.free_delta ?? 0))],
-      ['paid', Math.abs(Number(row.paid_delta ?? 0))],
-      ['incentive', Math.abs(Number(row.incentive_delta ?? 0))],
-    ];
-    const total = parts.reduce((n, [, v]) => n + v, 0);
-    if (!(total > 0)) throw new Error('original confirm moved no credits');
-    for (const [category, amount] of parts) {
-      if (amount <= 0) continue;
-      await createCredit({
-        orgId: args.orgId, amount, category,
-        referenceType: BLOG_REFUND_REFERENCE_TYPE, referenceId: row.id,
-        note: `Blog result unavailable - original charge returned (confirm ${row.id})`,
-        performedBy: args.userId,
-        idempotencyKey: `blog_refund:${row.id}:${category}`,   // keyed on the ORIGINAL settle: exactly once
-      });
-    }
-    await emitFinancialAudit({ actorUserId: args.userId, actionType: 'system_refund', organizationId: args.orgId,
-      amountCredits: total, reasonType: 'system', reason: 'blog_result_unavailable', ledgerIdempotencyKey: `blog_refund:${row.id}`,
-      metadata: { referenceId: args.referenceId, confirmTransactionId: row.id } });
-    logger.info('blog_result_unavailable_refunded', { orgId: args.orgId, referenceId: args.referenceId, confirmId: row.id, credits: total });
-    return { ok: false, status: 409, code: 'BLOG_RESULT_UNAVAILABLE', retryable: false, error: blogUnavailableRefundedText(total) };
-  } catch (err) {
-    // Never a promise we did not keep: the refund is not claimed until it is written.
-    logger.error('blog_result_unavailable_refund_failed', { orgId: args.orgId, referenceId: args.referenceId, message: (err as Error)?.message });
-    return retry;
-  }
+  return pending;   // 'unrecorded': never a promise we did not keep
 }
 
 /** The ruled price of a DELIVERED partial blog: min(40, ceil(40 x calls / 32)); 0 calls -> 0. No path delivers a partial blog today. */
