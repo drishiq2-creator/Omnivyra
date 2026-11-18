@@ -25,6 +25,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { db, inRollback, seedTenants, ORG_A, ORG_B, newPerson } from './setup';
+import { expireOrgFreeCreditsProductionState } from './pre053FunctionState';
 
 type Cls = 'T' | 'B' | 'A';
 /** [signature, class, pinned by the migration, prod anon EXECUTE, prod authenticated EXECUTE, prod PUBLIC EXECUTE] */
@@ -217,20 +218,7 @@ async function pseProductionState(): Promise<void> {
   if (rows[0]?.prosecdef === true) await q(PSE_S1_DEF);
 }
 
-/**
- * expire_org_free_credits(uuid,integer,text) in its PRODUCTION pre-053 state. 20270217000053 DROPS it (20260625
- * intended to; no caller). This SEC-B file re-applies a migration that REVOKEs / ALTERs it, so a replay that carries
- * 053 needs the production function back - restored byte-for-byte from the committed C100 fixture. Inside the test
- * transaction; nothing persists. No-op on a replay without 053.
- */
-const EXPIRE_LIVE_BODY = fs.readFileSync(
-  path.join(__dirname, '..', 'fixtures', 'live-credit-functions-20261113', 'LIVE-expire_org_free_credits.prosrc.sql'), 'utf8');
-async function expireOrgFreeCreditsProductionState(): Promise<void> {
-  const { rows } = await q(`SELECT to_regprocedure('public.expire_org_free_credits(uuid,integer,text)') IS NULL AS missing`);
-  if (!rows[0].missing) return;
-  await q('CREATE FUNCTION public.expire_org_free_credits(p_org_id uuid, p_amount int, p_note text DEFAULT \'free credit expiry\') '
-    + 'RETURNS int LANGUAGE plpgsql AS $fn$' + EXPIRE_LIVE_BODY + '$fn$');
-}
+// expire_org_free_credits' pre-053 production state: shared helper (pre053FunctionState.ts).
 
 /** Step 1 + 2: production state for every listed function, then the migration. */
 async function prodStateThenMigration(): Promise<void> {
@@ -348,6 +336,7 @@ describe('catalog end state after the migration (from the production state)', ()
   it('SECURITY DEFINER/INVOKER, owners and every other function are untouched', async () => {
     await inRollback(async () => {
       await pseProductionState(); // the pre-SEC-B production state is the reference
+      await expireOrgFreeCreditsProductionState(); // CI-486: the ACL snapshot below casts every listed signature
       const snap = `SELECT p.oid::regprocedure::text AS f, p.prosecdef, p.proowner::regrole::text AS owner, p.prosrc
                       FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace ORDER BY 1`;
       const before = (await q(snap)).rows;
