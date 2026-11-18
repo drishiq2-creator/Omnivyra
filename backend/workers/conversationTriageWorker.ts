@@ -33,6 +33,10 @@ type Candidate = { threadId: string; organizationId: string };
 async function selectCandidates(): Promise<Candidate[] | null> {
   const picked: Candidate[] = [];
   const perOrg = new Map<string, number>();
+  // 7c residual: OFFSET paging over a MUTABLE key (updated_at) - concurrent inbound activity can move a thread so it is
+  // served on two pages in one tick. A thread is picked at most once per tick (no double classification / double pay).
+  // The structural fix (one bounded query for unclassified-or-stale threads via an RPC/view) is a register item.
+  const seen = new Set<string>();
 
   for (let page = 0; page < TRIAGE_MAX_PAGES && picked.length < TRIAGE_BATCH_LIMIT; page++) {
     const from = page * TRIAGE_PAGE_SIZE;
@@ -75,6 +79,8 @@ async function selectCandidates(): Promise<Candidate[] | null> {
 
     for (const t of threads) {
       const th = t as { id: string; organization_id: string };
+      if (seen.has(th.id)) continue;
+      seen.add(th.id);
       const latestMsgTime = latestByThread.get(th.id) ?? '';
       const needs = !classifiedAt.has(th.id)
         || Boolean(latestMsgTime && classifiedAt.get(th.id) && latestMsgTime > (classifiedAt.get(th.id) as string));

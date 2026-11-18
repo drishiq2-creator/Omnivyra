@@ -52,6 +52,8 @@ export async function getControls(organizationId: string): Promise<EngagementCon
     console.error('[engagementGovernance] engagement_controls_read_failed', { organizationId, message: error.message });
     return { ...ALL_OFF };
   }
+  // DELIBERATE product behaviour, not a leftover (7c): a company that never wrote its controls gets DEFAULTS. Whether
+  // paid engagement AI (e.g. triage) should be OPT-IN once it is billed is an OWNER decision pending (c6, 2026-11-18).
   if (!data) return DEFAULTS;
 
   return {

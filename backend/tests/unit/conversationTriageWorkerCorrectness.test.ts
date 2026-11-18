@@ -102,6 +102,22 @@ describe('a) selection', () => {
   });
 });
 
+test('7c: a thread pushed onto the next page by concurrent activity is classified ONCE per tick', async () => {
+  // t0000..t0099 fill page 0 (newest first); t0100 is on page 1. All classified except t0099 (last of page 0).
+  const orig: Row[] = [];
+  for (let i = 0; i <= 100; i++) orig.push(thread(i, `org-${i}`, 10 + i));
+  for (let i = 0; i <= 100; i++) if (i !== 99) db.classifications.push({ thread_id: `t${String(i).padStart(4, '0')}`, classified_at: iso(1) });
+  // Concurrent inbound activity between the two page reads: t0100 is bumped to the front, pushing t0099 onto page 1.
+  let reads = 0;
+  Object.defineProperty(db, 'threads', { configurable: true, get: () => { reads++; if (reads === 2) orig[100].updated_at = iso(0); return orig; }, set: () => undefined });
+  try {
+    await runConversationTriageWorker();
+  } finally {
+    Object.defineProperty(db, 'threads', { configurable: true, writable: true, value: [] });
+  }
+  expect(classified.filter((t) => t === 't0099')).toHaveLength(1);
+});
+
 describe('d) reads fail closed', () => {
   test.each(['engagement_threads', 'engagement_messages', 'engagement_thread_classification'])(
     'a failed read of %s ends the tick with NO AI call', async (table) => {
