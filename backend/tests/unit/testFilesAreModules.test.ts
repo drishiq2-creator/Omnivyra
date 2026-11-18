@@ -10,7 +10,8 @@
  * COMMENTS DO NOT COUNT (7c): comments are stripped before the test, matching TypeScript's own definition of module-ness
  * (the PARSED source) - a commented-out block of imports must not make a script look like a module.
  * KNOWN LIMIT: a line starting `import ` / `export ` inside a multi-line TEMPLATE LITERAL would still false-match (rare;
- * not worth a parser).
+ * not worth a parser). Two LOUD limits (they only false-RED a genuine module, never pass a script): an INDENTED top-level
+ * import (the regex requires column 0), and a `/*` inside a string literal that starts a bogus comment strip.
  */
 export {};
 import fs from 'fs';
