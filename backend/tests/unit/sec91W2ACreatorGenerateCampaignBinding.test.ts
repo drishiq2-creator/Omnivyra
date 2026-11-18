@@ -91,9 +91,13 @@ describe('campaign_id is bound to the authorized company', () => {
     expect(campaignReadsFor(CAMPAIGN_B)).toEqual([]);
   });
 
-  it('a campaign id that does not exist yet stays allowed (creation semantics) and resolves no plan', async () => {
+  // CONTRACT CHANGE (GATE-404, owner ruling 2026-11-18): this case was "a campaign id that does not exist yet stays
+  // allowed (creation semantics) and resolves no plan". A missing campaign may be a DELETED one with surviving child
+  // rows, so the gate refuses it; the only creation opt-in is create-12week-plan. The shipped creator workflow never
+  // sends campaign_id (creatorSuggestionAndPayload / useCreatorWorkflowActions on main).
+  it('a campaign id that does not exist → 404 and resolves no plan (GATE-404)', async () => {
     const r = await invoke(generate, { method: 'POST', body: body(UNKNOWN_ID), as: 'A' });
-    expect([403, 404]).not.toContain(r.status);
+    expect(r.status).toBe(404);
     expect(mockResolvePlan).not.toHaveBeenCalled();
   });
 

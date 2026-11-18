@@ -80,10 +80,31 @@ describe('enforceCompanyAccess campaign binding', () => {
     expect(r.status).toBe(404);
     expect(r.body).toEqual({ error: 'Campaign not found', code: 'CAMPAIGN_NOT_FOUND' });
   });
-  it('a campaign that does not exist yet is allowed (creation flows authorize the id they are creating)', async () => {
+  // GATE-404 (2026-11-18): was 'a campaign that does not exist yet is allowed (creation flows authorize the id they
+  // are creating)'. A DELETED campaign leaves its child rows behind, so absence is not proof the id is nobody's.
+  it('a campaign that does not exist → 404 with the foreign body, unless the caller opts in (GATE-404)', async () => {
     const r = await invoke(guard(CO_A, UNKNOWN_ID), { as: 'A' });
-    expect(r.status).toBe(200);
+    expect(r.status).toBe(404);
+    expect(r.body).toEqual({ error: 'Campaign not found', code: 'CAMPAIGN_NOT_FOUND' });
   });
+  it('the creation-flow opt-in (literal allowMissingCampaign: true) admits a missing campaign, never a foreign one', async () => {
+    const optIn = (campaignId: string) => async (req: any, res: any) => {
+      const ok = await enforceCompanyAccess({ req, res, companyId: CO_A, campaignId, allowMissingCampaign: true });
+      if (!ok) return;
+      res.status(200).json({ ok: true });
+    };
+    expect((await invoke(optIn(UNKNOWN_ID), { as: 'A' })).status).toBe(200);
+    expect((await invoke(optIn(CAMPAIGN_B), { as: 'A' })).status).toBe(404);
+  });
+  it.each([['the string "true"', 'true'], ['1', 1], ['an object', {}]])(
+    'a truthy non-literal opt-in (%s) still answers 404 for a missing campaign', async (_n, value) => {
+      const r = await invoke(async (req: any, res: any) => {
+        const ok = await enforceCompanyAccess({ req, res, companyId: CO_A, campaignId: UNKNOWN_ID, allowMissingCampaign: value as any });
+        if (!ok) return;
+        res.status(200).json({ ok: true });
+      }, { as: 'A' });
+      expect(r.status).toBe(404);
+    });
   it('an orphan campaign (exists, no owner) is refused like a foreign one', async () => {
     seed({ campaigns: [{ id: 'camp-orphan', company_id: null }] });
     const r = await invoke(guard(CO_A, 'camp-orphan'), { as: 'A' });

@@ -170,11 +170,14 @@ describe('engagement/content-opportunities/lifecycle', () => {
     expect(oppWrites()).toHaveLength(0);
     expect(rows('engagement_content_opportunities').find((o) => o.id === OPP_A)?.campaign_id).toBeNull();
   });
-  it('link_campaign with a not-yet-existing campaign id is not a cross-tenant link (unchanged behaviour)', async () => {
-    // The shared binder denies campaigns owned by ANOTHER company (above); an id
-    // with no campaign behind it belongs to nobody, so no tenant is exposed.
+  // CONTRACT CHANGE (GATE-404, owner ruling 2026-11-18): this case was "link_campaign with a not-yet-existing campaign
+  // id is not a cross-tenant link (unchanged behaviour)" -> 200. A missing campaign is NOT "nobody's": a DELETED
+  // campaign leaves child rows (prod C107: 97 orphans), so the gate refuses it unless a creation flow opts in, and the
+  // only opt-in is create-12week-plan. No client links an opportunity to a not-yet-created campaign.
+  it('link_campaign with a campaign id that does not exist → 404, campaign never stored (GATE-404)', async () => {
     const r = await patch('A', { id: OPP_A, action: 'link_campaign', organization_id: CO_A, campaign_id: UNKNOWN_ID });
-    expect(r.status).toBe(200);
+    expect(r.status).toBe(404);
+    expect(rows('engagement_content_opportunities').find((o) => o.id === OPP_A)?.campaign_id).not.toBe(UNKNOWN_ID);
   });
   it('link_campaign with own campaign → 200 and stored', async () => {
     const r = await patch('A', { id: OPP_A, action: 'link_campaign', organization_id: CO_A, campaign_id: CAMPAIGN_A });

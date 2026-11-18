@@ -21,10 +21,12 @@
  *   owned        — a record ties the campaign to the company;
  *   foreign      — the campaign exists but nothing ties it to the company
  *                  (another tenant's campaign, or an orphan with no owner);
- *   not_found    — no campaign with this id exists yet (no campaigns row and
- *                  no campaign_versions row). Creation flows pass the id of the
- *                  campaign they are about to create, and a campaign that does
- *                  not exist cannot belong to another tenant;
+ *   not_found    — no campaign with this id exists (no campaigns row and no
+ *                  campaign_versions row). NOT proof the id is nobody's: a
+ *                  DELETED campaign leaves child rows behind (no FK to
+ *                  campaigns). enforceCompanyAccess answers it 404 unless the
+ *                  caller opts in with the literal missing-campaign flag
+ *                  (creation flows only; GATE-404, 2026-11-18);
  *   lookup_error — a read failed; callers must fail closed (503).
  *
  * This module deliberately imports nothing but the database client, the

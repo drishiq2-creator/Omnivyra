@@ -84,6 +84,8 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     } else if (typeof companyId === 'string' && companyId.trim()) {
       const ctx = await requireCompanyContext({
         req, res, companyId: companyId.trim(), campaignId, requireCampaignId: false,
+        // GATE-404: the ONE creation flow — this id names the campaign about to be created below.
+        allowMissingCampaign: true,
       });
       if (!ctx) return;
       authorizedCompanyId = ctx.companyId;

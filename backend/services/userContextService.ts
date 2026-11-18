@@ -161,10 +161,20 @@ export function isExternalMemberForCompany(
  * `companyId` (campaignOwnershipService). Before this, the guard only checked
  * that a campaignId was present, so a member of company A could pass company
  * B's campaign id and the route acted on B's campaign. A campaign owned by
- * another company (or by nobody) answers 404; a campaign that does not exist
- * yet is allowed, because creation flows authorize the id of the campaign they
- * are about to create and a non-existent campaign cannot belong to another
- * tenant; a transient lookup failure answers a retryable 503, never an allow.
+ * another company (or by nobody) answers 404; a transient lookup failure
+ * answers a retryable 503, never an allow.
+ *
+ * GATE-404 (owner + coordinator ruling, 2026-11-18) — a campaign that does NOT
+ * EXIST (ownership 'not_found') also answers 404 by default, with the same body
+ * as a foreign one. The earlier premise ("a non-existent campaign cannot belong
+ * to another tenant") is false for DELETED campaigns: their child rows survive
+ * the delete (no foreign keys to campaigns; prod held 97 orphans), so a caller
+ * holding a deleted campaign's id passed this gate and reached another tenant's
+ * orphaned rows. Absence of a campaigns row is not proof that the id is nobody's.
+ * A creation flow that authorizes the id of the campaign it is about to create
+ * opts in with the LITERAL `allowMissingCampaign: true` (never derived from
+ * request data); the only such caller is pages/api/campaigns/create-12week-plan.ts
+ * (new-campaign branch), pinned by backend/tests/unit/allowMissingCampaignLiteral.test.ts.
  *
  * New code should call `requireTenantAccess` directly. This helper is
  * retained to avoid churn in 30+ existing callsites.
@@ -175,6 +185,8 @@ export const enforceCompanyAccess = async (input: {
   companyId?: string | null;
   campaignId?: string | null;
   requireCampaignId?: boolean;
+  /** GATE-404: allow a campaignId that matches no campaign. Literal `true` only; see the doc comment above. */
+  allowMissingCampaign?: true;
 }): Promise<UserContext | null> => {
   const user = await resolveUserContext(input.req);
 
@@ -193,7 +205,9 @@ export const enforceCompanyAccess = async (input: {
   const campaignBound = async (): Promise<boolean> => {
     if (!input.campaignId) return true;
     const ownership = await checkCampaignOwnership(String(input.campaignId), String(input.companyId));
-    if (ownership === 'owned' || ownership === 'not_found') return true;
+    if (ownership === 'owned') return true;
+    // GATE-404: only the literal opt-in admits a missing campaign (a deleted one leaves its children behind).
+    if (ownership === 'not_found' && input.allowMissingCampaign === true) return true;
     if (ownership === 'lookup_error') {
       input.res.setHeader('Retry-After', String(SEAM_RETRY_AFTER_SECONDS));
       input.res.status(503).json({

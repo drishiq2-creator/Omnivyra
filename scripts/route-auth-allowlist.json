@@ -949,8 +949,7 @@
           "db-write .update() pages/api/campaigns/create-12week-plan.ts",
           "db-write .update() backend/db/campaignVersionStore.ts",
           "db-write .update() backend/db/campaignPlanStore.ts",
-          "db-write .insert() backend/db/campaignPlanStore.ts",
-          "db-write .upsert() backend/db/campaignPlanStore.ts"
+          "db-write .insert() backend/db/campaignPlanStore.ts"
         ]
       }
     ],

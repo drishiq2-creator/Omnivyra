@@ -355,9 +355,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   // being authorized. It used to be read later (campaign_versions snapshot →
   // variant plan → orchestrator → response) with no company check, so a member
   // of A could generate from company B's campaign snapshot. enforceCompanyAccess
-  // answers 404 for a campaign owned by another company (a campaign id that
-  // does not exist yet stays allowed, as for every creation flow); the snapshot
-  // read below is additionally scoped to companyId.
+  // answers 404 for a campaign owned by another company, and (GATE-404,
+  // 2026-11-18) for a campaign id that does not exist — this route creates no
+  // campaign; the snapshot read below is additionally scoped to companyId.
   const campaignIdForVariant = typeof body.campaign_id === 'string' && body.campaign_id.trim().length > 0
     ? body.campaign_id.trim()
     : null;
