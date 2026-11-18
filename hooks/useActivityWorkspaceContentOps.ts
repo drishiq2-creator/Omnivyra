@@ -28,6 +28,19 @@ type Params = {
 };
 
 
+/**
+ * c6's generate_master rule: the activity must resolve to a campaign-backed daily_content_plans row
+ * (its id or execution_id); otherwise it is refused (400/404) BEFORE billing, with a message the user
+ * can't act on from this screen. So the UI asks only when it has a campaign + activity (7c).
+ */
+export const MASTER_NEEDS_SAVED_ACTIVITY = 'Save this activity to a campaign first to generate its master content.';
+
+function hasCampaignBackedActivity(payload: WorkspacePayload | null): boolean {
+  const campaignId = String(payload?.campaignId ?? '').trim();
+  const executionId = String(payload?.activityId ?? (payload?.dailyExecutionItem as any)?.execution_id ?? '').trim();
+  return Boolean(campaignId && executionId);
+}
+
 export function useActivityWorkspaceContentOps({
   payload,
   schedules,
@@ -49,6 +62,10 @@ export function useActivityWorkspaceContentOps({
   findVariantForSchedule,
 }: Params) {
   const handleGenerateMasterContent = async () => {
+    if (!hasCampaignBackedActivity(payload)) {
+      notify('info', MASTER_NEEDS_SAVED_ACTIVITY);
+      return;
+    }
     try {
       setIsGeneratingMaster(true);
       // Billed + keyed (c6 @723d40de3): kept on an unknown outcome so a retry replays.
@@ -168,7 +185,9 @@ export function useActivityWorkspaceContentOps({
 
       let activeMasterContent = masterContent || currentDaily.master_content || null;
       const masterReady = activeMasterContent && String((activeMasterContent as any)?.content || '').trim().length > 0;
-      if (!masterReady) {
+      // No campaign-backed activity: the master request could only be refused (c6), so skip it; the
+      // variants call below proceeds exactly as it does after a known master failure.
+      if (!masterReady && hasCampaignBackedActivity(payload)) {
         setIsGeneratingMaster(true);
         try {
           let masterData: any = null;

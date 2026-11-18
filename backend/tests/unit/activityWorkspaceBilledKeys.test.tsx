@@ -149,11 +149,11 @@ describe('generate_master (c6 @723d40de3: key required, replays) through useActi
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const { useActivityWorkspaceContentOps } = require('../../../hooks/useActivityWorkspaceContentOps');
   const actionOf = (call: unknown[]) => JSON.parse((call[1] as { body: string }).body).action;
-  function setup(masterContent: unknown = null) {
+  function setup(masterContent: unknown = null, payloadOverride?: Record<string, unknown>) {
     const notify = jest.fn();
     const schedule = { id: 'sch1', platform: 'linkedin', contentType: 'post' };
     const params = {
-      payload: { activityId: 'act-1', companyId: 'c1', campaignId: 'k1', topic: 'T', dailyExecutionItem: {} },
+      payload: payloadOverride ?? { activityId: 'act-1', companyId: 'c1', campaignId: 'k1', topic: 'T', dailyExecutionItem: {} },
       schedules: [schedule], selectedCompanyId: 'c1', queryCampaignId: 'k1', masterContent, creatorAsset: null,
       platformVariants: [], normalizeKey: (v: unknown) => String(v ?? '').toLowerCase(), notify,
       setIsGeneratingMaster: jest.fn(), setIsGeneratingVariants: jest.fn(), setLatestMasterContent: jest.fn(),
@@ -194,5 +194,23 @@ describe('generate_master (c6 @723d40de3: key required, replays) through useActi
     const { result, schedule } = setup(null);
     await act(async () => { await result.current.handleRepurposeForPlatform(schedule); });
     expect(apiFetch.mock.calls.map(actionOf)).toEqual(['generate_master', 'generate_variants']);
+  });
+
+  // c6: generate_master is refused (400/404, before billing) without a campaign-backed activity.
+  const unsaved = { companyId: 'c1', topic: 'T', dailyExecutionItem: {} }; // no campaignId, no activityId
+  it('master button without a saved activity: NO request, a plain sentence', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { MASTER_NEEDS_SAVED_ACTIVITY } = require('../../../hooks/useActivityWorkspaceContentOps');
+    const { result, notify } = setup(null, unsaved);
+    await act(async () => { await result.current.handleGenerateMasterContent(); });
+    expect(apiFetch).not.toHaveBeenCalled();
+    expect(notify).toHaveBeenCalledWith('info', MASTER_NEEDS_SAVED_ACTIVITY);
+    expect(MASTER_NEEDS_SAVED_ACTIVITY).not.toMatch(/billable|workspace ID/i);
+  });
+  it('repurpose without a saved activity skips the doomed master request and goes straight to variants', async () => {
+    apiFetch.mockResolvedValueOnce(reply(200, { platform_variants: [] }));
+    const { result, schedule } = setup(null, unsaved);
+    await act(async () => { await result.current.handleRepurposeForPlatform(schedule); });
+    expect(apiFetch.mock.calls.map(actionOf)).toEqual(['generate_variants']);
   });
 });
