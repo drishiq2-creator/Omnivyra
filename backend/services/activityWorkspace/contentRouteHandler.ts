@@ -26,7 +26,12 @@ import { isUuid } from '@/lib/shared/uuid';
 import { checkRateLimit } from '@/lib/auth/rateLimit';
 import { resolveMonetizationFeature } from '@/shared/monetization/featureRegistry';
 
+import { createHash } from 'crypto';
 import { billedRouteHttpError } from '@/backend/services/billing/billedRouteHttpError';
+import {
+  BilledResultUnpersistedError, BilledRouteKeyRequiredError, BilledRouteRequestEndedError,
+  clientIdempotencyKey, persistBilledResultOrThrow, refuseIfInFlight, replayOrRefund,
+} from '@/backend/services/billing/billedRequestRecovery';
 import { type WorkspaceAction, type ImprovementType, type ContentWriteTarget, MonetizedWorkflowError, runReservedFixedWorkflow, asObject, persistMasterToDb, persistVariantsToDb, FAILED_VARIANT_PREFIXES } from './contentRouteModel';
 
 /** An 8-4-4-4-12 hex group inside a longer string — a mangled row id, never a transient key. */
@@ -627,6 +632,22 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         return res.status(429).json({ error: 'Too many requests' });
       }
 
+      // ── b3 rulings 2026-11-18 (BLOCKING-launch, billed today): billed-request recovery ──
+      // The identity is the activity + the client's Idempotency-Key (REQUIRED; never synthesised): a retry replays, a
+      // deliberate regenerate (a new click = a new key) is a new run and a new charge. The master is persisted INSIDE the
+      // charge; a same-key request while the first is in flight is 409; a durably unreadable replay is refunded.
+      const gmClientKey = clientIdempotencyKey(req.headers['idempotency-key']);
+      if (!gmClientKey) throw new BilledRouteKeyRequiredError('activity-workspace.generate_master');
+      const gmIdentity = `${activityDbId}:k:${createHash('sha256').update(gmClientKey).digest('hex').slice(0, 24)}`;
+      const gmScope = 'activity-workspace:generate_master';
+      const gmIdemKey = makeIdempotencyKey(user.id, 'content_generation', gmIdentity);
+      const gmReplay = await replayOrRefund({
+        surface: 'activity-workspace.generate_master', scope: gmScope, orgId: resolvedOrgId, key: gmIdentity, performedBy: user.id,
+        confirmKeys: [`${gmIdemKey}:confirm`, `${gmIdemKey}:entry:confirm`, `${gmIdemKey}:exposure:confirm`], referenceId: activityDbId,
+      });
+      if (gmReplay) return res.status(200).json({ success: true, master_content: gmReplay.value, replayed: true });
+      await refuseIfInFlight({ surface: 'activity-workspace.generate_master', baseKey: gmIdemKey });
+
       const PROVIDER = 'openai';
       // Model tiering by content category: long-format (article / white_paper /
       // newsletter / short_story → category 'article') needs the stronger model
@@ -658,7 +679,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         action:         'content_generation' as const,
         referenceType:  'master_content',
         referenceId:    activityDbId,
-        idempotencyKey: makeIdempotencyKey(user.id, 'content_generation', activityDbId),
+        idempotencyKey: gmIdemKey,
         note:           'Master content generation',
         llmPricing: {
           provider:        PROVIDER,
@@ -672,6 +693,12 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
           const strict = await generateMasterContentStrict({ ...item, company_id: resolvedOrgId }, {
             provider: PROVIDER,
             model:    MODEL,
+          });
+          // PERSIST INSIDE the charge (b3/7c): the row write (strict - a failure throws) and the result store, read
+          // back. Any failure throws -> the engine releases; the master is returned free (caught below).
+          await persistBilledResultOrThrow({
+            scope: gmScope, orgId: resolvedOrgId, key: gmIdentity, value: strict.master,
+            durableWrite: () => persistMasterToDb(writeTarget, strict.master, { strict: true }),
           });
           return {
             result:   strict.master,
@@ -701,9 +728,18 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         throw admErr;
       }
       const ecMode = await getCreditEconomyExecutionMode({ organizationId: resolvedOrgId, surface: 'route.activity-workspace-content' });
-      const result = ecMode === 'enforce'
-        ? await executeWithEntryConsumption<MasterContentPayload>(masterContentBilling)
-        : await executeWithCredits<MasterContentPayload>(masterContentBilling);
+      let result;
+      try {
+        result = ecMode === 'enforce'
+          ? await executeWithEntryConsumption<MasterContentPayload>(masterContentBilling)
+          : await executeWithCredits<MasterContentPayload>(masterContentBilling);
+      } catch (gmErr) {
+        // Delivered in this response but not durably stored: released, NOT charged.
+        if (gmErr instanceof BilledResultUnpersistedError) {
+          return res.status(200).json({ success: true, master_content: gmErr.result });
+        }
+        throw gmErr;
+      }
 
       if (result.status === 'insufficient_credits') {
         return res.status(402).json({
@@ -721,13 +757,13 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       if (result.status === 'no_credit_account') {
         return res.status(402).json({ error: 'No credit account for org' });
       }
+      if (result.status === 'already_released') throw new BilledRouteRequestEndedError('activity-workspace.generate_master');
       if (result.status !== 'executed') {
         return res.status(500).json({ error: 'Failed to generate master content' });
       }
 
-      const master = result.result;
-      await persistMasterToDb(writeTarget, master);
-      return res.status(200).json({ success: true, master_content: master });
+      // The master was persisted inside the charge (above).
+      return res.status(200).json({ success: true, master_content: result.result });
     }
 
     if (action === 'refine_variant') {
