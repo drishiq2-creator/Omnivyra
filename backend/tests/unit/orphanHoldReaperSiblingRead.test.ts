@@ -5,6 +5,7 @@
  * as failed, logged, operational event) and nothing is released.
  * The fake mirrors PostgREST: the builder is awaited and resolves { data, error }; it never throws.
  */
+export {}; // a module, not a global script: top-level names must not collide with other test files (CI-496)
 type Res = { data: unknown; error: { message: string } | null };
 const OLD = new Date(Date.now() - 2 * 3600 * 1000).toISOString();
 const HOLD = (id: string, key: string) => ({

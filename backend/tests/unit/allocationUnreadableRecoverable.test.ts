@@ -9,6 +9,7 @@
  *     throws (a failed job is DLQ'd by runJob and every later run in the window would dead_letter_skip).
  * The fake mirrors PostgREST: builders resolve { data, error } and never throw.
  */
+export {}; // a module, not a global script: top-level names must not collide with other test files (CI-496)
 type Res = { data: unknown; error: { message: string } | null };
 const st: { orgList: Res; assignment: Res; plan: Res; sub: Res; planAssign: Res } = {} as any;
 const reset = () => {

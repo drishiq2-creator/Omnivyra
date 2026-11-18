@@ -5,6 +5,7 @@
  * evaluateCost refuses, and the cost-governance route answers 503 + Retry-After.
  * The fake mirrors PostgREST: builders resolve { data, error } and never throw (the thrown shape is separate).
  */
+export {}; // a module, not a global script: top-level names must not collide with other test files (CI-496)
 type Mode = 'ok' | 'error' | 'throw';
 const st: { budget: unknown; budgetMode: Mode; spend: unknown[]; spendMode: Mode; reads: string[] } = {
   budget: null, budgetMode: 'ok', spend: [], spendMode: 'ok', reads: [],

@@ -5,6 +5,7 @@
  * ORG_CONTROLS_UNVERIFIABLE / DAILY_LIMIT_UNVERIFIABLE. Both failure shapes are covered: PostgREST's
  * { data: null, error } (resolves, never throws) and a thrown rejection (network / client error).
  */
+export {}; // a module, not a global script: top-level names must not collide with other test files (CI-496)
 type Res = { data: unknown; error: { message: string } | null };
 type Mode = 'ok' | 'error' | 'throw';
 const st: { controls: unknown; controlsMode: Mode; usage: unknown[]; usageMode: Mode; reads: string[] } = {

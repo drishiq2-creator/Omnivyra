@@ -7,6 +7,7 @@
  * BEFORE any purchase row or provider order. getFxConfig keeps its DEFAULT_FX fallback for DISPLAY only.
  * The fake mirrors PostgREST: an awaited select resolves { data, error } and never throws (the thrown shape is separate).
  */
+export {}; // a module, not a global script: top-level names must not collide with other test files (CI-496)
 type Mode = 'ok' | 'error' | 'throw';
 const st: { rates: unknown[]; ratesMode: Mode; overrides: unknown[]; overridesMode: Mode } = { rates: [], ratesMode: 'ok', overrides: [], overridesMode: 'ok' };
 const answer = (mode: Mode, data: unknown) => {

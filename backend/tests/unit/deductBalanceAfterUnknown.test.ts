@@ -3,6 +3,7 @@
  * AFTER a successful charge, the result is still success with balanceAfter: null (UNKNOWN) - never a failure (the
  * charge happened) and never 0 (which reads as "you are out of credits").
  */
+export {}; // a module, not a global script: top-level names must not collide with other test files (CI-496)
 const st: { balance: () => Promise<number | null> } = { balance: async () => 42 };
 
 jest.mock('../../services/creditPriorityService', () => ({

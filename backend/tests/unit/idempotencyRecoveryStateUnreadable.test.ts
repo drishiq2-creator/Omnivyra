@@ -11,6 +11,7 @@
  * The fake mirrors PostgREST (terminal calls resolve { data, error }, never throw) and identifies each read by its
  * filters, not by call order.
  */
+export {}; // a module, not a global script: top-level names must not collide with other test files (CI-496)
 type Res = { data: unknown; error: { message: string } | null };
 type Step = 'key' | 'settled' | 'hold' | 'sibling' | 'current';
 const st: { fail: Set<Step>; holdRows: unknown[]; siblingRows: unknown[]; settledRows: unknown[]; reads: Step[]; writes: string[] } = {
