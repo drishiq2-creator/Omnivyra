@@ -25,6 +25,8 @@ function query(table: string) {
   q.gte = () => q;
   q.lte = () => q;
   q.limit = () => q;
+  // Re-land (c6 11-19): the export also reads the org credit rate (ledgerUsd, 72362cd25); no rate row -> the default.
+  q.maybeSingle = async () => ({ data: null, error: null });
   q.eq = (col: string, v: unknown) => { if (col === 'execution_phase') filters.push((r) => r[col] === v); return q; };
   q.in = (col: string, v: unknown[]) => { if (col === 'execution_phase') filters.push((r) => v.includes(r[col])); return q; };
   q.then = (resolve: (v: unknown) => unknown) =>
