@@ -51,3 +51,35 @@ describe('activity-workspace content: the registry and the handler agree', () =>
     }
   });
 });
+
+// 7c/04 2026-11-18: KEY_ACCEPTED_ROUTES - accepts a key but does not require it - is EXACT-SET equal to the code.
+import { KEY_ACCEPTED_ROUTES } from '../../services/billing/keyRequiredRoutes';
+describe('KEY_ACCEPTED_ROUTES equals the code exactly', () => {
+  const ROOT = process.cwd();
+  const strip = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+  const walk = (d: string, out: string[]) => {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      const p = path.join(d, e.name);
+      if (e.isDirectory()) walk(p, out); else if (/\.ts$/.test(e.name)) out.push(p);
+    }
+    return out;
+  };
+  const routeOf = (f: string) => '/' + path.relative(path.join(ROOT, 'pages'), f).split(path.sep).join('/').replace(/\.ts$/, '').replace(/\/index$/, '');
+  const pageFiles = walk(path.join(ROOT, 'pages', 'api'), []);
+  const required = new Set(KEY_REQUIRED_ROUTES.map((r) => r.route));
+  test('per-request: every wirePhase2Route caller not in KEY_REQUIRED_ROUTES, and nothing else', () => {
+    const callers = pageFiles.filter((f) => /\bwirePhase2Route\s*\(/.test(strip(fs.readFileSync(f, 'utf8')))).map(routeOf);
+    expect(callers.length).toBeGreaterThanOrEqual(20);   // non-vacuous
+    const fromCode = callers.filter((r) => !required.has(r)).sort();
+    const fromRegistry = KEY_ACCEPTED_ROUTES.filter((r) => r.fallback === 'per-request').map((r) => r.route).sort();
+    expect(fromRegistry).toEqual(fromCode);
+  });
+  test('content-hash: exactly the routes whose recovery opts out with requireClientKey: false', () => {
+    const fromCode = pageFiles.filter((f) => /requireClientKey:\s*false/.test(strip(fs.readFileSync(f, 'utf8')))).map(routeOf).sort();
+    expect(fromCode.length).toBeGreaterThan(0);
+    expect(KEY_ACCEPTED_ROUTES.filter((r) => r.fallback === 'content-hash').map((r) => r.route).sort()).toEqual(fromCode);
+  });
+  test('no route is both required and accepted', () => {
+    for (const r of KEY_ACCEPTED_ROUTES) expect([r.route, required.has(r.route)]).toEqual([r.route, false]);
+  });
+});
