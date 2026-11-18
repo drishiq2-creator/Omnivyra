@@ -192,6 +192,15 @@ const resolveSelect = (table: string, state: any) => {
     // !inner. This double used to drop top-level rows on the old, NON-inner `scheduled_posts.users.active_company_id`
     // filter, which production never did - so the cross-tenant tests passed while every company's analytics leaked
     // (CI-301). The old key is therefore NOT honoured here; only the !inner social-account filter is.
+    // 7c (2026-11-18): the OTHER half of PostgREST's embed semantics is not modelled. A NON-!inner embed filter keeps
+    // the top-level row and filters only the EMBEDDED array; this double does neither, so it must not pretend. Any
+    // embedded-resource filter other than the one !inner key it models THROWS, so a new caller has to model it here
+    // instead of silently reading unfiltered nested data (the class of mistake that hid CI-301).
+    const MODELLED_EMBED_FILTERS = new Set(['scheduled_posts.social_accounts.company_id']);
+    const unmodelled = Object.keys(state.filters).filter((k) => k.includes('.') && !MODELLED_EMBED_FILTERS.has(k));
+    if (unmodelled.length > 0) {
+      throw new Error(`communityAiTestHarness: embedded filter(s) not modelled: ${unmodelled.join(', ')} - model PostgREST's semantics (!inner vs non-inner) before using them`);
+    }
     const companyId = state.filters['scheduled_posts.social_accounts.company_id'];
     if (companyId) {
       // !inner: a row with no post, or a post with no account company, is excluded; the rest must match.

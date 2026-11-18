@@ -32,7 +32,7 @@ type EmbedClass =
   | 'PENDING_FIX';        // removed/fixed on another branch; allowed to disappear
 
 /** file::embed -> class + reason. Keys are exactly what scanEmbeds reports. */
-const ALLOWLIST: Record<string, { cls: EmbedClass; why: string }> = {
+const ALLOWLIST: Record<string, { cls: EmbedClass; why: string; since?: string }> = {
   'backend/queue/jobProcessors/engagementPollingProcessor.ts::social_accounts': { cls: 'TENANT_CHECK', why: 'fetches social_accounts.company_id to key each post to its org; each org runs in its own tenant job' },
   'backend/services/communityAiForecastInsightsService.ts::scheduled_posts': { cls: 'TENANT_CHECK', why: '!inner chain filtered on the post\'s account company (0ca211d1f)' },
   'backend/services/communityAiForecastInsightsService.ts::social_accounts': { cls: 'TENANT_CHECK', why: '!inner, filtered on the authorized company' },
@@ -65,7 +65,7 @@ const ALLOWLIST: Record<string, { cls: EmbedClass; why: string }> = {
   'pages/api/analytics/summary.ts::scheduled_posts': { cls: 'TENANT_CHECK', why: 'requireCompanyAccess + !inner company filter (attribution repaired in 78d272efb)' },
   'pages/api/blog/[slug]/series.ts::blog_series_posts': { cls: 'GLOBAL', why: 'public platform blog tables; titles re-resolved from published public_blogs' },
   'pages/api/campaigns/12week-plans.ts::daily_content_plans': { cls: 'PARENT_SCOPED_CHILD', why: 'count of children of the campaign\'s own refinements after requireCampaignAccess' },
-  'pages/api/campaigns/weekly-alignments.ts::users!content_plans_reviewed_by_fkey': { cls: 'PENDING_FIX', why: 'non-existent FK; removed in 78d272efb' },
+  'pages/api/campaigns/weekly-alignments.ts::users!content_plans_reviewed_by_fkey': { cls: 'PENDING_FIX', why: 'non-existent FK; removed in 78d272efb', since: '2026-11-18' },
   'pages/api/community-ai/content-kpis.ts::scheduled_posts': { cls: 'TENANT_CHECK', why: '!inner chain on the post\'s account company (0ca211d1f)' },
   'pages/api/community-ai/content-kpis.ts::social_accounts': { cls: 'TENANT_CHECK', why: '!inner, filtered on the authorized company' },
   'pages/api/community-ai/forecast.ts::scheduled_posts': { cls: 'TENANT_CHECK', why: '!inner chain on the post\'s account company (0ca211d1f)' },
@@ -78,7 +78,7 @@ const ALLOWLIST: Record<string, { cls: EmbedClass; why: string }> = {
   'pages/api/company/blog/series/[id].ts::company_blog_series_posts': { cls: 'PARENT_SCOPED_CHILD', why: 'as company/blog/intelligence' },
   'pages/api/company/blog/series/index.ts::company_blog_series_posts': { cls: 'PARENT_SCOPED_CHILD', why: 'as company/blog/intelligence' },
   'pages/api/cron/process-scheduled-posts.ts::social_accounts': { cls: 'TENANT_CHECK', why: 'CRON_SECRET; fetches company_id to resolve each post\'s org; tenant-contained runJob' },
-  'pages/api/response/rules.ts::response_templates': { cls: 'PENDING_FIX', why: 'leaked a foreign template name; removed in 3c609bb84' },
+  'pages/api/response/rules.ts::response_templates': { cls: 'PENDING_FIX', why: 'leaked a foreign template name; removed in 3c609bb84', since: '2026-11-18' },
   'pages/api/super-admin/activity-cost-breakdown-v2.ts::activity_metrics': { cls: 'SUPER_ADMIN', why: 'super-admin session or isPlatformSuperAdmin before the read' },
 };
 
@@ -123,6 +123,20 @@ describe('PostgREST embed guard', () => {
   it('rule 2: every production embed is attributed (an unclassified embed fails here)', () => {
     const unattributed = [...new Set(embeds.map((e) => `${e.file}::${e.embed}`))].filter((k) => !ALLOWLIST[k]);
     expect(unattributed).toEqual([]);
+  });
+
+  // 7c (2026-11-18): the PENDING_FIX exception is itself a staleness risk. Every PENDING_FIX entry names the commit that
+  // removes it and carries a `since` date; after PENDING_FIX_MAX_DAYS it fails, forcing a re-check (remove the entry
+  // once its fixing commit is on main, or re-date it with a reason).
+  it('rule 2: every PENDING_FIX exception names its fixing commit and has not outlived PENDING_FIX_MAX_DAYS', () => {
+    const PENDING_FIX_MAX_DAYS = 45;
+    const pending = Object.entries(ALLOWLIST).filter(([, v]) => v.cls === 'PENDING_FIX') as Array<[string, { why: string; since?: string }]>;
+    for (const [k, v] of pending) {
+      expect({ k, namesCommit: /\b[0-9a-f]{9,40}\b/.test(v.why) }).toEqual({ k, namesCommit: true });
+      expect({ k, dated: typeof v.since === 'string' && !Number.isNaN(Date.parse(v.since)) }).toEqual({ k, dated: true });
+      const ageDays = (Date.now() - Date.parse(v.since as string)) / 86_400_000;
+      expect({ k, expired: ageDays > PENDING_FIX_MAX_DAYS }).toEqual({ k, expired: false });
+    }
   });
 
   it('rule 2: no stale allowlist entry (except fixes landing on another branch)', () => {
