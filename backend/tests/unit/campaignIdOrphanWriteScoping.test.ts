@@ -12,6 +12,9 @@
  *   pages/api/campaigns/recommendations.ts           -> getCampaignPlanningInputs + saveCampaignBlueprintFromRecommendation
  *
  * The scoping must hold WITHOUT the gate refusing not_found (a separate change), so the gate runs for real here.
+ * GATE-404 (2026-11-18) is that separate change: the gate now answers 404 for a missing campaign by default. To keep
+ * proving the scoping on its own, every enforceCompanyAccess call in this suite carries the creation-flow opt-in
+ * (missing campaigns admitted, foreign ones still refused); the gate's own 404 is pinned in routeAuth001CampaignBinding.
  */
 import {
   seed, invoke, rows, completedWrites, resolveUpsertConflicts, leaksB,
@@ -22,6 +25,11 @@ jest.mock('@/config', () => ({ config: { DEV_USER_ID: '', NODE_ENV: 'production'
 jest.mock('../../db/supabaseClient', () => jest.requireActual('../helpers/routeAuthHarness').supabaseModule());
 jest.mock('../../db/writeOwner', () => jest.requireActual('../helpers/routeAuthHarness').writeOwnerModule());
 jest.mock('../../services/supabaseAuthService', () => jest.requireActual('../helpers/routeAuthHarness').authModule());
+// GATE-404: the real gate, with the creation-flow opt-in, so a missing campaign reaches the scoping under test.
+jest.mock('../../services/userContextService', () => {
+  const real = jest.requireActual('../../services/userContextService');
+  return { ...real, enforceCompanyAccess: (input: Record<string, unknown>) => real.enforceCompanyAccess({ ...input, allowMissingCampaign: true }) };
+});
 jest.mock('../../security/IdentityResolver', () => jest.requireActual('../helpers/routeAuthHarness').identityModule());
 
 // apply-opportunity: a deterministic suggestion (week 1, a fixed topic).

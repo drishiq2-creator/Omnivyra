@@ -19,8 +19,12 @@
  *   owned        → proceed.
  *   foreign      → JobTenantBindingError (never retried into success).
  *   not_found    → JobTenantBindingError when the producer guarantees the
- *                  campaign exists (`requireExisting`), otherwise proceed —
- *                  a non-existent campaign cannot belong to another tenant.
+ *                  campaign exists (`requireExisting`), otherwise proceed.
+ *                  GATE-404 (2026-11-18): every in-repo caller now passes
+ *                  `requireExisting: true` — no job processor creates the
+ *                  campaign it names, and "a non-existent campaign cannot
+ *                  belong to another tenant" is false for a DELETED campaign
+ *                  (its child rows survive; no FK to campaigns).
  *   lookup_error → a plain Error so BullMQ retries (transient DB failure);
  *                  exhaustion lands in the dead-letter table as usual.
  * A rejection is logged as a structured `queue_job_tenant_binding_rejected`

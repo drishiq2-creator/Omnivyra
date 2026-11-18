@@ -172,7 +172,10 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
      * membership-checked. This keeps the explicit refusal PR #246 shipped and
      * tested, so a foreign campaign id can never be carried into generation
      * inputs or telemetry under an authorized tenant. Semantics match
-     * enforceCompanyAccess's campaign binding: owned, or not yet existing.
+     * enforceCompanyAccess's campaign binding: owned only. GATE-404 (2026-11-18):
+     * a campaign that does not exist is refused too (same 404) — a DELETED
+     * campaign leaves its child rows behind, so absence is not "nobody's", and
+     * this action creates no campaign.
      */
     const bodyCampaignId = String((req.body as any)?.campaignId || '').trim();
     if (bodyCampaignId && companyId && action !== 'generate_master') {
@@ -181,7 +184,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         res.setHeader('Retry-After', String(SEAM_RETRY_AFTER_SECONDS));
         return res.status(503).json({ error: 'Campaign ownership check is temporarily unavailable. Please try again.', code: 'CAMPAIGN_LOOKUP_ERROR', retryable: true });
       }
-      if (ownership !== 'owned' && ownership !== 'not_found') {
+      if (ownership !== 'owned') {
         return res.status(404).json({ error: 'Campaign not found' });
       }
     }

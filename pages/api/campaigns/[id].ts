@@ -7,6 +7,7 @@ import { enforceCompanyAccess, resolveUserContext } from '../../../backend/servi
 import { enforceRole, Role } from '../../../backend/services/rbacService';
 import { resolveCampaignOwnership } from '../../../backend/services/campaignOwnershipService';
 import { tenantTable, tenantContextFor, TenantSeamError } from '../../../backend/db/tenantTable';
+import { purgeCampaignChildren } from '../../../backend/services/campaignDeleteCleanup';
 
 /** CAMPAIGN_DELETE holders (backend/security/capabilityRegistry.ts). */
 const CAMPAIGN_DELETE_ROLES: Role[] = [Role.COMPANY_ADMIN, Role.SUPER_ADMIN];
@@ -19,28 +20,13 @@ const CAMPAIGN_EDIT_ROLES: Role[] = [
   Role.SUPER_ADMIN,
 ];
 
-/**
- * 3AH-116 (WS-D) — campaign-scoped rows removed with the campaign, in order.
- * `companyBound` tables carry company_id and are additionally filtered by the
- * canonical owner; the others are keyed only by the campaign, whose ownership
- * has been proven before the first delete. campaign_versions is NOT here: it is
- * removed last, after the campaigns row, so every partial state still resolves
- * to the same owner and a retry can finish the delete.
+/*
+ * 3AH-116 (WS-D) + 2026-11-18 coordinator ruling — campaign-scoped rows removed with the campaign come from
+ * backend/services/campaignDeleteCleanup.ts: EVERY registry child of `campaigns` (backend/db/tenantTables.ts),
+ * their registry descendants, and the named campaign_id-keyed direct tables (filtered by the owner company).
+ * campaign_versions is NOT there: it is removed last, after the campaigns row, so every partial state still
+ * resolves to the same owner and a retry can finish the delete.
  */
-const CAMPAIGN_DEPENDENT_TABLES: ReadonlyArray<{ table: string; companyBound: boolean }> = [
-  { table: 'scheduled_posts', companyBound: false },
-  { table: 'daily_content_plans', companyBound: false },
-  { table: 'campaign_week_plan', companyBound: false },
-  { table: 'bolt_content_jobs', companyBound: false },
-  { table: 'bolt_execution_runs', companyBound: true },
-  { table: 'platform_content_slots', companyBound: false },
-  { table: 'campaign_goals', companyBound: false },
-  { table: 'campaign_metrics', companyBound: true },
-  { table: 'campaign_analytics', companyBound: false },
-  { table: 'campaign_execution_state', companyBound: false },
-];
-/** PostgREST / Postgres "relation does not exist" — a dependent table absent from this deployment. */
-const MISSING_TABLE_CODES = new Set(['42P01', 'PGRST205']);
 
 const validatePlaybookReference = async (playbookId: string, companyId: string) => {
   const { data, error } = await supabase
@@ -180,14 +166,11 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       // returned error and stops before the next destructive step, so a failure
       // leaves the campaign itself in place, owned as before, and the delete can
       // simply be retried.
-      for (const { table, companyBound } of CAMPAIGN_DEPENDENT_TABLES) {
-        let query = supabase.from(table).delete().eq('campaign_id', id);
-        if (companyBound) query = query.eq('company_id', campaignCompanyId);
-        const { error: dependentError } = await query;
-        if (dependentError && !MISSING_TABLE_CODES.has(String(dependentError.code))) {
-          console.error('[delete-campaign] dependent cleanup failed', table, dependentError.code);
-          return res.status(500).json({ error: 'Failed to delete campaign' });
-        }
+      // A table missing from the deployment (42P01 / PGRST205) is skipped; any other failure stops here.
+      const dependentFailure = await purgeCampaignChildren(supabase, id, campaignCompanyId);
+      if (dependentFailure) {
+        console.error('[delete-campaign] dependent cleanup failed', dependentFailure.table, dependentFailure.code);
+        return res.status(500).json({ error: 'Failed to delete campaign' });
       }
 
       const campaignDelete = campaignRowUnowned

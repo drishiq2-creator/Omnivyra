@@ -7,6 +7,8 @@ export async function requireCompanyContext(input: {
   companyId?: string | null;
   campaignId?: string | null;
   requireCampaignId?: boolean;
+  /** GATE-404: forwarded to enforceCompanyAccess. Literal `true` only (creation flows); see its doc comment. */
+  allowMissingCampaign?: true;
 }): Promise<{ companyId: string } | null> {
   const companyId = input.companyId?.trim();
   if (!companyId) {
@@ -20,6 +22,7 @@ export async function requireCompanyContext(input: {
     companyId,
     campaignId: input.campaignId ?? null,
     requireCampaignId: input.requireCampaignId ?? false,
+    ...(input.allowMissingCampaign === true ? { allowMissingCampaign: true } : {}),
   });
   if (!access) return null;
 

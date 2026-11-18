@@ -72,10 +72,10 @@ async function refundCredits(_company_id: string, _key: string): Promise<void> {
  * them (adapters/campaign/masterContentAdapter); the blog, post and engagement
  * producers carry none. The campaign binding is therefore asserted only when
  * the payload has one, exactly as the creator processor treats an
- * activity-workspace campaign id — `requireExisting: false`, because a
- * campaign that does not exist cannot belong to another tenant, while a
- * campaign owned by ANOTHER company is refused before any billing or model
- * call.
+ * activity-workspace campaign id — `requireExisting: true` (GATE-404,
+ * 2026-11-18): a campaign owned by ANOTHER company, or one that does not
+ * exist (a deleted campaign leaves its child rows behind; this processor
+ * creates no campaign), is refused before any billing or model call.
  */
 async function assertGenericContentJobTenantBinding(job: Job): Promise<void> {
   const data = (job?.data && typeof job.data === 'object' ? job.data : {}) as Record<string, unknown>;
@@ -87,7 +87,7 @@ async function assertGenericContentJobTenantBinding(job: Job): Promise<void> {
     campaignId: String(campaignId),
     // assertGenericContentJob already proved this is a non-empty string.
     companyId: data.company_id,
-    requireExisting: false,
+    requireExisting: true,
   });
 }
 

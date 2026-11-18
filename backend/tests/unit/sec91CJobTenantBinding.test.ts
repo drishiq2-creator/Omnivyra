@@ -173,10 +173,14 @@ describe('creator-content processor — activity-workspace jobs', () => {
     expect(admission).not.toHaveBeenCalled();
   });
 
-  it('allows a workspace id that is not a campaign, and jobs without a campaign', async () => {
+  // GATE-404 (2026-11-18): was 'allows a workspace id that is not a campaign, and jobs without a campaign'. A
+  // DELETED campaign leaves its child rows behind, so "matches no campaign" is not "no tenant owns it", and no
+  // in-repo producer sends a workspace campaign id that is not a real campaign.
+  it('refuses a workspace id that matches no campaign before admission, and still runs jobs without a campaign', async () => {
     await expect(processCreatorContentJob(creatorJob({
       company_id: 'comp-a', content_type: 'carousel', activity_workspace: { campaign_id: 'workspace-123' },
-    }))).rejects.toThrow('PAST_BINDING');
+    }))).rejects.toMatchObject({ name: 'JobTenantBindingError', ownership: 'not_found' });
+    expect(admission).not.toHaveBeenCalled();
     await expect(processCreatorContentJob(creatorJob({ company_id: 'comp-a', content_type: 'carousel' })))
       .rejects.toThrow('PAST_BINDING');
   });
@@ -218,10 +222,13 @@ describe('generic-content processor — campaign payloads', () => {
     expect(admission).toHaveBeenCalledTimes(1);
   });
 
-  it('allows an id that is not a campaign (nothing owns it), like the creator workspace case', async () => {
+  // GATE-404 (2026-11-18): was 'allows an id that is not a campaign (nothing owns it), like the creator workspace
+  // case'. A deleted campaign's id matches no campaign but its child rows survive; this processor creates none.
+  it('refuses an id that matches no campaign before admission (GATE-404), like the creator workspace case', async () => {
     await expect(processContentGenerationJob(contentJob(genericPayload({ campaign_id: 'not-a-campaign' }))))
-      .rejects.toThrow('PAST_BINDING');
-    expect(admission).toHaveBeenCalledTimes(1);
+      .rejects.toMatchObject({ name: 'JobTenantBindingError', ownership: 'not_found' });
+    expect(admission).not.toHaveBeenCalled();
+    expect(model).not.toHaveBeenCalled();
   });
 
   it('retries (plain error) on a lookup failure instead of failing open', async () => {

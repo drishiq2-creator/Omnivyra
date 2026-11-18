@@ -8,7 +8,8 @@ import { tenantChildTable, type TenantContext } from './tenantTable';
 /*
  * S2-55 (2026-11-14): the functions below that take an optional `tenant` scope campaign_week_plan /
  * campaign_resource_projection to the AUTHORIZED company when the caller passes its context.
- * enforceCompanyAccess({campaignId}) allows an id that matches no campaign at all, and child rows of a DELETED
+ * enforceCompanyAccess({campaignId}) allowed an id that matches no campaign at all (since GATE-404 only with the creation-flow
+ * opt-in), and child rows of a DELETED
  * campaign survive (no FK to campaigns), so a read or write keyed on campaign_id alone can reach another company's
  * orphaned rows. With a context, tenantChildTable first proves the campaigns row is this tenant's (else it throws a
  * TenantSeamError, which the route maps through seamDenial) and pins every verb to that campaign. Without one, the

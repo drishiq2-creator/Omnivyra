@@ -45,7 +45,9 @@ function safeObject(value: unknown): Record<string, unknown> {
  *   enqueues rows it loaded by campaign, so all three always hold for
  *   legitimate jobs).
  *   Activity-workspace jobs: a workspace campaign id owned by ANOTHER company
- *   is refused; an id that is not a campaign keeps working (no tenant owns it).
+ *   is refused, and so is an id that matches no campaign (GATE-404, 2026-11-18:
+ *   a deleted campaign leaves its child rows behind, so absence is not "no
+ *   tenant owns it", and this processor creates no campaign).
  */
 async function assertCreatorJobTenantBinding(job: Job): Promise<void> {
   const data = safeObject(job?.data);
@@ -64,7 +66,7 @@ async function assertCreatorJobTenantBinding(job: Job): Promise<void> {
   const workspaceCampaignId = safeObject(data.activity_workspace).campaign_id;
   if (workspaceCampaignId !== undefined && workspaceCampaignId !== null && String(workspaceCampaignId) !== '') {
     await assertJobCampaignBinding({
-      queue, jobId: job.id, campaignId: String(workspaceCampaignId), companyId: data.company_id, requireExisting: false,
+      queue, jobId: job.id, campaignId: String(workspaceCampaignId), companyId: data.company_id, requireExisting: true,
     });
   }
 }
