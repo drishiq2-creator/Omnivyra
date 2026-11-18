@@ -22,6 +22,26 @@ jest.mock('../../services/creditExecutionService', () => ({
   confirmCreditReservationToActual: async (h: any, n: number) => { if (settleThrows) throw new Error('ledger down'); calls.push({ fn: 'confirmToActual', args: [h, n], storedAtConfirm: mockStore.rows.length } as any); return { status: 'confirmed' }; },
   releaseCreditReservation: async (h: any) => { if (settleThrows) throw new Error('ledger down'); calls.push({ fn: 'release', args: [h] }); return { status: 'released' }; },
   makeIdempotencyKey: (...p: string[]) => p.join(':'),
+  getReservationKeys: (k: string) => ({ holdKey: `${k}:hold`, confirmKey: `${k}:confirm`, releaseKey: `${k}:release` }),
+  // ledger-faithful grant: idempotent on its key (a repeated key grants nothing more)
+  createCredit: async (o: any) => {
+    if (mockGrantThrows) throw new Error('[createCredit] grant failed: timeout');
+    if (!mockGrants.some((g) => g.idempotencyKey === o.idempotencyKey)) mockGrants.push(o);
+  },
+}));
+const mockGrants: any[] = [];
+let mockGrantThrows = false;
+// credit_transactions: the ORIGINAL confirm rows, by idempotency key
+const mockConfirmRows = new Map<string, any>();
+let mockLedgerReadFails = false;
+jest.mock('../../db/supabaseClient', () => ({
+  supabase: { from: (t: string) => {
+    if (t !== 'credit_transactions') throw new Error(`unexpected table ${t}`);
+    const f: Record<string, unknown> = {};
+    const chain: any = { select: () => chain, eq: (c: string, v: unknown) => { f[c] = v; return chain; },
+      maybeSingle: async () => (mockLedgerReadFails ? { data: null, error: { message: 'timeout' } } : { data: mockConfirmRows.get(String(f.idempotency_key)) ?? null, error: null }) };
+    return chain;
+  } },
 }));
 const mockInfo = jest.fn();
 jest.mock('../../services/logger', () => ({ logger: { info: (...a: unknown[]) => mockInfo(...a), warn: jest.fn(), error: jest.fn() } }));
@@ -30,7 +50,11 @@ const mockAnomalies: any[] = [];
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const mockStore = require('../helpers/fakeIdempotencyStore').makeFakeIdempotencyStore();
 jest.mock('../../db/writeOwner', () => ({ ownedDbTable: (t: string) => mockStore.ownedDbTable(t) }));
-jest.mock('../../services/billing/billingAuditEmitter', () => ({ emitAnomaly: (a: unknown) => { mockAnomalies.push(a); } }));
+const mockAudits: any[] = [];
+jest.mock('../../services/billing/billingAuditEmitter', () => ({
+  emitAnomaly: (a: unknown) => { mockAnomalies.push(a); },
+  emitFinancialAudit: async (a: unknown) => { mockAudits.push(a); },
+}));
 jest.mock('../../services/intelligenceConfigService', () => ({
   getResolvedConfigStrict: async (companyId: string | null, jobType: string) => {
     if (mockSwitch instanceof Error) throw mockSwitch;
@@ -41,6 +65,7 @@ jest.mock('../../services/intelligenceConfigService', () => ({
 import {
   BLOG_CREDITS, holdBlog, isBlogHoldRefusal, partialBlogCredits, runBlogWithBilling, blogBillingOf,
   blogReferenceId, blogGenerationRefusal, isBlogRefusal, __resetBlogSwitchAbsentReportForTests, blogReplay,
+  blogUnavailableRefundsOriginalCharge, blogUnavailableRefundedText,
 } from '../../services/blog/blogBilling';
 import { getActiveCreditHandle } from '../../services/billing/aiGatewayBillingGuard';
 
@@ -51,7 +76,8 @@ class QualityGate extends Error {}
 const providerCalls = (n: number) => { for (let i = 0; i < n; i++) getActiveCreditHandle()?.onProviderCall?.(); };
 
 beforeEach(() => { calls.length = 0; reserveResult = { status: 'reserved' }; settleThrows = false; mockSwitch = { enabled: true }; mockInfo.mockClear();
-  mockStore.rows.length = 0; mockStore.failInsert = false; mockStore.failRead = false; mockAnomalies.length = 0; });
+  mockStore.rows.length = 0; mockStore.failInsert = false; mockStore.failRead = false; mockAnomalies.length = 0;
+  mockGrants.length = 0; mockGrantThrows = false; mockConfirmRows.clear(); mockLedgerReadFails = false; mockAudits.length = 0; });
 
 async function held() {
   const h = await holdBlog({ orgId: ORG, userId: ORG, referenceId: REF, validateMembership: false });
@@ -70,12 +96,68 @@ describe('hold', () => {
     const r = await holdBlog({ orgId: ORG, userId: ORG, referenceId: REF, validateMembership: true });
     expect(r).toMatchObject({ ok: false, status: 409, code: 'BLOG_ALREADY_IN_PROGRESS', retryable: true });
   });
-  test('charged earlier but NO stored result -> 409 BLOG_RESULT_UNAVAILABLE + critical anomaly, never "start a new request"', async () => {
+  // b3 ruling 2026-11-18 replaces "-> 409 BLOG_RESULT_UNAVAILABLE + contact support": AUTO-REFUND, exactly once.
+  const ORIGINAL_CONFIRM_KEY = `${ORG}:blog_post:${REF}:confirm`;
+  const armOriginalCharge = () => mockConfirmRows.set(ORIGINAL_CONFIRM_KEY,
+    { id: 'confirm-1', execution_phase: 'confirm_partial', free_delta: -30, paid_delta: -10, incentive_delta: 0 });
+  test('charged earlier, NO stored copy -> the ORIGINAL charge is credited back per category, keyed on the original confirm; 409 says so', async () => {
+    armOriginalCharge();
     reserveResult = { status: 'already_confirmed' };
     const r = await holdBlog({ orgId: ORG, userId: ORG, referenceId: REF, validateMembership: true });
-    expect(r).toMatchObject({ ok: false, status: 409, code: 'BLOG_RESULT_UNAVAILABLE', retryable: false });
-    expect((r as any).error).not.toMatch(/start/i);
+    expect(r).toEqual({ ok: false, status: 409, code: 'BLOG_RESULT_UNAVAILABLE', retryable: false,
+      error: "We couldn't recover this blog, so your 40 credits have been returned. You can write it again." });
+    expect(mockGrants.map((g) => [g.category, g.amount, g.idempotencyKey, g.referenceType, g.referenceId])).toEqual([
+      ['free', 30, 'blog_refund:confirm-1:free', 'blog_refund', 'confirm-1'],
+      ['paid', 10, 'blog_refund:confirm-1:paid', 'blog_refund', 'confirm-1'],
+    ]);
+    expect(mockAudits).toEqual([expect.objectContaining({ actionType: 'system_refund', reason: 'blog_result_unavailable', amountCredits: 40 })]);
     expect(mockAnomalies).toEqual([expect.objectContaining({ kind: 'blog_result_lost', severity: 'critical' })]);
+  });
+  test('N retries of the same key -> ONE refund (the grant keys are the original confirm)', async () => {
+    armOriginalCharge();
+    reserveResult = { status: 'already_confirmed' };
+    for (let i = 0; i < 4; i++) await holdBlog({ orgId: ORG, userId: ORG, referenceId: REF, validateMembership: true });
+    expect(mockGrants.reduce((n, g) => n + g.amount, 0)).toBe(40);
+  });
+  test('another org with the same key -> its own (absent) original charge: nothing refunded, 503 retryable', async () => {
+    armOriginalCharge();
+    reserveResult = { status: 'already_confirmed' };
+    const OTHER = '99999999-9999-4999-8999-999999999999';
+    const r = await holdBlog({ orgId: OTHER, userId: OTHER, referenceId: REF, validateMembership: true });
+    expect(r).toMatchObject({ ok: false, status: 503, code: 'BLOG_REFUND_PENDING', retryable: true });
+    expect(mockGrants).toEqual([]);
+  });
+  test('a refund WRITE failure -> 503 retryable, and the text claims NO refund (never a promise not kept)', async () => {
+    armOriginalCharge(); mockGrantThrows = true;
+    reserveResult = { status: 'already_confirmed' };
+    const r = await holdBlog({ orgId: ORG, userId: ORG, referenceId: REF, validateMembership: true });
+    expect(r).toMatchObject({ ok: false, status: 503, code: 'BLOG_REFUND_PENDING', retryable: true });
+    expect((r as any).error).not.toMatch(/have been returned/);
+    expect(mockAudits).toEqual([]);
+  });
+  test('the original charge cannot be READ -> 503 retryable, nothing granted', async () => {
+    armOriginalCharge(); mockLedgerReadFails = true;
+    reserveResult = { status: 'already_confirmed' };
+    expect(await holdBlog({ orgId: ORG, userId: ORG, referenceId: REF, validateMembership: true })).toMatchObject({ status: 503, retryable: true });
+    expect(mockGrants).toEqual([]);
+  });
+  test('a protected org (Embrosales) is never auto-refunded - review text, no grant', async () => {
+    const EMB = '73e5fa6f-0000-4000-8000-000000000000';
+    mockConfirmRows.set(`${EMB}:blog_post:${REF}:confirm`, { id: 'c-emb', execution_phase: 'confirm', free_delta: -40, paid_delta: 0, incentive_delta: 0 });
+    reserveResult = { status: 'already_confirmed' };
+    const r = await holdBlog({ orgId: EMB, userId: EMB, referenceId: REF, validateMembership: true });
+    expect(r).toMatchObject({ status: 409, code: 'BLOG_RESULT_UNAVAILABLE' });
+    expect((r as any).error).not.toMatch(/returned/);
+    expect(mockGrants).toEqual([]);
+  });
+  test('COUPLING (04/7c): the user-facing refund sentence is produced ONLY with a written refund equal to the charge', async () => {
+    expect(blogUnavailableRefundsOriginalCharge()).toBe(true);
+    armOriginalCharge();
+    reserveResult = { status: 'already_confirmed' };
+    const r: any = await holdBlog({ orgId: ORG, userId: ORG, referenceId: REF, validateMembership: true });
+    const claimed = Number(/your (\d+) credits have been returned/.exec(r.error)?.[1]);
+    expect(claimed).toBe(mockGrants.reduce((n, g) => n + g.amount, 0));
+    expect(blogUnavailableRefundedText(claimed)).toBe(r.error);
   });
   test('a key whose run failed and was released -> 409 BLOG_REQUEST_ENDED (not charged)', async () => {
     reserveResult = { status: 'already_released' };
