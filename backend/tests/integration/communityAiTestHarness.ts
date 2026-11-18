@@ -115,6 +115,9 @@ const policyDecision = (org: unknown, tenant: unknown) => {
   return { allowed: true, code: null, auto_rules_enabled: row.auto_rules_enabled, policy_version: 'v1' };
 };
 
+/** The one execution_guardrails row the fake knows: read by the select AND by the atomic claim. */
+export const GUARDRAIL_ROW = { auto_execution_enabled: true, daily_platform_limit: 999, per_post_reply_limit: 999, per_evaluation_limit: 999 };
+
 /**
  * Emulates the Prompt 3 database functions for the in-memory harness (the SQL
  * itself is proven in the real-schema suites): the tenant policy decision, the
@@ -157,6 +160,44 @@ export const communityRpc = async (name: string, args: Record<string, any>) => {
       ? args.p_correlation_id : row.execution_correlation_id;
     actionStore.set(row.id, { ...row, status: 'executing', execution_mode: args.p_execution_mode || row.execution_mode, execution_correlation_id: corr });
     return { data: [{ claimed: true, code: null, current_status: 'executing' }], error: null };
+  }
+  if (name === 'community_ai_claim_within_limits') {
+    // CLASS-2 A19 (97aba0bf9, migration 20270217000021): the claim THROUGH the guardrails, atomically.
+    // As the SQL does: refuse a bad source; then, with a guardrail row, the limits counted over
+    // executed (in the window) + executing actions; a hit refuses with GUARDRAIL_* (one refusal record,
+    // nothing claimed); otherwise delegate to the plain claim. The fake's guardrail row is the same
+    // constant resolveSelect answers for execution_guardrails. Stage 0 (a9): this RPC had no fake, so
+    // every scheduler / evaluation claim failed CLAIM_RPC_ERROR.
+    if (args.p_source !== 'evaluation' && args.p_source !== 'scheduler') {
+      return { data: [{ claimed: false, code: 'INVALID_ARGUMENT', current_status: null }], error: null };
+    }
+    const row = actionStore.get(args.p_action_id);
+    if (row && row.organization_id === args.p_org && row.tenant_id === args.p_tenant) {
+      const g = GUARDRAIL_ROW;
+      const platform = String(row.platform ?? '').trim().toLowerCase();
+      const counted = (since: string | null, extra: (a: any) => boolean) => Array.from(actionStore.values()).filter((a) =>
+        a.organization_id === args.p_org && String(a.platform ?? '').trim().toLowerCase() === platform && extra(a)
+        && ((a.status === 'executed' && a.executed_at && (!since || a.executed_at >= since)) || a.status === 'executing')).length;
+      const dayStart = new Date(); dayStart.setUTCHours(0, 0, 0, 0);
+      let code: string | null = null;
+      if (g.auto_execution_enabled === false) code = 'GUARDRAIL_AUTO_DISABLED';
+      if (!code && g.daily_platform_limit != null && counted(dayStart.toISOString(), () => true) >= g.daily_platform_limit) {
+        code = 'GUARDRAIL_DAILY_PLATFORM_LIMIT';
+      }
+      if (!code && String(row.action_type).toLowerCase() === 'reply' && g.per_post_reply_limit != null
+        && counted(null, (a) => a.target_id === row.target_id && a.action_type === 'reply') >= g.per_post_reply_limit) {
+        code = 'GUARDRAIL_PER_POST_LIMIT';
+      }
+      if (!code && args.p_source === 'evaluation' && g.per_evaluation_limit != null
+        && counted(new Date(Date.now() - 10 * 60 * 1000).toISOString(), () => true) >= g.per_evaluation_limit) {
+        code = 'GUARDRAIL_PER_EVALUATION_LIMIT';
+      }
+      if (code) {
+        refusalStore.push({ action_id: row.id, organization_id: row.organization_id, tenant_id: row.tenant_id, claim_point: args.p_claim_point, code });
+        return { data: [{ claimed: false, code, current_status: row.status }], error: null };
+      }
+    }
+    return communityRpc('claim_community_ai_action_for_execution', args);
   }
   return { data: null, error: { message: `communityRpc: unexpected rpc ${name}` } };
 };
@@ -231,6 +272,13 @@ const resolveSelect = (table: string, state: any) => {
       rows = rows.filter((row) => {
         const value = row[state.lteFilter.field];
         return value && value <= state.lteFilter.value;
+      });
+    }
+    // The guardrail's windowed counts (executed_at >= start of day / ten minutes ago) need gte too.
+    if (state.gteFilter) {
+      rows = rows.filter((row) => {
+        const value = row[state.gteFilter.field];
+        return value && value >= state.gteFilter.value;
       });
     }
     return { data: rows, error: null };
@@ -367,7 +415,7 @@ const resolveSelect = (table: string, state: any) => {
     return { data: rows, error: null };
   }
   if (table === 'execution_guardrails') {
-    const value = { auto_execution_enabled: true, daily_platform_limit: 999, per_post_reply_limit: 999, per_evaluation_limit: 999 };
+    const value = { ...GUARDRAIL_ROW };
     return { data: state.single ? value : [value], error: null };
   }
   if (table === 'organization_plan_assignments' || table === 'pricing_plans') return { data: state.single ? null : [], error: null };
@@ -476,23 +524,36 @@ export const buildQuery = (table: string) => {
     limitValue?: number;
     single?: boolean;
     notNull?: string[];
+    count?: { head: boolean };
   } = { filters: {} };
+  // PostgREST's `select(cols, { count: 'exact', head: true })` answers { data: null, count: <n> }. The fake
+  // used to answer { data: rows } with no `count`, so a caller that (correctly) treats a missing count as
+  // unreadable - the CLASS-2 A19 guardrail, which fails CLOSED - refused every action (stage 0, a9).
+  const answer = (r: any) => {
+    if (!state.count) return r;
+    if (r?.error) return { data: null, count: null, error: r.error };
+    const rows = Array.isArray(r?.data) ? r.data : r?.data ? [r.data] : [];
+    return { data: state.count.head ? null : r.data, count: rows.length, error: null };
+  };
   const query: any = {
-    select: jest.fn().mockReturnThis(),
+    select: jest.fn((_cols?: string, options?: { count?: string; head?: boolean }) => {
+      if (options?.count) state.count = { head: options.head === true };
+      return query;
+    }),
     eq: jest.fn((field: string, value: any) => { state.filters[field] = value; return query; }),
     gte: jest.fn((field: string, value: any) => { state.gteFilter = { field, value }; return query; }),
     limit: jest.fn((value: number) => { state.limitValue = value; return query; }),
     lte: jest.fn((field: string, value: any) => { state.lteFilter = { field, value }; return query; }),
     in: jest.fn((field: string, values: any[]) => { state.inFilter = { field, values }; return query; }),
     order: jest.fn((field: string, options?: any) => { state.order = { field, ascending: options?.ascending !== false }; return query; }),
-    single: jest.fn(async () => { state.single = true; return resolveSelect(table, state); }),
-    maybeSingle: jest.fn(async () => { state.single = true; return resolveSelect(table, state); }),
+    single: jest.fn(async () => { state.single = true; return answer(resolveSelect(table, state)); }),
+    maybeSingle: jest.fn(async () => { state.single = true; return answer(resolveSelect(table, state)); }),
     not: jest.fn((field: string, op: string, value: any) => {
       if (op === 'is' && value === null) state.notNull = [...(state.notNull || []), field];
       return query;
     }),
     or: jest.fn(() => query),
-    then: (resolve: any, reject: any) => Promise.resolve(resolveSelect(table, state)).then(resolve, reject),
+    then: (resolve: any, reject: any) => Promise.resolve(answer(resolveSelect(table, state))).then(resolve, reject),
     update: jest.fn((values: any) => {
       state.update = values;
       // Chainable update — supports .eq().in().select().maybeSingle() / .single()
