@@ -16,6 +16,7 @@
  *   503 { error, code: 'REFUND_PENDING', retryable: true }   the refund could not be recorded yet - retry; nothing promised
  *   400 { error, code: 'IDEMPOTENCY_KEY_REQUIRED', retryable: false }   a billed request with no client key (never minted)
  *   409 { error, code: 'REQUEST_ENDED', retryable: false }   this key's run failed and was released (not charged)
+ *   409 { error, code: 'REQUEST_IN_PROGRESS', retryable: true }   the same key's first attempt is still running
  * Returns null for any other error - the route's own handling applies.
  */
 import { PaymentRequiredError } from './phase2EnforcementGate';
@@ -30,6 +31,7 @@ import {
   BilledRouteRefundPendingError,
   BilledRouteReplayUnavailableError,
   BilledRouteRequestEndedError,
+  BilledRouteRequestInProgressError,
   BilledRouteResultUnavailableError,
 } from './billedRequestRecovery';
 
@@ -54,6 +56,9 @@ export function billedRouteHttpError(err: unknown): { status: number; body: Bill
   }
   if (err instanceof BilledRouteKeyRequiredError) {
     return { status: 400, body: { error: err.message, code: 'IDEMPOTENCY_KEY_REQUIRED', retryable: false } };
+  }
+  if (err instanceof BilledRouteRequestInProgressError) {
+    return { status: 409, body: { error: err.message, code: 'REQUEST_IN_PROGRESS', retryable: true } };
   }
   if (err instanceof BilledRouteRequestEndedError) {
     return { status: 409, body: { error: err.message, code: 'REQUEST_ENDED', retryable: false } };

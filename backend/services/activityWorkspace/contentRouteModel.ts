@@ -26,7 +26,7 @@ import { resolveMonetizationFeature } from '@/shared/monetization/featureRegistr
 import { createHash } from 'crypto';
 import {
   BilledResultUnpersistedError, BilledRouteKeyRequiredError, BilledRouteRequestEndedError,
-  clientIdempotencyKey, persistBilledResultOrThrow, replayOrRefund,
+  clientIdempotencyKey, persistBilledResultOrThrow, refuseIfInFlight, replayOrRefund,
 } from '@/backend/services/billing/billedRequestRecovery';
 
 import { isFailedVariant } from './contentRouteHandler';
@@ -90,6 +90,7 @@ export async function runReservedFixedWorkflow<T>(input: {
       confirmKeys: [`${makeIdempotencyKey(input.userId, input.action, identity, input.note)}:confirm`], referenceId: input.referenceId,
     });
     if (replay) { recovery.onReplay?.(); return replay.value as T; }
+    await refuseIfInFlight({ surface: recovery.surface, baseKey: makeIdempotencyKey(input.userId, input.action, identity, input.note) });
     const run = input.executor;
     const key = identity;
     executor = async () => {
