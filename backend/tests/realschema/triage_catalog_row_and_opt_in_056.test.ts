@@ -1,8 +1,8 @@
 /**
  * Real-schema cover for 20270217000056 (c6; OWNER rulings 2026-11-18). After the full replay:
  *   - credit_cost_config conversation_triage = 1 credit, low, REPLY - exactly once; NO active action_pricing_config row;
- *   - engagement_system_controls.triage_engine_enabled defaults to FALSE: a row written for ANOTHER setting does not opt
- *     the company in (the opt-in ruling);
+ *   - all 7 engagement AI controls default to FALSE (owner: inbox AI is opt-in): a row written for ONE setting switches no
+ *     other on;
  *   - re-applying the forward migration switches an opted-in row OFF (existing rows are not assumed to have chosen);
  *   - the rollback restores the default true and deletes exactly 056's row, and does NOT switch anyone back on.
  * Disposable replay DB only; every mutation runs inside inRollback.
@@ -28,12 +28,21 @@ describe('20270217000056 triage catalog row + opt-in', () => {
     expect((await db.query(`SELECT 1 FROM public.action_pricing_config WHERE action_key = 'conversation_triage' AND is_active`)).rows).toEqual([]);
   });
 
-  it("the column default is false: a row written for ANOTHER setting does not opt the company in", async () => {
-    expect(await triageDefault()).toBe('false');
+  it('OPT-IN (owner via b3): all 7 engagement AI controls default to false; a row for ONE setting switches no other on', async () => {
+    const { rows: defs } = await db.query(
+      `SELECT column_name, column_default FROM information_schema.columns
+        WHERE table_schema='public' AND table_name='engagement_system_controls' AND column_name LIKE '%\\_enabled' ORDER BY 1`);
+    expect(defs).toEqual(['ai_suggestions_enabled', 'auto_reply_enabled', 'bulk_reply_enabled', 'digest_generation_enabled',
+      'opportunity_detection_enabled', 'response_strategy_learning_enabled', 'triage_engine_enabled']
+      .map((column_name) => ({ column_name, column_default: 'false' })));
     await inRollback(async () => {
-      await db.query(`INSERT INTO public.engagement_system_controls (organization_id, auto_reply_enabled) VALUES ($1, false)`, [ORG]);
-      const { rows } = await db.query(`SELECT triage_engine_enabled FROM public.engagement_system_controls WHERE organization_id = $1`, [ORG]);
-      expect(rows).toEqual([{ triage_engine_enabled: false }]);
+      await db.query(`INSERT INTO public.engagement_system_controls (organization_id, ai_suggestions_enabled) VALUES ($1, true)`, [ORG]);
+      const { rows } = await db.query(
+        `SELECT auto_reply_enabled, bulk_reply_enabled, ai_suggestions_enabled, triage_engine_enabled, opportunity_detection_enabled,
+                response_strategy_learning_enabled, digest_generation_enabled
+           FROM public.engagement_system_controls WHERE organization_id = $1`, [ORG]);
+      expect(rows).toEqual([{ auto_reply_enabled: false, bulk_reply_enabled: false, ai_suggestions_enabled: true, triage_engine_enabled: false,
+        opportunity_detection_enabled: false, response_strategy_learning_enabled: false, digest_generation_enabled: false }]);
     });
   });
 

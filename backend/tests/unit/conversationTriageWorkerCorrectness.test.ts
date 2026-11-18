@@ -174,11 +174,22 @@ describe('b) engagement controls fail closed on a read error', () => {
     expect(classified).toEqual([]);
   });
 
-  test('owner 2026-11-18 OPT-IN: no row (not an error) -> triage OFF, the other controls keep their defaults', async () => {
+  test('owner 2026-11-18 OPT-IN (inbox AI): no row (not an error) -> EVERY engagement AI control OFF', async () => {
     db.optInAll = false;
     const c = await getControls('org-a');
+    expect(c).toEqual({
+      auto_reply_enabled: false, bulk_reply_enabled: false, ai_suggestions_enabled: false, triage_engine_enabled: false,
+      opportunity_detection_enabled: false, response_strategy_learning_enabled: false, digest_generation_enabled: false,
+    });
+  });
+
+  test('OPT-IN: switching ONE control on does not switch the others on', async () => {
+    db.optInAll = false;
+    db.controls.push({ organization_id: 'org-a', ai_suggestions_enabled: true });
+    const c = await getControls('org-a');
+    expect(c.ai_suggestions_enabled).toBe(true);
+    expect(c.auto_reply_enabled).toBe(false);
     expect(c.triage_engine_enabled).toBe(false);
-    expect(c.auto_reply_enabled).toBe(true);
   });
 
   test('OPT-IN: a row written for ANOTHER setting (triage column absent from the read) is still triage OFF', async () => {

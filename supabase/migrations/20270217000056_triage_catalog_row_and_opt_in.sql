@@ -8,11 +8,13 @@
 --    (conversationTriageWorker.ts); the row is the catalog/preview source and getCreditCost's answer. Deliberately NO
 --    action_pricing_config row (it would make resolveActivityCreditRange treat the key as token-priced - the F3 defect);
 --    the postcondition pins that absence, and the key is therefore absent from public.v_pricing_catalog - expected.
--- 2. engagement_system_controls.triage_engine_enabled: column default true -> FALSE. updateControls upserts only the
---    fields a caller passes, so with a true default a row written for ANY other engagement setting silently opted the
---    company into billed triage. Existing rows are switched OFF as well: a pre-existing true is indistinguishable from
---    the old default, and the ruling is that nobody is charged for something they never chose (C-pack: 0 rows in prod).
---    A company opts in afterwards by setting triage_engine_enabled = true explicitly.
+-- 2. OWNER 2026-11-18 (via b3): inbox AI is OPT-IN - EVERY engagement AI control's column default true -> FALSE
+--    (auto_reply, bulk_reply, ai_suggestions, triage_engine, opportunity_detection, response_strategy_learning,
+--    digest_generation). updateControls upserts only the fields a caller passes, so with true defaults a row written for
+--    ONE setting silently switched the others on. The app's DEFAULTS (no row) are all off in the same change.
+--    Existing rows: triage_engine_enabled is switched OFF (billed; a pre-existing true is indistinguishable from the old
+--    default); the other columns keep their stored values (b3: no existing org has a row; C-pack: 0 rows).
+--    A company opts in afterwards by switching a control on explicitly in settings.
 --
 -- No table is created; no GRANT changes. Rollback: rollbacks/triage_catalog_row_and_opt_in_rollback.sql.
 
@@ -31,7 +33,13 @@ BEGIN
 END
 $m056_pre$;
 
+ALTER TABLE public.engagement_system_controls ALTER COLUMN auto_reply_enabled SET DEFAULT false;
+ALTER TABLE public.engagement_system_controls ALTER COLUMN bulk_reply_enabled SET DEFAULT false;
+ALTER TABLE public.engagement_system_controls ALTER COLUMN ai_suggestions_enabled SET DEFAULT false;
 ALTER TABLE public.engagement_system_controls ALTER COLUMN triage_engine_enabled SET DEFAULT false;
+ALTER TABLE public.engagement_system_controls ALTER COLUMN opportunity_detection_enabled SET DEFAULT false;
+ALTER TABLE public.engagement_system_controls ALTER COLUMN response_strategy_learning_enabled SET DEFAULT false;
+ALTER TABLE public.engagement_system_controls ALTER COLUMN digest_generation_enabled SET DEFAULT false;
 UPDATE public.engagement_system_controls SET triage_engine_enabled = false, updated_at = now()
  WHERE triage_engine_enabled;
 
@@ -49,10 +57,16 @@ BEGIN
   IF EXISTS (SELECT 1 FROM public.action_pricing_config WHERE action_key = 'conversation_triage' AND is_active) THEN
     RAISE EXCEPTION '056 postcondition: an active action_pricing_config row for conversation_triage would make the preview token-priced';
   END IF;
-  IF (SELECT column_default FROM information_schema.columns
-       WHERE table_schema = 'public' AND table_name = 'engagement_system_controls' AND column_name = 'triage_engine_enabled')
-     IS DISTINCT FROM 'false' THEN
-    RAISE EXCEPTION '056 postcondition: triage_engine_enabled default is not false';
+  IF EXISTS (SELECT 1 FROM information_schema.columns
+              WHERE table_schema = 'public' AND table_name = 'engagement_system_controls'
+                AND column_name IN ('auto_reply_enabled', 'bulk_reply_enabled', 'ai_suggestions_enabled', 'triage_engine_enabled', 'opportunity_detection_enabled', 'response_strategy_learning_enabled', 'digest_generation_enabled')
+                AND column_default IS DISTINCT FROM 'false') THEN
+    RAISE EXCEPTION '056 postcondition: an engagement AI control does not default to false (opt-in)';
+  END IF;
+  IF (SELECT count(*) FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = 'engagement_system_controls'
+         AND column_name IN ('auto_reply_enabled', 'bulk_reply_enabled', 'ai_suggestions_enabled', 'triage_engine_enabled', 'opportunity_detection_enabled', 'response_strategy_learning_enabled', 'digest_generation_enabled')) <> 7 THEN
+    RAISE EXCEPTION '056 postcondition: expected the 7 engagement AI control columns';
   END IF;
   IF EXISTS (SELECT 1 FROM public.engagement_system_controls WHERE triage_engine_enabled) THEN
     RAISE EXCEPTION '056 postcondition: a company is still opted in to triage';

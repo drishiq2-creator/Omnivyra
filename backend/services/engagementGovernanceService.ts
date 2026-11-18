@@ -16,17 +16,19 @@ export type EngagementControls = {
   digest_generation_enabled: boolean;
 };
 
+/**
+ * OWNER 2026-11-18 (via b3): inbox AI is OPT-IN. Every engagement AI control is OFF for a company that has not switched
+ * it on in settings (where it sees the cost). Migration 20270217000056 makes every column default false too, so a row
+ * written for one setting never opts the company into the others.
+ */
 const DEFAULTS: EngagementControls = {
-  auto_reply_enabled: true,
-  bulk_reply_enabled: true,
-  ai_suggestions_enabled: true,
-  // OWNER 2026-11-18: triage is billed (1 credit per classified conversation) and OPT-IN - off unless the company
-  // turns it on. (Migration 20270217000056 makes the column default false too, so a row written for another setting
-  // never opts a company in.)
+  auto_reply_enabled: false,
+  bulk_reply_enabled: false,
+  ai_suggestions_enabled: false,
   triage_engine_enabled: false,
-  opportunity_detection_enabled: true,
-  response_strategy_learning_enabled: true,
-  digest_generation_enabled: true,
+  opportunity_detection_enabled: false,
+  response_strategy_learning_enabled: false,
+  digest_generation_enabled: false,
 };
 
 /** Fail-closed answer when the controls cannot be read: no engagement AI work runs on an unknown setting. */
@@ -55,18 +57,18 @@ export async function getControls(organizationId: string): Promise<EngagementCon
     console.error('[engagementGovernance] engagement_controls_read_failed', { organizationId, message: error.message });
     return { ...ALL_OFF };
   }
-  // DELIBERATE product behaviour, not a leftover (7c): a company that never wrote its controls gets DEFAULTS. Triage is
-  // OPT-IN (owner 2026-11-18) so its default is OFF; the other controls keep their defaults.
+  // DELIBERATE product behaviour, not a leftover (7c): a company that never wrote its controls gets DEFAULTS - all OFF
+  // (owner 2026-11-18: inbox AI is opt-in). A read ERROR is a different fact and is handled above (logged, all off).
   if (!data) return DEFAULTS;
 
   return {
-    auto_reply_enabled: data.auto_reply_enabled ?? true,
-    bulk_reply_enabled: data.bulk_reply_enabled ?? true,
-    ai_suggestions_enabled: data.ai_suggestions_enabled ?? true,
+    auto_reply_enabled: data.auto_reply_enabled ?? false,
+    bulk_reply_enabled: data.bulk_reply_enabled ?? false,
+    ai_suggestions_enabled: data.ai_suggestions_enabled ?? false,
     triage_engine_enabled: data.triage_engine_enabled ?? false,
-    opportunity_detection_enabled: data.opportunity_detection_enabled ?? true,
-    response_strategy_learning_enabled: data.response_strategy_learning_enabled ?? true,
-    digest_generation_enabled: data.digest_generation_enabled ?? true,
+    opportunity_detection_enabled: data.opportunity_detection_enabled ?? false,
+    response_strategy_learning_enabled: data.response_strategy_learning_enabled ?? false,
+    digest_generation_enabled: data.digest_generation_enabled ?? false,
   };
 }
 
@@ -100,12 +102,12 @@ export async function updateControls(
   }
 
   return {
-    auto_reply_enabled: data?.auto_reply_enabled ?? true,
-    bulk_reply_enabled: data?.bulk_reply_enabled ?? true,
-    ai_suggestions_enabled: data?.ai_suggestions_enabled ?? true,
+    auto_reply_enabled: data?.auto_reply_enabled ?? false,
+    bulk_reply_enabled: data?.bulk_reply_enabled ?? false,
+    ai_suggestions_enabled: data?.ai_suggestions_enabled ?? false,
     triage_engine_enabled: data?.triage_engine_enabled ?? false,
-    opportunity_detection_enabled: data?.opportunity_detection_enabled ?? true,
-    response_strategy_learning_enabled: data?.response_strategy_learning_enabled ?? true,
-    digest_generation_enabled: data?.digest_generation_enabled ?? true,
+    opportunity_detection_enabled: data?.opportunity_detection_enabled ?? false,
+    response_strategy_learning_enabled: data?.response_strategy_learning_enabled ?? false,
+    digest_generation_enabled: data?.digest_generation_enabled ?? false,
   };
 }
