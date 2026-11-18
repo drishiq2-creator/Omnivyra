@@ -126,9 +126,13 @@ describe('BlogGenerateModal (rendered)', () => {
     expect(keyOf(full[1])).not.toBe(keyOf(full[0]));
   });
 
-  it('lost connection -> the uncertain line, and the retry reuses the key', async () => {
+  // COUPLED CLAIM (7c): the line says "trying again won't charge you twice", which is true ONLY
+  // because the kept key makes the retry the same request. One test asserts both, so a change to
+  // the key rule can't silently falsify the sentence.
+  it('lost connection -> "won’t charge you twice" is shown AND the retry reuses the key', async () => {
     const { full, write } = await toWriteStep('blog', 'C-lost', [new TypeError('Failed to fetch'), reply(200, { result: { title: 't' } })]);
     fireEvent.click(write());
+    expect(BILLED_NETWORK_UNCERTAIN).toMatch(/won’t charge you twice/);
     expect(await screen.findByText(new RegExp(BILLED_NETWORK_UNCERTAIN.slice(0, 30)))).toBeInTheDocument();
     fireEvent.click(write());
     await waitFor(() => expect(full).toHaveLength(2));

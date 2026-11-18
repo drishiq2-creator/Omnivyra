@@ -14,6 +14,13 @@
  *     server says the same key is still running) the key is KEPT, so trying again reuses it and the
  *     server answers "already being written" / "already finished" instead of holding a second 40.
  * Today's main routes ignore the header, so sending it is harmless before c6's branch lands.
+ *
+ * DO NOT "FIX" THE KEPT KEY (7c, 2026-11-18). If a finished, charged blog's response is lost, the
+ * retry with the kept key can only be answered from the SERVER (owner ruling via b3: replay the
+ * same result, one charge; c6 builds it). Ending the key on a lost connection so the retry
+ * regenerates would turn lost data into a SECOND charge. The UI line "Trying again won't charge you
+ * twice" (BlogGenerateModalMain BILLED_NETWORK_UNCERTAIN) is true only because of this rule;
+ * blogCostUi.test.tsx pins the two together.
  */
 import { createBilledActionKeyGate } from '../idempotency';
 
