@@ -102,6 +102,11 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
 
   try {
     const { proposals, usedFallback, fallbackReason } = await runCampaignContentAssist({ request, llm });
+    if (usedFallback) {
+      // b3 2026-11-18: the deterministic fallback is NOT charged (the billed AI call failed or replayed an error, and
+      // was released). Counted, and flagged in the response (used_fallback) so the UI can say "AI was unavailable".
+      try { (await import('../../../backend/services/billing/billingMetrics')).incrCounter('assist_ai_fallback_total'); } catch { /* fail-safe */ }
+    }
     if (usedFallback && fallbackReason) {
       try {
         const { logger } = await import('../../../backend/services/logger');
