@@ -12,7 +12,7 @@ import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeF
 
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { enforceCompanyAccess } from '../../../backend/services/userContextService';
-import { getUserRole } from '../../../backend/services/rbacService';
+import { getUserRole, respondRoleRefusal } from '../../../backend/services/rbacService';
 import { hasCommunityAiCapability } from '../../../backend/services/rbac/communityAiCapabilities';
 import {
   addWorkspaceItem,
@@ -64,7 +64,7 @@ async function handlePost(req: NextApiRequest, res: NextApiResponse) {
   const ctx = await enforceCompanyAccess({ req, res, companyId });
   if (!ctx) return;
   const { role, error: roleError } = await getUserRole(ctx.userId, companyId);
-  if (roleError || !role) return res.status(403).json({ error: roleError ?? 'FORBIDDEN_ROLE' });
+  if (roleError || !role) return respondRoleRefusal(res, roleError);
   if (!hasCommunityAiCapability(role, 'MANAGE_LISTENING_CAPABILITIES')) {
     return res.status(403).json({ error: 'FORBIDDEN_ROLE' });
   }
@@ -119,7 +119,7 @@ async function handlePatch(req: NextApiRequest, res: NextApiResponse) {
   const ctx = await enforceCompanyAccess({ req, res, companyId });
   if (!ctx) return;
   const { role, error: roleError } = await getUserRole(ctx.userId, companyId);
-  if (roleError || !role) return res.status(403).json({ error: roleError ?? 'FORBIDDEN_ROLE' });
+  if (roleError || !role) return respondRoleRefusal(res, roleError);
   if (!hasCommunityAiCapability(role, 'MANAGE_LISTENING_CAPABILITIES')) {
     return res.status(403).json({ error: 'FORBIDDEN_ROLE' });
   }
@@ -139,7 +139,7 @@ async function handleDelete(req: NextApiRequest, res: NextApiResponse) {
   const ctx = await enforceCompanyAccess({ req, res, companyId });
   if (!ctx) return;
   const { role, error: roleError } = await getUserRole(ctx.userId, companyId);
-  if (roleError || !role) return res.status(403).json({ error: roleError ?? 'FORBIDDEN_ROLE' });
+  if (roleError || !role) return respondRoleRefusal(res, roleError);
   if (!hasCommunityAiCapability(role, 'MANAGE_LISTENING_CAPABILITIES')) {
     return res.status(403).json({ error: 'FORBIDDEN_ROLE' });
   }
