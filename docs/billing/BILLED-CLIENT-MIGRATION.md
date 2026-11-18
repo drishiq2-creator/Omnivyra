@@ -59,6 +59,7 @@ Batches group screens that share a feature, so each one can be reviewed and chec
 - [ ] `/api/bolt/campaign-chat`: `components/bolt/BoltCampaignChat.tsx`, `components/BoltCreatorViewMain.tsx`, `components/command-center/BoltCombinedStrategyMain.tsx`
 
 ### Batch 4: Content & engagement
+- [ ] **Rewire (b3, 2026-11-18): `pages/engagement-inbox.tsx` "Generate a reply"** (:249-259 at main 516d526d3) → `/api/engagement/suggestions`. Today it POSTs `/api/engagement/generate-response` with `original_message` and no `engagement_type`; the route reads `message` + requires `engagement_type` (generate-response.ts:79-88), so it ALWAYS 400s "message required" and has never worked. c6 is closing that route's unbilled AI fallback (409 `AI_REPLY_USE_SUGGESTIONS`). The new call uses the shared keep/end helper (replaying route) and the price line. Owner opt-in: when `ai_suggestions` is OFF (the default) the button does NOT call; it shows "Reply suggestions are off. A company admin can switch them on in Inbox AI settings." with a link to the Inbox AI settings page. Rendered tests: off -> no request + the message/link; on -> key sent, kept on a lost connection, price line shown.
 - [ ] `/api/company/blog/brief-suggestions` (shared fetcher first, then pages):
   - `components/content/managed-intelligence/briefSuggestionsFetcher.ts`
   - `components/blog/intelligence/useBlogIntelligence.ts`
