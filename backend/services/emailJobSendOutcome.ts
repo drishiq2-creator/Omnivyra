@@ -28,7 +28,8 @@ export async function emailSendFailureOutcome(error: unknown): Promise<EmailSend
   // Since the idempotency change (CI-248), a KEYED send that may already have gone out answers
   // 409 IDEMPOTENCY_UNCERTAIN. That 4xx is NOT 'nothing sent' - it is the uncertain verdict itself, so it must
   // never become a retry (a9, CI-124 x CI-248 merge). The email_jobs worker sends no key today; this keeps it
-  // correct the day it does.
+  // correct the day it does. NOT dormant feature code: a fail-safe for an answer the function can already give.
+  // Do not remove it in a dormant-code sweep - without it, a keyed uncertain send would be retried (7c).
   if (status === 409 && (body as { error?: unknown } | null)?.error === 'IDEMPOTENCY_UNCERTAIN') return 'uncertain';
   if (status !== null && status >= 400 && status < 500) return 'not_sent';
   return (body as { outcome?: unknown } | null)?.outcome === 'not_sent' ? 'not_sent' : 'uncertain';
