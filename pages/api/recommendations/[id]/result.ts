@@ -4,6 +4,7 @@ import { resolveUserContext } from '../../../../backend/services/userContextServ
 import { isSuperAdmin } from '../../../../backend/services/rbacService';
 import { supabase } from '../../../../backend/db/supabaseClient';
 import { tenantChildTable, tenantContextFor } from '../../../../backend/db/tenantTable';
+import { reportTenantFanout } from '../../../../backend/db/seamDenial';
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'GET') {
@@ -60,7 +61,9 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       tenantContextFor({ userId: userContext.userId }, String(job.company_id)),
       String(job.id),
     );
-  } catch {
+  } catch (err) {
+    // A seam fan-out (availability limit) is still raised as the alertable server signal (7c, 2026-11-19).
+    reportTenantFanout(err);
     return res.status(404).json({ error: 'Job not found' });
   }
   const { data: analysis, error: analysisError } = await analysisTable

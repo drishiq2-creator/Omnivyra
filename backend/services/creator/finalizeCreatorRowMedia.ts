@@ -24,6 +24,7 @@
  */
 
 import { ownerOfChildRow, systemTenantContext, tenantChildTable } from '@/backend/db/tenantTable';
+import { reportTenantFanout } from '@/backend/db/seamDenial';
 import {
   normalizeCreatorFormat,
   isAttachmentRequiredFormat,
@@ -89,6 +90,8 @@ export async function finalizeCreatorRowMediaLifecycle(
       owner.parentId,
     );
   } catch (seamError) {
+    // A seam fan-out (availability limit) is still raised as the alertable server signal (7c, 2026-11-19).
+    reportTenantFanout(seamError);
     return { rowId, ok: false, scheduled: false, reason: `tenant_refused:${(seamError as Error)?.message ?? 'unknown'}` };
   }
 

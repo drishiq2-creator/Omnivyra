@@ -14,6 +14,7 @@
 
 import { supabase } from '../../../db/supabaseClient';
 import { ownerOfChildRow, systemTenantContext, tenantChildTable } from '../../../db/tenantTable';
+import { reportTenantFanout } from '../../../db/seamDenial';
 import { getExecutionItem, getExecutionItems, isSafeActivityKey } from '../canonicalExecutionAdapter';
 import { projectExecutionState } from './orchestrationStateProjector';
 import {
@@ -61,7 +62,9 @@ async function persistProjection(
       .update({ content: JSON.stringify(merged), updated_at: new Date().toISOString() })
       .eq('id', rowId);
     return { ok: !error, previous };
-  } catch {
+  } catch (err) {
+    // A seam fan-out (availability limit) is still raised as the alertable server signal (7c, 2026-11-19).
+    reportTenantFanout(err);
     return { ok: false, previous: null };
   }
 }
