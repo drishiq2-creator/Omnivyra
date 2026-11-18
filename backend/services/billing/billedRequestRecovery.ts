@@ -16,6 +16,7 @@ import { persistBilledResult, replayBilledResult } from './billedResultStore';
 import { readOriginalCharge, refundOriginalCharge, type RefundOutcome } from './owedRefunds';
 import { emitAnomaly } from './billingAuditEmitter';
 import { logger } from '../logger';
+import { supabase } from '../../db/supabaseClient';
 
 /** The client's Idempotency-Key when usable (>= 8 chars after trim), else null. Never synthesises one. */
 export function clientIdempotencyKey(header: unknown): string | null {
@@ -74,6 +75,49 @@ export class BilledRouteRefundPendingError extends Error {
     super('We could not recover this result and could not record the refund yet. Please try again in a moment.');
     this.name = 'BilledRouteRefundPendingError';
   }
+}
+
+/** The same key's first attempt is still running: retry after a moment with the SAME key (never a second run). */
+export class BilledRouteRequestInProgressError extends Error {
+  readonly code = 'REQUEST_IN_PROGRESS';
+  readonly retryable = true;
+  constructor(public readonly surface: BillingSurface | string) {
+    super('This request is still being processed. Please wait a moment and try again.');
+    this.name = 'BilledRouteRequestInProgressError';
+  }
+}
+
+/**
+ * How long an unsettled hold counts as "in flight". Longer than any billed route's own timeout; an OLDER unsettled hold
+ * is a run that died (the orphan reapers are unscheduled until 053), so the engine's resume path takes it over rather
+ * than leaving the key refused forever.
+ */
+export const IN_FLIGHT_WINDOW_MS = 10 * 60 * 1000;
+
+/**
+ * Refuse a same-key request while its first attempt is still running (an unsettled HOLD younger than the window): the
+ * engine would otherwise RESUME the hold and run the work a second time under one charge. A read error proceeds (the
+ * engine's resume is single-charge; the residual is a duplicate run, never a duplicate charge).
+ */
+export async function refuseIfInFlight(a: { surface: BillingSurface | string; baseKey: string; now?: Date }): Promise<void> {
+  const hold = `${a.baseKey}:hold`;
+  let rows: Array<{ idempotency_key: string; created_at: string }> = [];
+  try {
+    const { data, error } = await supabase
+      .from('credit_transactions')
+      .select('idempotency_key, created_at')
+      .in('idempotency_key', [hold, `${a.baseKey}:confirm`, `${a.baseKey}:release`]);
+    if (error) throw new Error(error.message);
+    rows = (data ?? []) as typeof rows;
+  } catch (err) {
+    logger.warn('billed_in_flight_check_failed', { surface: a.surface, message: (err as Error)?.message });
+    return;
+  }
+  const keys = new Set(rows.map((r) => r.idempotency_key));
+  if (!keys.has(hold) || keys.has(`${a.baseKey}:confirm`) || keys.has(`${a.baseKey}:release`)) return;
+  const created = new Date(rows.find((r) => r.idempotency_key === hold)!.created_at).getTime();
+  const age = (a.now ?? new Date()).getTime() - created;
+  if (Number.isFinite(age) && age < IN_FLIGHT_WINDOW_MS) throw new BilledRouteRequestInProgressError(a.surface);
 }
 
 /** Internal carrier: the work finished but could not be persisted - the engine releases, the caller returns it free. */
