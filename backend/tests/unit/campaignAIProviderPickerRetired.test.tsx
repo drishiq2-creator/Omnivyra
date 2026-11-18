@@ -89,6 +89,10 @@ describe('the fake-AI surfaces are RETIRED, not hidden (b3 2026-11-19; public re
     'components/MultiAIChat.tsx',
     'components/ComprehensivePlanningInterface.tsx',
     'lib/campaign-details/useWeeklyAiActions.ts',
+    // Orphaned by the deletion above (7c): their only consumer chain ended at ComprehensivePlanningInterface.
+    'components/planner/ComprehensivePlanCanvas.tsx',
+    'components/planner/ComprehensivePlanHeader.tsx',
+    'hooks/useComprehensivePlan.ts',
   ])('%s is deleted', (file) => {
     expect(fs.existsSync(at(file))).toBe(false);
   });
@@ -109,13 +113,6 @@ describe('the fake-AI surfaces are RETIRED, not hidden (b3 2026-11-19; public re
     };
     ['components', 'hooks', 'lib', 'pages'].forEach(walk);
     expect(hits).toEqual([]);
-  });
-
-  it('useComprehensivePlan is TYPES only (its hook defaulted to the demo provider and lost its only caller)', () => {
-    const src = read('hooks/useComprehensivePlan.ts');
-    expect(src).not.toMatch(/export function useComprehensivePlan/);
-    expect(src).not.toMatch(/'demo'/);
-    expect(src).toMatch(/export interface CampaignStrategy/); // control: the types are still here
   });
 
   it('the blueprint-failure fallback sends no provider and reports what was ACTUALLY created', () => {
