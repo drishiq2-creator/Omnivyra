@@ -402,7 +402,7 @@ export function useCampaignPlanningState() {
     // Fail closed (04, 2026-11-18): with no active company there is nothing to create the campaign under, so do not
     // call (the server would answer 400 COMPANY_REQUIRED); tell the user plainly instead.
     if (!selectedCompanyId) {
-      notify('info', 'Select a company to create a campaign.');
+      notify('info', 'Select a company to generate a plan.');
       return;
     }
 
@@ -435,14 +435,18 @@ export function useCampaignPlanningState() {
         if (adoptedCampaignId !== campaignId) {
           setCampaignId(adoptedCampaignId);
           setCampaignData(prev => (prev.id === campaignId ? { ...prev, id: adoptedCampaignId } : prev));
-          window.history.replaceState({}, '', `${window.location.pathname}?campaignId=${adoptedCampaignId}`);
+          // 04 review: replace ONLY campaignId; every other param (e.g. ?companyId, read by this hook) survives a reload.
+          const adoptedUrl = new URL(window.location.href);
+          adoptedUrl.searchParams.set('campaignId', adoptedCampaignId);
+          window.history.replaceState({}, '', `${adoptedUrl.pathname}${adoptedUrl.search}`);
         }
 
         // Check for existing plan after generation
         await checkExistingPlan(adoptedCampaignId);
 
         // Redirect to campaign details to view the generated plan
-        window.location.href = `/campaign-details/${adoptedCampaignId}`;
+        // The adopted id is server-controlled (phase 2): encode it into the path.
+        window.location.href = `/campaign-details/${encodeURIComponent(adoptedCampaignId)}`;
       } else {
         throw new Error('Failed to generate campaign plan');
       }
@@ -460,7 +464,7 @@ export function useCampaignPlanningState() {
   // Check if campaign plan exists and load description
   const checkExistingPlan = async (campaignId: string) => {
     try {
-      const response = await fetch(`/api/campaigns/get-weekly-plans?campaignId=${campaignId}`);
+      const response = await fetch(`/api/campaigns/get-weekly-plans?campaignId=${encodeURIComponent(campaignId)}`);
       if (response.ok) {
         const data = await response.json();
         console.log('Weekly plans data received:', data);

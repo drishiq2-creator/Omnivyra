@@ -118,7 +118,7 @@ export function useCampaignPlanCreation({
           if (recommendationIdParam) nextParams.set('recommendationId', recommendationIdParam);
         }
         nextParams.set('focus', 'weekly-blueprint');
-        window.location.href = `/campaign-details/${adoptedCampaignId}?${nextParams.toString()}`;
+        window.location.href = `/campaign-details/${encodeURIComponent(adoptedCampaignId)}?${nextParams.toString()}`;
       }
     } catch (error) {
       console.error('Error creating campaign plan:', error);

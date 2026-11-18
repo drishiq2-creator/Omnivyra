@@ -105,7 +105,10 @@ describe('resolveReturnedCampaignId (helper)', () => {
   });
   it('keeps the sent id for an old server / unusable value', () => {
     for (const body of [{}, { success: true, data: { campaignId: RETURNED } }, { campaign_id: '' }, { campaign_id: null },
-      { campaign_id: 42 }, { campaign_id: { id: RETURNED } }, null, undefined, 'x', [RETURNED]]) {
+      { campaign_id: 42 }, { campaign_id: { id: RETURNED } }, null, undefined, 'x', [RETURNED],
+      // 7c: a malformed or hostile id is never adopted (it would reach the URL and the navigation target)
+      { campaign_id: 'not-a-uuid' }, { campaign_id: `${RETURNED}&companyId=evil` }, { campaign_id: '../../admin' },
+      { campaign_id: `${RETURNED}#x` }, { campaign_id: ` ${RETURNED}` }]) {
       expect(resolveReturnedCampaignId(SENT, body)).toBe(SENT);
     }
   });
@@ -235,7 +238,7 @@ describe('hooks/useCampaignPlanningState generate12WeekPlan', () => {
     await act(async () => { await result.current.createNewCampaign(); });
     await act(async () => { await result.current.generate12WeekPlan(); });
     expect(fetchMock.mock.calls.filter(c => String(c[0]) === CREATE)).toEqual([]);
-    expect(result.current.notice).toEqual({ type: 'info', message: 'Select a company to create a campaign.' });
+    expect(result.current.notice).toEqual({ type: 'info', message: 'Select a company to generate a plan.' });
   });
 
   it('(a) NO-OP: same id returned -> no URL replace, refetch + navigation with the sent id', async () => {
@@ -267,6 +270,18 @@ describe('hooks/useCampaignPlanningState generate12WeekPlan', () => {
     expect(mentions(after, SENT)).toEqual([]);
     expect(result.current.campaignId).toBe(RETURNED);
     expect(result.current.campaignData.id).toBe(RETURNED);
+  });
+
+  it('(b) ADOPTION keeps every other query param (04): ?companyId survives the URL replace', async () => {
+    createResponseBody = { success: true, campaign_id: RETURNED };
+    Object.defineProperty(globalThis.crypto, 'randomUUID', { configurable: true, writable: true, value: () => SENT });
+    const { result } = renderHook(() => useCampaignPlanningState());
+    await act(async () => { await result.current.createNewCampaign(); });
+    search = `?companyId=co-keep&campaignId=${SENT}`;
+    await act(async () => { await result.current.generate12WeekPlan(); });
+    await act(async () => { await new Promise(r => setTimeout(r, 0)); });
+    const replaced = afterCreate().filter(e => e.kind === 'replaceState');
+    expect(replaced).toEqual([{ kind: 'replaceState', url: `/campaign-planning?companyId=co-keep&campaignId=${RETURNED}` }]);
   });
 
   it('(c) BACKWARD COMPAT: no campaign_id -> the sent id is used', async () => {

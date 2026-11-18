@@ -347,6 +347,17 @@ describe('campaigns/create-12week-plan — tenant binding', () => {
     expect(res.body.campaign_id).toBe(OWN_CAMPAIGN);
   });
 
+  it('PL-38 (04): an EXISTING campaign with a DIFFERENT body company uses the ROW company (the body company is ignored)', async () => {
+    // The /campaign-planning hook now always sends the ACTIVE company. A user who switched to company B and plans
+    // company A's existing campaign must not be refused, and nothing may be written under B.
+    const res = await post(createPlanRoute, MEMBER_A, { campaignId: OWN_CAMPAIGN, companyId: VICTIM, ...PLAN });
+    expect(res.statusCode).toBe(200);
+    expect(res.body.campaign_id).toBe(OWN_CAMPAIGN);
+    const stamped = tenantWrites().filter(w => w.payload && 'company_id' in w.payload).map(w => w.payload.company_id);
+    expect(stamped).not.toContain(VICTIM);
+    expect(tenantWrites().some(w => w.table === 'campaigns' && w.op === 'insert')).toBe(false); // planned, not created
+  });
+
   it('TENANT: creating a campaign with NO companyId is refused and writes nothing (was a company-less campaign)', async () => {
     // Changed contract (e9, 2026-11-12): this used to assert that a company-less campaign was created.
     // That row is the NULL campaigns.company_id defect. The tenant guard does no active-company

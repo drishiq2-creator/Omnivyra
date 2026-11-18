@@ -259,7 +259,7 @@ const AIIntegration = {
         const result = await response.json().catch(() => null);
         const adoptedCampaignId = resolveReturnedCampaignId(campaignId, result);
         // Redirect to campaign details to view the generated plan
-        window.location.href = Routes.viewCampaign(adoptedCampaignId);
+        window.location.href = Routes.viewCampaign(encodeURIComponent(adoptedCampaignId));
       }
     } catch (error) {
       console.error('Error generating campaign plan:', error);
