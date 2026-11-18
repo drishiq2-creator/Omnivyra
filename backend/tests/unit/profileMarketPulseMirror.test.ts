@@ -161,6 +161,10 @@ describe('marketPulseReadFromBody', () => {
   });
 });
 
+// SOURCE-TEXT pin (7c): it checks the ORDER of calls in saveProfile's text, not runtime behaviour. If the
+// save path moves, re-anchor `post` on the new call that sends the payload, and keep
+// `expect(post).toBeGreaterThan(reread)`: it also fails when the anchor is not found (-1), so the slices below
+// can never silently match nothing. The behavioural equivalent needs the hook rendered.
 describe('saveProfile wiring (6.4b + 05 review)', () => {
   const hook = require('fs').readFileSync(require('path').join(process.cwd(), 'hooks/useCompanyProfileState.tsx'), 'utf8') as string;
   const save = hook.slice(hook.indexOf('const saveProfile = async'));
