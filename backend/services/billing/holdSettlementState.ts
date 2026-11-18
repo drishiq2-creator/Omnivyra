@@ -11,6 +11,7 @@
  */
 import { supabase } from '../../db/supabaseClient';
 import { logger } from '../logger';
+import { CONFIRM_PHASES, SETTLE_PHASES } from '../../../shared/billing/creditPhaseVocabulary';
 
 export type HoldSettlementState =
   | { state: 'open' }
@@ -87,17 +88,12 @@ function creditsOf(r: Row): number | null {
 }
 
 /**
- * The execution_phase vocabulary PROD writes to credit_transactions (verified against the live bodies, C100 record
- * 2026-11-13, committed under backend/tests/fixtures/live-credit-functions-20261113/): apply_credit_reservation
- * (20260322 body) writes 'hold' / 'confirm' / 'release' (plus 'grant' / 'expire' / 'expire_incentive', which never
- * settle a hold); apply_credit_partial_confirm (hand-applied body, md5 ff208f60) writes ONE 'confirm_partial' row and
- * returns the unused remainder to the wallet inside the same UPDATE. liveCreditPhaseVocabulary.test.ts reads those
- * bodies and fails if they write a phase this module does not classify.
+ * The execution_phase vocabulary is defined ONCE, in shared/billing/creditPhaseVocabulary.ts (verified against the live
+ * prod bodies, C100; liveCreditPhaseVocabulary.test.ts parses those bodies and fails if they write a phase the
+ * vocabulary does not classify). Re-exported here for this module's existing importers - never redefined
+ * (creditPhaseVocabularyNoLocalCopies.test.ts fails on a local copy).
  */
-export const CONFIRM_PHASES: readonly string[] = ['confirm', 'confirm_partial'];
-export const SETTLE_PHASES: readonly string[] = [...CONFIRM_PHASES, 'release'];
-/** Phases the live bodies write that never settle a hold (classified as "not a settle row"). */
-export const NON_SETTLE_PHASES: readonly string[] = ['hold', 'grant', 'expire', 'expire_incentive'];
+export { CONFIRM_PHASES, SETTLE_PHASES, NON_SETTLE_PHASES } from '../../../shared/billing/creditPhaseVocabulary';
 
 /** The remainder-release key of a confirm, or null when the confirm has no key (never derive from ''). */
 function remainderKeyOf(confirmKey: string | null): string | null {
@@ -169,4 +165,35 @@ export async function readHoldSettlementState(input: {
     logger.error('credit_settle_released_before_confirm', { holdId: input.holdId, confirmKey: input.confirmKey, releaseId: state.transactionId });
   }
   return state;
+}
+
+/**
+ * Settled amounts from an apply_credit_partial_confirm RESULT, whichever shape it has (e9 follow-up, 2026-11-14):
+ *   - a FRESH call returns {total_consumed, total_released, is_underfunded, ...};
+ *   - a REPLAY (same key) and the unique_violation path return row_to_json(the ledger row) - no total_* fields, but the
+ *     row's deltas are -(consumed) per category (live body, C100).
+ * The settlement report previously read only total_* and silently fell back to the PLANNED amounts on every replay.
+ * Planned is now used only when the payload carries neither shape, and is then flagged (amountEstimated).
+ */
+export function settledAmountsFromPartialConfirm(
+  data: unknown,
+  held: number,
+  planned: { consumed: number; released: number },
+): { consumed: number; released: number; underfunded: boolean; amountEstimated: boolean } {
+  const d = (data ?? {}) as Record<string, unknown>;
+  const underfunded = d.is_underfunded === true;
+  const total = Number(d.total_consumed);
+  if (d.total_consumed !== undefined && d.total_consumed !== null && Number.isFinite(total)) {
+    const rel = Number(d.total_released);
+    return { consumed: total, released: Number.isFinite(rel) ? rel : Math.max(0, held - total), underfunded, amountEstimated: false };
+  }
+  const deltas = [d.free_delta, d.paid_delta, d.incentive_delta];
+  const present = deltas.filter((v) => v !== undefined && v !== null);
+  // At least one delta present (all-NULL tells us nothing), and every present one numeric - an unreadable value is
+  // UNKNOWN (falls through to the flagged plan), never silently 0 (05).
+  if (present.length > 0 && present.every((v) => Number.isFinite(Number(v)))) {
+    const consumed = present.reduce<number>((sum, v) => sum + Math.abs(Number(v)), 0);
+    return { consumed, released: Math.max(0, held - consumed), underfunded, amountEstimated: false };
+  }
+  return { consumed: planned.consumed, released: planned.released, underfunded, amountEstimated: true };
 }

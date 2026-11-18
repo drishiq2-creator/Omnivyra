@@ -26,6 +26,7 @@ import {
   previewOnboardingApplication,
   rollbackOnboardingApplication,
   upsertOnboardingTemplate,
+  OnboardingTemplateNotFoundError,
 } from '../../../backend/services/enterpriseOnboardingService';
 import {
   ONBOARDING_APPLICATION_STATUSES,
@@ -132,8 +133,16 @@ async function handlePost(req: NextApiRequest, res: NextApiResponse) {
     });
     return res.status(200).json({ ok: true, application: app });
   } catch (err: any) {
+    // A template the caller's organization does not own (unknown, another tenant's, or a platform preset): uniform
+    // 404, so a probe cannot tell "exists elsewhere" from "never existed".
+    if (err instanceof OnboardingTemplateNotFoundError) {
+      return res.status(404).json({ ok: false, error: 'onboarding_template_not_found' });
+    }
     console.error('[enterprise-onboarding POST] failed:', err?.message);
-    return res.status(500).json({ ok: false, error: err?.message ?? 'onboarding_action_failed' });
+    // Only the stable code before the first ':' reaches the caller, e.g. 'onboarding_template_name_required'. Detail
+    // after it (PostgREST text) is logged above and never echoed.
+    const code = String(err?.message ?? '').split(':')[0].trim();
+    return res.status(500).json({ ok: false, error: /^[a-z0-9_]+$/.test(code) ? code : 'onboarding_action_failed' });
   }
 }
 

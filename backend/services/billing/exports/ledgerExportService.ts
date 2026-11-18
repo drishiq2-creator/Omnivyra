@@ -10,8 +10,10 @@
  */
 
 import { supabase } from '../../../db/supabaseClient';
+
 import { logger } from '../../logger';
 import { recordExportManifest, type ExportFormat, type ManifestResult, type ExportType } from './auditManifestService';
+import { CONFIRM_PHASES } from '../../../../shared/billing/creditPhaseVocabulary';
 
 export interface LedgerExportFilters {
   organizationId?: string;
@@ -96,7 +98,7 @@ export async function exportCompanyUsage(args: {
     .from('credit_transactions')
     .select('id, organization_id, execution_phase, credits_delta, balance_after, usd_equivalent, reference_type, reference_id, note, performed_by, idempotency_key, parent_transaction_id, category, created_at')
     .eq('organization_id', args.organizationId)
-    .eq('execution_phase', 'confirm')
+    .in('execution_phase', [...CONFIRM_PHASES])
     .order('created_at', { ascending: false });
   if (args.periodStart) q = q.gte('created_at', args.periodStart);
   if (args.periodEnd)   q = q.lte('created_at', args.periodEnd);
@@ -128,7 +130,7 @@ export async function exportReservationLifecycle(args: {
   let q = supabase
     .from('credit_transactions')
     .select('id, organization_id, execution_phase, credits_delta, parent_transaction_id, idempotency_key, reference_type, reference_id, created_at, expires_at')
-    .in('execution_phase', ['hold', 'confirm', 'release'])
+    .in('execution_phase', ['hold', ...CONFIRM_PHASES, 'release'])
     .order('created_at', { ascending: false });
   if (args.organizationId) q = q.eq('organization_id', args.organizationId);
   if (args.periodStart)   q = q.gte('created_at', args.periodStart);
