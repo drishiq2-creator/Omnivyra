@@ -45,12 +45,15 @@ describe('mergeNonEmptyFields', () => {
   });
 
   it('field lists match the endpoints that produce them', () => {
+    // 7c 2026-11-19: no longer two copies compared by text. The routes and this client list now import
+    // ONE definition (lib/companyProfile/aiOutputFields), so they match by construction; the identity
+    // and "no private copy" checks live in companyProfileAiFieldsOneSource.test.ts.
     const src = (p: string) => require('fs').readFileSync(require('path').join(process.cwd(), p), 'utf8') as string;
-    for (const f of TARGET_CUSTOMER_FIELDS) expect(src('pages/api/company-profile/define-target-customer.ts')).toContain(`'${f}'`);
-    for (const f of MARKETING_INTELLIGENCE_FIELDS) {
-      expect(src('pages/api/company-profile/generate-marketing-intelligence.ts')).toContain(`'${f}'`);
-      expect(src('pages/api/company-profile/define-marketing-intelligence.ts')).toContain(`'${f}'`);
-    }
+    expect(src('pages/api/company-profile/define-target-customer.ts')).toContain("from '../../../lib/companyProfile/aiOutputFields'");
+    expect(src('pages/api/company-profile/generate-marketing-intelligence.ts')).toContain("from '../../../lib/companyProfile/aiOutputFields'");
+    expect(src('pages/api/company-profile/define-marketing-intelligence.ts')).toContain("from '../../../lib/companyProfile/aiOutputFields'");
+    expect(TARGET_CUSTOMER_FIELDS.length).toBeGreaterThan(0);
+    expect(MARKETING_INTELLIGENCE_FIELDS.length).toBeGreaterThan(0);
   });
 });
 

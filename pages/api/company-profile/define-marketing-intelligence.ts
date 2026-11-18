@@ -3,6 +3,7 @@ import { NextApiRequest, NextApiResponse } from 'next';
 import { runCompletion } from '../../../backend/services/aiGateway';
 import { getCanonicalProfile as getProfile } from '@/backend/services/context/canonicalProfileAdapter';
 import { resolveCompanyAccess } from '../../../backend/services/contentArchitectService';
+import { MARKETING_INTELLIGENCE_FIELDS } from '../../../lib/companyProfile/aiOutputFields';
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'POST') {
@@ -29,15 +30,8 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       : 'Company not yet profiled.';
 
     const companyName = profile?.name || 'the company';
-    const FIELD_ORDER = [
-      'marketing_channels',
-      'content_strategy',
-      'campaign_focus',
-      'key_messages',
-      'brand_positioning',
-      'competitive_advantages',
-      'growth_priorities',
-    ] as const;
+    // One definition shared with the client's advisory merge (lib/companyProfile/aiOutputFields).
+    const FIELD_ORDER = MARKETING_INTELLIGENCE_FIELDS;
     const FIELD_QUESTIONS: Record<string, string> = {
       marketing_channels: `Which marketing channels does ${companyName} rely on most (social, email, events, paid, SEO, community)?`,
       content_strategy: `What is ${companyName}'s content approach — main formats, themes, and cadence?`,

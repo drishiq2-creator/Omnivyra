@@ -10,6 +10,7 @@ import {
   isQuestionEligibleForOrchestration,
 } from '../../../backend/services/companyProfile/profileConversationOrchestrator';
 import { defineRolloutFlag, resolveRolloutSync } from '../../../lib/platform/rollout';
+import { TARGET_CUSTOMER_FIELDS } from '../../../lib/companyProfile/aiOutputFields';
 
 /**
  * CONVERSATION-INTELLIGENCE-001 Phase C — pilot rollout flag (default OFF).
@@ -64,15 +65,8 @@ const FIELDS_DESCRIPTION = [
 
 // The 7 Phase-1 commercial fields, in DB-column naming. Used to detect which are
 // already captured on the profile so the questionnaire never re-asks them.
-const COMMERCIAL_FIELDS = [
-  'target_customer_segment',
-  'ideal_customer_profile',
-  'pricing_model',
-  'sales_motion',
-  'avg_deal_size',
-  'sales_cycle',
-  'key_metrics',
-] as const;
+// One definition shared with the client's advisory merge (lib/companyProfile/aiOutputFields).
+const COMMERCIAL_FIELDS = TARGET_CUSTOMER_FIELDS;
 
 // Phase 2: Campaign purpose questions. Parsed into campaign_purpose_intent JSONB.
 const CAMPAIGN_PURPOSE_QUESTIONS = [

@@ -8,16 +8,10 @@ import {
 import { resolveCompanyAccess } from '../../../backend/services/contentArchitectService';
 import { supabase } from '../../../backend/db/supabaseClient';
 import { mergeAiScalarFields } from '../../../backend/services/companyProfile/aiProfileMerge';
+import { MARKETING_INTELLIGENCE_FIELDS } from '../../../lib/companyProfile/aiOutputFields';
 
-const OUTPUT_FIELDS = [
-  'marketing_channels',
-  'content_strategy',
-  'campaign_focus',
-  'key_messages',
-  'brand_positioning',
-  'competitive_advantages',
-  'growth_priorities',
-] as const;
+// One definition shared with the client's advisory merge (lib/companyProfile/aiOutputFields).
+const OUTPUT_FIELDS = MARKETING_INTELLIGENCE_FIELDS;
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'POST') {

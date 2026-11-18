@@ -63,24 +63,5 @@ export function mergeCampaignPurposeIntent<T extends CampaignPurposeIntentLike>(
   return merged as T;
 }
 
-/** Output fields of /api/company-profile/define-target-customer (COMMERCIAL_FIELDS). */
-export const TARGET_CUSTOMER_FIELDS = [
-  'target_customer_segment',
-  'ideal_customer_profile',
-  'pricing_model',
-  'sales_motion',
-  'avg_deal_size',
-  'sales_cycle',
-  'key_metrics',
-] as const;
-
-/** Output fields of define-/generate-marketing-intelligence (OUTPUT_FIELDS / FIELD_ORDER). */
-export const MARKETING_INTELLIGENCE_FIELDS = [
-  'marketing_channels',
-  'content_strategy',
-  'campaign_focus',
-  'key_messages',
-  'brand_positioning',
-  'competitive_advantages',
-  'growth_priorities',
-] as const;
+/** The endpoints' output fields: ONE definition, owned with the server's guard (7c). */
+export { TARGET_CUSTOMER_FIELDS, MARKETING_INTELLIGENCE_FIELDS } from '../lib/companyProfile/aiOutputFields';
