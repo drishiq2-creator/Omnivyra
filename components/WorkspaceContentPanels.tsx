@@ -6,6 +6,7 @@ import ExamplePreview from '@/components/shared/ExamplePreview';
 import type { ScheduleItem } from '../types/activityWorkspace';
 import type { useActivityWorkspace } from '../hooks/useActivityWorkspace';
 import WorkspacePlatformCard from './activity-workspace/WorkspacePlatformCard';
+import { hasCampaignBackedActivity, MASTER_NEEDS_SAVED_ACTIVITY } from '@/hooks/useActivityWorkspaceContentOps';
 
 type WorkspaceState = ReturnType<typeof useActivityWorkspace>;
 
@@ -36,6 +37,9 @@ export default function WorkspaceContentPanels({ d }: { d: WorkspaceState }) {
   } = d as WorkspaceState & {
     getAddablePlatformsForContentType: (contentType: string) => string[];
   };
+
+  // Same predicate as the handler guard (one source): prevent the dead end, say why.
+  const canGenerateMaster = hasCampaignBackedActivity(payload ?? null);
 
   const masterText =
     String((masterContent as any)?.master_content || (masterContent as any)?.content || '').trim();
@@ -79,12 +83,15 @@ export default function WorkspaceContentPanels({ d }: { d: WorkspaceState }) {
                 <button
                   type="button"
                   onClick={() => handleGenerateMasterContent?.()}
-                  disabled={isGeneratingMaster}
+                  disabled={isGeneratingMaster || !canGenerateMaster}
                   className="inline-flex items-center gap-2 rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                 >
                   <Sparkles className="h-4 w-4" />
                   {isGeneratingMaster ? 'Generating...' : 'Generate Master Content'}
                 </button>
+                {!canGenerateMaster && (
+                  <p className="mt-2 text-xs text-slate-500">{MASTER_NEEDS_SAVED_ACTIVITY}</p>
+                )}
               </div>
             )}
           </div>

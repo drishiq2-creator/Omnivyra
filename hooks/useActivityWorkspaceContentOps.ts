@@ -35,7 +35,7 @@ type Params = {
  */
 export const MASTER_NEEDS_SAVED_ACTIVITY = 'Save this activity to a campaign first to generate its master content.';
 
-function hasCampaignBackedActivity(payload: WorkspacePayload | null): boolean {
+export function hasCampaignBackedActivity(payload: WorkspacePayload | null): boolean {
   const campaignId = String(payload?.campaignId ?? '').trim();
   const executionId = String(payload?.activityId ?? (payload?.dailyExecutionItem as any)?.execution_id ?? '').trim();
   return Boolean(campaignId && executionId);
