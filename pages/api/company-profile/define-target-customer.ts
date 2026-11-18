@@ -66,6 +66,8 @@ const FIELDS_DESCRIPTION = [
 // The 7 Phase-1 commercial fields, in DB-column naming. Used to detect which are
 // already captured on the profile so the questionnaire never re-asks them.
 // One definition shared with the client's advisory merge (lib/companyProfile/aiOutputFields).
+// NOT the same as backend/services/companyProfile/fieldConstants.ts COMMERCIAL_FIELDS (a different 6-field set
+// used for section scoring). This one is the AI endpoint's 7 output fields (7c).
 const COMMERCIAL_FIELDS = TARGET_CUSTOMER_FIELDS;
 
 // Phase 2: Campaign purpose questions. Parsed into campaign_purpose_intent JSONB.

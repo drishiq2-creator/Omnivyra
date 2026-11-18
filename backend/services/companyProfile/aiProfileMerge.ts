@@ -52,3 +52,31 @@ export function mergeCampaignPurposeIntent(stored: unknown, ai: unknown): Cpi | 
   if (domains.length > 0) base.dominant_problem_domains = domains;
   return Object.keys(base).length > 0 ? base : null;
 }
+
+/**
+ * define-marketing-intelligence's deterministic guard (7c 2026-11-19). Per field: a "keep" answer keeps the
+ * current value; else the model's non-empty value; else the user's answer; else the current value. "Current" is
+ * the caller's value (it may carry the user's UNSAVED edits) and, when the caller sent none for a field, the
+ * STORED profile value: a caller short a field (another client, a retry, a stale form) can no longer blank a
+ * stored value. A field with no value anywhere is OMITTED, never '' (the same rule as mergeAiScalarFields).
+ */
+export function finalizeConversationFields(args: {
+  fields: readonly string[];
+  userAnswers: readonly string[];
+  modelFields: Record<string, unknown> | null | undefined;
+  callerCurrent: Record<string, unknown> | null | undefined;
+  stored: Record<string, unknown> | null | undefined;
+  keep: RegExp;
+}): Record<string, string> {
+  const out: Record<string, string> = {};
+  args.fields.forEach((field, i) => {
+    const cur = nonEmpty(args.callerCurrent?.[field]) || nonEmpty(args.stored?.[field]);
+    const ans = String(args.userAnswers[i] ?? '').trim();
+    const modelVal = nonEmpty(args.modelFields?.[field]);
+    let v: string;
+    if (args.keep.test(ans)) v = cur || modelVal;
+    else v = modelVal || ans || cur;
+    if (v) out[field] = v;
+  });
+  return out;
+}
