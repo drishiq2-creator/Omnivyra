@@ -18,14 +18,20 @@ export async function emailSendFailureOutcome(error: unknown): Promise<EmailSend
   if (!e || e.name !== 'FunctionsHttpError') return 'uncertain';
   const response = e.context as { status?: unknown; clone?: () => { json: () => Promise<unknown> }; json?: () => Promise<unknown> } | undefined;
   const status = typeof response?.status === 'number' ? response.status : null;
-  if (status !== null && status >= 400 && status < 500) return 'not_sent';
+  let body: unknown = null;
   try {
     const reader = typeof response?.clone === 'function' ? response.clone() : response;
-    const body = reader && typeof reader.json === 'function' ? await reader.json() : null;
-    return (body as { outcome?: unknown } | null)?.outcome === 'not_sent' ? 'not_sent' : 'uncertain';
+    body = reader && typeof reader.json === 'function' ? await reader.json() : null;
   } catch {
-    return 'uncertain';
+    body = null;
   }
+  // Since the idempotency change (CI-248), a KEYED send that may already have gone out answers
+  // 409 IDEMPOTENCY_UNCERTAIN. That 4xx is NOT 'nothing sent' - it is the uncertain verdict itself, so it must
+  // never become a retry (a9, CI-124 x CI-248 merge). The email_jobs worker sends no key today; this keeps it
+  // correct the day it does.
+  if (status === 409 && (body as { error?: unknown } | null)?.error === 'IDEMPOTENCY_UNCERTAIN') return 'uncertain';
+  if (status !== null && status >= 400 && status < 500) return 'not_sent';
+  return (body as { outcome?: unknown } | null)?.outcome === 'not_sent' ? 'not_sent' : 'uncertain';
 }
 
 /** The dead-letter reason of an uncertain send: a person checks the recipient's inbox / SES before any resend. */

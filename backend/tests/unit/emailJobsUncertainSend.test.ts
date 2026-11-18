@@ -58,6 +58,9 @@ describe('the worker: only a failure known to have sent nothing is retried', () 
     ['a relay error', () => new FunctionsRelayError({})],
     ['a 500 whose answer says the outcome is uncertain', () => new FunctionsHttpError(response(500, { error: 'timeout', outcome: 'uncertain' }))],
     ['a 500 with no outcome (an older function)', () => new FunctionsHttpError(response(500, { error: 'boom' }))],
+    // CI-124 x CI-248 merge (a9): sendOnce's uncertain answers. A 409 is a 4xx but NOT 'nothing sent'.
+    ['a 409 IDEMPOTENCY_UNCERTAIN (a keyed send that may already have gone out)', () => new FunctionsHttpError(response(409, { ok: false, error: 'IDEMPOTENCY_UNCERTAIN', duplicate: true, retryable: false }))],
+    ['a 502 from sendOnce carrying outcome uncertain', () => new FunctionsHttpError(response(502, { ok: false, error: 'socket hang up', uncertain: true, retryable: false, outcome: 'uncertain' }))],
   ])('%s -> DEAD-LETTERED OUTCOME_UNCERTAIN, never retried', async (_l, err) => {
     mockInvoke = async () => ({ data: null, error: err() });
     await tick();
