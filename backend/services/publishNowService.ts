@@ -46,8 +46,12 @@ import { publishThread } from './threadRuntime/threadPublishOrchestrator';
 import {
   classifyPublishAttempt,
   isPreCallClaim,
+  isSupersedePreCallClaim,
   hasUncertainOutcome,
   publishClaimCode,
+  PRIOR_JOB_CANCEL_FAILED,
+  PRIOR_JOB_CANCEL_FAILED_MESSAGE,
+  supersedeClaimToken,
   PUBLISH_CALL_STARTED,
   PUBLISH_OUTCOME_UNCERTAIN,
   PUBLISH_OUTCOME_UNCERTAIN_MESSAGE,
@@ -232,7 +236,7 @@ export type PublishNowResult = {
 };
 
 /** publishNow refused: the post's queued publish job could not be retired. */
-export const PUBLISH_NOW_PRIOR_JOB_CANCEL_FAILED = 'PRIOR_JOB_CANCEL_FAILED' as const;
+export const PUBLISH_NOW_PRIOR_JOB_CANCEL_FAILED = PRIOR_JOB_CANCEL_FAILED;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // POST-LEVEL PUBLISH CLAIM — the durable idempotency boundary
@@ -402,12 +406,19 @@ export async function claimScheduledPostForPublish(input: {
   snapshotStatus: string | null | undefined;
   snapshotUpdatedAt: string | null | undefined;
   snapshotErrorCode: string | null | undefined;
+  /**
+   * The caller will supersede the post's queued jobs (publishNow
+   * `supersede_queued_jobs`): the claim token carries
+   * PUBLISH_SUPERSEDE_CLAIM_MARK, so the claim itself records that a supersede
+   * is in progress (see backend/queue/publishOutcome.ts).
+   */
+  supersede?: boolean;
 }): Promise<PublishClaimResult> {
   const { scheduledPostId } = input;
   const status = String(input.snapshotStatus ?? '').trim().toLowerCase();
   const errorCode = input.snapshotErrorCode ?? null;
   const staleBefore = Date.now() - PUBLISH_CLAIM_STALE_WINDOW_MS;
-  const token = randomUUID();
+  const token = input.supersede === true ? supersedeClaimToken(randomUUID()) : randomUUID();
 
   let query = ownedDbTable('scheduled_posts')
     .update({ status: 'publishing', error_code: publishClaimCode(token), updated_at: new Date().toISOString() })
@@ -422,6 +433,14 @@ export async function claimScheduledPostForPublish(input: {
   } else if (status === 'publishing') {
     if (errorCode === PUBLISH_CALL_STARTED) return claimRefused('call_in_flight');
     if (!isPreCallClaim({ status, error_code: errorCode })) return claimRefused('held_by_another_execution');
+    // A SUPERSEDE-marked pre-call claim is never taken over, however old: its
+    // post's queued job may be alive (the cancel, and the fence that would
+    // have retired the row, may both have failed), and the job that would take
+    // it over is exactly that job. It stays held until the stuck-publishing
+    // sweeper fences it to 'cancelled' / PRIOR_JOB_CANCEL_FAILED.
+    if (isSupersedePreCallClaim({ status, error_code: errorCode })) {
+      return claimRefused('held_by_another_execution');
+    }
     // A pre-call claim: refuse while it looks live (heuristic only).
     const heldSince = input.snapshotUpdatedAt ? new Date(input.snapshotUpdatedAt).getTime() : NaN;
     if (!Number.isFinite(heldSince) || heldSince > staleBefore) {
@@ -558,10 +577,13 @@ export async function refreshScheduledPostMediaFromRefs(input: {
  *     publisher claims (claimScheduledPostForPublish: not_claimable; the
  *     route/worker publish-authorization gate: not releasable) and the cron
  *     never selects.
- *   - if even that write fails, the row keeps this execution's pre-call claim:
- *     a delivery within PUBLISH_CLAIM_STALE_WINDOW_MS is refused as held and
- *     completes without publishing, and the stuck-publishing sweeper later
- *     moves it to a retryable failure with no live job left.
+ *   - if even that write fails, the row keeps this execution's pre-call
+ *     claim, which is SUPERSEDE-marked (PUBLISH_CLAIMED:SUPERSEDE:<uuid>,
+ *     written by the claim itself). A marked claim is refused as held however
+ *     old (no stale takeover), and the stuck-publishing sweeper fences it to
+ *     the same 'cancelled' / PRIOR_JOB_CANCEL_FAILED, never to a claimable
+ *     'failed'. The surviving job therefore completes without publishing
+ *     whenever it is delivered.
  * A BullMQ-only removal error does NOT refuse: the database row is already
  * 'cancelled', and the worker obeys that.
  */
@@ -582,13 +604,21 @@ async function supersedeQueuedPublishJobs(
     detail = `cancel threw: ${error instanceof Error ? error.message : String(error)}`;
   }
 
+  // FENCE, NEVER RELEASE. The claim is NOT given back here, even though no
+  // platform call happened: releasing would restore 'scheduled'/'failed',
+  // both claimable, and hand the row to the queued job whose cancel we could
+  // not confirm — it would publish a post this request reports as not posted.
+  // 'cancelled' is the only state no publisher claims. If this write fails
+  // too, the claim we already hold is SUPERSEDE-marked, so neither a stale
+  // takeover nor the stuck-publishing sweeper can make the row claimable
+  // again: the sweeper writes this same fence.
   let fenced = false;
   try {
     const { data, error } = await ownedDbTable('scheduled_posts')
       .update({
         status: 'cancelled',
         error_code: PUBLISH_NOW_PRIOR_JOB_CANCEL_FAILED,
-        error_message: 'Not posted: its queued publish job could not be retired, so it was cancelled to prevent a later or duplicate post.',
+        error_message: PRIOR_JOB_CANCEL_FAILED_MESSAGE,
         updated_at: new Date().toISOString(),
       })
       .eq('id', scheduledPostId)
@@ -722,6 +752,9 @@ export async function publishNow(input: PublishNowInput): Promise<PublishNowResu
     snapshotStatus:    (scheduledPost as { status?: string | null }).status ?? null,
     snapshotUpdatedAt: (scheduledPost as { updated_at?: string | null }).updated_at ?? null,
     snapshotErrorCode: (scheduledPost as { error_code?: string | null }).error_code ?? null,
+    // The marker must travel with the FIRST write: a superseding publish-now
+    // records it in the claim itself, before it touches the queue.
+    supersede: input.supersede_queued_jobs === true,
   });
 
   if (!claim.claimed) {

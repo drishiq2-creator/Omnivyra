@@ -548,3 +548,200 @@ describe('ordering', () => {
     expect(qjob(jobId).status).toBe('pending');
   });
 });
+
+// ─── (8) the supersede marker travels with the claim (reviewer 7c) ─────────
+//
+// THE HOLE: the cancel fails AND the fence write fails, so the row keeps the
+// pre-call claim. Before the marker, the stuck-publishing sweeper relabelled
+// any pre-call claim 'failed' / PUBLISH_NOT_ATTEMPTED (claimable), and a stale
+// claim could be taken over: a worker delayed past either published the post
+// through the job whose cancel had failed, after the user was told "not
+// posted". The claim itself now carries PUBLISH_CLAIMED:SUPERSEDE:<uuid>.
+
+import sweepStuckPublishing from '../../../pages/api/cron/sweep-stuck-publishing';
+import {
+  isPreCallClaim,
+  isSupersedePreCallClaim,
+  PUBLISH_SUPERSEDE_CLAIM_PREFIX,
+  reschedulingFenceState,
+  retryClaimState,
+} from '../../queue/publishOutcome';
+import * as platformAdapter from '../../adapters/platformAdapter';
+import * as creatorPublishValidation from '../../services/creatorPublishValidation';
+
+const ELEVEN_MIN_AGO = (): string => new Date(Date.now() - 11 * 60 * 1000).toISOString();
+const SIX_MIN_AGO = (): string => new Date(Date.now() - 6 * 60 * 1000).toISOString();
+const MARKED = /^PUBLISH_CLAIMED:SUPERSEDE:[0-9a-f-]{36}$/;
+
+async function sweep(): Promise<Row> {
+  const prev = process.env.CRON_SECRET;
+  process.env.CRON_SECRET = 'sweep-secret';
+  try {
+    const res: RouteRes = {
+      statusCode: 200,
+      body: null,
+      status: (c: number) => { res.statusCode = c; return res; },
+      json: (b: Row) => { res.body = b; return res; },
+      setHeader: () => undefined,
+    };
+    const req = { method: 'POST', headers: { authorization: 'Bearer sweep-secret' }, query: {}, body: {} };
+    await (sweepStuckPublishing as unknown as (rq: typeof req, rs: RouteRes) => Promise<void>)(req, res);
+    expect(res.statusCode).toBe(200);
+    return res.body as Row;
+  } finally {
+    if (prev === undefined) delete process.env.CRON_SECRET; else process.env.CRON_SECRET = prev;
+  }
+}
+
+/** Cancel fails (queue_jobs down) AND the fence write fails: the row keeps our claim. */
+async function strandMarkedClaim(id: string): Promise<string> {
+  const jobId = await stage(id);
+  dbFault = (table, op, payload) => {
+    if (table === 'queue_jobs') return { code: '08006', message: 'connection lost' };
+    if (table === 'scheduled_posts' && op === 'update' && payload?.status === 'cancelled') {
+      return { code: '08006', message: 'connection lost' };
+    }
+    return null;
+  };
+  const res = await postNow(id);
+  dbFault = null;
+  expect(res.statusCode).toBe(503);
+  expect(res.body?.post_fenced).toBe(false);
+  expect(post(id).status).toBe('publishing'); // our pre-call claim, unfenced
+  expect(qjob(jobId).status).toBe('pending'); // the job survived
+  expect(callsFor(id)).toBe(0);
+  return jobId;
+}
+
+describe('(8a) cancel fails + fence fails, then the sweeper runs, then the old job fires', () => {
+  test('the sweeper fences the marked claim; the surviving job, publishNow and Post Now all make ZERO platform calls', async () => {
+    const jobId = await strandMarkedClaim('sp-8a');
+    post('sp-8a').updated_at = ELEVEN_MIN_AGO(); // the worker is delayed past the sweep
+
+    const claimCode = String(post('sp-8a').error_code);
+    const swept = await sweep();
+    expect(swept.swept).toBe(1);
+
+    // Drive every publisher at the swept row: none may reach the platform.
+    await fire(jobId, 'sp-8a');
+    expect(callsFor('sp-8a')).toBe(0);
+    const cron = await publishNow({ scheduled_post_id: 'sp-8a', social_account_id: ACCOUNT, user_id: USER });
+    expect(cron.status).toBe('FAILED');
+    expect(cron.suppressed).toBe(true);
+    const again = await postNow('sp-8a');
+    expect(again.body?.status).not.toBe('PUBLISHED');
+    expect(callsFor('sp-8a')).toBe(0);
+    expect(platformPublished).toEqual([]);
+    // Why: the claim's FIRST write carried the marker, and the sweep wrote the fence.
+    expect(claimCode).toMatch(MARKED);
+    expect(post('sp-8a')).toMatchObject({ status: 'cancelled', error_code: 'PRIOR_JOB_CANCEL_FAILED' });
+  });
+
+  test('a stale marked claim is never TAKEN OVER: the job delayed past the stale window (before any sweep) makes zero calls', async () => {
+    const jobId = await strandMarkedClaim('sp-8a2');
+    post('sp-8a2').updated_at = SIX_MIN_AGO(); // > PUBLISH_CLAIM_STALE_WINDOW_MS, < sweep threshold
+
+    await fire(jobId, 'sp-8a2');
+    expect(callsFor('sp-8a2')).toBe(0);
+    const cron = await publishNow({ scheduled_post_id: 'sp-8a2', social_account_id: ACCOUNT, user_id: USER });
+    expect(callsFor('sp-8a2')).toBe(0);
+    expect(cron.refusal).toBe('held_by_another_execution');
+    expect(post('sp-8a2').status).toBe('publishing');
+    expect(String(post('sp-8a2').error_code)).toMatch(MARKED);
+  });
+});
+
+describe('(8b) control: an UNMARKED stuck pre-call claim keeps the existing sweep', () => {
+  test('swept to failed / PUBLISH_NOT_ATTEMPTED and still claimable: its job publishes', async () => {
+    const jobId = await stage('sp-8b', { status: 'publishing', error_code: 'PUBLISH_CLAIMED:dead-holder', updated_at: ELEVEN_MIN_AGO() });
+    const swept = await sweep();
+    expect(swept.swept).toBe(1);
+    expect(post('sp-8b')).toMatchObject({ status: 'failed', error_code: 'PUBLISH_NOT_ATTEMPTED' });
+
+    await fire(jobId, 'sp-8b');
+    expect(callsFor('sp-8b')).toBe(1);
+    expect(post('sp-8b').status).toBe('published');
+  });
+
+  test('an unmarked stale pre-call claim is still taken over by a delivery', async () => {
+    const jobId = await stage('sp-8b2', { status: 'publishing', error_code: 'PUBLISH_CLAIMED:dead-holder', updated_at: SIX_MIN_AGO() });
+    await fire(jobId, 'sp-8b2');
+    expect(callsFor('sp-8b2')).toBe(1);
+    expect(post('sp-8b2').status).toBe('published');
+  });
+
+  test('a call-started row is still swept to PUBLISH_OUTCOME_UNCERTAIN', async () => {
+    await stage('sp-8b3', { status: 'publishing', error_code: 'PUBLISH_CALL_STARTED', updated_at: ELEVEN_MIN_AGO() });
+    await sweep();
+    expect(post('sp-8b3')).toMatchObject({ status: 'failed', error_code: 'PUBLISH_OUTCOME_UNCERTAIN' });
+  });
+});
+
+describe('(8c) a marked claim that proceeds normally flows exactly as before', () => {
+  test('cancel ok -> marked claim -> PUBLISH_CALL_STARTED -> published, same codes as an unmarked publish', async () => {
+    const jobId = await stage('sp-8c');
+    const atCancel: unknown[] = [];
+    cancelSpy.mockImplementationOnce(async (id: string, opts?: { reason?: string }) => {
+      atCancel.push(post(id).error_code);
+      return jest.requireActual('../../scheduler/schedulerPostQueueControl').cancelScheduledPostQueueEntry(id, opts);
+    });
+    const atCall: unknown[] = [];
+    const adapter = platformAdapter.publishToPlatform as unknown as jest.Mock;
+    const real = adapter.getMockImplementation() as (...a: unknown[]) => Promise<unknown>;
+    adapter.mockImplementationOnce(async (id: string, ...rest: unknown[]) => {
+      atCall.push(post(id).error_code);
+      return real(id, ...rest);
+    });
+
+    const res = await postNow('sp-8c');
+    expect(res.body?.status).toBe('PUBLISHED');
+    expect(String(atCancel[0])).toMatch(MARKED);
+    expect(atCall).toEqual(['PUBLISH_CALL_STARTED']); // the CAS from the marked token landed
+    expect(callsFor('sp-8c')).toBe(1);
+    expect(qjob(jobId).status).toBe('cancelled');
+
+    // Same terminal state as an unmarked (cron) publish of an identical row.
+    await stage('sp-8c-ref');
+    const ref = await publishNow({ scheduled_post_id: 'sp-8c-ref', social_account_id: ACCOUNT, user_id: USER });
+    expect(ref.status).toBe('PUBLISHED');
+    const pick = (r: Row) => ({ status: r.status, error_code: r.error_code ?? null, has_id: !!r.platform_post_id });
+    expect(pick(post('sp-8c'))).toEqual(pick(post('sp-8c-ref')));
+    expect(pick(post('sp-8c'))).toMatchObject({ status: 'published', has_id: true });
+  });
+
+  test('cancel ok -> platform rejects -> failed with the platform code (not a supersede fence)', async () => {
+    await stage('sp-8c2');
+    platformOutcome = 'failure';
+    const res = await postNow('sp-8c2');
+    expect(res.body?.status).toBe('FAILED');
+    expect(post('sp-8c2')).toMatchObject({ status: 'failed', error_code: 'LINKEDIN_RATE_LIMIT' });
+  });
+
+  test('cancel ok -> unexpected throw before the call -> the marked claim is RELEASED to its prior state', async () => {
+    await stage('sp-8c3');
+    jest.spyOn(creatorPublishValidation, 'validateCreatorPublishSemanticsLive').mockRejectedValueOnce(new Error('boom'));
+    let threw = false;
+    await publishNow({ scheduled_post_id: 'sp-8c3', social_account_id: ACCOUNT, user_id: USER, supersede_queued_jobs: true })
+      .catch(() => { threw = true; });
+    expect(threw).toBe(true);
+    expect(callsFor('sp-8c3')).toBe(0);
+    expect(post('sp-8c3')).toMatchObject({ status: 'scheduled', error_code: null });
+  });
+});
+
+describe('(8d) the marker in the pure predicates', () => {
+  const code = `${PUBLISH_SUPERSEDE_CLAIM_PREFIX}00000000-0000-4000-8000-000000000001`;
+  test('a marked claim is a pre-call claim AND a supersede claim; an unmarked one is not a supersede claim', () => {
+    expect(isPreCallClaim({ status: 'publishing', error_code: code })).toBe(true);
+    expect(isSupersedePreCallClaim({ status: 'publishing', error_code: code })).toBe(true);
+    expect(isSupersedePreCallClaim({ status: 'publishing', error_code: 'PUBLISH_CLAIMED:00000000-0000-4000-8000-000000000001' })).toBe(false);
+    expect(isSupersedePreCallClaim({ status: 'failed', error_code: code })).toBe(false);
+    expect(isSupersedePreCallClaim({ status: 'publishing', error_code: 'PUBLISH_CALL_STARTED' })).toBe(false);
+    // Fails closed: the bare marker still counts as marked.
+    expect(isSupersedePreCallClaim({ status: 'publishing', error_code: PUBLISH_SUPERSEDE_CLAIM_PREFIX })).toBe(true);
+  });
+  test('the timed-fence extractor never sees a marked claim (prefix mismatch gives null, never NaN/live)', () => {
+    expect(retryClaimState(code, Date.now())).toBeNull();
+    expect(reschedulingFenceState(code, Date.now())).toBeNull();
+  });
+});
