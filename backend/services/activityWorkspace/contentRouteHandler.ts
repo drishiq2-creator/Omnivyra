@@ -27,6 +27,7 @@ import { checkRateLimit } from '@/lib/auth/rateLimit';
 import { resolveMonetizationFeature } from '@/shared/monetization/featureRegistry';
 
 import { createHash } from 'crypto';
+import { KEY_REQUIRED_SURFACE } from '@/backend/services/billing/keyRequiredRoutes';
 import { billedRouteHttpError } from '@/backend/services/billing/billedRouteHttpError';
 import {
   BilledResultUnpersistedError, BilledRouteKeyRequiredError, BilledRouteRequestEndedError,
@@ -637,16 +638,16 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       // deliberate regenerate (a new click = a new key) is a new run and a new charge. The master is persisted INSIDE the
       // charge; a same-key request while the first is in flight is 409; a durably unreadable replay is refunded.
       const gmClientKey = clientIdempotencyKey(req.headers['idempotency-key']);
-      if (!gmClientKey) throw new BilledRouteKeyRequiredError('activity-workspace.generate_master');
+      if (!gmClientKey) throw new BilledRouteKeyRequiredError(KEY_REQUIRED_SURFACE.generateMaster);
       const gmIdentity = `${activityDbId}:k:${createHash('sha256').update(gmClientKey).digest('hex').slice(0, 24)}`;
       const gmScope = 'activity-workspace:generate_master';
       const gmIdemKey = makeIdempotencyKey(user.id, 'content_generation', gmIdentity);
       const gmReplay = await replayOrRefund({
-        surface: 'activity-workspace.generate_master', scope: gmScope, orgId: resolvedOrgId, key: gmIdentity, performedBy: user.id,
+        surface: KEY_REQUIRED_SURFACE.generateMaster, scope: gmScope, orgId: resolvedOrgId, key: gmIdentity, performedBy: user.id,
         confirmKeys: [`${gmIdemKey}:confirm`, `${gmIdemKey}:entry:confirm`, `${gmIdemKey}:exposure:confirm`], referenceId: activityDbId,
       });
       if (gmReplay) return res.status(200).json({ success: true, master_content: gmReplay.value, replayed: true });
-      await refuseIfInFlight({ surface: 'activity-workspace.generate_master', baseKey: gmIdemKey });
+      await refuseIfInFlight({ surface: KEY_REQUIRED_SURFACE.generateMaster, baseKey: gmIdemKey });
 
       const PROVIDER = 'openai';
       // Model tiering by content category: long-format (article / white_paper /
@@ -757,7 +758,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       if (result.status === 'no_credit_account') {
         return res.status(402).json({ error: 'No credit account for org' });
       }
-      if (result.status === 'already_released') throw new BilledRouteRequestEndedError('activity-workspace.generate_master');
+      if (result.status === 'already_released') throw new BilledRouteRequestEndedError(KEY_REQUIRED_SURFACE.generateMaster);
       if (result.status !== 'executed') {
         return res.status(500).json({ error: 'Failed to generate master content' });
       }
@@ -851,7 +852,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         // b3/7c: the refined text is post-processed and PERSISTED (variant write, strict; then the result store, read
         // back) INSIDE the charge; a same-key retry replays it; a lost result is refunded by the system.
         recovery: {
-          surface: 'activity-workspace.refine_variant',
+          surface: KEY_REQUIRED_SURFACE.refineVariant,
           scope: 'activity-workspace:refine_variant',
           postProcess: async (text: string) => {
             const raw = String(text || '').trim();
@@ -953,7 +954,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       // recovery below); the reference only scopes it.
       referenceId: activityDbId || String(item.execution_id || 'workspace'),
       note: 'Generated platform variants',
-      recovery: { surface: 'activity-workspace.generate_variants', scope: 'activity-workspace:generate_variants', idempotencyKeyHeader: req.headers['idempotency-key'], onReplay: () => { variantsReplayed = true; } },
+      recovery: { surface: KEY_REQUIRED_SURFACE.generateVariants, scope: 'activity-workspace:generate_variants', idempotencyKeyHeader: req.headers['idempotency-key'], onReplay: () => { variantsReplayed = true; } },
       multiplier: Math.max(1, activePlatformTargets.length || schedules.length || 1),
       executor: async () => {
         // Closure Pass — Phase 4. Enrich item with governance before
