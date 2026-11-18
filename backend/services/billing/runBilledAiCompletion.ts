@@ -100,6 +100,12 @@ export interface RunBilledAiCompletionArgs {
   recovery?: {
     surface: string;
     scope: string;
+    /**
+     * Default true: the client's Idempotency-Key is REQUIRED. false: without the header the identity is the http key's
+     * content-derived root (actor + action + reference + request-body hash) - STABLE content, never a clock or random
+     * value (7c), so a retry of the same request replays; an identical deliberate re-ask also replays (charged once).
+     */
+    requireClientKey?: boolean;
     postProcess?: (text: string) => Promise<unknown> | unknown;
     durableWrite?: (value: unknown) => Promise<void>;
   };
@@ -129,7 +135,8 @@ export async function runBilledAiCompletion(
   let recoveredValue: unknown;
   if (args.recovery) {
     const idem = args.idempotency;
-    if (idem.kind !== 'http' || !clientIdempotencyKey(idem.requestHeaderIdempotency)) {
+    if (idem.kind !== 'http') throw new BilledRouteKeyRequiredError(args.recovery.surface);
+    if (args.recovery.requireClientKey !== false && !clientIdempotencyKey(idem.requestHeaderIdempotency)) {
       throw new BilledRouteKeyRequiredError(args.recovery.surface);
     }
     const root = buildBillingIdempotencyKey(idem);

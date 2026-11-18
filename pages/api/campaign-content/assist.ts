@@ -62,6 +62,10 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   const llm: ContentAssistLlm = async (messages) => {
     const { runBilledAiCompletion } = await import('../../../backend/services/billing/runBilledAiCompletion');
     const result = await runBilledAiCompletion({
+      // c6 2026-11-18 (b3 + 7c invariant): the response IS the work product - it is stored INSIDE the charge (read
+      // back), a same request replays it, a durably unreadable replay is refunded. Identity: the client's key when
+      // sent, else the request's content hash (stable; never a clock/random value).
+      recovery: { surface: 'campaign-content.assist', scope: 'campaign-content:assist', requireClientKey: false },
       module: 'http:campaign_content_assist',
       userId: user.userId as string,
       orgId: companyId,
@@ -81,6 +85,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
         action: 'content_rewrite',
         referenceId: `campaign-content:${request.action}:${request.platform ?? 'any'}`,
         requestBody: req.body,
+        requestHeaderIdempotency: typeof req.headers['idempotency-key'] === 'string' && (req.headers['idempotency-key'] as string).trim().length >= 8 ? (req.headers['idempotency-key'] as string).trim() : undefined,
       },
       completion: {
         model: 'gpt-4o-mini',
@@ -109,6 +114,9 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       ...(fallbackReason ? { fallback_reason: fallbackReason } : {}),
     });
   } catch (error) {
+    // c6 2026-11-18: the standard billed shapes (replay unavailable / result unavailable + refund / in progress / ended).
+    { const { billedRouteHttpError } = await import('../../../backend/services/billing/billedRouteHttpError');
+      const billedErr = billedRouteHttpError(error); if (billedErr) return res.status(billedErr.status).json(billedErr.body); }
     return res.status(500).json({ error: error instanceof Error ? error.message : 'content assist failed' });
   }
 }

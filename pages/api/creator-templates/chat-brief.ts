@@ -104,6 +104,10 @@ Fill every brief field with your best inference so far; keep each concise. No ma
     const { runBilledAiCompletion } = await import('../../../backend/services/billing/runBilledAiCompletion');
     const convoHash = createHash('sha1').update(JSON.stringify(messages)).digest('hex').slice(0, 16);
     const result = await runBilledAiCompletion({
+      // c6 2026-11-18 (b3 + 7c invariant): the response IS the work product - it is stored INSIDE the charge (read
+      // back), a same request replays it, a durably unreadable replay is refunded. Identity: the client's key when
+      // sent, else the request's content hash (stable; never a clock/random value).
+      recovery: { surface: 'creator-templates.chat-brief', scope: 'creator-templates:chat-brief', requireClientKey: false },
       module: 'http:creator_chat_brief',
       userId: user.userId as string,
       orgId: companyId,
@@ -123,6 +127,7 @@ Fill every brief field with your best inference so far; keep each concise. No ma
         action: 'content_rewrite',
         referenceId: `${assetFamily}:${convoHash}`,
         requestBody: req.body,
+        requestHeaderIdempotency: typeof req.headers['idempotency-key'] === 'string' && (req.headers['idempotency-key'] as string).trim().length >= 8 ? (req.headers['idempotency-key'] as string).trim() : undefined,
       },
       completion: {
         model: 'gpt-4o-mini',
@@ -157,6 +162,9 @@ Fill every brief field with your best inference so far; keep each concise. No ma
 
     return res.status(200).json({ reply, brief });
   } catch (error) {
+    // c6 2026-11-18: the standard billed shapes (replay unavailable / result unavailable + refund / in progress / ended).
+    { const { billedRouteHttpError } = await import('../../../backend/services/billing/billedRouteHttpError');
+      const billedErr = billedRouteHttpError(error); if (billedErr) return res.status(billedErr.status).json(billedErr.body); }
     return res.status(500).json({ error: error instanceof Error ? error.message : 'chat brief failed' });
   }
 }

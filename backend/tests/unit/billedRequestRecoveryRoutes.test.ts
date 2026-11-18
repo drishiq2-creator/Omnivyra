@@ -161,6 +161,20 @@ describe('refine_variant: runBilledAiCompletion with recovery', () => {
     expect(mockAiCalls).toBe(1);
     expect(charges).toBe(1);
   });
+  test('assist routes (requireClientKey: false): no header -> the CONTENT-hash identity; the same request replays, one charge', async () => {
+    const assist = () => runBilledAiCompletion({
+      module: 'http:assist', userId: USER, orgId: ORG, action: 'content_rewrite' as any, referenceType: 'assist', referenceId: 'a',
+      llmPricing: { provider: 'openai', model: 'm', maxInputTokens: 1, maxOutputTokens: 1, actionKey: 'content_rewrite' },
+      idempotency: { kind: 'http', actorUserId: USER, action: 'content_rewrite', referenceId: 'a', requestBody: { q: 1 } },
+      completion: { model: 'm', temperature: 0, messages: [], operation: 'assist' },
+      recovery: { surface: 'campaign-content.assist', scope: 'campaign-content:assist', requireClientKey: false },
+    });
+    const a = await assist();
+    const b = await assist();
+    expect(a.text).toBe('raw text');
+    expect(b).toMatchObject({ text: 'raw text', replayed: true });
+    expect(mockAiCalls).toBe(1);
+  });
   test('the route\'s durable write FAILS -> released, NOT charged, the refined text still returned (unbilled)', async () => {
     const r = await call('click-key-001', async () => { throw new Error('content write failed'); });
     expect(r).toMatchObject({ value: 'RAW TEXT', unbilled: true });
