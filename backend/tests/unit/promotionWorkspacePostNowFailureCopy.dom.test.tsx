@@ -143,6 +143,23 @@ describe('PromotionWorkspace Post Now (DOM)', () => {
     expect(screen.queryByText(/Not posted/)).toBeNull();
   });
 
+  test('Post Now can only stage a SINGLE post, never a thread root (7c): no `nodes`, and the staging request IS made', async () => {
+    // schedule.ts takes the thread path only for a `nodes` array of 2+ entries (isThreadPayload), and a thread root
+    // bypasses the supersede (the orchestrator runs before the claim). Pin the request shape. The positive assertion
+    // (contentType 'post' on a real staging call) stops this pin going vacuous if the request is ever issued elsewhere.
+    mockFetch
+      .mockResolvedValueOnce(json(200, { id: 'sp-6' }))
+      .mockResolvedValueOnce(json(200, { status: 'PUBLISHED' }));
+    renderWorkspace();
+    fireEvent.click(screen.getByRole('button', { name: /post now/i }));
+    await waitFor(() => expect(screen.getByText('Posted.')).toBeInTheDocument());
+    const stage = mockFetch.mock.calls.find((c) => c[0] === '/api/scheduler/schedule');
+    expect(stage).toBeDefined();
+    const body = JSON.parse((stage![1] as { body: string }).body);
+    expect(body.contentType).toBe('post');
+    expect('nodes' in body).toBe(false);
+  });
+
   test('control: a PUBLISHED result shows Posted.', async () => {
     mockFetch
       .mockResolvedValueOnce(json(200, { id: 'sp-4' }))
