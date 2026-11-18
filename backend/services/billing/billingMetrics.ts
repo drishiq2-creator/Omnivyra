@@ -84,6 +84,11 @@ const COUNTER_REGISTRY = {
   // type-check against BillingCounter AND appear in snapshotBillingMetrics (the exported metrics).
   phase2_route_without_idempotency_key_total: 0,
   phase2_route_reclaim_cap_exhausted_total:   0,
+  // c6 2026-11-18 (b3/7c): settlementPending on every route; persist-before-settle + replay.
+  phase2_route_settlement_pending_total:      0,
+  settlement_pending_unsurfaced_total:        0,
+  phase2_route_replayed_total:                0,
+  phase2_route_result_unpersisted_total:      0,
 } satisfies Record<string, number>;
 
 const counters: Record<keyof typeof COUNTER_REGISTRY, number> = { ...COUNTER_REGISTRY };

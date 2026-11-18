@@ -9,6 +9,9 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const mockStore = require('../helpers/fakeIdempotencyStore').makeFakeIdempotencyStore();
+jest.mock('../../db/writeOwner', () => ({ ownedDbTable: (t: string) => mockStore.ownedDbTable(t) }));
 const engine = {
   executeWithEntryConsumption: jest.fn(),
   makeIdempotencyKey: jest.fn((u: string, a: string, r: string) => `${u}|${a}|${r}`),
