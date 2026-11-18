@@ -13,11 +13,9 @@ import { isAcceptableEmailAddress, EMAIL_ADDRESS_POLICY_MESSAGE } from '../../..
  *                        prior flow (orphaned). Blocks the silent
  *                        user_repeated_signup failure mode.
  *   4. CLAIMED_DOMAIN — another user from this email's domain is already
- *                        the COMPANY_ADMIN. First time we see this email,
- *                        we send them a referral email with the admin's
- *                        contact details and write a signup_referrals row.
- *                        Subsequent attempts skip the email and return
- *                        alreadyReferred=true.
+ *                        the COMPANY_ADMIN. The company's admins are told;
+ *                        the reply is { error, code } only and reveals
+ *                        nothing about the company or its admins (CI-309).
  *   5. Upsert signup_intents row and return { proceed: true }.
  *
  * Does NOT send a confirmation email — Supabase sends that itself when the
@@ -48,20 +46,7 @@ type SuccessResponse = { proceed: true };
 type ErrorResponse = {
   error: string;
   code?: string;
-  /** CLAIMED_DOMAIN only: the prospect was already emailed on a prior attempt. */
-  alreadyReferred?: boolean;
-  /** CLAIMED_DOMAIN only: masked admin email shown on the contact-admin screen. */
-  adminEmailMasked?: string | null;
 };
-
-/** "jo••••@acme.com" — enough to recognise the admin without leaking the full address. */
-function maskEmail(email: string | null): string | null {
-  if (!email) return null;
-  const [local, host] = email.split('@');
-  if (!local || !host) return null;
-  const shown = local.slice(0, 2);
-  return `${shown}${'•'.repeat(Math.max(1, local.length - shown.length))}@${host}`;
-}
 
 async function handler(
   req: NextApiRequest,
@@ -203,10 +188,11 @@ async function handler(
   // If any company already owns this email's domain, a NEW person from that
   // domain CANNOT self-register. We block here — BEFORE the confirmation
   // email is sent — so they never get a verification mail for an account
-  // that can't exist. They see the admin's (masked) contact details, and
-  // both the prospect and the company admin are emailed. Deduped per
-  // prospect email via signup_referrals so repeat attempts don't re-spam
-  // the admin (the signup endpoint is also IP rate-limited above).
+  // that can't exist. CI-309: the company's admins are emailed; the prospect
+  // is sent nothing and the reply carries nothing about the company or its
+  // admins, the same on every attempt. Deduped per prospect email via
+  // signup_referrals so repeat attempts don't re-spam the admin (the signup
+  // endpoint is also IP rate-limited above).
   // The first user of a domain is unaffected: their company row doesn't
   // exist yet at signup time, so there's nothing to match.
   {
@@ -228,45 +214,21 @@ async function handler(
     if (claimedCompany) {
       const company = claimedCompany as { id: string; name: string | null };
 
-      // Resolve the company admin's email for the masked display.
-      const { data: adminRole } = await supabase
-        .from('user_company_roles')
-        .select('user_id')
-        .eq('company_id', company.id)
-        .eq('role', 'COMPANY_ADMIN')
-        .eq('status', 'active')
-        .order('created_at', { ascending: true })
-        .limit(1)
-        .maybeSingle();
-      const adminUserId = (adminRole as { user_id?: string } | null)?.user_id ?? null;
-      const { data: adminUser } = adminUserId
-        ? await supabase.from('users').select('email').eq('id', adminUserId).maybeSingle()
-        : { data: null };
-      const adminEmail = (adminUser as { email?: string } | null)?.email ?? null;
-
-      // alreadyReferred = the prospect was already emailed on a prior attempt.
-      const { data: priorReferral } = await supabase
-        .from('signup_referrals')
-        .select('admin_email_sent_at')
-        .eq('email', normalizedEmail)
-        .maybeSingle();
-      const alreadyReferred = !!(priorReferral as { admin_email_sent_at?: string | null } | null)
-        ?.admin_email_sent_at;
-
-      // Fire both emails (idempotent / deduped inside the service; never throws).
+      // Notify the company's admins (deduped inside the service; never throws). The prospect is
+      // never sent the admin's contact (CI-309).
       await notifyAdminAndProspectOfClaimedDomain(supabase, {
         prospectEmail: normalizedEmail,
         emailDomain:   domain,
         companyId:     company.id,
         companyName:   company.name,
         nowIso:        new Date().toISOString(),
+        notifyProspect: false,
       });
 
       logger.info('auth_signup_company_claimed_blocked', {
         email:     normalizedEmail,
         domain,
         companyId: company.id,
-        alreadyReferred,
         correlationId,
       });
       await emitOutcome('CompanyExists', 'denied', 'CLAIMED_DOMAIN', company.id);
@@ -274,8 +236,6 @@ async function handler(
       return res.status(httpStatusFor('CLAIMED_DOMAIN')).json({
         error:            ELIGIBILITY_MESSAGES.CLAIMED_DOMAIN,
         code:             'CLAIMED_DOMAIN',
-        alreadyReferred,
-        adminEmailMasked: maskEmail(adminEmail),
       });
     }
   }

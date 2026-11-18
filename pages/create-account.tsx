@@ -34,10 +34,7 @@ export default function CreateAccountPage() {
   const [error, setError]             = useState<string | null>(null);
   const [sent, setSent]               = useState(false);
   const [captchaToken, setCaptchaToken] = useState<string | null>(null);
-  const [claimed, setClaimed]   = useState<{
-    alreadyReferred: boolean;
-    adminEmailMasked: string | null;
-  } | null>(null);
+  const [claimed, setClaimed]   = useState(false);
 
   useEffect(() => {
     if (emailParam) setEmail(emailParam);
@@ -120,10 +117,7 @@ export default function CreateAccountPage() {
           return;
         }
         if (json.code === 'CLAIMED_DOMAIN') {
-          setClaimed({
-            alreadyReferred: !!json.alreadyReferred,
-            adminEmailMasked: json.adminEmailMasked ?? null,
-          });
+          setClaimed(true);
           setLoading(false);
           return;
         }
@@ -184,23 +178,9 @@ export default function CreateAccountPage() {
             <div className="w-full max-w-md text-center animate-fadeIn">
               <div className="mb-6 inline-flex h-16 w-16 items-center justify-center rounded-2xl bg-blue-50 text-3xl">🏢</div>
               <h2 className="text-2xl font-bold text-[#0B1F33]">Your company is already on Omnivyra</h2>
-              {claimed.alreadyReferred ? (
-                <p className="mx-auto mt-3 max-w-sm text-sm leading-relaxed text-[#6B7C93]">
-                  Your administrator&apos;s contact details were already shared with you at{' '}
-                  <strong className="text-[#0B1F33]">{email}</strong>. If you need help, email{' '}
-                  <a href="mailto:support@omnivyra.com" className="font-medium text-[#0A66C2] hover:underline">
-                    support@omnivyra.com
-                  </a>.
-                </p>
-              ) : (
-                <p className="mx-auto mt-3 max-w-sm text-sm leading-relaxed text-[#6B7C93]">
-                  {claimed.adminEmailMasked ? (
-                    <>We&apos;ve emailed <strong className="text-[#0B1F33]">{email}</strong> with your administrator&apos;s contact details ({claimed.adminEmailMasked}). Please reach out to them to request access.</>
-                  ) : (
-                    <>We&apos;ve emailed <strong className="text-[#0B1F33]">{email}</strong> — please check your inbox for next steps.</>
-                  )}
-                </p>
-              )}
+              <p className="mx-auto mt-3 max-w-sm text-sm leading-relaxed text-[#6B7C93]">
+                This domain already has an Omnivyra workspace. Ask your organization&apos;s administrator to invite you.
+              </p>
               <div className="mt-8 flex flex-col items-center gap-3">
                 <Link href="/login"
                   className="rounded-full bg-gradient-to-r from-[#0A66C2] to-[#3FA9F5] px-6 py-3 text-sm font-semibold text-white shadow-[0_4px_16px_rgba(10,102,194,0.35)] transition hover:opacity-95">
