@@ -36,6 +36,8 @@ const FAILED = { error: 'Generation failed', billing: { charged: 0, released: 40
 
 beforeEach(() => {
   fetchWithAuth.mockReset();
+  // The modal's price line reads the pricing catalog through fetchWithAuth.
+  fetchWithAuth.mockResolvedValue(reply(200, { ranges: [], unknown: [] }));
   routerState.push = jest.fn();
   (global as { fetch?: unknown }).fetch = jest.fn();
   window.scrollTo = jest.fn() as never;

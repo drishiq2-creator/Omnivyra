@@ -15,9 +15,39 @@ import type { ManagedContentType } from '../../lib/content/contentTemplateRegist
 
 import { stepProgress, type IndustryAngle, type Props, type Step, type GenerationKind, type QualityGateReport, INTENT_OPTIONS, ANGLE_META, ANGLE_TRACKER_STEPS, FULL_TRACKER_STEPS } from './BlogGenerateModalModel';
 import { blogGenerateKeys, blogKeyScope, blogRefusalText, keepBlogKey } from '../../lib/blog/blogGenerateKey';
+import RunCostLine from '../billing/RunCostLine';
+import { classifyBilledResponse, billedOutcomeText } from '../../lib/billing/billedResponse';
 
 /** Blog drafts are billed by c6's route, which requires an Idempotency-Key (see lib/blog/blogGenerateKey). */
 const BILLED_BLOG_ENDPOINT = '/api/blogs/generate';
+
+/**
+ * The error line for a failed full-draft request. Billed blogs: c6's blog refusals first (in
+ * progress, switched off, switch unreadable: none of these is "not sure it went through"), then the
+ * shared billed helper (402 credits, a failure stating its billing = "you weren't charged", quality
+ * refund); never the raw server message. Other content types keep their existing text.
+ */
+export function generateFailureMessage(args: {
+  billed: boolean;
+  status: number;
+  data: Record<string, unknown>;
+  report: QualityGateReport | null;
+}): string {
+  const { billed, status, data, report } = args;
+  const billedText = billed
+    ? blogRefusalText(data) ?? billedOutcomeText(classifyBilledResponse(status, data, 'Generation failed.'))
+    : '';
+  if (report?.failures?.length) {
+    return `Quality gate blocked this draft: ${report.failures.join('; ')}${billed && data.billing ? ` ${billedText}` : ''}`;
+  }
+  if (billed) return billedText;
+  return typeof data.error === 'string' && data.error ? data.error : 'Generation failed.';
+}
+
+/** A billed request that lost its connection: the key is kept (lib/blog/blogGenerateKey), so a retry can't hold twice. */
+export const BILLED_NETWORK_UNCERTAIN = 'We lost the connection, so we’re not sure this finished. Trying again won’t charge you twice.';
+
+type GeneratedArgs = Parameters<Props['onGenerated']>;
 
 
 // ── Component ─────────────────────────────────────────────────────────────────
@@ -70,6 +100,13 @@ export default function BlogGenerateModal({
   const [generationProgress, setGenerationProgress] = useState(0);
   const [qualityReport, setQualityReport] = useState<QualityGateReport | null>(null);
   const [openingEditor, setOpeningEditor] = useState(false);
+  /**
+   * 7c: a 2xx with settlementPending is DONE but its charge is unresolved. The note must stay on
+   * screen until the user moves on (auto-opening the editor would unmount it, and a user who missed
+   * it and ran again would make a NEW request = a second 40). So the modal holds the draft here and
+   * opens the editor only when the user clicks.
+   */
+  const [pendingDraft, setPendingDraft] = useState<{ note: string; args: GeneratedArgs } | null>(null);
 
   React.useEffect(() => {
     if (step !== 'generating') {
@@ -312,12 +349,14 @@ export default function BlogGenerateModal({
     setGenerationKind('full');
     setGenerationProgress(5);
     setStep('generating');
+    setPendingDraft(null);
 
     // Blogs only: one key per click, kept only while the outcome is unknown (lib/blog/blogGenerateKey).
     const billed = apiEndpoint === BILLED_BLOG_ENDPOINT;
     const scope = blogKeyScope(companyId, topic, selectedAngle.type, selectedAngle.title);
     const op = billed ? blogGenerateKeys.begin(scope) : null;
     let keepKey = true; // until a response says otherwise
+    let gotResponse = false;
     try {
       const res  = await fetch(apiEndpoint, {
         method:  'POST',
@@ -327,14 +366,13 @@ export default function BlogGenerateModal({
       });
       const data = await res.json();
       keepKey = keepBlogKey(res.status, data);
+      gotResponse = true;
       if (!res.ok) {
         const report = data.thought_leadership_quality && typeof data.thought_leadership_quality === 'object'
           ? data.thought_leadership_quality as QualityGateReport
           : null;
         setQualityReport(report);
-        setError(report?.failures?.length
-          ? `Quality gate blocked this draft: ${report.failures.join('; ')}`
-          : (billed ? blogRefusalText(data) : null) || data.error || 'Generation failed.');
+        setError(generateFailureMessage({ billed, status: res.status, data, report }));
         setGenerationProgress(100);
         setStep('angles');
         return;
@@ -352,15 +390,35 @@ export default function BlogGenerateModal({
         resultWithSeo.secondary_keywords = seo.secondary_keywords;
       }
 
+      if (billed && classifyBilledResponse(res.status, data, '').kind === 'settlement_pending') {
+        const outcome = classifyBilledResponse(res.status, data, '');
+        setPendingDraft({ note: billedOutcomeText(outcome), args: [resultWithSeo, confidence, hookAssessment, selectedAngle?.type ?? null] });
+        return;
+      }
+
       setOpeningEditor(true);
       setGenerationProgress(100);
       await onGenerated(resultWithSeo, confidence, hookAssessment, selectedAngle?.type ?? null);
     } catch {
       setOpeningEditor(false);
-      setError('Network error. Please try again.');
+      setError(billed && !gotResponse ? BILLED_NETWORK_UNCERTAIN : 'Network error. Please try again.');
       setStep('angles');
     } finally {
       if (op && !keepKey) blogGenerateKeys.end(scope);
+    }
+  }
+
+  /** The user read the settlement note and chose to continue (see pendingDraft). */
+  async function openPendingDraft() {
+    const pending = pendingDraft;
+    if (!pending) return;
+    setPendingDraft(null);
+    setOpeningEditor(true);
+    try {
+      await onGenerated(...pending.args);
+    } catch {
+      setOpeningEditor(false);
+      setPendingDraft(pending); // keep the draft: nothing is re-run
     }
   }
 
@@ -933,6 +991,10 @@ export default function BlogGenerateModal({
                 >
                   <ArrowLeft className="h-4 w-4" /> Back
                 </button>
+                {/* Cost before consent: catalog price, never a balance check. Same condition as the billing. */}
+                {apiEndpoint === BILLED_BLOG_ENDPOINT && (
+                  <RunCostLine companyId={companyId} actionKey="blog_post" quantity={1} unit="blog" unitPlural="blogs" noun="blog" className="mr-auto self-center" />
+                )}
                 <button
                   onClick={generateFull}
                   disabled={!selectedAngle}
@@ -951,19 +1013,30 @@ export default function BlogGenerateModal({
                 <div className="w-14 h-14 rounded-full bg-indigo-100 flex items-center justify-center">
                   <Sparkles className="h-6 w-6 text-indigo-600" />
                 </div>
-                <Loader2 className="absolute -inset-1 h-16 w-16 text-indigo-400 animate-spin opacity-60" />
+                {!pendingDraft && <Loader2 className="absolute -inset-1 h-16 w-16 text-indigo-400 animate-spin opacity-60" />}
               </div>
               <div>
                 <p className="text-base font-bold text-gray-900">
-                  {openingEditor ? 'Opening editor...' : angles.length === 0 ? 'Generating angle options...' : `Writing your ${contentLabel}...`}
+                  {pendingDraft ? 'Your draft is ready' : openingEditor ? 'Opening editor...' : angles.length === 0 ? 'Generating angle options...' : `Writing your ${contentLabel}...`}
                 </p>
                 <p className="text-sm text-gray-500 mt-1 max-w-xs">
-                  {openingEditor
+                  {pendingDraft
+                    ? pendingDraft.note
+                    : openingEditor
                     ? 'Your draft is ready. Moving directly to the blog editor.'
                     : angles.length === 0
                     ? 'Analysing the topic and identifying three editorial directions.'
                     : 'Constructing the narrative section by section and running quality gates.'}
                 </p>
+                {pendingDraft && (
+                  <button
+                    type="button"
+                    onClick={openPendingDraft}
+                    className="mt-4 inline-flex items-center gap-2 px-5 py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700"
+                  >
+                    Open the editor <ChevronRight className="h-4 w-4" />
+                  </button>
+                )}
               </div>
               <div className="w-full max-w-sm rounded-2xl border border-indigo-100 bg-indigo-50/60 p-4 text-left">
                 <div className="mb-3 flex items-center justify-between text-xs font-semibold text-indigo-800">

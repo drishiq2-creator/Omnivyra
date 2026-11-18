@@ -20,17 +20,20 @@ export function runCostText(args: {
   quantity: number;
   unit: string;
   unitPlural: string;
+  /** What is being paid for, e.g. 'run' (default) or 'blog'. */
+  noun?: string;
 }): string {
   const { range, unit, unitPlural } = args;
+  const noun = args.noun ?? 'run';
   const q = Math.max(1, Math.floor(args.quantity));
   if (!range) return 'Price unavailable right now.';
   const fixed = !range.tokenPriced || range.maxCredits <= range.minCredits;
   if (fixed) {
     const total = range.minCredits * q;
     const per = q > 1 ? ` (${range.minCredits} per ${unit} × ${q} ${unitPlural})` : '';
-    return `This run uses ${total} credit${total === 1 ? '' : 's'}${per}.`;
+    return `This ${noun} uses ${total} credit${total === 1 ? '' : 's'}${per}.`;
   }
-  return `This run uses about ${range.minCredits * q}–${range.maxCredits * q} credits; the final charge is what it actually uses.`;
+  return `This ${noun} uses about ${range.minCredits * q}–${range.maxCredits * q} credits; the final charge is what it actually uses.`;
 }
 
 export default function RunCostLine({
@@ -42,6 +45,7 @@ export default function RunCostLine({
   free = false,
   freeText = 'This run doesn’t use credits.',
   className = '',
+  noun,
 }: {
   companyId: string;
   actionKey: string;
@@ -51,13 +55,14 @@ export default function RunCostLine({
   free?: boolean;
   freeText?: string;
   className?: string;
+  noun?: string;
 }) {
   const { ranges, unknown, loading, error } = useActivityCostRanges(free ? '' : companyId, actionKey);
   let text: string;
   if (free) text = freeText;
   else if (loading && ranges.length === 0) text = 'Checking the price…';
   else if (error || unknown.includes(actionKey)) text = 'Price unavailable right now.';
-  else text = runCostText({ range: ranges.find((r) => r.actionKey === actionKey) ?? null, quantity, unit, unitPlural });
+  else text = runCostText({ range: ranges.find((r) => r.actionKey === actionKey) ?? null, quantity, unit, unitPlural, noun });
   return (
     <p className={`text-xs text-gray-600 ${className}`} data-testid={`run-cost-${actionKey}`}>
       {text}
