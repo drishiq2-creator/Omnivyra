@@ -7,7 +7,7 @@ import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeF
  * Supports the full BlogGenerateModal flow:
  *   mode: 'angles'  → synchronous angle generation via runBlogGeneration
  *   mode: 'full'    → synchronous full blog generation via runBlogGeneration
- *   (no mode)       → queue-based generation via blogContentAdapter (legacy)
+ *   (no mode)       → 400 BLOG_MODE_REQUIRED (the legacy unbilled queue path is refused, b3 2026-11-18)
  *
  * Super Admin uses /api/admin/blog/generate (public_blogs, SA role only).
  *
@@ -31,7 +31,6 @@ import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeF
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { enforceCompanyAccess } from '../../../backend/services/userContextService';
 import { enforceRole, Role } from '../../../backend/services/rbacService';
-import { generateBlogContent } from '../../../backend/adapters/commandCenter/blogContentAdapter';
 import { buildContentContext } from '../../../lib/content/buildContentContext';
 import {
   type BlogGenerationRequest,
@@ -69,6 +68,11 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     return res.status(400).json({ error: 'company_id required' });
   if (!topic || typeof topic !== 'string' || !topic.trim())
     return res.status(400).json({ error: 'topic required' });
+  // b3 ruling 2026-11-18: the legacy no-mode queue path (content-blog job) ran AI UNBILLED in prod and its output lived
+  // only in the BullMQ job result. No UI calls it (every caller sends 'angles' or 'full'): REFUSED, nothing enqueued.
+  if (mode !== 'angles' && mode !== 'full') {
+    return res.status(400).json({ code: 'BLOG_MODE_REQUIRED', retryable: false, error: "Choose how to generate the blog: mode 'angles' or 'full'." });
+  }
 
   // ── 1. Auth ─────────────────────────────────────────────────────────────────
   const access = await enforceCompanyAccess({ req, res, companyId: company_id });
@@ -198,29 +202,6 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
         ...(blogBillingOf(error) ? { billing: blogBillingOf(error) } : {}),
       });
     }
-  }
-
-  // ── No mode: legacy queue-based generation ────────────────────────────────
-  try {
-    const { getContentQueue } = await import('../../../backend/queue/contentGenerationQueues');
-    const contentGenerationQueue = getContentQueue('content-blog');
-
-    const result = await generateBlogContent(company_id, contentGenerationQueue, {
-      topic: String(topic).trim(),
-      audience: typeof audience === 'string' ? audience.trim() : undefined,
-      angle_preference: typeof angle_preference === 'string' && angle_preference ?
-        angle_preference as 'analytical' | 'contrarian' | 'strategic' : null,
-    }, {
-      writing_style_instructions: builtContext?.writingStyleInstructions,
-      company_profile: builtContext?.companyProfile,
-    });
-
-    return res.status(200).json(result);
-  } catch (error) {
-    console.error('[blogs/generate]', error);
-    return res.status(500).json({
-      error: error instanceof Error ? error.message : 'Failed to generate blog',
-    });
   }
 }
 
