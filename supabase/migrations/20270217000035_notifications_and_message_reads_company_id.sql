@@ -19,6 +19,14 @@
 --   No privilege change: the new columns inherit the table grants (20270111000002 revoked client privileges on
 --   notifications; message_reads / message_mentions grants unchanged).
 --
+-- LOCKS (7c, 2026-11-19). The FKs are added WITHOUT 'NOT VALID' and the indexes WITHOUT 'CONCURRENTLY', so while
+--   this runs, writes to notifications / message_reads / message_mentions WAIT: each FK validation scans its table
+--   under SHARE ROW EXCLUSIVE, and each index build takes SHARE. The new column is NULL in every existing row, so
+--   the validations pass trivially and the partial indexes hold no rows - but both still SCAN, so the wait grows with
+--   the row count. CONCURRENTLY cannot run inside the transaction Supabase wraps a migration in. If cb's prod read
+--   shows large tables, split it: this file adds the columns + FKs NOT VALID; a second, non-transactional migration
+--   runs VALIDATE CONSTRAINT and CREATE INDEX CONCURRENTLY. With small tables, this form is fine as written.
+--
 -- ROLLBACK: rollbacks/notifications_and_message_reads_company_id_rollback.sql (drops the indexes, FKs and columns; any
 --   company_id values written after apply are lost - recoverable from the writers' logs only).
 
