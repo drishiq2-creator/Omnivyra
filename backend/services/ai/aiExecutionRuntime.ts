@@ -28,6 +28,7 @@
  *   org_control_blocked. Everything else resumes.
  */
 
+import { BilledResultUnpersistedError } from '../billing/billedRequestRecovery';
 import {
   executeWithCredits,
   executeWithEntryConsumption,
@@ -140,6 +141,22 @@ export async function runAiExecution<T>(args: RunAiExecutionArgs<T>): Promise<Ai
     if (stored) return { status: 'completed', result: stored.payload, resumed: true, charged: false };
   }
 
+  // c6 2026-11-18 (b3 + 7c invariant, BLOCKING-launch): never CONFIRM a charge for a result that exists only in an
+  // undelivered response. With persistence on, the executor SAVES the result and READS IT BACK before it returns, so
+  // the engine confirms only a resumable result; a result that cannot be saved (store error, over the size cap) throws
+  // -> the engine RELEASES and the result is returned uncharged. (It used to be saved best-effort AFTER the confirm.)
+  const executor = persist
+    ? async (): Promise<T> => {
+        const value = await args.executor();
+        const saved = await saveAiExecutionResult({
+          idempotencyKey: rootKey, action: args.action, organizationId: args.companyId,
+          actorUserId: args.userId, module: args.module, payload: value,
+        });
+        if (!saved || !(await loadAiExecutionResult<T>(rootKey))) throw new BilledResultUnpersistedError(value);
+        return value;
+      }
+    : args.executor;
+
   // RESERVATION_CREATED → EXECUTING → (ledger CONFIRM) via the existing seams.
   const attempt = async (key: string) => {
     const common = {
@@ -151,7 +168,7 @@ export async function runAiExecution<T>(args: RunAiExecutionArgs<T>): Promise<Ai
       idempotencyKey: key,
       ...(args.amountOverride != null ? { amountOverride: args.amountOverride } : {}),
       note: args.note ?? args.salt,
-      executor: args.executor,
+      executor,
     };
     if (args.billing === 'entry-auto') {
       const mode = await getCreditEconomyExecutionMode({ organizationId: args.companyId, surface: `ai-runtime:${args.action}` });
@@ -163,8 +180,9 @@ export async function runAiExecution<T>(args: RunAiExecutionArgs<T>): Promise<Ai
   };
 
   const settle = async (result: T, charged: boolean, resumed: boolean): Promise<AiExecutionOutcome<T>> => {
-    // PERSISTING — best-effort; a failed save never fails the request.
-    if (persist) {
+    // A CHARGED result was already saved inside the executor (above). Only an uncharged re-run saves here,
+    // best-effort; a failed save never fails the request.
+    if (persist && !charged) {
       await saveAiExecutionResult({
         idempotencyKey: rootKey,
         action: args.action,
@@ -178,7 +196,14 @@ export async function runAiExecution<T>(args: RunAiExecutionArgs<T>): Promise<Ai
     return { status: 'completed', result, resumed, charged };
   };
 
-  const outcome = await attempt(rootKey);
+  let outcome;
+  try {
+    outcome = await attempt(rootKey);
+  } catch (err) {
+    // The result could not be saved: released, NOT charged - still returned.
+    if (err instanceof BilledResultUnpersistedError) return { status: 'completed', result: err.result as T, resumed: false, charged: false };
+    throw err;
+  }
 
   if (outcome.status === 'executed') return settle(outcome.result, true, false);
 
@@ -186,7 +211,13 @@ export async function runAiExecution<T>(args: RunAiExecutionArgs<T>): Promise<Ai
     if (outcome.status === 'already_released') {
       // Prior attempt refunded — this is a fresh billable attempt, keyed
       // deterministically so ITS retries still dedupe.
-      const retry = await attempt(makeIdempotencyKey(args.userId, args.action, args.referenceId, `${args.salt}:r1`));
+      let retry;
+      try {
+        retry = await attempt(makeIdempotencyKey(args.userId, args.action, args.referenceId, `${args.salt}:r1`));
+      } catch (err) {
+        if (err instanceof BilledResultUnpersistedError) return { status: 'completed', result: err.result as T, resumed: false, charged: false };
+        throw err;
+      }
       if (retry.status === 'executed') return settle(retry.result, true, false);
       if (!CONTINUATION_STATUSES.has(retry.status)) return mapBlocked(retry);
       // The retry key itself already settled — fall through to resume.
