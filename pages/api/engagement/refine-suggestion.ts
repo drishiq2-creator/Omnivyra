@@ -89,8 +89,10 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     // and forbid naming any other company not present in this thread/draft.
     const grounding = await resolveCompanyGroundingGuard(organizationId);
 
+    let settlementPending: { code: 'CREDIT_SETTLE_AMBIGUOUS' } | undefined;
     const result = await wirePhase2Route({
       surface:        'engagement.refine-suggestion',
+      onSettlementPending: () => { settlementPending = { code: 'CREDIT_SETTLE_AMBIGUOUS' }; },
       organizationId,
       action:         'engagement_refine',
       referenceType:  'engagement_refine',
@@ -128,7 +130,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       return res.status(500).json({ error: 'AI returned an empty refinement' });
     }
 
-    return res.status(200).json({ refined });
+    return res.status(200).json(settlementPending ? { refined, settlementPending } : { refined });
   } catch (err) {
     { const billedErr = billedRouteHttpError(err); if (billedErr) return res.status(billedErr.status).json(billedErr.body); }
     const message = (err as Error)?.message ?? 'Failed to refine suggestion';

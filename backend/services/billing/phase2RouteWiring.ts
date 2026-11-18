@@ -30,6 +30,7 @@ import {
   type ExecuteWithEntryConsumptionResult,
 } from '../creditExecutionService';
 import { getRequestContext } from '../requestContext';
+import type { SettlementPending } from './holdSettlementState';
 import { hasEnoughCredits, type CreditAction } from '../creditDeductionService';
 import { incrCounter } from './billingMetrics';
 import { emitAnomaly } from './billingAuditEmitter';
@@ -102,7 +103,10 @@ export class BilledRouteReclaimExhaustedError extends Error {
  * actual. maxTokens cover ONE billed unit: multi-call units scale by their calls (C83: a campaign plan ~2 calls,
  * a virality assessment 5, the longest blog template 7). Settlement is ALWAYS the actual collected usage.
  */
-const ROUTE_UNIT_CALLS: Partial<Record<string, number>> = {
+/** Also read by the bound test: every static entry must be an integer in 1..MAX_ROUTE_UNIT_CALLS. Note (7c): blogs no
+ *  longer use 'blog_generation' here - they bill a fixed 40 in blogBilling.ts, whose BLOG_REFERENCE_CALLS (32) is a
+ *  separate value for the same quantity; this 7 is the interim value for any remaining blog_generation caller. */
+export const ROUTE_UNIT_CALLS: Readonly<Partial<Record<string, number>>> = {
   insight_generation: 5,
   blog_generation: 7,
   campaign_preplanning: 3,
@@ -114,7 +118,7 @@ const ROUTE_UNIT_CALLS: Partial<Record<string, number>> = {
  * is the call's own max_tokens, so the hold covers the worst case without over-holding a small wallet:
  *   reply_generation - engagementAiAssistantService max_tokens 700; observed avg 760 in / 100 out (C82, 6 calls).
  */
-const ROUTE_CALL_TOKENS: Partial<Record<string, { input: number; output: number }>> = {
+export const ROUTE_CALL_TOKENS: Readonly<Partial<Record<string, { input: number; output: number }>>> = {
   reply_generation: { input: 3000, output: 700 },
 };
 /** A per-request call count (e.g. a bulk batch) is capped so a hostile input cannot inflate a hold. */
@@ -151,6 +155,10 @@ export interface WirePhase2RouteArgs<T> {
   /** AI calls in THIS request's billed unit when it varies per request (a bulk batch): scales the HOLD only;
    *  settlement is always the actual usage. Integer 1..MAX_ROUTE_UNIT_CALLS, else the action's default. */
   unitCalls?: number;
+  /** Called when the work SUCCEEDED but the settle outcome is unknown (CREDIT_SETTLE_AMBIGUOUS): the hold is left
+   *  reserved for resolution. The route surfaces it as 200 + `settlementPending: { code }` (owner contract) so a later
+   *  resolver charge is never unexplained. Optional: a route that omits it still has the log + counter below. */
+  onSettlementPending?: (pending: SettlementPending) => void;
 }
 
 /**
@@ -255,6 +263,14 @@ export async function wirePhase2Route<T>(args: WirePhase2RouteArgs<T>): Promise<
         switch (result.status) {
           case 'executed':
             incrCounter('billing_operations_confirmed');
+            if (result.settlementPending) {
+              incrCounter('phase2_route_settlement_pending_total');
+              logger.warn('phase2_route_settlement_pending', {
+                surface: args.surface, org: args.organizationId, action: args.action,
+                holdId: result.settlementPending.holdId, state: result.settlementPending.state,
+              });
+              try { args.onSettlementPending?.(result.settlementPending); } catch { /* reporting never fails finished work */ }
+            }
             return { ok: true, result: result.result };
           case 'already_settled':
             // This exact request was already charged and answered: never re-run it for free.

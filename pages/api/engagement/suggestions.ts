@@ -81,9 +81,11 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     const nonEmpty = (r: Awaited<ReturnType<typeof generateReplySuggestions>>) =>
       (r?.suggested_replies ?? []).filter((reply) => (reply.text ?? '').toString().trim().length > 0);
     let replies: Array<{ text: string; tone?: string }> = [];
+    let settlementPending: { code: 'CREDIT_SETTLE_AMBIGUOUS' } | undefined;
     try {
       replies = await wirePhase2Route({
         surface:        'engagement.suggestions',
+        onSettlementPending: () => { settlementPending = { code: 'CREDIT_SETTLE_AMBIGUOUS' }; },
         organizationId,
         action:         'reply_generation',
         referenceType:  'engagement_reply_suggestions',
@@ -108,7 +110,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       explanation_tag: r.tone ? r.tone.replace(/_/g, ' ') : undefined,
     }));
 
-    return res.status(200).json({ suggestions });
+    return res.status(200).json(settlementPending ? { suggestions, settlementPending } : { suggestions });
   } catch (err) {
     { const billedErr = billedRouteHttpError(err); if (billedErr) return res.status(billedErr.status).json(billedErr.body); }
     // F5: "this thread is already answered" is a deterministic refusal, not a
