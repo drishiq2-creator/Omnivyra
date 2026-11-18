@@ -9,12 +9,14 @@
  * gpt-image-2.6-sunburst or gpt-image-2.6-flare. gpt-image-1 already returns
  * "model does not exist" for the production account (2026-10-25). Sunburst leads
  * because it is the "detailed visual work" model; Flare is the "fast iteration"
- * model and is the fallback.
+ * model and is the fallback. gpt-image-2.5-sunburst (not scheduled for shutdown)
+ * comes last: OpenAI's own image guide still shows 2.5 ids in its examples, so if the
+ * 2.6 ids are refused for this account, text-to-image generation still renders.
  *
  * OPENAI_IMAGE_MODEL, when set, is tried FIRST, so the model can be changed
  * without a deploy (for example back to a model this account can still call).
  */
-export const OPENAI_IMAGE_MODEL_DEFAULTS = ['gpt-image-2.6-sunburst', 'gpt-image-2.6-flare'] as const;
+export const OPENAI_IMAGE_MODEL_DEFAULTS = ['gpt-image-2.6-sunburst', 'gpt-image-2.6-flare', 'gpt-image-2.5-sunburst'] as const;
 
 /**
  * The provider's token usage for one image call, for the per-image price of the new

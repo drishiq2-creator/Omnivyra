@@ -61,15 +61,15 @@ afterAll(() => {
 });
 
 describe('creator image model: off the models OpenAI is shutting down', () => {
-  it('the default chain is the supported gpt-image-2.6 models, Sunburst first', () => {
-    expect(openAIImageModelCandidates(undefined)).toEqual(['gpt-image-2.6-sunburst', 'gpt-image-2.6-flare']);
+  it('the default chain is the supported gpt-image-2.6 models, Sunburst first, then 2.5 Sunburst', () => {
+    expect(openAIImageModelCandidates(undefined)).toEqual(['gpt-image-2.6-sunburst', 'gpt-image-2.6-flare', 'gpt-image-2.5-sunburst']);
     for (const m of OPENAI_IMAGE_MODEL_DEFAULTS) expect(RETIRING).not.toContain(m);
   });
 
   it('OPENAI_IMAGE_MODEL is tried first, trimmed, never duplicated; blank is ignored', () => {
-    expect(openAIImageModelCandidates('  my-model  ')).toEqual(['my-model', 'gpt-image-2.6-sunburst', 'gpt-image-2.6-flare']);
-    expect(openAIImageModelCandidates('gpt-image-2.6-flare')).toEqual(['gpt-image-2.6-flare', 'gpt-image-2.6-sunburst']);
-    expect(openAIImageModelCandidates('   ')).toEqual(['gpt-image-2.6-sunburst', 'gpt-image-2.6-flare']);
+    expect(openAIImageModelCandidates('  my-model  ')).toEqual(['my-model', 'gpt-image-2.6-sunburst', 'gpt-image-2.6-flare', 'gpt-image-2.5-sunburst']);
+    expect(openAIImageModelCandidates('gpt-image-2.6-flare')).toEqual(['gpt-image-2.6-flare', 'gpt-image-2.6-sunburst', 'gpt-image-2.5-sunburst']);
+    expect(openAIImageModelCandidates('   ')).toEqual(['gpt-image-2.6-sunburst', 'gpt-image-2.6-flare', 'gpt-image-2.5-sunburst']);
   });
 
   it('the in-request renderer generates with gpt-image-2.6-sunburst by default', async () => {

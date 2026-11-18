@@ -125,7 +125,7 @@ describe('B — purpose → fidelity matrix', () => {
 });
 
 describe('C — provider evidence (mocked SDK)', () => {
-  it('CRITICAL: unset + attached MAIN SUBJECT → images.edit at high fidelity (quality medium)', async () => {
+  it('CRITICAL: unset + attached MAIN SUBJECT → images.edit with the photo alone, quality medium, no input_fidelity', async () => {
     const r = await generateProviderImage({ prompt: 'p', referenceImages: [{ bytes: PNG, mimeType: 'image/png' }], referenceFidelity: 'high' });
     expect(editCalls).toHaveLength(1);
     expect(generateCalls).toHaveLength(0);
