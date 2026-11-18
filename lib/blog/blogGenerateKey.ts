@@ -70,6 +70,8 @@ export function blogRefusalText(body: unknown): string | null {
       // No amount in the fallback (7c): it is reached only when the server says nothing, so the
       // client must not state a sum it can't check. The server sentence carries the exact figure.
       return serverText || 'We couldn’t recover this blog, so your credits have been returned. You can write it again.';
+    case 'BLOG_REFUND_PENDING': // 503, retryable (c6 @8f10ad7e2): refund not written yet; key KEPT, retry completes it; no "returned" claim
+      return serverText || 'We could not recover this blog and are returning your credits. Please try again in a moment.';
     case 'BLOG_REQUEST_ENDED': // 409: this request failed and was released (not charged)
       return serverText || 'This request didn’t finish and you weren’t charged. Please try again.';
     case 'BLOG_GENERATION_DISABLED':

@@ -204,6 +204,21 @@ describe('BlogGenerateModal (rendered)', () => {
     expect(keyOf(full[1])).not.toBe(keyOf(full[0]));
   });
 
+  it('503 refund pending -> c6’s sentence (no "returned" claim, not "not sure"); the retry reuses the key', async () => {
+    const SENT = 'We could not recover this blog and are returning your credits. Please try again in a moment.';
+    const { full, write } = await toWriteStep('blog', 'C-refundpending', [
+      reply(503, { code: 'BLOG_REFUND_PENDING', retryable: true, error: SENT }),
+      reply(409, { code: 'BLOG_RESULT_UNAVAILABLE', retryable: false, error: 'We couldn’t recover this blog, so your 40 credits have been returned. You can write it again.' }),
+    ]);
+    fireEvent.click(write());
+    expect(await screen.findByText(SENT)).toBeInTheDocument();
+    expect(screen.queryByText(/have been returned/)).toBeNull();
+    fireEvent.click(write());
+    await waitFor(() => expect(full).toHaveLength(2));
+    expect(keyOf(full[1])).toBe(keyOf(full[0]));
+    expect(await screen.findByText(/your 40 credits have been returned/)).toBeInTheDocument(); // the server sentence carries the figure
+  });
+
   it('control: a plain 2xx opens the editor straight away (no hold)', async () => {
     const { write, onGenerated } = await toWriteStep('blog', 'C-ok', [reply(200, { result: { title: 'Draft' }, billing: { charged: 40, released: 0, reason: 'completed' } })]);
     fireEvent.click(write());

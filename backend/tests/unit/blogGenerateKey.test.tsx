@@ -57,6 +57,7 @@ describe('keepBlogKey: keep only while the outcome is unknown', () => {
     ['503 stored result unreadable (retry the same request)', 503, { code: 'BLOG_RESULT_READ_FAILED', retryable: true }, true],
     ['409 charged earlier, no stored copy (support case)', 409, { code: 'BLOG_RESULT_UNAVAILABLE' }, false],
     ['409 this request failed and was released', 409, { code: 'BLOG_REQUEST_ENDED' }, false],
+    ['503 refund not written yet (retry completes it)', 503, { code: 'BLOG_REFUND_PENDING', retryable: true }, true],
     ['200 replay of a charged success', 200, { result: {}, billing: { charged: 0, released: 0, reason: 'replayed' } }, false],
     ['403 switched off', 403, { code: 'BLOG_GENERATION_DISABLED' }, false],
   ])('%s', (_n, status, body, keep) => {
