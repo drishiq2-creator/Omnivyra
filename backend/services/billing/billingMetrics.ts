@@ -89,6 +89,8 @@ const COUNTER_REGISTRY = {
   settlement_pending_unsurfaced_total:        0,
   phase2_route_replayed_total:                0,
   phase2_route_result_unpersisted_total:      0,
+  // c6 2026-11-18 (b3): campaign-content assist answered with its deterministic fallback (uncharged, flagged).
+  assist_ai_fallback_total:                   0,
 } satisfies Record<string, number>;
 
 const counters: Record<keyof typeof COUNTER_REGISTRY, number> = { ...COUNTER_REGISTRY };
