@@ -50,7 +50,8 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       }
     }
     const week = weekNumber ? Number(weekNumber) : undefined;
-    const assets = await listAssetsWithLatestContent({ campaignId, weekNumber: week });
+    // S2-55: pinned to the company enforceCompanyAccess authorized (a campaign that is not its own lists nothing).
+    const assets = await listAssetsWithLatestContent({ campaignId, weekNumber: week, companyId: String(companyId ?? '') });
     const refinedAssets = await refineUserFacingResponse(assets);
     return res.status(200).json({ assets: refinedAssets });
   } catch (error: any) {

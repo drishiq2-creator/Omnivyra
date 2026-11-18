@@ -1,4 +1,21 @@
 import { supabase } from './supabaseClient';
+import { resolveCampaignOwnership } from '../services/campaignOwnershipService';
+
+/**
+ * S2-55 (2026-11-14): content_assets has no company column (campaign_id is text, no FK to campaigns), the request
+ * gate allows a campaign id that matches NO campaign, and assets of a deleted campaign survive. So a list keyed on
+ * campaign_id alone can return another company's orphaned assets. When the caller passes the AUTHORIZED companyId,
+ * the campaign must first be proven that company's own by the canonical resolver (campaigns.company_id plus every
+ * campaign_versions row agree on it); otherwise nothing is read. A failed owner lookup throws (fail closed: never
+ * "unknown, so read").
+ */
+async function campaignOwnedByCompany(campaignId: string, companyId: string): Promise<boolean> {
+  const ownership = await resolveCampaignOwnership(campaignId);
+  if (ownership.status === 'LOOKUP_FAILED') {
+    throw new Error('Campaign ownership check is temporarily unavailable');
+  }
+  return ownership.status === 'OWNED' && ownership.companyId.toLowerCase() === String(companyId).toLowerCase();
+}
 
 export async function createContentAsset(input: {
   campaignId: string;
@@ -67,7 +84,10 @@ export async function getContentAssetById(assetId: string): Promise<any | null> 
 export async function listContentAssets(input: {
   campaignId: string;
   weekNumber?: number;
+  /** S2-55: the authorized company; when given, a campaign that is not its own lists nothing. */
+  companyId?: string;
 }): Promise<any[]> {
+  if (input.companyId !== undefined && !(await campaignOwnedByCompany(input.campaignId, input.companyId))) return [];
   let query = supabase.from('content_assets').select('*').eq('campaign_id', input.campaignId);
   if (input.weekNumber) {
     query = query.eq('week_number', input.weekNumber);
@@ -115,10 +135,13 @@ export async function listAssetsWithLatestContent(input: {
   campaignId: string;
   weekNumber?: number;
   status?: string;
+  /** S2-55: the authorized company; when given, a campaign that is not its own lists nothing (see listContentAssets). */
+  companyId?: string;
 }): Promise<any[]> {
   const assets = await listContentAssets({
     campaignId: input.campaignId,
     weekNumber: input.weekNumber,
+    ...(input.companyId !== undefined ? { companyId: input.companyId } : {}),
   });
   const filtered = input.status ? assets.filter((asset) => asset.status === input.status) : assets;
   const enriched = await Promise.all(

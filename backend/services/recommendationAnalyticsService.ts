@@ -57,6 +57,16 @@ export const getRecommendationAnalytics = async (
     }
   }
 
+  // S2-55: performance_feedback has no company column, and the route's gate allows a campaignId that matches NO
+  // campaign (rows of a deleted campaign survive), so campaign_id alone could read another company's orphaned
+  // feedback. Scope it like the branch above: a campaign that is not one of the company's own reads nothing.
+  if (filters.companyId && filters.campaignId) {
+    const companyCampaignIds = await getCompanyCampaignIds(filters.companyId);
+    if (!companyCampaignIds.includes(filters.campaignId)) {
+      feedbackQuery = feedbackQuery.eq('campaign_id', '00000000-0000-0000-0000-000000000000');
+    }
+  }
+
   if (fromDate) {
     snapshotsQuery = snapshotsQuery.gte('created_at', fromDate);
     auditsQuery = auditsQuery.gte('created_at', fromDate);

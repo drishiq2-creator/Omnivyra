@@ -6,6 +6,8 @@ import { supabase } from '@/backend/db/supabaseClient';
 // row > blueprint execution items > legacy, preserving execution_id).
 import { canonicalExecutionAdapter, resolveAuthoritativeWorkspace } from '@/backend/services/orchestration';
 import { enforceCompanyAccess } from '@/backend/services/userContextService';
+import { tenantChildTable, tenantContextFor, TenantSeamError } from '@/backend/db/tenantTable';
+import { seamDenial } from '@/backend/db/seamDenial';
 import {
   isContentArchitectSession,
   checkContentArchitectAccess,
@@ -90,9 +92,12 @@ async function handlerImpl(req: NextApiRequest, res: NextApiResponse) {
       }
     }
 
+    // S2: the principal the access check below authorized for companyId (seam context source).
+    let seamPrincipal: { userId: string | null | undefined } | null = null;
     if (isContentArchitectSession(req)) {
       const archAccess = checkContentArchitectAccess(req, res, companyId ?? undefined);
       if (archAccess === null) return;
+      seamPrincipal = archAccess ?? null;
     } else {
       const access = await enforceCompanyAccess({
         req,
@@ -102,9 +107,32 @@ async function handlerImpl(req: NextApiRequest, res: NextApiResponse) {
         requireCampaignId: false,
       });
       if (!access) return;
+      seamPrincipal = access;
     }
 
     const targetExecId = executionId;
+
+    // S2-55: enforceCompanyAccess allows a campaignId that matches NO campaign, and daily_content_plans /
+    // scheduled_posts (and the blueprint) of a deleted campaign survive with no FK, so every read below that is keyed
+    // on campaign_id would reach another company's orphaned rows. Prove the campaign is the authorized company's own
+    // FIRST (the seam reads the campaigns row under that company), before the canonical adapter or any other
+    // campaign-keyed read runs, and read the two child tables through the seam. No authorized company (a Content
+    // Architect session on a campaign no record ties to a company), or a campaign that is not the company's, answers
+    // the route's existing 404.
+    const notFoundBody = { error: 'Activity not found', campaignId, executionId: targetExecId };
+    if (!companyId || !seamPrincipal) return res.status(404).json(notFoundBody);
+    let dailyPlans: Awaited<ReturnType<typeof tenantChildTable>>;
+    let scheduledPostsTable: Awaited<ReturnType<typeof tenantChildTable>>;
+    try {
+      const tenant = tenantContextFor(seamPrincipal, companyId);
+      [dailyPlans, scheduledPostsTable] = await Promise.all([
+        tenantChildTable('daily_content_plans', tenant, campaignId),
+        tenantChildTable('scheduled_posts', tenant, campaignId),
+      ]);
+    } catch (err) {
+      if (err instanceof TenantSeamError) return seamDenial(res, err, 404, notFoundBody);
+      throw err;
+    }
 
     // Phase-2 Step-1: single canonical read. Reconciles enriched
     // daily_content_plans row > blueprint execution_items > legacy, and
@@ -185,10 +213,8 @@ async function handlerImpl(req: NextApiRequest, res: NextApiResponse) {
     const creator_card = (raw as any)?.creator_card ?? (dailyExecutionItem as any)?.creator_card;
     let creator_asset = (raw as any)?.creator_asset ?? (dailyExecutionItem as any)?.creator_asset;
     let content_status = (raw as any)?.content_status ?? (dailyExecutionItem as any)?.content_status;
-    const { data: dailyPlanRow } = await supabase
-      .from('daily_content_plans')
+    const { data: dailyPlanRow } = await dailyPlans
       .select('creator_asset, content_status')
-      .eq('campaign_id', campaignId)
       .eq('execution_id', targetExecId)
       .maybeSingle();
     if (dailyPlanRow?.creator_asset != null) {
@@ -206,12 +232,10 @@ async function handlerImpl(req: NextApiRequest, res: NextApiResponse) {
     let creatorWorkspace: unknown = null;
     let creatorWorkspaceRowId: string | null = null;
     try {
-      const { data: fullRow } = await supabase
-        .from('daily_content_plans')
+      const { data: fullRow } = await dailyPlans
         .select(
           'id, content, content_type, platform, content_status, asset_type, intent_type, week_number, topic, title',
         )
-        .eq('campaign_id', campaignId)
         .eq('execution_id', targetExecId)
         .maybeSingle();
       if (fullRow) {
@@ -284,11 +308,9 @@ async function handlerImpl(req: NextApiRequest, res: NextApiResponse) {
     const allExecIds = allTopicEntries.map((e) => e.executionId);
     let scheduledPostsMap: Record<string, { scheduled_for: string | null; status: string | null; content: string | null }> = {};
     if (allExecIds.length > 0) {
-      const { data: scheduledPosts } = await supabase
-        .from('scheduled_posts')
+      const { data: scheduledPosts } = await scheduledPostsTable
         .select('execution_id, scheduled_for, status, content')
-        .in('execution_id', allExecIds)
-        .eq('campaign_id', campaignId);
+        .in('execution_id', allExecIds);
       if (Array.isArray(scheduledPosts)) {
         for (const sp of scheduledPosts) {
           if (sp.execution_id) {

@@ -11,7 +11,7 @@ import { Role } from '../../../backend/services/rbacService';
 import { requireCompanyContext } from '../../../backend/services/companyContextGuardService';
 import {
   getContentVelocityMetrics,
-  resolveCampaignIdsForCompany,
+  scopeCampaignIdsForCompany,
 } from '../../../backend/services/growthIntelligence';
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
@@ -31,7 +31,8 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     const companyContext = await requireCompanyContext({ req, res, companyId, campaignId });
     if (!companyContext) return;
 
-    const campaignIds = campaignId ? [campaignId] : await resolveCampaignIdsForCompany(supabase, companyId);
+    // S2-55: a supplied campaignId is used only if it is one of the authorized company's own campaigns.
+    const campaignIds = await scopeCampaignIdsForCompany(supabase, companyId, campaignId);
     const data = await getContentVelocityMetrics(supabase, campaignIds);
     return res.status(200).json({ success: true, data });
   } catch (err: unknown) {

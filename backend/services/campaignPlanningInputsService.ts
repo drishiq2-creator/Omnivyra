@@ -1,5 +1,6 @@
 import { supabase } from '../db/supabaseClient';
 import { ownedDbTable } from '../db/writeOwner';
+import { tenantTable, type TenantContext } from '../db/tenantTable';
 
 export type CampaignPlanningInputs = {
   recommendation_snapshot: unknown;
@@ -22,9 +23,15 @@ export type CampaignPlanningInputs = {
 };
 
 export async function getCampaignPlanningInputs(
-  campaignId: string
+  campaignId: string,
+  /**
+   * S2-55: the authorized company's context. When given, only that company's rows are read (company_id is stamped
+   * by saveCampaignPlanningInputs), so a campaign id that matches no campaign - or a deleted campaign whose rows
+   * survive - can never return another company's inputs. Omitted: the legacy campaign-only read.
+   */
+  tenant?: TenantContext,
 ): Promise<CampaignPlanningInputs | null> {
-  const { data, error } = await ownedDbTable('campaign_planning_inputs')
+  const { data, error } = await (tenant ? tenantTable('campaign_planning_inputs', tenant) : ownedDbTable('campaign_planning_inputs'))
     .select(
       'recommendation_snapshot, available_content, weekly_capacity, exclusive_campaigns, selected_platforms, platform_content_requests, planning_stage, is_completed'
     )
