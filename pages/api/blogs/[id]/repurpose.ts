@@ -152,9 +152,11 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   });
 
   try {
-    // Public blogs have no company -> nothing to charge; passthrough (honest). The billed call is reached ONLY on the
-    // company path, after enforceCompanyAccess (c6 2026-11-18: an explicit early branch, so the route-auth ordering
-    // analysis - path-insensitive - sees the billed writes behind authentication, as they always were).
+    // Public blogs have no company -> nothing to charge; passthrough (honest).
+    // DO NOT remove the enforceCompanyAccess below as "redundant" (c6/7c 2026-11-18): the old code gated authentication
+    // on `source === 'company'` and the billed call on `companyId ?` - TWO conditions that had to agree, with nothing
+    // enforcing it (the route-auth ordering gate found that latent divergence). The billed path now asserts its own
+    // precondition under ONE condition, immediately before money moves.
     let result: Awaited<ReturnType<typeof runAi>>;
     if (source !== 'company' || !companyId) {
       result = await runAi();
