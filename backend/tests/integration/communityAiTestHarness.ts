@@ -71,6 +71,7 @@ export const seedPlaybook = (overrides?: Record<string, any>) => {
 };
 
 export const resetCommunityAiStores = () => {
+  guardrailRow = { ...DEFAULT_GUARDRAIL_ROW };
   actionStore.clear();
   actionLogStore.length = 0;
   roleStore.length = 0;
@@ -115,8 +116,15 @@ const policyDecision = (org: unknown, tenant: unknown) => {
   return { allowed: true, code: null, auto_rules_enabled: row.auto_rules_enabled, policy_version: 'v1' };
 };
 
-/** The one execution_guardrails row the fake knows: read by the select AND by the atomic claim. */
-export const GUARDRAIL_ROW = { auto_execution_enabled: true, daily_platform_limit: 999, per_post_reply_limit: 999, per_evaluation_limit: 999 };
+/**
+ * The ONE execution_guardrails row the fake knows, read by the select AND by the atomic claim (so the two can never
+ * disagree). `null` = no guardrail row for the company: production then applies NO limits (the select answers no
+ * row; the SQL wraps every limit in IF FOUND) - the one path where the safety mechanism is absent, so it must be
+ * reachable (7c). resetCommunityAiStores() restores the default.
+ */
+export const DEFAULT_GUARDRAIL_ROW = Object.freeze({ auto_execution_enabled: true, daily_platform_limit: 999, per_post_reply_limit: 999, per_evaluation_limit: 999 });
+let guardrailRow: Record<string, any> | null = { ...DEFAULT_GUARDRAIL_ROW };
+export const setGuardrailRow = (row: Record<string, any> | null) => { guardrailRow = row === null ? null : { ...row }; };
 
 /**
  * Emulates the Prompt 3 database functions for the in-memory harness (the SQL
@@ -169,11 +177,15 @@ export const communityRpc = async (name: string, args: Record<string, any>) => {
     // constant resolveSelect answers for execution_guardrails. Stage 0 (a9): this RPC had no fake, so
     // every scheduler / evaluation claim failed CLAIM_RPC_ERROR.
     if (args.p_source !== 'evaluation' && args.p_source !== 'scheduler') {
-      return { data: [{ claimed: false, code: 'INVALID_ARGUMENT', current_status: null }], error: null };
+      // As the SQL: RAISE EXCEPTION ... ERRCODE '22023' - the caller sees an RPC error, not a refusal row (7c).
+      return { data: null, error: { code: '22023', message: 'community_ai_claim_within_limits: invalid arguments' } };
     }
     const row = actionStore.get(args.p_action_id);
-    if (row && row.organization_id === args.p_org && row.tenant_id === args.p_tenant) {
-      const g = GUARDRAIL_ROW;
+    // As the SQL (:152-153): the guardrails are evaluated ONLY for a found, in-scope row whose status is 'approved';
+    // anything else delegates straight to the plain claim and returns ITS answer (7c finding: without the status
+    // test the fake could answer GUARDRAIL_* for an executing / executed / failed action, which production never does).
+    const g = guardrailRow;
+    if (row && row.organization_id === args.p_org && row.tenant_id === args.p_tenant && row.status === 'approved' && g) {
       const platform = String(row.platform ?? '').trim().toLowerCase();
       const counted = (since: string | null, extra: (a: any) => boolean) => Array.from(actionStore.values()).filter((a) =>
         a.organization_id === args.p_org && String(a.platform ?? '').trim().toLowerCase() === platform && extra(a)
@@ -184,7 +196,9 @@ export const communityRpc = async (name: string, args: Record<string, any>) => {
       if (!code && g.daily_platform_limit != null && counted(dayStart.toISOString(), () => true) >= g.daily_platform_limit) {
         code = 'GUARDRAIL_DAILY_PLATFORM_LIMIT';
       }
-      if (!code && String(row.action_type).toLowerCase() === 'reply' && g.per_post_reply_limit != null
+      // Gate as the SQL: lower(btrim(coalesce(action_type, ''))) = 'reply'; the count below matches action_type exactly,
+      // as the SQL's does (community_ai_actions_action_type_check pins lower-case values, so the two cannot diverge).
+      if (!code && String(row.action_type ?? '').trim().toLowerCase() === 'reply' && g.per_post_reply_limit != null
         && counted(null, (a) => a.target_id === row.target_id && a.action_type === 'reply') >= g.per_post_reply_limit) {
         code = 'GUARDRAIL_PER_POST_LIMIT';
       }
@@ -274,7 +288,9 @@ const resolveSelect = (table: string, state: any) => {
         return value && value <= state.lteFilter.value;
       });
     }
-    // The guardrail's windowed counts (executed_at >= start of day / ten minutes ago) need gte too.
+    // The guardrail's windowed counts (executed_at >= start of day / ten minutes ago) need gte too. A STRING compare:
+    // correct only because every stored timestamp is uniform ISO-8601 UTC (toISOString), so lexical == chronological.
+    // Seed timestamps the same way (7c).
     if (state.gteFilter) {
       rows = rows.filter((row) => {
         const value = row[state.gteFilter.field];
@@ -415,7 +431,8 @@ const resolveSelect = (table: string, state: any) => {
     return { data: rows, error: null };
   }
   if (table === 'execution_guardrails') {
-    const value = { ...GUARDRAIL_ROW };
+    if (guardrailRow === null) return { data: state.single ? null : [], error: null };
+    const value = { ...guardrailRow };
     return { data: state.single ? value : [value], error: null };
   }
   if (table === 'organization_plan_assignments' || table === 'pricing_plans') return { data: state.single ? null : [], error: null };
