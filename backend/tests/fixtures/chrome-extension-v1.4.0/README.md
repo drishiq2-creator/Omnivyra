@@ -21,6 +21,15 @@ WHERE THE SOURCE IS (owner, 2026-11-19): the Chrome extension has its OWN versio
 against a checkout of that repository at the pinned tag `v1.4.0` - never against a copy on someone's machine.
 `<extensionSrcDir>` below is the `extension/` folder of that checkout.
 
+VERIFY IS A MANUAL PROCEDURE: run fixture-tool.js against a checkout of the extension repo at the pinned tag.
+CI does NOT check it (CI cannot reach that repository without a new read-only token - an owner decision on the
+post-launch register). In CI the suites assert the excerpts as vendored; nothing turns red if the extension moves.
+
+TWO EXTENSION VERSIONS ARE LIVE (b3 / owner, 2026-11-19): 1.4.0 (still installed; it collects DMs / comments /
+feeds, so the server-side ingestion block in extensionIngestionSuspension.ts holds) and 1.4.1 (collection
+removed). This fixture covers the OLDER of the two, deliberately, while 1.4.0 installs remain. A 1.4.1 fixture is
+a named follow-up (post-launch register); keep this one until telemetry shows no 1.4.0 installs.
+
 `fixture-tool.js` rebuilds and verifies them from the real source:
 
     node backend/tests/fixtures/chrome-extension-v1.4.0/fixture-tool.js <extensionSrcDir>          # verify
