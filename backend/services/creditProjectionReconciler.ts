@@ -34,7 +34,7 @@
 
 import { supabase } from '../db/supabaseClient';
 import { logger } from './logger';
-import { isRemainderKey } from '../../shared/billing/creditPhaseVocabulary';
+import { isRemainderKey, PARTIAL_CONFIRM_PHASE } from '../../shared/billing/creditPhaseVocabulary';
 
 const LEDGER_PAGE = 1000;
 
@@ -148,7 +148,7 @@ export function computeFromLedger(rows: LedgerRow[]): ComputedWallet {
     if (isRemainderKey(row.idempotency_key)) continue;
 
     const keyed = reservationBase(row.idempotency_key);
-    if (isPhase(row, 'confirm_partial')) {
+    if (isPhase(row, PARTIAL_CONFIRM_PHASE)) {
       // MONEY (e9, 2026-11-12): token-priced settlements. Both the live and the
       // guarded partial confirm release the unused hold and charge any over-run
       // from the balance, recording the ACTUAL per-bucket consumption in the

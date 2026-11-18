@@ -1,5 +1,6 @@
 import { supabase } from '../db/supabaseClient';
 import type { CategorySplit } from '../services/creditPriorityService';
+import { SETTLE_PHASES as SETTLEMENT_ROW_PHASES, REMAINDER_KEY_SUFFIX as REMAINDER_SUFFIX } from '../../shared/billing/creditPhaseVocabulary';
 
 export interface CreditReservationCommand {
   orgId: string;
@@ -96,9 +97,8 @@ export interface CreditPartialConfirmCommand {
  * half was what saw partial confirms, via the <base>:confirm key).
  */
 const SETTLE_PHASES = ['confirm', 'release'] as const;
-/** Ledger phases that settle a hold (the partial confirm writes 'confirm_partial'). */
-const SETTLEMENT_ROW_PHASES = ['confirm', 'release', 'confirm_partial'] as const;
-const REMAINDER_SUFFIX = ':remainder';
+// Ledger phases that settle a hold (incl. the partial confirm) and the guarded remainder-key suffix come from the
+// one execution_phase vocabulary (imported above).
 
 function keyBase(key: string): string | null {
   const m = /^(.*):(confirm|release)$/.exec(key);

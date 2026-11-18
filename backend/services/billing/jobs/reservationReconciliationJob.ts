@@ -19,6 +19,7 @@ import { supabase } from '../../../db/supabaseClient';
 import { logger } from '../../logger';
 import { emitAnomaly } from '../billingAuditEmitter';
 import { incrCounter } from '../billingMetrics';
+import { SETTLE_PHASES } from '../../../../shared/billing/creditPhaseVocabulary';
 
 export interface ReservationReconciliationResult {
   scanned:                  number;
@@ -62,7 +63,7 @@ export async function runReservationReconciliation(opts?: {
       .from('credit_transactions')
       .select('id, execution_phase')
       .eq('parent_transaction_id', h.id)
-      .in('execution_phase', ['confirm', 'release', 'confirm_partial'] /* a partial confirm settles its hold */)
+      .in('execution_phase', [...SETTLE_PHASES] /* a partial confirm settles its hold */)
       .limit(1);
     if (siblingErr) { unverifiable += 1; continue; }
     if (!sibling || sibling.length === 0) {

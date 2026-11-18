@@ -12,8 +12,11 @@
  * misses every token-priced charge.
  */
 
+/** The token-priced settle phase (apply_credit_partial_confirm). Readers name it through this constant, never a literal. */
+export const PARTIAL_CONFIRM_PHASE = 'confirm_partial';
+
 /** Phases that CHARGE a hold: credits used. */
-export const CONFIRM_PHASES: readonly string[] = Object.freeze(['confirm', 'confirm_partial']);
+export const CONFIRM_PHASES: readonly string[] = Object.freeze(['confirm', PARTIAL_CONFIRM_PHASE]);
 
 /** Phases that settle (terminate) a hold. */
 export const SETTLE_PHASES: readonly string[] = Object.freeze([...CONFIRM_PHASES, 'release']);
