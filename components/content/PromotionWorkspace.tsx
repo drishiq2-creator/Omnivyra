@@ -32,6 +32,27 @@ type PlatformState = {
   scheduledFor: string; // datetime-local value
 };
 
+/**
+ * The Post Now failure copy. True for every path into the catch — staging
+ * failed (no row exists), or the publish failed / was refused: the server
+ * cancels the staged row's queued job before it publishes (and refuses to
+ * publish when it cannot), so nothing is posted later on its own. The one
+ * exception is an UNCERTAIN outcome (the post may be live), shown as the
+ * server words it.
+ */
+export function postNowFailureDetail(e: unknown): string {
+  // Not a failure we can call "not posted": the post may already be live
+  // (backend/queue/publishOutcome PUBLISH_OUTCOME_UNCERTAIN). The server's own
+  // words are shown, unchanged, as before.
+  if (e instanceof Error && ((e as { outcomeUncertain?: boolean }).outcomeUncertain === true || /^Publish outcome unknown/.test(e.message))) {
+    return e.message;
+  }
+  const reason = e instanceof Error ? e.message.trim().replace(/[.\s]+$/, '') : '';
+  return reason
+    ? `Not posted: ${reason}. Nothing will be posted automatically. You can try again.`
+    : 'Not posted. Nothing will be posted automatically. You can try again.';
+}
+
 function defaultScheduleValue(): string {
   // Default to ~1 hour out (scheduling floor); local-time string for the input.
   const d = new Date(Date.now() + 60 * 60 * 1000);
@@ -279,6 +300,11 @@ export default function PromotionWorkspace({
         body: JSON.stringify({ post_id: postId }),
       });
       const pubData = await pubRes.json().catch(() => ({}));
+      // The post MAY be live (an attempt reached the platform, result unsaved):
+      // never reported as "not posted".
+      if (pubData?.code === 'PUBLISH_OUTCOME_UNCERTAIN') {
+        throw Object.assign(new Error(pubData?.message || 'The publish outcome is unknown.'), { outcomeUncertain: true });
+      }
       if (!pubRes.ok) throw new Error(pubData?.error || `Publish failed (status ${pubRes.status}).`);
       // The publish endpoint returns 200 even when the adapter reports FAILED —
       // the truth is in `status`; only PUBLISHED counts.
@@ -288,7 +314,7 @@ export default function PromotionWorkspace({
       patch(platform, { status: 'posted', statusDetail: 'Posted.' });
       await saveDraftRow(platform, 'posted').catch(() => {});
     } catch (e) {
-      patch(platform, { status: 'failed', statusDetail: e instanceof Error ? e.message : 'Post failed.' });
+      patch(platform, { status: 'failed', statusDetail: postNowFailureDetail(e) });
       await saveDraftRow(platform, 'failed').catch(() => {});
     } finally {
       patch(platform, { busy: null });

@@ -71,6 +71,24 @@ export function retryClaimState(errorCode: string | null | undefined, nowMs: num
 }
 
 /**
+ * Did a `cancelScheduledPostQueueEntry` run (backend/scheduler) leave a publish
+ * job whose state is UNDECIDED, i.e. one that may still publish? True when any
+ * `queue_jobs` step reported an error: the old job's database state is then
+ * unknown. A BullMQ removal error alone does not count, because the row is
+ * already 'cancelled' and the worker obeys that (publishProcessor refuses a
+ * cancelled row).
+ *
+ * Shared by every caller that supersedes a post's queued attempt with its own:
+ * the tenant retry (pages/api/scheduler/retry.ts, Closure-014C) and the manual
+ * publish-now (publishNowService `supersede_queued_jobs`). It lives in this pure
+ * module, not beside the cancel helper, so suites that stub the scheduler
+ * module keep the real predicate.
+ */
+export function queueCancelLeftJobUndecided(cancel: { errors: string[] }): boolean {
+  return cancel.errors.some((e) => e.startsWith('queue_jobs'));
+}
+
+/**
  * Prefix of the fence an activity-workspace reschedule writes on a single post
  * TOGETHER WITH the new time (one compare-and-set), holds while it writes the
  * plan row and re-queues, and clears last: RESCHEDULING:<epochMs>:<uuid>.
