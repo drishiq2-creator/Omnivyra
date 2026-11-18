@@ -7,6 +7,7 @@
  * Real route; the DB read, company access and the service are faked. The fake mirrors PostgREST (maybeSingle resolves
  * { data, error }, never throws).
  */
+export {}; // a module, not a global script: top-level names must not collide with other test files (CI-496)
 type Res = { data: unknown; error: { message: string } | null };
 const st: { fetch: Res; reject: () => Promise<void>; rejected: string[] } = {
   fetch: { data: { id: 'req-1', initiator_campaign_id: 'camp-1' }, error: null },
