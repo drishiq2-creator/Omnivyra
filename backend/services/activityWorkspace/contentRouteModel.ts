@@ -23,6 +23,11 @@ import { enrichItemWithGovernance } from '@/backend/services/creator/governanceI
 import { updateExecutionContentByActivity } from '@/backend/services/orchestration';
 import { checkRateLimit } from '@/lib/auth/rateLimit';
 import { resolveMonetizationFeature } from '@/shared/monetization/featureRegistry';
+import { createHash } from 'crypto';
+import {
+  BilledResultUnpersistedError, BilledRouteKeyRequiredError, BilledRouteRequestEndedError,
+  clientIdempotencyKey, persistBilledResultOrThrow, replayOrRefund,
+} from '@/backend/services/billing/billedRequestRecovery';
 
 import { isFailedVariant } from './contentRouteHandler';
 
@@ -49,6 +54,14 @@ export async function runReservedFixedWorkflow<T>(input: {
   note: string;
   multiplier?: number;
   executor: () => Promise<T>;
+  /**
+   * b3 rulings 2026-11-18 (BLOCKING-launch) - opt in to billed-request recovery (billedRequestRecovery):
+   *   - the identity is the client's Idempotency-Key (REQUIRED; never synthesised), scoped to referenceId;
+   *   - the executor's result is persisted (billedResultStore, read back) INSIDE the charge, so it is never confirmed
+   *     for a result that cannot be returned (not persisted -> released, the work is returned free);
+   *   - a same-key retry replays it; a durably unreadable replay refunds the original charge (system-paid).
+   */
+  recovery?: { surface: string; scope: string; idempotencyKeyHeader: unknown; onReplay?: () => void };
 }): Promise<T> {
   if (!input.companyId) {
     throw new MonetizedWorkflowError(400, { error: 'Company context is required for billable content actions' });
@@ -63,21 +76,51 @@ export async function runReservedFixedWorkflow<T>(input: {
   if (!registryResolution) {
     throw new MonetizedWorkflowError(500, { error: `No monetization registry entry for ${input.action}` });
   }
+  // Recovery: identity = referenceId + the client's key (required); replay before any charge.
+  let identity: string | null = null;
+  let executor = input.executor;
+  if (input.recovery) {
+    const clientKey = clientIdempotencyKey(input.recovery.idempotencyKeyHeader);
+    if (!clientKey) throw new BilledRouteKeyRequiredError(input.recovery.surface);
+    identity = `${input.referenceId}:k:${createHash('sha256').update(clientKey).digest('hex').slice(0, 24)}`;
+    const recovery = input.recovery;
+    const orgId = input.companyId;
+    const replay = await replayOrRefund({
+      surface: recovery.surface, scope: recovery.scope, orgId, key: identity, performedBy: input.userId,
+      confirmKeys: [`${makeIdempotencyKey(input.userId, input.action, identity, input.note)}:confirm`], referenceId: input.referenceId,
+    });
+    if (replay) { recovery.onReplay?.(); return replay.value as T; }
+    const run = input.executor;
+    const key = identity;
+    executor = async () => {
+      const value = await run();
+      await persistBilledResultOrThrow({ scope: recovery.scope, orgId, key, value });   // throws -> released
+      return value;
+    };
+  }
   const baseCost = await getCreditCost(input.action);
   const amountOverride = Math.round(baseCost * (input.multiplier ?? 1));
-  const result = await executeWithCredits<T>({
-    userId: input.userId,
-    orgId: input.companyId,
-    action: input.action,
-    referenceType: input.referenceType,
-    referenceId: input.referenceId,
-    idempotencyKey: makeIdempotencyKey(input.userId, input.action, input.referenceId, input.note),
-    amountOverride,
-    note: `${input.note} [feature=${registryResolution.feature_key}; pricing=${registryResolution.pricing_key}]`,
-    executor: input.executor,
-  });
+  let result;
+  try {
+    result = await executeWithCredits<T>({
+      userId: input.userId,
+      orgId: input.companyId,
+      action: input.action,
+      referenceType: input.referenceType,
+      referenceId: input.referenceId,
+      idempotencyKey: makeIdempotencyKey(input.userId, input.action, identity ?? input.referenceId, input.note),
+      amountOverride,
+      note: `${input.note} [feature=${registryResolution.feature_key}; pricing=${registryResolution.pricing_key}]`,
+      executor,
+    });
+  } catch (err) {
+    // Delivered in this response but not durably stored: released, NOT charged (the work is still returned).
+    if (err instanceof BilledResultUnpersistedError) return err.result as T;
+    throw err;
+  }
 
   if (result.status === 'executed') return result.result;
+  if (identity && result.status === 'already_released') throw new BilledRouteRequestEndedError(input.recovery!.surface);
   if (result.status === 'insufficient_credits') {
     throw new MonetizedWorkflowError(402, {
       error: 'Insufficient credits to generate content',
@@ -106,24 +149,31 @@ export type ContentWriteTarget = { rowId: string; campaignId: string };
 
 async function persistContentEnvelopeToDb(
   target: ContentWriteTarget | null,
-  transform: (existing: Record<string, unknown>) => Record<string, unknown>
+  transform: (existing: Record<string, unknown>) => Record<string, unknown>,
+  opts: { strict?: boolean } = {},
 ): Promise<void> {
-  if (!target) return; // transient / unresolved activity — nothing to persist
+  if (!target) return; // transient / unresolved activity — nothing to persist (billed paths store via billedResultStore)
   // Canonical write: locates the row, applies the transform, reconciles
   // (enrichment-priority merge, blank/stale-overwrite guards, log-only
   // invariants), preserves legacy row shape, and emits write observability.
-  await updateExecutionContentByActivity(target.rowId, transform, 'activity-workspace/content', { campaignId: target.campaignId });
+  const r = await updateExecutionContentByActivity(target.rowId, transform, 'activity-workspace/content', { campaignId: target.campaignId });
+  // c6 2026-11-18 (b3): the write reports failure as { ok: false } - a BILLED path must not swallow it (strict): the
+  // throw inside the executor releases the charge.
+  if (opts.strict && (!r || (r as { ok?: boolean }).ok === false)) {
+    throw new Error(`content write failed: ${String((r as { reason?: string } | undefined)?.reason ?? 'unknown')}`);
+  }
 }
 
 /** Merge master_content into daily_content_plans.content JSON blob for the given activity row. */
-export async function persistMasterToDb(target: ContentWriteTarget | null, master: MasterContentPayload): Promise<void> {
-  await persistContentEnvelopeToDb(target, (existing) => ({ ...existing, master_content: master }));
+export async function persistMasterToDb(target: ContentWriteTarget | null, master: MasterContentPayload, opts: { strict?: boolean } = {}): Promise<void> {
+  await persistContentEnvelopeToDb(target, (existing) => ({ ...existing, master_content: master }), opts);
 }
 
 export async function persistVariantsToDb(
   target: ContentWriteTarget | null,
   variants: Array<Record<string, unknown>>,
-  master: Record<string, unknown> | null | undefined
+  master: Record<string, unknown> | null | undefined,
+  opts: { strict?: boolean } = {},
 ): Promise<void> {
   await persistContentEnvelopeToDb(target, (existing) => {
     const previous = Array.isArray(existing.platform_variants) ? (existing.platform_variants as Array<Record<string, unknown>>) : [];
@@ -152,7 +202,7 @@ export async function persistVariantsToDb(
       content_status: variantList.length > 0 ? 'repurposed' : existing.content_status,
       repurposed_at: variantList.length > 0 ? new Date().toISOString() : existing.repurposed_at,
     };
-  });
+  }, opts);
 }
 
 export const FAILED_VARIANT_PREFIXES = [

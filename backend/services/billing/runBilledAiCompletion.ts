@@ -51,6 +51,11 @@ import { runBilledOperation, type OrchestratorResult } from './enterpriseBilling
 import type { BillingIdempotencyArgs } from './billingIdempotencyService';
 import type { CreditAction, LlmExecutorResult } from '../creditExecutionService';
 import { checkAiBillingGuard, runWithCreditHandle, type CreditHandle } from './aiGatewayBillingGuard';
+import { buildBillingIdempotencyKey } from './billingIdempotencyService';
+import {
+  BilledResultUnpersistedError, BilledRouteKeyRequiredError, BilledRouteRequestEndedError,
+  clientIdempotencyKey, persistBilledResultOrThrow, replayOrRefund,
+} from './billedRequestRecovery';
 
 export interface RunBilledAiCompletionArgs {
   module:        string;
@@ -85,10 +90,29 @@ export interface RunBilledAiCompletionArgs {
     cache_version?: string | null;
   };
   validateMembership?: boolean;
+  /**
+   * b3 rulings 2026-11-18 (BLOCKING-launch) - opt in to billed-request recovery (billedRequestRecovery). Requires an
+   * 'http' idempotency with the client's Idempotency-Key (refused without one - never synthesised). The completion is
+   * post-processed and PERSISTED (durableWrite, then billedResultStore, read back) INSIDE the charge: a result that
+   * cannot be persisted is released and returned free; a same-key retry replays the stored value; a durably
+   * unreadable replay refunds the original charge (system-paid).
+   */
+  recovery?: {
+    surface: string;
+    scope: string;
+    postProcess?: (text: string) => Promise<unknown> | unknown;
+    durableWrite?: (value: unknown) => Promise<void>;
+  };
 }
 
 export interface BilledAiCompletionResult {
   text:            string;
+  /** With `recovery`: the post-processed (and persisted) value - or the replayed one. */
+  value?:          unknown;
+  /** With `recovery`: true when this response replays an earlier, already-charged result (nothing new charged). */
+  replayed?:       boolean;
+  /** With `recovery`: true when the result could not be persisted, so the charge was released (returned free). */
+  unbilled?:       boolean;
   operationId:     string;
   correlationId:   string;
   idempotencyKey:  string;
@@ -101,7 +125,27 @@ export interface BilledAiCompletionResult {
 export async function runBilledAiCompletion(
   args: RunBilledAiCompletionArgs,
 ): Promise<BilledAiCompletionResult> {
-  const orchestratorResult: OrchestratorResult<string> = await runBilledOperation<string>({
+  // ── Recovery (opt-in): required client key, replay before any charge ──
+  let recoveredValue: unknown;
+  if (args.recovery) {
+    const idem = args.idempotency;
+    if (idem.kind !== 'http' || !clientIdempotencyKey(idem.requestHeaderIdempotency)) {
+      throw new BilledRouteKeyRequiredError(args.recovery.surface);
+    }
+    const root = buildBillingIdempotencyKey(idem);
+    const replay = await replayOrRefund({
+      surface: args.recovery.surface, scope: args.recovery.scope, orgId: args.orgId, key: root.root, performedBy: args.userId,
+      confirmKeys: [root.confirm], referenceId: args.referenceId,
+    });
+    if (replay) {
+      return { text: typeof replay.value === 'string' ? replay.value : '', value: replay.value, replayed: true,
+        operationId: '', correlationId: '', idempotencyKey: root.root, promptTokens: 0, completionTokens: 0, provider: '', model: '' };
+    }
+  }
+
+  let orchestratorResult: OrchestratorResult<string>;
+  try {
+  orchestratorResult = await runBilledOperation<string>({
     module:         args.module,
     action:         args.action,
     userId:         args.userId,
@@ -145,6 +189,16 @@ export async function runBilledAiCompletion(
 
       const text = typeof gatewayResp.output === 'string' ? gatewayResp.output : '';
       const usage = gatewayResp.metadata?.token_usage ?? {};
+      if (args.recovery) {
+        // PERSIST INSIDE the charge (b3/7c): throws BilledResultUnpersistedError -> the engine releases.
+        const recovery = args.recovery;
+        const value = recovery.postProcess ? await recovery.postProcess(text) : text;
+        await persistBilledResultOrThrow({
+          scope: recovery.scope, orgId: args.orgId, key: buildBillingIdempotencyKey(args.idempotency).root, value,
+          durableWrite: recovery.durableWrite ? () => recovery.durableWrite!(value) : undefined,
+        });
+        recoveredValue = value;
+      }
 
       return {
         result: text,
@@ -159,6 +213,18 @@ export async function runBilledAiCompletion(
     },
   });
 
+  } catch (err) {
+    // Delivered in this response but not durably stored: released, NOT charged (the work is still returned).
+    if (err instanceof BilledResultUnpersistedError) {
+      return { text: typeof err.result === 'string' ? err.result : '', value: err.result, unbilled: true,
+        operationId: '', correlationId: '', idempotencyKey: '', promptTokens: 0, completionTokens: 0, provider: '', model: '' };
+    }
+    throw err;
+  }
+
+  if (args.recovery && orchestratorResult.result.status === 'already_released') {
+    throw new BilledRouteRequestEndedError(args.recovery.surface);
+  }
   if (orchestratorResult.result.status !== 'executed') {
     throw new Error(
       `[runBilledAiCompletion] orchestrator did not execute: status=${orchestratorResult.result.status}`,
@@ -182,5 +248,6 @@ export async function runBilledAiCompletion(
     completionTokens: Number(actualUsage.outputTokens ?? 0),
     provider:         settlement?.provider ?? args.llmPricing.provider,
     model:            settlement?.model    ?? args.llmPricing.model,
+    ...(args.recovery ? { value: recoveredValue } : {}),
   };
 }
