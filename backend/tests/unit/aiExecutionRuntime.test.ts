@@ -93,11 +93,33 @@ describe('canonical lifecycle', () => {
     expect(saveCalls).toBe(1);                 // result now stored for the NEXT retry
   });
 
-  test('persist failure → response still succeeds; the retry resumes via free re-run, never a new charge', async () => {
+  // c6 2026-11-18 (b3 + 7c invariant) replaces "persist failure → response still succeeds; the retry resumes via free
+  // re-run, never a new charge": the result is now saved INSIDE the charge, so a save failure RELEASES it - the user
+  // still gets the result, and is NOT charged for one we could not store.
+  test('persist failure → response still succeeds, and it is NOT charged (released inside the charge)', async () => {
     saveShouldFail = true;
     const executor = jest.fn(async () => 'v1');
     const first = await runAiExecution(baseArgs(executor));
-    expect(first).toMatchObject({ status: 'completed', charged: true }); // user unaffected by persist failure
+    expect(first).toMatchObject({ status: 'completed', result: 'v1', charged: false });
+  });
+
+  test('the result is SAVED INSIDE the charge - before the engine returns executed (the confirm), never after', async () => {
+    const credits = jest.requireMock('../../services/creditExecutionService').executeWithCredits as jest.Mock;
+    let savesWhenEngineReturned = -1;
+    credits.mockImplementationOnce(async (args: any) => {
+      billingCalls.push({ engine: 'credits', key: args.idempotencyKey });
+      const result = await args.executor();
+      savesWhenEngineReturned = saveCalls;   // the confirm happens here, after the executor returns
+      return { status: 'executed', result };
+    });
+    const before = saveCalls;
+    const out = await runAiExecution(baseArgs(jest.fn(async () => 'v1')));
+    expect(out).toMatchObject({ status: 'completed', charged: true });
+    expect(savesWhenEngineReturned).toBe(before + 1);
+    expect(saveCalls).toBe(before + 1);   // and not saved a second time after
+  });
+
+  test('a settled charge with an empty store (a pre-change charge) resumes via a free re-run, never a new charge', async () => {
 
     // Retry: ledger says settled; store is empty → free re-run
     saveShouldFail = false;
