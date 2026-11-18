@@ -255,7 +255,10 @@ async function persistPlan(
     return;
   }
 
-  await supabase.from('campaign_week_plan').upsert({
+  // c6 2026-11-18 (b3, the "ignored write" group): persistPlan runs INSIDE the billed executor; the upsert reports
+  // failure as { error } (it does not throw), which was ignored - a plan that was not saved was still charged. Now a
+  // failed save THROWS, so the charge releases and the job retries.
+  const { error: persistErr } = await supabase.from('campaign_week_plan').upsert({
     campaign_id:   plan.campaign_id,
     source:        'v2_pipeline',
     status:        'ready',
@@ -264,6 +267,7 @@ async function persistPlan(
     raw_plan_text: null,
     created_at:    new Date().toISOString(),
   }, { onConflict: 'campaign_id' });
+  if (persistErr) throw new Error(`[campaign-planning] plan not persisted (charge released): ${persistErr.message}`);
 }
 
 // ── Main processor ────────────────────────────────────────────────────────────
