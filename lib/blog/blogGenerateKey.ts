@@ -67,7 +67,9 @@ export function blogRefusalText(body: unknown): string | null {
     case 'BLOG_RESULT_READ_FAILED': // 503, retryable: the stored blog couldn't be read; the key is KEPT
       return serverText || 'We couldn’t check on this blog just now. Please try again.';
     case 'BLOG_RESULT_UNAVAILABLE': // 409: no stored copy; b3 ruling: c6 auto-refunds the original charge once
-      return serverText || 'We couldn’t recover this blog, so your 40 credits have been returned. You can write it again.';
+      // No amount in the fallback (7c): it is reached only when the server says nothing, so the
+      // client must not state a sum it can't check. The server sentence carries the exact figure.
+      return serverText || 'We couldn’t recover this blog, so your credits have been returned. You can write it again.';
     case 'BLOG_REQUEST_ENDED': // 409: this request failed and was released (not charged)
       return serverText || 'This request didn’t finish and you weren’t charged. Please try again.';
     case 'BLOG_GENERATION_DISABLED':

@@ -72,7 +72,10 @@ describe('blogRefusalText', () => {
     expect(blogRefusalText({ code: 'BLOG_GENERATION_DISABLED', error: 'Blog generation is turned off for this account.' })).toBe('Blog generation is turned off for this account.');
     expect(blogRefusalText({ code: 'BLOG_SWITCH_UNAVAILABLE', error: 'Blog generation is temporarily unavailable. Please try again.' })).toMatch(/temporarily unavailable/);
     expect(blogRefusalText({ code: 'BLOG_RESULT_READ_FAILED' })).toMatch(/try again/);
-    expect(blogRefusalText({ code: 'BLOG_RESULT_UNAVAILABLE' })).toBe('We couldn’t recover this blog, so your 40 credits have been returned. You can write it again.');
+    expect(blogRefusalText({ code: 'BLOG_RESULT_UNAVAILABLE' })).toBe('We couldn’t recover this blog, so your credits have been returned. You can write it again.');
+    expect(blogRefusalText({ code: 'BLOG_RESULT_UNAVAILABLE' })).not.toMatch(/\d/); // no client-invented amount
+    // the server's sentence (which knows the amount) wins over the fallback
+    expect(blogRefusalText({ code: 'BLOG_RESULT_UNAVAILABLE', error: 'Server: 40 credits returned.' })).toBe('Server: 40 credits returned.');
     expect(blogRefusalText({ code: 'BLOG_RESULT_UNAVAILABLE' })).not.toMatch(/support/i);
     expect(blogRefusalText({ code: 'BLOG_RESULT_UNAVAILABLE' })).not.toMatch(/start a new request/i);
     expect(blogRefusalText({ code: 'BLOG_REQUEST_ENDED' })).toMatch(/weren’t charged/);

@@ -197,7 +197,7 @@ describe('BlogGenerateModal (rendered)', () => {
       reply(200, { result: { title: 't' } }),
     ]);
     fireEvent.click(write());
-    expect(await screen.findByText(/your 40 credits have been returned\. You can write it again\./)).toBeInTheDocument();
+    expect(await screen.findByText(/your credits have been returned\. You can write it again\./)).toBeInTheDocument();
     expect(screen.queryByText(/support/i)).toBeNull();
     fireEvent.click(write());
     await waitFor(() => expect(full).toHaveLength(2));
