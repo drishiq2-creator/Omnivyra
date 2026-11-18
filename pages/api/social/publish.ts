@@ -257,10 +257,16 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
 
       // Patch the post row with the resolved account so publishNow and future jobs use it
       if (!post.social_account_id) {
-        await supabase
+        // publishNow and later jobs read the account from the row: publishing with it unpersisted would
+        // fail later for the wrong reason. Refused here instead (unread-error census).
+        const { error: patchError } = await supabase
           .from('scheduled_posts')
           .update({ social_account_id: socialAccountId })
           .eq('id', post.id);
+        if (patchError) {
+          console.error('[social/publish] resolved account not saved to the post; not publishing', { post_id: post.id, error: patchError.message });
+          return res.status(500).json({ error: 'Could not prepare the post for publishing. Please try again.' });
+        }
       }
 
       if (dry_run) {
