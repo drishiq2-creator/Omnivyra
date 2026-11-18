@@ -73,7 +73,7 @@ import {
   type AccountOutcome,
   type AccountResolution,
 } from './accountResolution';
-import { KNOWN_MULTI_PART_TLDS } from '../../../lib/shared/domain/companyDomain';
+import { isPublicSuffix } from '../../../lib/shared/domain/publicSuffix';
 import { normalizeCompanyDomain } from './normalization';
 
 /** Bumped when admissibility rules change, so a decision can be traced to them. */
@@ -171,7 +171,10 @@ export function classifyAccountDomain(raw: string | null | undefined): DomainAdm
   // registered, not one of them. `registrableRoot` returns it unchanged when
   // there is nothing to the left of it, so without this it would key an account
   // that every UK domain could later be mistaken for.
-  if (KNOWN_MULTI_PART_TLDS.has(domain)) {
+  // c6/7c 2026-11-19: asked of the vendored Public Suffix List - the SAME source registrableRoot uses - never a
+  // second, smaller hand list (which knew a handful of suffixes; the PSL knows thousands, incl. PRIVATE ones such as
+  // myshopify.com / github.io), so seeding and identity cannot disagree about what a suffix is.
+  if (isPublicSuffix(domain)) {
     return { admissible: false, domain: null, rejection: 'malformed' };
   }
 

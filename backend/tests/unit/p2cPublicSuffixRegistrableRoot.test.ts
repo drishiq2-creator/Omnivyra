@@ -16,7 +16,6 @@ import {
   registrableRoot,
   normalizeCompanyDomain,
   isSameCompanyDomain,
-  KNOWN_MULTI_PART_TLDS,
 } from '../../../lib/shared/domain/companyDomain';
 import { isPublicSuffix, publicSuffixLabelCount } from '../../../lib/shared/domain/publicSuffix';
 import {
@@ -135,9 +134,14 @@ describe('registrableRoot — edge cases identical to the pre-PSL function', () 
     expect(normalizeCompanyDomain('john@mail.acme.com')).toBe('acme.com');
   });
 
-  it('KNOWN_MULTI_PART_TLDS stays exported for its remaining importer', () => {
-    expect(KNOWN_MULTI_PART_TLDS.has('co.uk')).toBe(true);
-    for (const suffix of KNOWN_MULTI_PART_TLDS) expect(isPublicSuffix(suffix)).toBe(true);
+  // 7c 2026-11-19 replaces "KNOWN_MULTI_PART_TLDS stays exported for its remaining importer": the hand list is
+  // DELETED - one source for "is this a public suffix" (the PSL). accountSeeding asks isPublicSuffix.
+  it('the legacy hand list is gone and accountSeeding asks the PSL (one source for "is a public suffix")', () => {
+    const src = fs.readFileSync(path.join(process.cwd(), 'lib/shared/domain/companyDomain.ts'), 'utf8');
+    expect(src).not.toMatch(/KNOWN_MULTI_PART_TLDS/);
+    const seeding = fs.readFileSync(path.join(process.cwd(), 'backend/services/prospectIdentity/accountSeeding.ts'), 'utf8');
+    expect(seeding).toMatch(/if \(isPublicSuffix\(domain\)\)/);
+    for (const s of ['co.uk', 'com.sg', 'myshopify.com', 'github.io']) expect([s, isPublicSuffix(s)]).toEqual([s, true]);
   });
 });
 
@@ -180,5 +184,21 @@ describe('owner rule (onboarding binding): one company per registrable domain', 
   it('website = admin email domain holds across a multi-part ICANN suffix the old list lacked (com.sg)', () => {
     expect(isSameCompanyDomain('jane@acme.com.sg', 'https://www.acme.com.sg')).toBe(true);
     expect(isSameCompanyDomain('jane@acme.com.sg', 'https://www.other.com.sg')).toBe(false);
+  });
+});
+
+// 7c 2026-11-19 (FINDING 2): a stale PSL silently re-introduces the defect this change fixes - a platform's PRIVATE
+// suffix added upstream after the vendor date is missing, so two organisations collapse to one root. Make the age
+// VISIBLE: this fails once the snapshot is older than the refresh window. Remedy (one command, verifiable): replace
+// publicSuffixList.dat + meta.json from the source, then `node scripts/generate-public-suffix-rules.js` - the generator
+// reproduces the generated file byte-for-byte, so the refresh is mechanical and reviewable.
+describe('vendored PSL snapshot is fresh', () => {
+  const REFRESH_WINDOW_DAYS = 120;   // quarterly refresh + a month of slack
+  it(`retrievedAt is within ${REFRESH_WINDOW_DAYS} days (else refresh: see publicSuffixList.meta.json "refresh")`, () => {
+    const meta = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'lib/shared/domain/publicSuffixList.meta.json'), 'utf8'));
+    const retrieved = new Date(`${meta.retrievedAt}T00:00:00Z`).getTime();
+    expect(Number.isFinite(retrieved)).toBe(true);
+    const ageDays = (Date.now() - retrieved) / 86_400_000;
+    expect(ageDays).toBeLessThanOrEqual(REFRESH_WINDOW_DAYS);
   });
 });
