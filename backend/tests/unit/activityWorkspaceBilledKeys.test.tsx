@@ -144,3 +144,55 @@ describe('refine_variant (rendered through useActivityWorkspaceRefinementOps)', 
     expect(keyOf(apiFetch.mock.calls[1])).toBe(keyOf(apiFetch.mock.calls[0]));
   });
 });
+
+describe('generate_master (c6 @723d40de3: key required, replays) through useActivityWorkspaceContentOps', () => {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { useActivityWorkspaceContentOps } = require('../../../hooks/useActivityWorkspaceContentOps');
+  const actionOf = (call: unknown[]) => JSON.parse((call[1] as { body: string }).body).action;
+  function setup(masterContent: unknown = null) {
+    const notify = jest.fn();
+    const schedule = { id: 'sch1', platform: 'linkedin', contentType: 'post' };
+    const params = {
+      payload: { activityId: 'act-1', companyId: 'c1', campaignId: 'k1', topic: 'T', dailyExecutionItem: {} },
+      schedules: [schedule], selectedCompanyId: 'c1', queryCampaignId: 'k1', masterContent, creatorAsset: null,
+      platformVariants: [], normalizeKey: (v: unknown) => String(v ?? '').toLowerCase(), notify,
+      setIsGeneratingMaster: jest.fn(), setIsGeneratingVariants: jest.fn(), setLatestMasterContent: jest.fn(),
+      setPayload: jest.fn(), setRepurposingByScheduleId: jest.fn(), setFinalizedByScheduleId: jest.fn(),
+      setShowRefineByScheduleId: jest.fn(), updateSchedule: jest.fn(), findVariantForSchedule: () => null,
+    };
+    const { result } = renderHook(() => useActivityWorkspaceContentOps(params as never));
+    return { result, schedule, notify };
+  }
+
+  it('master: sends a key; a lost connection keeps it (retry replays); success ends it', async () => {
+    apiFetch.mockResolvedValueOnce(reply(503, { error: 'Network unreachable' }));
+    apiFetch.mockResolvedValueOnce(reply(200, { success: true, master_content: { content: 'M' }, replayed: true }));
+    apiFetch.mockResolvedValueOnce(reply(200, { success: true, master_content: { content: 'M2' } }));
+    const { result, notify } = setup();
+    await act(async () => { await result.current.handleGenerateMasterContent(); });
+    expect(notify).toHaveBeenCalledWith('info', UNCERTAIN_MESSAGE);
+    await act(async () => { await result.current.handleGenerateMasterContent(); });
+    await act(async () => { await result.current.handleGenerateMasterContent(); });
+    const [k1, k2, k3] = apiFetch.mock.calls.map(keyOf);
+    expect(apiFetch.mock.calls.map(actionOf)).toEqual(['generate_master', 'generate_master', 'generate_master']);
+    expect((k1 ?? '').length).toBeGreaterThanOrEqual(8);
+    expect(k2).toBe(k1);
+    expect(k3).not.toBe(k2);
+  });
+
+  it('repurpose: an UNKNOWN master outcome stops there (no second billed call to variants)', async () => {
+    apiFetch.mockResolvedValueOnce(reply(503, { error: 'Network unreachable' }));
+    const { result, schedule, notify } = setup(null);
+    await act(async () => { await result.current.handleRepurposeForPlatform(schedule); });
+    expect(apiFetch.mock.calls.map(actionOf)).toEqual(['generate_master']);
+    expect(notify).toHaveBeenCalledWith('info', UNCERTAIN_MESSAGE);
+  });
+
+  it('control: a KNOWN master failure continues to variants as before', async () => {
+    apiFetch.mockResolvedValueOnce(reply(402, { code: 'INSUFFICIENT_CREDITS', error: 'Not enough credits' }));
+    apiFetch.mockResolvedValueOnce(reply(200, { platform_variants: [] }));
+    const { result, schedule } = setup(null);
+    await act(async () => { await result.current.handleRepurposeForPlatform(schedule); });
+    expect(apiFetch.mock.calls.map(actionOf)).toEqual(['generate_master', 'generate_variants']);
+  });
+});

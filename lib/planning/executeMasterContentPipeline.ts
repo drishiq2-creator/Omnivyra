@@ -8,7 +8,7 @@ import type { MasterContentDocument } from './masterContentDocument';
 import { deriveGenerationBias } from '../intelligence/generationBias';
 import type { StrategicMemoryProfile } from '../intelligence/strategicMemory';
 import { apiFetch } from '../apiFetch';
-import { postGenerateVariants } from '../activity-workspace/postGenerateVariants';
+import { postGenerateVariants, postGenerateMaster } from '../activity-workspace/postGenerateVariants';
 
 type ActivityLike = {
   id?: string;
@@ -107,7 +107,6 @@ export async function executeMasterContentPipeline({
   }
 
   const masterPayload: Record<string, unknown> = {
-    action: 'generate_master',
     activity,
     schedules,
     dailyExecutionItem: dailyExecutionItem || {},
@@ -115,18 +114,9 @@ export async function executeMasterContentPipeline({
   };
   if (biasInstruction) masterPayload.extra_instruction = biasInstruction;
 
-  const resMaster = await apiFetch(CONTENT_API, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(masterPayload),
-  });
-
-  if (!resMaster.ok) {
-    const err = await resMaster.json().catch(() => ({}));
-    throw new Error(String(err?.message || err?.error || 'Failed to execute content pipeline (generate_master)'));
-  }
-
-  const dataMaster = await resMaster.json().catch(() => ({}));
+  // Billed + keyed (c6 @723d40de3): the shared keyed request; an unknown outcome throws
+  // UnconfirmedOutcomeError, so the variants step below is never reached (no second billed call).
+  const dataMaster = await postGenerateMaster(masterPayload, 'Failed to execute content pipeline (generate_master)');
   const master_content =
     (dataMaster?.master_content && typeof dataMaster.master_content === 'object')
       ? dataMaster.master_content

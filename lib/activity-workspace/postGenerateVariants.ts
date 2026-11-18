@@ -1,6 +1,7 @@
 /**
- * The ONE keyed request for activity-workspace `generate_variants` (shared by the content-ops hook and
- * executeMasterContentPipeline, so the key rule lives in one place).
+ * The ONE keyed request for the billed activity-workspace actions (`generate_variants`,
+ * `generate_master`), shared by the content-ops hook, executeMasterContentPipeline and the scheduler,
+ * so the key rule lives in one place.
  */
 import { apiFetch } from '../apiFetch';
 import { createBilledKeyLifetime, isUnknownOutcome } from '../billing/billedKeyLifetime';
@@ -13,6 +14,14 @@ import { classifyBilledResponse, billedOutcomeText, UNCERTAIN_MESSAGE } from '..
  * (lib/billing/billedKeyLifetime).
  */
 const variantKeys = createBilledKeyLifetime('activity-generate-variants', { replays: true });
+/** c6 engagement-v2 @723d40de3: generate_master too requires the key and replays (identity = activity id + key). */
+const masterKeys = createBilledKeyLifetime('activity-generate-master', { replays: true });
+
+type BilledWorkspaceAction = 'generate_variants' | 'generate_master';
+const KEYS: Record<BilledWorkspaceAction, typeof variantKeys> = {
+  generate_variants: variantKeys,
+  generate_master: masterKeys,
+};
 
 /** An error whose outcome is unknown: shown as-is, never prefixed with "Failed". */
 export class UnconfirmedOutcomeError extends Error {}
@@ -32,29 +41,32 @@ export function shouldFallbackAfter(error: unknown): boolean {
   return !(error instanceof UnconfirmedOutcomeError);
 }
 
-export async function postGenerateVariants(
+/** One billed action through its kept-on-unknown key. Throws UnconfirmedOutcomeError on an unknown outcome. */
+async function postBilledWorkspaceAction(
+  action: BilledWorkspaceAction,
   body: Record<string, unknown>,
   failureText: string,
   opts: { signal?: AbortSignal } = {},
 ): Promise<any> {
+  const keys = KEYS[action];
   const scope = generateVariantsScope(body);
-  const op = variantKeys.begin(scope);
+  const op = keys.begin(scope);
   let response: Response;
   try {
     response = await apiFetch('/api/activity-workspace/content', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...op.headers },
-      body: JSON.stringify({ action: 'generate_variants', ...body }),
+      body: JSON.stringify({ action, ...body }),
       ...(opts.signal ? { signal: opts.signal } : {}),
     });
   } catch {
     // apiFetch re-throws only an abort (e.g. a caller's timeout); the outcome is unknown, so the key
     // is kept. A lost connection arrives as apiFetch's synthetic 503 below (also unknown).
-    variantKeys.finish(scope, { lost: true });
+    keys.finish(scope, { lost: true });
     throw new UnconfirmedOutcomeError(UNCERTAIN_MESSAGE);
   }
   const data = await response.json().catch(() => ({}));
-  variantKeys.finish(scope, { status: response.status, body: data });
+  keys.finish(scope, { status: response.status, body: data });
   if (!response.ok) {
     // One source of copy: the canonical billed mapping (402 credits, server sentences, uncertain).
     const text = billedOutcomeText(classifyBilledResponse(response.status, data, failureText));
@@ -62,4 +74,14 @@ export async function postGenerateVariants(
     throw new Error(text);
   }
   return data;
+}
+
+/** generate_variants (billed; c6). */
+export function postGenerateVariants(body: Record<string, unknown>, failureText: string, opts: { signal?: AbortSignal } = {}): Promise<any> {
+  return postBilledWorkspaceAction('generate_variants', body, failureText, opts);
+}
+
+/** generate_master (billed; c6 @723d40de3: key required, replays). */
+export function postGenerateMaster(body: Record<string, unknown>, failureText: string, opts: { signal?: AbortSignal } = {}): Promise<any> {
+  return postBilledWorkspaceAction('generate_master', body, failureText, opts);
 }

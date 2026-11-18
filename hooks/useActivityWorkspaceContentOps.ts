@@ -1,6 +1,5 @@
 import { executeMasterContentPipeline } from '@/lib/planning/executeMasterContentPipeline';
-import { apiFetch } from '@/lib/apiFetch';
-import { postGenerateVariants, UnconfirmedOutcomeError } from '@/lib/activity-workspace/postGenerateVariants';
+import { postGenerateVariants, postGenerateMaster, shouldFallbackAfter, UnconfirmedOutcomeError } from '@/lib/activity-workspace/postGenerateVariants';
 import type { ScheduleItem } from '../types/activityWorkspace';
 import { asObject, type WorkspacePayload } from '@/lib/activity-workspace/shared';
 import { buildActivityRequestPayload } from '@/lib/activity-workspace/activityRequestPayload';
@@ -52,22 +51,14 @@ export function useActivityWorkspaceContentOps({
   const handleGenerateMasterContent = async () => {
     try {
       setIsGeneratingMaster(true);
-      const response = await apiFetch('/api/activity-workspace/content', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'generate_master',
-          activity: buildActivityRequestPayload(payload, schedules),
-          schedules,
-          dailyExecutionItem: payload?.dailyExecutionItem || null,
-          companyId: selectedCompanyId || payload?.companyId || null,
-          campaignId: payload?.campaignId || queryCampaignId || null,
-        }),
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(String(data?.message || data?.error || 'Failed to generate master content'));
-      }
+      // Billed + keyed (c6 @723d40de3): kept on an unknown outcome so a retry replays.
+      const data = await postGenerateMaster({
+        activity: buildActivityRequestPayload(payload, schedules),
+        schedules,
+        dailyExecutionItem: payload?.dailyExecutionItem || null,
+        companyId: selectedCompanyId || payload?.companyId || null,
+        campaignId: payload?.campaignId || queryCampaignId || null,
+      }, 'Failed to generate master content');
       const masterFromResponse =
         asObject(data?.master_content) ||
         asObject(data?.masterContent) ||
@@ -90,7 +81,8 @@ export function useActivityWorkspaceContentOps({
       notify('success', 'Master content generated.');
     } catch (error) {
       console.error('Master generation failed:', error);
-      notify('error', `Failed to generate master content: ${String((error as any)?.message || error)}`);
+      if (error instanceof UnconfirmedOutcomeError) notify('info', error.message);
+      else notify('error', `Failed to generate master content: ${String((error as any)?.message || error)}`);
     } finally {
       setIsGeneratingMaster(false);
     }
@@ -179,20 +171,21 @@ export function useActivityWorkspaceContentOps({
       if (!masterReady) {
         setIsGeneratingMaster(true);
         try {
-          const masterRes = await apiFetch('/api/activity-workspace/content', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              action: 'generate_master',
+          let masterData: any = null;
+          try {
+            masterData = await postGenerateMaster({
               activity: buildActivityRequestPayload(payload, schedules),
               schedules,
               dailyExecutionItem: payload?.dailyExecutionItem || null,
               companyId: selectedCompanyId || payload?.companyId || null,
               campaignId: payload?.campaignId || queryCampaignId || null,
-            }),
-          });
-          const masterData = await masterRes.json().catch(() => ({}));
-          if (masterRes.ok) {
+            }, 'Failed to generate master content');
+          } catch (masterError) {
+            // Unknown outcome: the master may have run and charged; do NOT go on to a second billed
+            // call (variants would generate a master again). A known failure continues as before.
+            if (!shouldFallbackAfter(masterError)) throw masterError;
+          }
+          if (masterData) {
             const newMaster = asObject(masterData?.master_content) || asObject(masterData?.masterContent) || null;
             if (newMaster) {
               activeMasterContent = newMaster;
