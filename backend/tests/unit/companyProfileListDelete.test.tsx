@@ -88,6 +88,27 @@ describe('saveProfileWithListEdits (the save request the hook delegates to)', ()
     expect(out.kind).toBe('saved');
   });
 
+  it('7c: an item added in another tab WHILE the confirm dialog is open survives the confirmed write', async () => {
+    const reads = [
+      { ...STORED, goals_list: ['grow', 'hire', 'launch'] }, // re-read before the first POST
+      { ...STORED, goals_list: ['grow', 'hire', 'launch', 'added-during-dialog'] }, // re-read after the confirm
+    ];
+    posts = [];
+    const f = jest.fn(async (_url: string, init?: { method?: string; body?: string }) => {
+      if (init?.method === 'POST') {
+        posts.push(JSON.parse(init.body ?? '{}'));
+        return posts.length === 1
+          ? reply(409, { code: 'BULK_LIST_REMOVAL_UNCONFIRMED', lists: [{ removed: ['hire', 'launch'] }] })
+          : reply(200, { profile: STORED });
+      }
+      return reply(200, { profile: reads.shift() });
+    });
+    const out = await save(f, { ...STORED, goals_list: ['grow'] });
+    expect(out.kind).toBe('saved');
+    expect(posts[1].confirm_bulk_removal).toBe(true);
+    expect(posts[1].goals_list).toEqual(['grow', 'added-during-dialog']);
+  });
+
   it('409 and the user says no -> cancelled, nothing more sent', async () => {
     const f = fetchFor({ postReplies: [reply(409, { code: 'BULK_LIST_REMOVAL_UNCONFIRMED', lists: [{ removed: ['hire', 'launch'] }] })] });
     const out = await save(f, { ...STORED, goals_list: ['grow'] }, jest.fn(() => false));

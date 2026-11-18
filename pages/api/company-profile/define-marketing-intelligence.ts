@@ -111,6 +111,9 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       keep: KEEP,
     });
 
+    // CONTRACT (7c): a field with no value anywhere is OMITTED, never ''. Callers must treat an ABSENT key as
+    // "unchanged" (the profile client skips keys not in the response); spreading this blindly over a profile
+    // is safe only because absent keys are absent, not empty.
     return res.status(200).json({ done: true, structuredFields: finalFields });
   } catch (err: any) {
     console.error('Define marketing intelligence failed:', err);

@@ -94,8 +94,8 @@ export async function saveProfileWithListEdits(args: {
   confirm: (text: string) => boolean;
 }): Promise<ProfileSaveOutcome> {
   const { fetch, companyId, base, payload, confirm } = args;
-  let body: Record<string, unknown> = payload;
-  if (planListReplacements(base, payload, null).replace_lists.length > 0) {
+  // Re-read the stored lists and rebase the user's edit on them. null = the re-read failed.
+  const rebasedBody = async (): Promise<Record<string, unknown> | null> => {
     let fresh: Record<string, unknown> | null = null;
     try {
       const latest = await fetch(`/api/company-profile?companyId=${encodeURIComponent(companyId)}`);
@@ -103,10 +103,16 @@ export async function saveProfileWithListEdits(args: {
     } catch {
       fresh = null;
     }
-    // Without the latest list a removal could drop someone else's addition: save nothing.
-    if (!fresh) return { kind: 'reread_failed' };
+    if (!fresh) return null;
     const plan = planListReplacements(base, payload, fresh);
-    if (plan.replace_lists.length > 0) body = { ...payload, ...plan.lists, replace_lists: plan.replace_lists };
+    return plan.replace_lists.length > 0 ? { ...payload, ...plan.lists, replace_lists: plan.replace_lists } : payload;
+  };
+  let body: Record<string, unknown> = payload;
+  if (planListReplacements(base, payload, null).replace_lists.length > 0) {
+    // Without the latest list a removal could drop someone else's addition: save nothing.
+    const rebased = await rebasedBody();
+    if (!rebased) return { kind: 'reread_failed' };
+    body = rebased;
   }
   const post = (b: Record<string, unknown>) =>
     fetch('/api/company-profile', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b) });
@@ -117,7 +123,12 @@ export async function saveProfileWithListEdits(args: {
       return { kind: 'failed', error: conflict?.error || 'Failed to save profile' };
     }
     if (!confirm(bulkRemovalConfirmText(Array.isArray(conflict.lists) ? conflict.lists : []))) return { kind: 'cancelled' };
-    response = await post({ ...body, confirm_bulk_removal: true });
+    // 7c: the confirm dialog can stay open for minutes; another tab may add an item meanwhile. Rebase AGAIN after
+    // the user answers, so the confirmed write is planned on the lists as they are now. The confirmed removals
+    // are unchanged (base - mine does not depend on the re-read); only the additions to keep are refreshed.
+    const confirmedBody = await rebasedBody();
+    if (!confirmedBody) return { kind: 'reread_failed' };
+    response = await post({ ...confirmedBody, confirm_bulk_removal: true });
   }
   if (!response.ok) {
     const errorBody = await response.json().catch(() => null);
