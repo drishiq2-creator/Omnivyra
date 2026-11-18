@@ -143,6 +143,18 @@ describe('a readable store is evaluated as before', () => {
     expect(r).toMatchObject({ ok: true, decision: { allowed: false, event: 'provider_rate_limited' } });
   });
 
+  it('no in-flight jobs of THIS tenant -> concurrency 0: a cap of 1 still allows (other tenants and own finished jobs do not count)', async () => {
+    // Restores the base case "no jobs of this tenant in the window -> concurrency 0" (replaced in bb4a345df): the exact
+    // count must answer 0 - never null / fail-closed, never the capped list - when only other tenants are rendering.
+    const others: ActiveRow[] = Array.from({ length: 5 }, (_, i) => ({ render_job_id: 'job-other-' + i, current_state: 'rendering', organization_id: 'org-2' }));
+    const done: ActiveRow[] = [{ render_job_id: 'job-done-1', current_state: 'completed', organization_id: 'org-1' }];
+    const c = fakeClient({ org: ok({ max_concurrent_renders: 1 }), activeRows: [...others, ...done] });
+    const r = await evaluateRenderGovernanceGate(c, 'org-1', CTX);
+    expect(r).toMatchObject({ ok: true, decision: { allowed: true } });
+    expect(c.seen.activeOrgFilter).toBe('org-1');
+    expect(c.seen.activeListQueries).toBe(0);
+  });
+
   it('EXACT (e9/05 2026-11-14): more than 1000 renders in 24h - every in-flight one counts, via the count path, never a capped list', async () => {
     const own: ActiveRow[] = Array.from({ length: 1200 }, (_, i) => ({ render_job_id: 'job-' + i, current_state: i % 2 ? 'rendering' : 'queued', organization_id: 'org-1' }));
     const c = fakeClient({ org: ok({ max_concurrent_renders: 1100 }), activeRows: own });
