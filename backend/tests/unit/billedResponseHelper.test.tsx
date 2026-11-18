@@ -195,7 +195,8 @@ describe('every wired billed caller sends a per-action key and classifies errors
     expect(src).toMatch(new RegExp(String.raw`const ${gate} = (createBilledActionKeyGate|createBilledKeyLifetime)\(`));
     expect(src).toMatch(new RegExp(String.raw`const ${op} = ${gate}\.begin\(`));
     expect(src).toMatch(new RegExp(String.raw`\.\.\.${op}\.headers`));
-    if (lifetime) expect(src).toMatch(new RegExp(String.raw`${gate}\.finish\(`));
+    // The RESPONSE-path finish (status + body); the abort path's `{ lost: true }` can't satisfy it.
+    if (lifetime) expect(src).toMatch(new RegExp(String.raw`${gate}\.finish\([^)]*\{\s*status:`));
     else expect(src).toMatch(new RegExp(String.raw`finally \{\s*${gate}\.end\(`));
     expect(src).toMatch(/classifyBilledResponse|parseRunStartError/);
   });

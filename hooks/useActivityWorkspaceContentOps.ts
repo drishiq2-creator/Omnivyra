@@ -3,6 +3,7 @@ import { apiFetch } from '@/lib/apiFetch';
 import { postGenerateVariants, UnconfirmedOutcomeError } from '@/lib/activity-workspace/postGenerateVariants';
 import type { ScheduleItem } from '../types/activityWorkspace';
 import { asObject, type WorkspacePayload } from '@/lib/activity-workspace/shared';
+import { buildActivityRequestPayload } from '@/lib/activity-workspace/activityRequestPayload';
 
 type NotifyFn = (type: 'success' | 'error' | 'info', message: string) => void;
 
@@ -27,17 +28,6 @@ type Params = {
   findVariantForSchedule: (item: ScheduleItem) => Record<string, unknown> | null;
 };
 
-function buildActivityRequestPayload(payload: WorkspacePayload | null, schedules: ScheduleItem[]) {
-  const primary = schedules[0];
-  return {
-    id: payload?.activityId || primary?.id || `workspace-${Date.now()}`,
-    platform: primary?.platform || 'linkedin',
-    contentType: primary?.contentType || 'post',
-    topic: payload?.topic || payload?.title || '',
-    title: payload?.title || payload?.topic || '',
-    description: payload?.description || '',
-  };
-}
 
 export function useActivityWorkspaceContentOps({
   payload,
@@ -219,8 +209,7 @@ export function useActivityWorkspaceContentOps({
         }
       }
 
-      // Scope = target + the content it is about: a kept key never carries over to edited content.
-      const data = await postGenerateVariants(`variants:${schedule.id}:${String((activeMasterContent as any)?.content ?? '')}`, {
+      const data = await postGenerateVariants({
           activity: buildActivityRequestPayload(payload, schedules),
           schedules: [schedule],
           dailyExecutionItem: {
@@ -319,7 +308,7 @@ export function useActivityWorkspaceContentOps({
     }
     try {
       setIsGeneratingVariants(true);
-      const data = await postGenerateVariants(`creator-promotion:${executionId}:${JSON.stringify(effectiveCreatorAsset ?? null)}`, {
+      const data = await postGenerateVariants({
           activity: buildActivityRequestPayload(payload, schedules),
           schedules: schedules.length > 0 ? schedules : [{ id: 'default', platform: 'linkedin', contentType: 'post' }],
           dailyExecutionItem: {

@@ -15,7 +15,8 @@ jest.mock('../../../lib/apiFetch', () => ({ apiFetch: (...a: unknown[]) => apiFe
 jest.mock('@/lib/apiFetch', () => ({ apiFetch: (...a: unknown[]) => apiFetch(...a) }));
 jest.mock('@/components/RichTextEditor', () => ({ htmlToPlainText: (s: string) => s }));
 
-import { postGenerateVariants, UnconfirmedOutcomeError } from '../../../lib/activity-workspace/postGenerateVariants';
+import { postGenerateVariants, UnconfirmedOutcomeError, shouldFallbackAfter, generateVariantsScope } from '../../../lib/activity-workspace/postGenerateVariants';
+import { buildActivityRequestPayload } from '../../../lib/activity-workspace/activityRequestPayload';
 import { useActivityWorkspaceRefinementOps } from '../../../hooks/useActivityWorkspaceRefinementOps';
 import { UNCERTAIN_MESSAGE } from '../../../lib/billing/billedResponse';
 
@@ -28,7 +29,7 @@ beforeEach(() => apiFetch.mockReset());
 describe('postGenerateVariants (the ONE keyed generate_variants request; hook, pipeline and scheduler use it)', () => {
   it('sends an Idempotency-Key (≥ 8 chars) and action generate_variants', async () => {
     apiFetch.mockResolvedValueOnce(reply(200, { platform_variants: [] }));
-    await postGenerateVariants('t1|A', { activity: { id: 'a1' } }, 'fail');
+    await postGenerateVariants({ case: 't1|A', activity: { id: 'a1' } }, 'fail');
     expect((keyOf(apiFetch.mock.calls[0]) ?? '').length).toBeGreaterThanOrEqual(8);
     expect(JSON.parse((apiFetch.mock.calls[0][1] as { body: string }).body).action).toBe('generate_variants');
   });
@@ -36,16 +37,16 @@ describe('postGenerateVariants (the ONE keyed generate_variants request; hook, p
   it('lost connection (apiFetch synthetic 503) -> UnconfirmedOutcomeError with the uncertain text; the retry REUSES the key', async () => {
     apiFetch.mockResolvedValueOnce(reply(503, { error: 'Network unreachable', detail: 'Failed to fetch' }));
     apiFetch.mockResolvedValueOnce(reply(200, { platform_variants: [], replayed: true }));
-    await expect(postGenerateVariants('t2|A', {}, 'fail')).rejects.toEqual(new UnconfirmedOutcomeError(UNCERTAIN_MESSAGE));
-    await postGenerateVariants('t2|A', {}, 'fail');
+    await expect(postGenerateVariants({ case: 't2|A' }, 'fail')).rejects.toEqual(new UnconfirmedOutcomeError(UNCERTAIN_MESSAGE));
+    await postGenerateVariants({ case: 't2|A' }, 'fail');
     expect(keyOf(apiFetch.mock.calls[1])).toBe(keyOf(apiFetch.mock.calls[0]));
   });
 
   it('a caller timeout (abort) keeps the key too', async () => {
     apiFetch.mockRejectedValueOnce(abortError());
     apiFetch.mockResolvedValueOnce(reply(200, {}));
-    await expect(postGenerateVariants('t3|A', {}, 'fail')).rejects.toBeInstanceOf(UnconfirmedOutcomeError);
-    await postGenerateVariants('t3|A', {}, 'fail');
+    await expect(postGenerateVariants({ case: 't3|A' }, 'fail')).rejects.toBeInstanceOf(UnconfirmedOutcomeError);
+    await postGenerateVariants({ case: 't3|A' }, 'fail');
     expect(keyOf(apiFetch.mock.calls[1])).toBe(keyOf(apiFetch.mock.calls[0]));
   });
 
@@ -53,9 +54,9 @@ describe('postGenerateVariants (the ONE keyed generate_variants request; hook, p
     apiFetch.mockResolvedValueOnce(reply(409, { code: 'REQUEST_IN_PROGRESS', retryable: true, error: 'Still running.' }));
     apiFetch.mockResolvedValueOnce(reply(409, { code: 'REQUEST_ENDED', retryable: false, error: 'This did not finish and you were not charged.' }));
     apiFetch.mockResolvedValueOnce(reply(200, {}));
-    await expect(postGenerateVariants('t4|A', {}, 'fail')).rejects.toBeInstanceOf(UnconfirmedOutcomeError);
-    await expect(postGenerateVariants('t4|A', {}, 'fail')).rejects.toThrow('This did not finish and you were not charged.');
-    await postGenerateVariants('t4|A', {}, 'fail');
+    await expect(postGenerateVariants({ case: 't4|A' }, 'fail')).rejects.toBeInstanceOf(UnconfirmedOutcomeError);
+    await expect(postGenerateVariants({ case: 't4|A' }, 'fail')).rejects.toThrow('This did not finish and you were not charged.');
+    await postGenerateVariants({ case: 't4|A' }, 'fail');
     const [k1, k2, k3] = apiFetch.mock.calls.map(keyOf);
     expect(k2).toBe(k1);
     expect(k3).not.toBe(k2);
@@ -64,19 +65,40 @@ describe('postGenerateVariants (the ONE keyed generate_variants request; hook, p
   it('402 -> the canonical credits text (not an unconfirmed outcome); the key ends', async () => {
     apiFetch.mockResolvedValueOnce(reply(402, { code: 'INSUFFICIENT_CREDITS', error: 'Not enough credits', required: 10, available: 2 }));
     apiFetch.mockResolvedValueOnce(reply(200, {}));
-    const err = await postGenerateVariants('t5|A', {}, 'fail').catch((e) => e);
+    const err = await postGenerateVariants({ case: 't5|A' }, 'fail').catch((e) => e);
     expect(err).not.toBeInstanceOf(UnconfirmedOutcomeError);
     expect(String(err.message)).toMatch(/Top up credits on the Billing page/);
-    await postGenerateVariants('t5|A', {}, 'fail');
+    await postGenerateVariants({ case: 't5|A' }, 'fail');
     expect(keyOf(apiFetch.mock.calls[1])).not.toBe(keyOf(apiFetch.mock.calls[0]));
   });
 
   it('a kept key never carries over to EDITED content (scope includes the content)', async () => {
     apiFetch.mockResolvedValueOnce(reply(503, { error: 'Network unreachable' }));
     apiFetch.mockResolvedValueOnce(reply(200, {}));
-    await expect(postGenerateVariants('t6|old text', {}, 'fail')).rejects.toBeInstanceOf(UnconfirmedOutcomeError);
-    await postGenerateVariants('t6|edited text', {}, 'fail');
+    await expect(postGenerateVariants({ case: 't6|old text' }, 'fail')).rejects.toBeInstanceOf(UnconfirmedOutcomeError);
+    await postGenerateVariants({ case: 't6|edited text' }, 'fail');
     expect(keyOf(apiFetch.mock.calls[1])).not.toBe(keyOf(apiFetch.mock.calls[0]));
+  });
+});
+
+describe('scope and fallback (7c: one source, a named decision)', () => {
+  it('the key scope IS the request body: same body -> same scope; any edit -> a different one', () => {
+    expect(generateVariantsScope({ a: 1, content: 'x' })).toBe(generateVariantsScope({ a: 1, content: 'x' }));
+    expect(generateVariantsScope({ a: 1, content: 'x' })).not.toBe(generateVariantsScope({ a: 1, content: 'y' }));
+  });
+  it('shouldFallbackAfter: NEVER a second billed call after an unknown outcome; a known failure may fall back', () => {
+    expect(shouldFallbackAfter(new UnconfirmedOutcomeError('x'))).toBe(false);
+    expect(shouldFallbackAfter(new Error('402'))).toBe(true);
+  });
+  it('the activity payload is deterministic without ids (no Date.now): two calls build the same body', () => {
+    const payload = { topic: 'T' } as never;
+    const schedules = [{ platform: 'x', contentType: 'post' }] as never;
+    const a = buildActivityRequestPayload(payload, schedules);
+    jest.spyOn(Date, 'now').mockReturnValue(123456789);
+    const b = buildActivityRequestPayload(payload, schedules);
+    (Date.now as jest.Mock).mockRestore?.();
+    expect(b).toEqual(a);
+    expect(a.id).toBe('workspace-x-post-T');
   });
 });
 

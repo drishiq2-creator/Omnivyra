@@ -1,7 +1,7 @@
 /** useMultiPlatformSchedulerController — state/handlers, verbatim. */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createIdempotentOperation } from '../lib/idempotency';
-import { postGenerateVariants, UnconfirmedOutcomeError } from '../lib/activity-workspace/postGenerateVariants';
+import { postGenerateVariants, shouldFallbackAfter } from '../lib/activity-workspace/postGenerateVariants';
 import Head from 'next/head';
 import Link from 'next/link';
 import { useRouter } from 'next/router';
@@ -816,7 +816,9 @@ export function useMultiPlatformSchedulerController() {
       // Non-quick platforms (e.g. LinkedIn/Threads) — full repurpose via the
       // activity-workspace variant path, with the quick-adapt rules as fallback.
       const masterContent = draft.masterContent || {
-        id: `scheduler-master-${Date.now()}`,
+        // Deterministic (no Date.now()): the request body is the key's scope, so a retry of the
+        // same repurpose must produce the same body (synthesised-key class).
+        id: `scheduler-master-${platform}`,
         generated_at: new Date().toISOString(),
         content: sourceContent,
         generation_status: 'generated',
@@ -831,7 +833,6 @@ export function useMultiPlatformSchedulerController() {
       let data: any;
       try {
         data = await postGenerateVariants(
-          `scheduler:${platform}|${publishContentType}|${sourceContent}`,
           {
             companyId: selectedCompanyId,
             activity: {
@@ -887,8 +888,8 @@ export function useMultiPlatformSchedulerController() {
     } catch (error) {
       // Lost-response class (money): the full repurpose may have run and charged, so do NOT start
       // a second billed call. Keep the key (a retry replays) and say we couldn't confirm.
-      if (error instanceof UnconfirmedOutcomeError) {
-        updatePlatformState(platform, { busy: false, status: 'idle', message: error.message });
+      if (!shouldFallbackAfter(error)) {
+        updatePlatformState(platform, { busy: false, status: 'idle', message: (error as Error).message });
         return;
       }
       const isAbort = error instanceof Error && error.name === 'AbortError';

@@ -5,6 +5,7 @@ import { htmlToPlainText } from '@/components/RichTextEditor';
 import { apiFetch } from '@/lib/apiFetch';
 import type { ScheduleItem } from '../types/activityWorkspace';
 import type { RefineChatMessage, WorkspacePayload } from '@/lib/activity-workspace/shared';
+import { buildActivityRequestPayload } from '@/lib/activity-workspace/activityRequestPayload';
 import { classifyBilledResponse, billedOutcomeText } from '../lib/billing/billedResponse';
 import { createBilledKeyLifetime } from '../lib/billing/billedKeyLifetime';
 
@@ -40,17 +41,6 @@ type Params = {
   refineInputByScheduleId: Record<string, string>;
 };
 
-function buildActivityRequestPayload(payload: WorkspacePayload | null, schedules: ScheduleItem[]) {
-  const primary = schedules[0];
-  return {
-    id: payload?.activityId || primary?.id || `workspace-${Date.now()}`,
-    platform: primary?.platform || 'linkedin',
-    contentType: primary?.contentType || 'post',
-    topic: payload?.topic || payload?.title || '',
-    title: payload?.title || payload?.topic || '',
-    description: payload?.description || '',
-  };
-}
 
 export function useActivityWorkspaceRefinementOps({
   payload,
