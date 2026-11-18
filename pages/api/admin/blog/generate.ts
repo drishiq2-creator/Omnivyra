@@ -39,7 +39,7 @@ import { runUnifiedLongFormGeneration } from '../../../../lib/content/unifiedLon
 import type { BlogAngle } from '../../../../lib/blog/blogGenerationEngine';
 import { buildContentContext } from '../../../../lib/content/buildContentContext';
 import { isValidBlogFormat } from '../../../../lib/blog/blogStructureTemplates';
-import { blogBillingOf, blogGenerationRefusal, blogReferenceId, blogReplay, holdBlog, isBlogHoldRefusal, isBlogRefusal, runBlogWithBilling } from '../../../../backend/services/blog/blogBilling';
+import { BLOG_PLATFORM_BILLING, BLOG_PLATFORM_SCOPE, blogGenerationRefusal, blogReferenceId, blogReplay, isBlogRefusal, storePlatformBlog } from '../../../../backend/services/blog/blogBilling';
 import { ThoughtLeadershipQualityGateError } from '../../../../backend/services/longForm/thoughtLeadershipQualityGate';
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
@@ -137,24 +137,20 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       return res.status(refStatus).json(refBody);   // no key -> 400, nothing held, no AI call
     }
     const referenceId = ref.referenceId;
-    // b3 BLOCKING: a finished, charged blog is replayed for the same key (no new hold, no new charge).
-    const replay = await blogReplay(company_id, referenceId);
+    // b3 ruling 2026-11-18 (item 4a): Omnivyra's OWN public blog is PLATFORM spend - NO company wallet is held or
+    // charged. The Idempotency-Key stays required (dedup): the same key replays the stored blog, no second generation.
+    // NOTE: these AI calls carry no credit handle (nothing is billed); the gateway guard records them in shadow mode.
+    // Attributing them to the platform ledger (4b) needs a9's 039 on main, and must land before BILLING_REQUIRE_AI_HANDLE
+    // is enforced.
+    const replay = await blogReplay(company_id, referenceId, BLOG_PLATFORM_SCOPE);
     if (isBlogRefusal(replay)) {
       const { status: replayStatus, ...replayBody } = replay;
       return res.status(replayStatus).json(replayBody);
     }
     if (replay.body) return res.status(200).json(replay.body);
-    const hold = await holdBlog({ orgId: company_id, userId: roleGate.userId, referenceId, validateMembership: false });
-    if (isBlogHoldRefusal(hold)) {
-      const { status, ...refusal } = hold;
-      return res.status(status).json(refusal);
-    }
-    const { result, billing } = await runBlogWithBilling({
-      reservation: hold.reservation,
-      run: () => runGeneration({ referenceType: 'blog_post', referenceId, parentActivityId: null }),
-      isQualityGateRefusal: (e) => e instanceof ThoughtLeadershipQualityGateError,
-    });
-    return res.status(200).json({ ...(result as object), billing, ...(billing.settlementPending ? { settlementPending: billing.settlementPending } : {}) });
+    const result = await runGeneration({ referenceType: 'blog_post_platform', referenceId, parentActivityId: null });
+    await storePlatformBlog(company_id, referenceId, result);
+    return res.status(200).json({ ...(result as object), billing: BLOG_PLATFORM_BILLING });
   } catch (err) {
     // Enterprise quality gate: failed blog drafts are blocked instead of
     // being returned as usable generation output (owner: refunded in full).
@@ -163,7 +159,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
         error: err.message,
         quality_passed: false,
         thought_leadership_quality: err.report,
-        ...(blogBillingOf(err) ? { billing: blogBillingOf(err) } : {}),
+        billing: BLOG_PLATFORM_BILLING,
       });
     }
     throw err;
