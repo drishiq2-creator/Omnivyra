@@ -28,6 +28,18 @@ import {
 import { publishRealtime } from './realtimePublisherService';
 import { publishOnboardingTemplateApplied } from '../events/listeningEvents';
 
+/**
+ * An update that matched no template in the caller's organization: the id is unknown, or belongs to another tenant or
+ * to a platform preset. Routes answer it as a uniform 404, so a probe cannot tell "exists elsewhere" from "never
+ * existed", and no database text reaches the caller.
+ */
+export class OnboardingTemplateNotFoundError extends Error {
+  constructor() {
+    super('onboarding_template_not_found');
+    this.name = 'OnboardingTemplateNotFoundError';
+  }
+}
+
 export type UpsertOnboardingTemplateInput = {
   organizationId: string | null;
   id?: string;
@@ -58,10 +70,18 @@ export async function upsertOnboardingTemplate(
         shared: input.shared ?? false,
         owner_user_id: input.ownerUserId,
       })
+      // TENANT (2026-11-18, cross-tenant write fix): an update is scoped to the CALLER's organization, like the
+      // sibling application update below. listOnboardingTemplates hands every caller the ids of shared templates
+      // (other tenants' shared rows and the NULL-org platform presets), so an id-only update let any capability
+      // holder rewrite another tenant's - or every tenant's platform - template. A NULL-org platform row never
+      // matches this filter: platform presets are not tenant-editable through this function.
+      .eq('organization_id', input.organizationId)
       .eq('id', input.id)
       .select('*')
-      .single();
-    if (upd.error || !upd.data) throw new Error(`onboarding_template_update_failed:${upd.error?.message ?? 'unknown'}`);
+      .maybeSingle();
+    if (upd.error) throw new Error(`onboarding_template_update_failed:${upd.error.message ?? 'unknown'}`);
+    // Zero rows matched under the caller's organization: not found (never "failed", never the PostgREST text).
+    if (!upd.data) throw new OnboardingTemplateNotFoundError();
     return upd.data as EnterpriseOnboardingTemplate;
   }
   const ins = await ownedDbTable('enterprise_onboarding_templates')
