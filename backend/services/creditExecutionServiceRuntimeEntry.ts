@@ -141,6 +141,17 @@ export type ExecuteWithEntryConsumptionOptions<T> =
  *
  * Exported so it can be unit-tested without any DB.
  */
+/**
+ * OWNER RULING 2026-11-18 (via b3): an AI action that fails on OUR side (provider error, timeout, our exception, our
+ * quality gate) with nothing delivered costs the customer NOTHING - we absorb the provider cost. The entry fee is
+ * therefore HELD at the first consumable event, CONFIRMED only when the run succeeds, and RELEASED when it fails.
+ * This is the entry fee a failed run keeps; the failure path below uses it, and a dependent branch's test pins it
+ * (expect(entryFeeOnFailure()).toBe(0)) so a client message "you weren't charged" cannot ship ahead of this rule.
+ */
+export function entryFeeOnFailure(): number {
+  return 0;
+}
+
 export function planEntryConsumptionSettlement(input: {
   entry: number;
   reservation: number;
@@ -222,7 +233,7 @@ export async function executeWithEntryConsumption<T>(
   if (releasedTxn) return { status: 'already_released' };
 
   // Admission control (Phase 8 TASK 2): require effective balance ≥ MAX exposure
-  // BEFORE consuming the non-refundable entry, so we never charge entry on an
+  // BEFORE holding the entry, so we never hold entry on an
   // activity that cannot reserve its full exposure.
   const availableTotal = await getTotalAvailable(opts.orgId);
   if ((availableTotal ?? 0) < maxExposure) {
@@ -240,30 +251,60 @@ export async function executeWithEntryConsumption<T>(
   };
 
   // ── STAGE 1 — ENTRY CONSUMER (Phase 12E: DEFERRED to the first consumable
-  // event). The non-refundable entry is NOT charged at launch. Instead we define
-  // a consumer that the first provider/asset event fires (STAGE 3), composing the
-  // SAME reserve→confirm primitives + the SAME deterministic entryKey, so it is
-  // idempotent/replay-safe and consumed at most once even across retries.
+  // event). The entry is NOT charged at launch. The first provider/asset event
+  // (STAGE 3) HOLDS it under the deterministic entryKey (reserved at most once
+  // across retries); it is confirmed on success and released on failure.
   let entryConsumed = 0;
-  const consumeEntry = async (): Promise<number> => {
-    if (entry <= 0) return 0;
+  // Owner ruling 2026-11-18: the first consumable event only HOLDS the entry (same deterministic entryKey, so it is
+  // reserved at most once across retries); the entry is CONFIRMED on success (settleEntry) and RELEASED on failure
+  // (releaseEntryOnFailure) - a failed run with nothing delivered is never charged.
+  type EntryHold =
+    | { kind: 'held'; handle: CreditReservationHandle }
+    | { kind: 'already_confirmed' }   // a prior attempt under this key already consumed it
+    | { kind: 'none' };
+  const entryNote = `[ENTRY] ${opts.note ?? action}`;
+  const holdEntry = async (): Promise<EntryHold> => {
+    if (entry <= 0) return { kind: 'none' };
     const entryRes = await reserveCreditsForWork({
       ...reserveCommon,
       idempotencyKey: entryKey,
       amountOverride: entry,
-      note: `[ENTRY] ${opts.note ?? action}`,
+      note: entryNote,
     });
-    if (entryRes.status === 'reserved' || entryRes.status === 'already_reserved') {
-      const entryConfirm = await confirmCreditReservation({ ...entryRes, note: `[ENTRY] ${opts.note ?? action}` });
-      if (entryConfirm.status === 'already_released') return 0;
-      return entry;
-    }
-    if (entryRes.status === 'already_confirmed') return entry; // resume: already consumed
+    if (entryRes.status === 'reserved' || entryRes.status === 'already_reserved') return { kind: 'held', handle: entryRes };
+    if (entryRes.status === 'already_confirmed') return { kind: 'already_confirmed' };
     // Admission already guaranteed effective balance >= MAX exposure, so entry
     // (<= max, and affordable after the exposure HOLD) should reserve; treat an
     // unexpected failure as cost-from-exposure rather than blocking post-work.
     logger.error('entry_consumption_first_event_reserve_failed', { orgId: opts.orgId, action, status: entryRes.status });
-    return 0;
+    return { kind: 'none' };
+  };
+  /** SUCCESS: the held entry is consumed. */
+  const settleEntry = async (h: EntryHold): Promise<number> => {
+    if (h.kind === 'already_confirmed') return entry;
+    if (h.kind !== 'held') return 0;
+    const entryConfirm = await confirmCreditReservation({ ...h.handle, note: entryNote });
+    if (entryConfirm.status === 'already_released') return 0;
+    return entry;
+  };
+  /** FAILURE: the held entry is released; returns the entry fee the failed run keeps. */
+  const releaseEntryOnFailure = async (h: EntryHold): Promise<number> => {
+    if (h.kind === 'already_confirmed') {
+      // Consumed by an earlier attempt under this key before this rule; never reversed here (no refund primitive) -
+      // logged so it is findable.
+      logger.error('entry_consumption_failed_run_entry_already_confirmed', { orgId: opts.orgId, action, entry });
+      return entry;
+    }
+    if (h.kind === 'held') {
+      try {
+        const r = await releaseCreditReservation({ ...h.handle, note: `[ENTRY][RELEASE] ${action} — executor error` });
+        if (r.status === 'already_confirmed') return entry;
+      } catch (relErr: any) {
+        // The entry hold stays RESERVED (not charged) and findable by entryKey; the executor error still surfaces.
+        logger.error('entry_consumption_entry_release_failed', { orgId: opts.orgId, action, message: relErr?.message });
+      }
+    }
+    return entryFeeOnFailure();
   };
 
   // ── STAGE 2 — EXPOSURE RESERVATION — HOLD(max − entry) ───────────────────────
@@ -278,8 +319,8 @@ export async function executeWithEntryConsumption<T>(
     if (expRes.status === 'reserved' || expRes.status === 'already_reserved') {
       exposureHandle = expRes;
     } else {
-      // Entry is already consumed (kept, by design). Exposure could not be
-      // reserved — surface the failure; the entry charge stands.
+      // Exposure could not be reserved - surface the failure. Nothing has run, so no
+      // entry has been held (the entry is held only at the first consumable event).
       logger.error('entry_consumption_exposure_reservation_failed', {
         orgId: opts.orgId, action, status: expRes.status, entryConsumed,
       });
@@ -289,8 +330,8 @@ export async function executeWithEntryConsumption<T>(
 
   // ── STAGE 3 — EXECUTE (entry is consumed lazily at the FIRST consumable event) ─
   // The executor runs inside an engine-owned usage scope. The first provider
-  // completion / billable artifact fires the armed consumer, which charges the
-  // non-refundable entry exactly once — never at launch, validation, or setup.
+  // completion / billable artifact fires the armed consumer, which HOLDS the
+  // entry exactly once — never at launch, validation, or setup.
   const scope = createUsageScope();
   // e1 2026-11-13 (55 finding A, BLOCKING for the BILLING_REQUIRE_AI_HANDLE flip): the executor runs INSIDE this
   // billed execution's credit handle, so every gateway call it makes is vouched for by the AI billing guard (the
@@ -305,8 +346,8 @@ export async function executeWithEntryConsumption<T>(
     amountReserved: exposureHandle?.creditsReserved,
   };
   const inCreditHandle = <R>(fn: () => R): R => runWithCreditHandle(creditHandle, fn);
-  let entryPromise: Promise<number> | null = null;
-  if (entry > 0) scope.armFirstConsumable(() => { entryPromise = consumeEntry(); });
+  let entryPromise: Promise<EntryHold> | null = null;
+  if (entry > 0) scope.armFirstConsumable(() => { entryPromise = holdEntry(); });
 
   let executorResult: T;
   let actualCredits: number;
@@ -346,11 +387,14 @@ export async function executeWithEntryConsumption<T>(
       actualCredits  = opts.amountOverride ?? await getCreditCost(action);
     }
   } catch (execErr: any) {
-    // ── ABANDONMENT (Phase 12E): entry kept ONLY if a consumable event fired;
-    // exposure released. A failure BEFORE the first provider call consumes
-    // NOTHING (entry not charged) — the requirement's core guarantee.
+    // ── ABANDONMENT: owner ruling 2026-11-18 - a failed run is never charged. The entry (held at the first
+    // consumable event, if one fired) is RELEASED and the exposure released: entryFeeOnFailure() = 0.
     let abandonEntry = 0;
-    if (entryPromise) { try { abandonEntry = await entryPromise; } catch { /* ignore */ } }
+    if (entryPromise) {
+      let held: EntryHold = { kind: 'none' };
+      try { held = await entryPromise; } catch { /* the hold itself failed: nothing reserved under entryKey */ }
+      abandonEntry = await releaseEntryOnFailure(held);
+    }
     if (exposureHandle) {
       await releaseCreditReservation({ ...exposureHandle, note: `[EXPOSURE][RELEASE] ${action} — executor error` });
     }
@@ -371,9 +415,9 @@ export async function executeWithEntryConsumption<T>(
   // consume entry now if the trigger never fired. Token-priced activities with
   // NO consumable event consume NOTHING (final charge resolves to ~0).
   if (entry > 0 && !entryPromise && !opts.llmPricing) {
-    entryPromise = consumeEntry();
+    entryPromise = holdEntry();
   }
-  if (entryPromise) entryConsumed = await entryPromise;
+  if (entryPromise) entryConsumed = await settleEntry(await entryPromise);
 
   // ── STAGE 4 — SETTLEMENT (TASK 4): consume actual−entry from exposure ────────
   const plan = planEntryConsumptionSettlement({ entry: entryConsumed, reservation, actualCredits });
