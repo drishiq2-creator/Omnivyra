@@ -102,11 +102,13 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     // scaled by the number of actionable threads (one reply generation each), settlement is the actual usage. The
     // same Idempotency-Key is answered 409 ALREADY_PROCESSED - a retried click never generates or SENDS twice.
     // Nothing actionable -> no AI -> nothing billed.
+    let settlementPending: { code: 'CREDIT_SETTLE_AMBIGUOUS' } | undefined;
     const runBatch = () => bulkReplyThreads(organizationId, actionableIds, getReplyText, roleGate?.userId);
     const { sent, skipped, errors, outcomes } = actionableIds.length === 0
       ? await runBatch()
       : await wirePhase2Route({
           surface:        'engagement.bulk-ai-reply',
+          onSettlementPending: () => { settlementPending = { code: 'CREDIT_SETTLE_AMBIGUOUS' }; },
           organizationId,
           action:         'reply_generation',
           referenceType:  'engagement_bulk_reply',
@@ -127,6 +129,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       // §11: every attempted dispatch has an explainable terminal outcome.
       outcomes,
       errors: errors.slice(0, 5),
+      ...(settlementPending ? { settlementPending } : {}),
     });
   } catch (err) {
     { const billedErr = billedRouteHttpError(err); if (billedErr) return res.status(billedErr.status).json(billedErr.body); }
