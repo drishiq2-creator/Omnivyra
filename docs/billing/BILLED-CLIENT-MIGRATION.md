@@ -90,6 +90,15 @@ Batches group screens that share a feature, so each one can be reviewed and chec
 - [ ] `/api/admin/blog/brief-suggestions`: `pages/admin/blog/content-refine.tsx`, `pages/admin/blog/generate.tsx`
 - [ ] `/api/admin/blog/generate`: `pages/admin/blog/content-refine.tsx`, `lib/blog/hookAssessment.ts`, `lib/blog/runBlogGeneration.ts`
 
+## Moving to persist-before-settle + replay (c6 via b3, 2026-11-18, BLOCKING-launch, in this order)
+
+Each needs a key per user action. **Keep ENDING the key until c6 says that route "replays"**; then switch it to keep-on-unknown (same shape as the 21: same key -> 200 stored body; read error -> 503, terminal after durable re-read failures).
+1. [ ] `/api/activity-workspace/content`: `generate_master` first, then `improve` / `generate_variants` (transient-draft case), then `refine_variant`. Callers (main 516d526d3): `hooks/useActivityWorkspaceContentOps.ts`, `hooks/useActivityWorkspaceRefinementOps.ts` (refine_variant: key already sent, see Done), `components/MultiPlatformSchedulerController.tsx`, `lib/planning/executeMasterContentPipeline.ts`. **Gap found:** only refine_variant was tracked; the other callers were missing from this list.
+2. [ ] `/api/campaign-content/assist`: `components/planner/ContentWorkspace.tsx` (also listed in Batch 4).
+3. [ ] `/api/creator-templates/field-assist`: `components/creator/AssetCreationWorkspace.tsx`, `components/creator/workflow/useCreatorWorkflowActions.tsx` (also in Batch 5).
+4. [ ] `/api/creator-templates/chat-brief`: `components/creator/CreateWithAIChat.tsx` (also in Batch 5).
+5. [ ] `/api/planner/generate-workspace-content`: `components/planner/ContentWorkspace.tsx`. **Gap found:** this route was not in the tracker at all.
+
 ## Not billed (no helper, no Idempotency-Key needed)
 - `/api/creator-intelligence/campaign-variant-estimate` (`components/variant-experience/CampaignVariantBillingEstimate.tsx`). e1 confirmed at main 9cecd075f: read-only, no charging and no AI call; a pure calculation from the persisted variant_strategy.
 
