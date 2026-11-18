@@ -110,6 +110,8 @@ export const ACTIVITY_CLASS_MAP: Record<CreditAction, ActivityClass> = {
   // LONG_GENERATION — long-form, token-priced
   content_generation:              'LONG_GENERATION',
   blog_generation:                 'LONG_GENERATION',
+  // OWNER 2026-11-18: a blog is a FIXED 40 credits (blogBilling.ts, amountOverride) - not the class's entry path.
+  blog_post:                       'LONG_GENERATION',
 
   // DEEP_RESEARCH — heavy synthesis
   trend_analysis:                  'DEEP_RESEARCH',
