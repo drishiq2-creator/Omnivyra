@@ -60,6 +60,16 @@ beforeEach(() => {
   confirmCreditReservation.mockClear(); releaseCreditReservation.mockClear(); events.length = 0;
 });
 
+// Main's hold-release gate (#400, holdReleaseGate.ts) is default-OFF: CREDIT_HOLD_REAP_ENABLED === 'true' only.
+// This suite exercises the ENABLED reaper / reconciler (its sibling-read refusals), so it turns the gate on for this
+// file and restores it after; the OFF behaviour is pinned by main's holdReleaseGate.test.ts.
+const PRIOR_HOLD_GATE = process.env.CREDIT_HOLD_REAP_ENABLED;
+beforeAll(() => { process.env.CREDIT_HOLD_REAP_ENABLED = 'true'; });
+afterAll(() => {
+  if (PRIOR_HOLD_GATE === undefined) delete process.env.CREDIT_HOLD_REAP_ENABLED;
+  else process.env.CREDIT_HOLD_REAP_ENABLED = PRIOR_HOLD_GATE;
+});
+
 describe.each([
   ['completed', 'confirm'],
   ['failed', 'release'],

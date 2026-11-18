@@ -45,6 +45,16 @@ const { reapOrphanHolds } = require('../../services/creditOrphanHoldReaper');
 
 beforeEach(() => { db.holds = { data: [], error: null }; db.siblings = {}; db.siblingReads = []; released.length = 0; events.length = 0; });
 
+// Main's hold-release gate (#400, holdReleaseGate.ts) is default-OFF: CREDIT_HOLD_REAP_ENABLED === 'true' only.
+// This suite exercises the ENABLED reaper / reconciler (its sibling-read refusals), so it turns the gate on for this
+// file and restores it after; the OFF behaviour is pinned by main's holdReleaseGate.test.ts.
+const PRIOR_HOLD_GATE = process.env.CREDIT_HOLD_REAP_ENABLED;
+beforeAll(() => { process.env.CREDIT_HOLD_REAP_ENABLED = 'true'; });
+afterAll(() => {
+  if (PRIOR_HOLD_GATE === undefined) delete process.env.CREDIT_HOLD_REAP_ENABLED;
+  else process.env.CREDIT_HOLD_REAP_ENABLED = PRIOR_HOLD_GATE;
+});
+
 it('the sibling read FAILS -> the hold is NOT released; counted failed, event recorded', async () => {
   db.holds = { data: [HOLD('h1', 'job-1:hold')], error: null };
   db.siblings['job-1:confirm'] = { data: null, error: { message: 'connection reset' } };
