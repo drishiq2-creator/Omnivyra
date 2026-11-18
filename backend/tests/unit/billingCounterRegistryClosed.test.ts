@@ -15,7 +15,8 @@ function neverCalled(): void {
 void neverCalled;
 
 it('registered names compile and are exported in the snapshot', () => {
-  const names: BillingCounter[] = ['phase2_route_without_idempotency_key_total', 'phase2_route_reclaim_cap_exhausted_total'];
+  // Counter NAMES, not secrets: gitleaks' generic-api-key rule matches the long snake_case literal (reviewed false positive).
+  const names: BillingCounter[] = ['phase2_route_without_idempotency_key_total', 'phase2_route_reclaim_cap_exhausted_total']; // gitleaks:allow
   for (const n of names) expect(snapshotBillingMetrics()).toHaveProperty(n);
 });
 
