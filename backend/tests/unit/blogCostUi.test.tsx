@@ -191,14 +191,14 @@ describe('BlogGenerateModal (rendered)', () => {
     expect(keyOf(full[1])).toBe(keyOf(full[0]));
   });
 
-  it('409 no stored copy -> contact support, never "start a new request"; the request is over (new key)', async () => {
+  it('409 no stored copy -> refunded + "you can write it again" (b3: no support promise); the request is over (new key)', async () => {
     const { full, write } = await toWriteStep('blog', 'C-unavailable', [
       reply(409, { code: 'BLOG_RESULT_UNAVAILABLE', retryable: false }),
       reply(200, { result: { title: 't' } }),
     ]);
     fireEvent.click(write());
-    expect(await screen.findByText(/contact support/)).toBeInTheDocument();
-    expect(screen.queryByText(/start a new request/i)).toBeNull();
+    expect(await screen.findByText(/your 40 credits have been returned\. You can write it again\./)).toBeInTheDocument();
+    expect(screen.queryByText(/support/i)).toBeNull();
     fireEvent.click(write());
     await waitFor(() => expect(full).toHaveLength(2));
     expect(keyOf(full[1])).not.toBe(keyOf(full[0]));
