@@ -315,7 +315,14 @@ describe('source pins', () => {
     expect(hook).toBeGreaterThan(s.indexOf('recordGptCall();'));
     expect(hook).toBeLessThan(s.indexOf('callProviderWithRetry(activeProvider'));
   });
-  test.each(['pages/api/blogs/generate.ts', 'pages/api/admin/blog/generate.ts'])('%s: one blog = one hold - blogBilling only, no wirePhase2Route', (f) => {
+  test('the super-admin public-blog route is PLATFORM spend: no hold, no settle, no wirePhase2Route (b3 4a)', () => {
+    const s = read('pages/api/admin/blog/generate.ts');
+    expect(s).not.toMatch(/holdBlog\(|runBlogWithBilling\(|wirePhase2Route\(/);
+    expect(s).toMatch(/blogGenerationRefusal\(company_id\)/);
+    expect(s).toMatch(/if \(isBlogRefusal\(ref\)\)/);
+    expect(s).toMatch(/blogReplay\(company_id, referenceId, BLOG_PLATFORM_SCOPE\)/);
+  });
+  test.each(['pages/api/blogs/generate.ts'])('%s: one blog = one hold - blogBilling only, no wirePhase2Route', (f) => {
     const s = read(f);
     expect(s).toMatch(/holdBlog\(/);
     expect(s).toMatch(/runBlogWithBilling\(/);
