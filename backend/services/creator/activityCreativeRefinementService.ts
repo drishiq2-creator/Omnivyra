@@ -31,6 +31,7 @@
 import { resolveActivityCreative, activityCreativeIsRefinable } from './activityCreativeService';
 import { libraryReadAsset, libraryWriteAsset } from '../creatorAssetPersistenceService';
 import { systemTenantContext, tenantChildTable } from '../../db/tenantTable';
+import { reportTenantFanout } from '../../db/seamDenial';
 
 export type RefinementFailureReason =
   | 'activity_not_found'
@@ -211,7 +212,9 @@ export async function refineActivityCreative(input: {
         .select('id, campaign_id, content, asset_type')
         .eq('id', activityId)
         .maybeSingle());
-    } catch {
+    } catch (err) {
+      // A seam fan-out (availability limit) is still raised as the alertable server signal (7c, 2026-11-19).
+      reportTenantFanout(err);
       row = null;
     }
   }

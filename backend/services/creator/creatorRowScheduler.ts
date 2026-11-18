@@ -29,6 +29,7 @@
 
 import { ownedDbTable } from '../../db/writeOwner';
 import { ownerOfChildRow, resolveTenantOfRow, systemTenantContext, tenantChildTable, tenantTable, TenantSeamError, type TenantContext } from '../../db/tenantTable';
+import { reportTenantFanout } from '../../db/seamDenial';
 import { enqueueScheduledPostAt } from '../../scheduler/schedulerService';
 import { getPlatformRules, listPlatformCatalog } from '../platformIntelligenceService';
 import { isIdempotencyCollision } from '../boltScheduleIdempotency';
@@ -675,6 +676,8 @@ export async function autoScheduleReadyCreatorRowById(
       dbContentType,
     });
   } catch (error: any) {
+    // A seam fan-out (availability limit) is still raised as the alertable server signal (7c, 2026-11-19).
+    reportTenantFanout(error);
     console.warn('[creator-row-schedule][auto-schedule-failed]', dailyPlanId, error?.message);
     return { status: 'error', scheduledPostId: null, reason: error?.message ?? 'unknown_error' };
   }
@@ -812,6 +815,8 @@ export async function scheduleRenderedAutonomousRowById(
       dbContentType,
     });
   } catch (error: any) {
+    // A seam fan-out (availability limit) is still raised as the alertable server signal (7c, 2026-11-19).
+    reportTenantFanout(error);
     console.warn('[creator-row-schedule][autonomous-auto-schedule-failed]', dailyPlanId, error?.message);
     return { status: 'error', scheduledPostId: null, reason: error?.message ?? 'unknown_error' };
   }

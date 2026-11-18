@@ -1,5 +1,6 @@
 import { supabase } from './supabaseClient';
 import { resolveCampaignOwnership } from '../services/campaignOwnershipService';
+import { TenantSeamError } from './tenantTable';
 
 /**
  * S2-55 (2026-11-14): content_assets has no company column (campaign_id is text, no FK to campaigns), the request
@@ -10,6 +11,18 @@ import { resolveCampaignOwnership } from '../services/campaignOwnershipService';
  * "unknown, so read").
  * There is no unscoped variant (owner rule: no dormant code; the last caller-less ones were removed in 7c).
  */
+/**
+ * A scoped list never runs without its company at runtime (7c, 2026-11-19): the type requires companyId, but an
+ * untyped caller or a cast can still pass none. Refused BEFORE the owner lookup or any read, with the same seam error
+ * campaignPlanStore raises (TENANT_CONTEXT_MISSING), never answered as an empty list.
+ */
+function requiredCompanyId(companyId: string | null | undefined): string {
+  if (typeof companyId !== 'string' || companyId.trim() === '') {
+    throw new TenantSeamError('TENANT_CONTEXT_MISSING', 'contentAssetStore: scoped list without the authorized companyId');
+  }
+  return companyId;
+}
+
 async function campaignOwnedByCompany(campaignId: string, companyId: string): Promise<boolean> {
   const ownership = await resolveCampaignOwnership(campaignId);
   if (ownership.status === 'LOOKUP_FAILED') {
@@ -88,7 +101,8 @@ export async function listContentAssets(input: {
   /** S2-55: the authorized company (REQUIRED); a campaign that is not its own lists nothing. */
   companyId: string;
 }): Promise<any[]> {
-  if (!(await campaignOwnedByCompany(input.campaignId, input.companyId))) return [];
+  const companyId = requiredCompanyId(input.companyId);
+  if (!(await campaignOwnedByCompany(input.campaignId, companyId))) return [];
   return listContentAssetsByCampaignId(input);
 }
 
