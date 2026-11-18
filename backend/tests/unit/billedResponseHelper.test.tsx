@@ -188,10 +188,15 @@ describe('every wired billed caller sends a per-action key and classifies errors
     ['components/content/SuggestWithAIPanel.tsx', 'suggestKeys', 'suggestOp'],
   ])('%s', (file, gate, op) => {
     const src = read(file);
-    expect(src).toMatch(new RegExp(String.raw`const ${gate} = createBilledActionKeyGate\(`));
+    // A caller either ends its key on every outcome (createBilledActionKeyGate + finally end), or,
+    // where the route REPLAYS (c6), keeps it on an unknown outcome via the shared lifetime helper
+    // (createBilledKeyLifetime + finish). refine_variant moved to the latter (BLOCKING-launch, b3).
+    const lifetime = new RegExp(String.raw`const ${gate} = createBilledKeyLifetime\(`).test(src);
+    expect(src).toMatch(new RegExp(String.raw`const ${gate} = (createBilledActionKeyGate|createBilledKeyLifetime)\(`));
     expect(src).toMatch(new RegExp(String.raw`const ${op} = ${gate}\.begin\(`));
     expect(src).toMatch(new RegExp(String.raw`\.\.\.${op}\.headers`));
-    expect(src).toMatch(new RegExp(String.raw`finally \{\s*${gate}\.end\(`));
+    if (lifetime) expect(src).toMatch(new RegExp(String.raw`${gate}\.finish\(`));
+    else expect(src).toMatch(new RegExp(String.raw`finally \{\s*${gate}\.end\(`));
     expect(src).toMatch(/classifyBilledResponse|parseRunStartError/);
   });
 });
