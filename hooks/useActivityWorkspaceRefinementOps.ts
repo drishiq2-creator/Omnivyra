@@ -5,6 +5,15 @@ import { htmlToPlainText } from '@/components/RichTextEditor';
 import { apiFetch } from '@/lib/apiFetch';
 import type { ScheduleItem } from '../types/activityWorkspace';
 import type { RefineChatMessage, WorkspacePayload } from '@/lib/activity-workspace/shared';
+import { buildActivityRequestPayload } from '@/lib/activity-workspace/activityRequestPayload';
+import { classifyBilledResponse, billedOutcomeText } from '../lib/billing/billedResponse';
+import { createBilledKeyLifetime } from '../lib/billing/billedKeyLifetime';
+
+/**
+ * Billed: one Idempotency-Key per refine action (c6: required, replays for the same key). Kept on an
+ * unknown outcome so a retry replays instead of charging again (lib/billing/billedKeyLifetime).
+ */
+const refineKeys = createBilledKeyLifetime('activity-refine-variant', { replays: true });
 
 type NotifyFn = (type: 'success' | 'error' | 'info', message: string) => void;
 
@@ -32,17 +41,6 @@ type Params = {
   refineInputByScheduleId: Record<string, string>;
 };
 
-function buildActivityRequestPayload(payload: WorkspacePayload | null, schedules: ScheduleItem[]) {
-  const primary = schedules[0];
-  return {
-    id: payload?.activityId || primary?.id || `workspace-${Date.now()}`,
-    platform: primary?.platform || 'linkedin',
-    contentType: primary?.contentType || 'post',
-    topic: payload?.topic || payload?.title || '',
-    title: payload?.title || payload?.topic || '',
-    description: payload?.description || '',
-  };
-}
 
 export function useActivityWorkspaceRefinementOps({
   payload,
@@ -115,11 +113,15 @@ export function useActivityWorkspaceRefinementOps({
       notify('info', 'Generate repurposed content first.');
       return;
     }
+    let refineScope = '';
     try {
       setIsRefiningByScheduleId((prev) => ({ ...prev, [schedule.id]: true }));
+      // Scope = target + the instruction + the text it refines: a kept key never carries over to an edit.
+      refineScope = `${schedule.id}|${prompt}|${currentContent}`;
+      const refineOp = refineKeys.begin(refineScope);
       const response = await apiFetch('/api/activity-workspace/content', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...refineOp.headers },
         body: JSON.stringify({
           action: 'refine_variant',
           activity: buildActivityRequestPayload(payload, schedules),
@@ -132,8 +134,17 @@ export function useActivityWorkspaceRefinementOps({
         }),
       });
       const data = await response.json().catch(() => ({}));
+      refineKeys.finish(refineScope, { status: response.status, body: data });
+      refineScope = '';
       if (!response.ok) {
-        throw new Error(String(data?.message || data?.error || 'Failed to refine content'));
+        const outcome = classifyBilledResponse(response.status, data, 'Failed to refine content');
+        if (outcome.kind === 'already_processed') {
+          // Already refined and charged (double click / retry): not an error.
+          notify('success', 'This refinement was already applied.');
+          return;
+        }
+        notify(outcome.kind === 'error' || outcome.kind === 'credits' ? 'error' : 'info', billedOutcomeText(outcome));
+        return;
       }
       const refinedContent = String(data?.refined_content || '').trim();
       if (!refinedContent) {
@@ -160,6 +171,8 @@ export function useActivityWorkspaceRefinementOps({
       console.error('Refine with AI failed:', error);
       notify('error', `Failed to refine content: ${String((error as any)?.message || error)}`);
     } finally {
+      // apiFetch only throws on an abort: the outcome is unknown, keep the key (a retry replays).
+      if (refineScope) refineKeys.finish(refineScope, { lost: true });
       setIsRefiningByScheduleId((prev) => ({ ...prev, [schedule.id]: false }));
     }
   };
