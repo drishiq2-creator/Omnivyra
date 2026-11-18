@@ -624,3 +624,66 @@ describe('no raw database error text in any setup-company response', () => {
     expect(JSON.stringify(r.body)).not.toMatch(/forced failure|user_company_roles|XX000/);
   });
 });
+
+describe('PSL guard (7c): a public suffix is never a company domain', () => {
+  const verdictOf = (surface: 'check' | 'setup' | 'complete', r: { status?: number; body: any }) => {
+    if (r.status === 409) return r.body?.code;
+    if (surface === 'check') return r.status === 200 ? (r.body?.matched === true ? 'existing' : 'new') : `status ${r.status}`;
+    if (surface === 'setup') return r.status === 200 ? (r.body?.joinRequested === true ? 'existing' : 'new') : `status ${r.status}`;
+    return r.status === 403 && r.body?.joinRequested === true ? 'existing' : r.status === 200 ? 'new' : `status ${r.status}`;
+  };
+  const threeSurfaces = async (email: string, mkWorld: () => void) => {
+    const headers = { 'x-test-user': REQ, 'x-test-email': email };
+    mkWorld();
+    const check = await invoke(domainCheckRoute as never, { method: 'GET', headers });
+    mkWorld();
+    const setupReply = await setup(email);
+    await settle();
+    mkWorld();
+    for (const t of ['free_credit_profiles', 'users']) resolveUpsertConflicts(t, t === 'users' ? ['id'] : ['organization_id']);
+    const done = await invoke(completeRoute as never, { method: 'POST', headers, body: { fullName: 'Requester Person' } });
+    await settle();
+    return { check: verdictOf('check', check), setup: verdictOf('setup', setupReply), complete: verdictOf('complete', done) };
+  };
+  const AMBIG = { check: 'COMPANY_DOMAIN_AMBIGUOUS', setup: 'COMPANY_DOMAIN_AMBIGUOUS', complete: 'COMPANY_DOMAIN_AMBIGUOUS' };
+
+  for (const [email, suffix] of [['x@co.il', 'co.il'], ['x@github.io', 'github.io']] as const) {
+    it(`an email whose host IS a public suffix (${email}) is ambiguous on all three surfaces, even with a company stored under it`, async () => {
+      const mk = () => world({
+        companies: [{ id: '30930930-0000-4000-8000-0000000000b1', name: 'Suffix Holder', status: 'active', website: null, website_domain: null, admin_email_domain: suffix }],
+        users: [{ id: 'u-sfx', email: `boss@${suffix}`, name: 'Suffix Boss', status: 'active' }],
+        roles: [{ id: 'r-sfx', user_id: 'u-sfx', company_id: '30930930-0000-4000-8000-0000000000b1', role: 'COMPANY_ADMIN', status: 'active' }],
+      }, email);
+      expect(await threeSurfaces(email, mk)).toEqual(AMBIG);
+      expect(sentTo(`boss@${suffix}`)).toEqual([]);
+    });
+  }
+
+  it('foo.co.il and bar.co.il are DIFFERENT companies: each first user gets their own, no cross binding', async () => {
+    world({ users: [{ id: 'u-bar', email: 'bar@bar.co.il', name: 'Bar Person', industry: null, status: 'active', active_company_id: null }] }, 'foo@foo.co.il');
+    const foo = await invoke(setupCompanyRoute as never, { method: 'POST', body: { companyName: 'Foo IL' }, headers: { 'x-test-user': REQ, 'x-test-email': 'foo@foo.co.il' } });
+    await settle();
+    const bar = await invoke(setupCompanyRoute as never, { method: 'POST', body: { companyName: 'Bar IL' }, headers: { 'x-test-user': 'u-bar', 'x-test-email': 'bar@bar.co.il' } });
+    await settle();
+    expect([foo.status, Object.keys(foo.body ?? {})]).toEqual([200, ['companyId']]);
+    expect([bar.status, Object.keys(bar.body ?? {})]).toEqual([200, ['companyId']]);
+    expect(bar.body.companyId).not.toBe(foo.body.companyId);
+    const created = createdCompanies();
+    expect(created.map((c) => c.admin_email_domain).sort()).toEqual(['bar.co.il', 'foo.co.il']);
+    expect(rolesOf('u-bar')).toEqual([expect.objectContaining({ company_id: bar.body.companyId, role: 'COMPANY_ADMIN' })]);
+    expect(rolesOf(REQ)).toEqual([expect.objectContaining({ company_id: foo.body.companyId, role: 'COMPANY_ADMIN' })]);
+  });
+});
+
+describe('candidate cap: a query that returns MAX_DOMAIN_CANDIDATES rows is potentially incomplete -> ambiguous, never a decision', () => {
+  it('with the cap reached, the same-domain requester gets 409 COMPANY_DOMAIN_AMBIGUOUS (not a join request)', async () => {
+    // The in-memory harness does not evaluate ILIKE, so every candidate query returns the first rows of
+    // the table: 12 unrelated companies fill the cap, exactly as an over-broad real result would.
+    const filler = Array.from({ length: 12 }, (_, i) => ({ id: `30930930-0000-4000-8000-0000000001${String(i).padStart(2, '0')}`, name: `Filler ${i}`, status: 'active', website: null, website_domain: null, admin_email_domain: `filler${i}.test` }));
+    world({ companies: filler }, 'sam@victim.test');
+    const r = await setup('sam@victim.test');
+    await settle();
+    expect([r.status, r.body?.code]).toEqual([409, 'COMPANY_DOMAIN_AMBIGUOUS']);
+    expect(sentTo(VADMIN_EMAIL)).toEqual([]);
+  });
+});

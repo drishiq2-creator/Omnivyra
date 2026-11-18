@@ -385,7 +385,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse<Result>) {
     if (!domainLookup.ok) {
       return res.status(503).json({ error: 'Could not resolve your company. Please try again.' });
     }
-    if (domainLookup.companies.length > 1) {
+    if (domainLookup.ambiguous || domainLookup.companies.length > 1) {
       // Several companies claim this domain: never guess which to bind, and reveal none of them.
       console.error('[setup-company] ambiguous company domain', { count: domainLookup.companies.length });
       await emitCompanyEvent('CompanyExists', 'denied', 'COMPANY_DOMAIN_AMBIGUOUS');
@@ -513,7 +513,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse<Result>) {
       // Both domain keys are the verified email domain (the website is bound to it above), so the
       // winner is re-resolved by the same verified-domain lookup.
       const raceLookup = await findCompaniesByVerifiedEmailDomain(user.email);
-      if (raceLookup.ok && raceLookup.companies.length > 1) {
+      if (raceLookup.ok && (raceLookup.ambiguous || raceLookup.companies.length > 1)) {
         console.error('[setup-company] ambiguous company domain after race', { count: raceLookup.companies.length });
         await emitCompanyEvent('CompanyExists', 'denied', 'COMPANY_DOMAIN_AMBIGUOUS');
         return res.status(409).json({ code: 'COMPANY_DOMAIN_AMBIGUOUS', error: 'Your company could not be resolved. Please contact support.' });

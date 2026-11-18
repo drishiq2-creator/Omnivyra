@@ -24,6 +24,8 @@ import { supabase } from '../db/supabaseClient';
 // its own divergent copy.
 import { isPublicEmailDomain } from '../../lib/auth/publicEmailDomains';
 import { normalizeCompanyDomain } from '../../lib/shared/domain/companyDomain';
+import { isPublicSuffix } from '../../lib/shared/domain/publicSuffix';
+import { logger } from './logger';
 
 /** Extract the domain portion from a URL or email address, stripping www. */
 export function extractDomain(input: string): string | null {
@@ -93,9 +95,12 @@ export type VerifiedDomainCompany = {
  * `ok: false` = the lookup itself failed (a failed read is never "no company").
  * `domain` = the registrable domain that was looked up, or null when the email has no usable
  * corporate domain (free / public provider, malformed) - then nothing can match.
+ * `ambiguous: true` = no decision is possible (the root is empty or itself a public suffix, or a
+ * candidate query hit the cap); every caller answers it exactly like several matches: 409
+ * COMPANY_DOMAIN_AMBIGUOUS, never a match.
  */
 export type VerifiedDomainLookup =
-  | { ok: true; domain: string | null; companies: VerifiedDomainCompany[] }
+  | { ok: true; domain: string | null; companies: VerifiedDomainCompany[]; ambiguous?: true }
   | { ok: false };
 
 /**
@@ -120,26 +125,44 @@ export async function findCompaniesByVerifiedEmailDomain(
   verifiedEmail: string | null | undefined,
 ): Promise<VerifiedDomainLookup> {
   const host = extractDomain(verifiedEmail ?? '');
+  if (!host || isFreeEmailDomain(host)) return { ok: true, domain: null, companies: [] };
   const domain = normalizeCompanyDomain(verifiedEmail);
-  if (!host || !domain || isFreeEmailDomain(host) || isFreeEmailDomain(domain)) {
-    return { ok: true, domain: null, companies: [] };
+  // PSL guard (7c, 2026-11-19): a public suffix (co.il, github.io, com.sg) is never a company domain -
+  // matching on it would bind strangers to one company. Ambiguous, never a match; decided before any read.
+  if (!domain || isPublicSuffix(domain)) {
+    logger.warn('verified_domain_lookup_public_suffix', { host });
+    return { ok: true, domain: domain || host, companies: [], ambiguous: true };
   }
+  if (isFreeEmailDomain(domain)) return { ok: true, domain: null, companies: [] };
+  // `*` -> `_`: PostgREST accepts `*` as an alias of the `%` wildcard in like/ilike, so a literal `*`
+  // must not reach the pattern. A domain cannot contain `*`, and `_` matches exactly one character, so
+  // this only ever NARROWS the candidate set (the decision below is exact anyway).
   const escapedRoot = domain.replace(/[\\%_]/g, (c) => `\\${c}`).replace(/\*/g, '_');
   const byId = new Map<string, VerifiedDomainCompany>();
+  let capHit = false;
   for (const column of ['website_domain', 'admin_email_domain'] as const) {
     for (const pattern of [escapedRoot, `%.${escapedRoot}`]) {
+      // The leading-wildcard ILIKE can never use a btree index. If this ever needs optimising, the right
+      // fix is a stored normalized-root column maintained by companyIdentityWriter with a plain btree
+      // index (which also removes the suffix pattern) - NOT an index on the raw domain columns.
       const { data, error } = await ownedDbTable('companies')
         .select(`id, name, ${column}`)
         .ilike(column, pattern)
         .is('deleted_at', null)
         .limit(MAX_DOMAIN_CANDIDATES);
       if (error) return { ok: false };
+      // A full page is potentially incomplete: never decide on it.
+      if ((data ?? []).length >= MAX_DOMAIN_CANDIDATES) capHit = true;
       for (const row of (data ?? []) as Array<Record<string, unknown>>) {
         const stored = row?.[column];
         if (row?.id == null || typeof stored !== 'string' || normalizeCompanyDomain(stored) !== domain) continue;
         byId.set(String(row.id), { company_id: String(row.id), company_name: String(row.name ?? '') });
       }
     }
+  }
+  if (capHit) {
+    logger.warn('verified_domain_lookup_cap_hit', { domain, cap: MAX_DOMAIN_CANDIDATES });
+    return { ok: true, domain, companies: [], ambiguous: true };
   }
   return { ok: true, domain, companies: [...byId.values()] };
 }

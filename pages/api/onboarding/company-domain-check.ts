@@ -55,7 +55,7 @@ async function handler(
   // Free / public email domains look nothing up and match nothing.
   const domainLookup = await findCompaniesByVerifiedEmailDomain(email);
   if (!domainLookup.ok) return res.status(503).json({ error: 'Could not check your company.' });
-  if (domainLookup.companies.length > 1) {
+  if (domainLookup.ambiguous || domainLookup.companies.length > 1) {
     return res.status(409).json({ code: 'COMPANY_DOMAIN_AMBIGUOUS', error: 'Your company could not be resolved. Please contact support.' });
   }
   const company = domainLookup.companies[0] ? { id: domainLookup.companies[0].company_id } : null;

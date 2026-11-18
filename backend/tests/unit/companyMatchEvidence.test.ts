@@ -21,6 +21,8 @@ function ilikeMatch(value: string, pattern: string): boolean {
 }
 const mockCompanies: Row[] = [];
 let mockFail = false;
+/** Return the first N rows regardless of the filters (an over-broad result), to exercise the cap. */
+let mockIgnoreFiltersRows: number | null = null;
 const mockQueries: Array<Record<string, unknown>> = [];
 function mockTable() {
   const tests: Array<(r: Row) => boolean> = []; let cap = Infinity; const q: Record<string, unknown> = {};
@@ -34,7 +36,7 @@ function mockTable() {
       mockQueries.push(q);
       return Promise.resolve(mockFail
         ? { data: null, error: { message: 'boom' } }
-        : { data: mockCompanies.filter((r) => tests.every((t) => t(r))).slice(0, cap), error: null }).then(ok, ko);
+        : { data: mockIgnoreFiltersRows !== null ? mockCompanies.slice(0, Math.min(mockIgnoreFiltersRows, cap)) : mockCompanies.filter((r) => tests.every((t) => t(r))).slice(0, cap), error: null }).then(ok, ko);
     },
   };
   return b;
@@ -45,6 +47,7 @@ const { findCompaniesByVerifiedEmailDomain } = require('../../services/companyMa
 /* eslint-enable @typescript-eslint/no-var-requires */
 beforeEach(() => {
   mockFail = false;
+  mockIgnoreFiltersRows = null;
   mockQueries.length = 0;
   mockCompanies.length = 0;
   mockCompanies.push(
@@ -79,7 +82,7 @@ it('a company NAME is never an input: an email at a domain no company holds matc
 });
 
 it('a free / public email domain looks nothing up and matches nothing', async () => {
-  for (const email of ['p@gmail.com', 'p@outlook.com', '', null, undefined, 'not-an-email']) {
+  for (const email of ['p@gmail.com', 'p@outlook.com', '', null, undefined]) {
     const r = await findCompaniesByVerifiedEmailDomain(email);
     expect([email, r]).toEqual([email, { ok: true, domain: null, companies: [] }]);
   }
@@ -124,4 +127,32 @@ it('7c: a soft-deleted company is out of the match and the ambiguity count; a su
   mockCompanies[1].status = 'suspended';
   const susp = await findCompaniesByVerifiedEmailDomain('p@zeta.io');
   expect(susp.ok && susp.companies.map((c: { company_id: string }) => c.company_id)).toEqual(['c-zeta']);
+});
+
+it('PSL guard: an email whose host IS a public suffix is ambiguous - never a match - even with a company stored under it', async () => {
+  mockCompanies.push({ id: 'c-sfx', name: 'Suffix Holder', status: 'active', website_domain: null, admin_email_domain: 'co.il' });
+  for (const email of ['x@co.il', 'x@github.io', 'x@com.sg']) {
+    const r = await findCompaniesByVerifiedEmailDomain(email);
+    expect([email, r]).toEqual([email, { ok: true, domain: expect.any(String), companies: [], ambiguous: true }]);
+  }
+  expect(mockQueries).toEqual([]); // decided before any read
+});
+
+it('PSL: foo.co.il and bar.co.il are different registrable domains', async () => {
+  mockCompanies.push({ id: 'c-foo', name: 'Foo IL', status: 'active', website_domain: null, admin_email_domain: 'foo.co.il' });
+  const r = await findCompaniesByVerifiedEmailDomain('bar@bar.co.il');
+  expect(r).toEqual({ ok: true, domain: 'bar.co.il', companies: [] });
+});
+
+it('cap: a candidate query returning MAX_DOMAIN_CANDIDATES rows is potentially incomplete -> ambiguous, never a decision', async () => {
+  for (let i = 0; i < 9; i++) mockCompanies.push({ id: `c-junk-${i}`, name: `Junk ${i}`, status: 'active', website_domain: `junk${i}.example`, admin_email_domain: null });
+  mockIgnoreFiltersRows = 10; // acme + zeta + uk + 7 junk... the first 10 rows, only c-acme decides for acme.com
+  const r = await findCompaniesByVerifiedEmailDomain('p@acme.com');
+  expect(r).toMatchObject({ ok: true, ambiguous: true });
+});
+
+it('PSL guard: a host with no registrable root (no dot) is ambiguous, never a match', async () => {
+  const r = await findCompaniesByVerifiedEmailDomain('not-an-email');
+  expect(r).toMatchObject({ ok: true, companies: [], ambiguous: true });
+  expect(mockQueries).toEqual([]);
 });

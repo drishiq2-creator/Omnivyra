@@ -242,7 +242,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
         console.error('[onboarding/complete] company domain lookup failed');
         return res.status(503).json({ error: 'Could not resolve your company. Please try again.' });
       }
-      if (domainLookup.companies.length > 1) {
+      if (domainLookup.ambiguous || domainLookup.companies.length > 1) {
         // Several companies claim this domain: ambiguous - never guess which to bind.
         console.error('[onboarding/complete] ambiguous company domain', { count: domainLookup.companies.length });
         return res.status(409).json({ code: 'COMPANY_DOMAIN_AMBIGUOUS', error: 'Your company could not be resolved. Please contact support.' });
