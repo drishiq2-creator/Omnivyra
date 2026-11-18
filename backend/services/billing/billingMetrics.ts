@@ -72,6 +72,12 @@ const counters: Record<string, number> = {
   // Phase 8E — credit-economy shadow adoption (telemetry only; dark by default).
   credit_economy_shadow_would_allow:    0,
   credit_economy_shadow_would_block:    0,
+  // c6 2026-11-18 (b3/7c): billed result recovery - terminal replays, owed refunds and their completer.
+  billed_result_replay_terminal_total:  0,
+  credit_refund_unrecorded_total:       0,
+  owed_refund_granted_total:            0,
+  owed_refund_grant_failed_total:       0,
+  owed_refund_stuck_total:              0,
 };
 
 export type BillingCounter = keyof typeof counters;
