@@ -26,7 +26,9 @@ jest.mock('../../../lib/content/unifiedLongFormEngine', () => ({
 jest.mock('../../services/userContextService', () => ({ enforceCompanyAccess: async () => ({ userId: 'u1' }) }));
 jest.mock('../../services/rbacService', () => ({ Role: { COMPANY_ADMIN: 'COMPANY_ADMIN', CONTENT_CREATOR: 'CONTENT_CREATOR', CONTENT_REVIEWER: 'CONTENT_REVIEWER', CONTENT_PUBLISHER: 'CONTENT_PUBLISHER', SUPER_ADMIN: 'SUPER_ADMIN' }, enforceRole: async () => ({ userId: '33333333-3333-4333-8333-333333333333', role: 'COMPANY_ADMIN' }) }));
 jest.mock('../../../lib/content/buildContentContext', () => ({ buildContentContext: async () => ({}) }));
-jest.mock('../../adapters/commandCenter/blogContentAdapter', () => ({ generateBlogContent: async () => ({}) }));
+const mockEnqueued: any[] = [];
+jest.mock('../../queue/contentGenerationQueues', () => ({ getContentQueue: () => ({ name: 'content-blog' }) }));
+jest.mock('../../adapters/commandCenter/blogContentAdapter', () => ({ generateBlogContent: async (...a: any[]) => { mockEnqueued.push(a); return {}; } }));
 jest.mock('../../services/creditExecutionService', () => ({
   reserveCreditsForWork: async (o: any) => { ledger.push({ fn: 'reserve', n: o.amountOverride });
     if (settledKeys.has(o.idempotencyKey)) return { status: 'already_confirmed' };
@@ -126,4 +128,14 @@ describe.each([['company /api/blogs/generate', route], ['super-admin /api/admin/
     expect(ledger).toEqual([]);
     expect(gens).toEqual([]);
   });
+});
+
+test('b3: NO mode (the legacy unbilled queue path) -> 400 BLOG_MODE_REQUIRED, nothing enqueued, held or generated', async () => {
+  for (const mode of [undefined, '', 'queue', 'FULL']) {
+    const r = await call({ company_id: CO, topic: 'x', ...(mode === undefined ? {} : { mode }) }, KEY);
+    expect([mode, r.statusCode, r.body?.code]).toEqual([mode, 400, 'BLOG_MODE_REQUIRED']);
+  }
+  expect(mockEnqueued).toEqual([]);
+  expect(ledger).toEqual([]);
+  expect(gens).toEqual([]);
 });
