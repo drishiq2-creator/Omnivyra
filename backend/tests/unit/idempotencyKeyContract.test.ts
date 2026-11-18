@@ -9,8 +9,18 @@
  */
 import * as fs from 'fs';
 import * as path from 'path';
-import { KEY_REQUIRED_ROUTES } from '../../services/billing/keyRequiredRoutes';
-import { scanSource, isRequired, type CallSite } from '../helpers/keyContractScan';
+import { scanSource, isRequired, type CallSite, type RegistryEntry } from '../helpers/keyContractScan';
+
+// 7c: the registry lives on c6's base branch. Where it is absent this suite must go RED with one
+// named test, never compile-fail into a silent 0-test suite that leaves `Tests:` green.
+let registry: { KEY_REQUIRED_ROUTES: readonly RegistryEntry[] } | undefined;
+try {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  registry = require('../../services/billing/keyRequiredRoutes');
+} catch {
+  registry = undefined;
+}
+const KEY_REQUIRED_ROUTES: readonly RegistryEntry[] = registry?.KEY_REQUIRED_ROUTES ?? [];
 
 const ROOT = process.cwd();
 const CLIENT_DIRS = ['components', 'pages', 'hooks', 'lib'];
@@ -32,6 +42,9 @@ const SITES: CallSite[] = CLIENT_DIRS.flatMap((d) => clientFiles(path.join(ROOT,
 );
 
 describe('registry is the source (derived, not typed)', () => {
+  it('the registry is importable: this gate cannot run without it', () => {
+    expect(registry).toBeDefined();
+  });
   it('the server registry is non-empty and carries the activity-workspace and blog routes', () => {
     const routes = KEY_REQUIRED_ROUTES.map((e) => e.route);
     expect(routes).toEqual(expect.arrayContaining(['/api/activity-workspace/content', '/api/blogs/generate', '/api/admin/blog/generate']));
@@ -68,6 +81,12 @@ describe('scanner controls (planted callers)', () => {
     const sites = scanSource('planted.ts', planted, REG);
     expect(sites).toHaveLength(1);
     expect(sites[0].required && !sites[0].keyed).toBe(true);
+  });
+  it('a planted caller with a TEMPLATE or CONCATENATED path is still seen (7c: the pass-through limit)', () => {
+    const template = 'async function t(q) { await apiFetch(`/api/blogs/generate?company=${q}`, { body: JSON.stringify({ mode: "full" }) }); }';
+    expect(scanSource('t.ts', template, REG).map((s) => [s.required, s.keyed])).toEqual([[true, false]]);
+    const concat = "async function c(b) { await fetch(b + '/api/activity-workspace/content', { body: JSON.stringify({ action: 'generate_variants' }) }); }";
+    expect(scanSource('c.ts', concat, REG).map((s) => [s.required, s.keyed])).toEqual([[true, false]]);
   });
   it('a planted caller via an ALIAS constant is still seen', () => {
     const planted = `const API = '/api/blogs/generate'; async function y() { await apiFetch(API, { body: JSON.stringify({ mode: 'full' }) }); }`;

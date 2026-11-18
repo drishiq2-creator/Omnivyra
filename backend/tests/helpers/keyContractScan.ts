@@ -51,13 +51,34 @@ function escapeRe(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+/** The call's first argument (up to the first top-level comma), e.g. `'/api/x'`, `API`, a template. */
+function firstArgument(callText: string): string {
+  let depth = 0;
+  let quote: string | null = null;
+  for (let i = 1; i < callText.length; i += 1) {
+    const ch = callText[i];
+    if (quote) {
+      if (ch === '\\') { i += 1; continue; }
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === '`') { quote = ch; continue; }
+    if (ch === '(' || ch === '{' || ch === '[') depth += 1;
+    else if (ch === ')' || ch === '}' || ch === ']') {
+      if (depth === 0) return callText.slice(1, i);
+      depth -= 1;
+    } else if (ch === ',' && depth === 0) return callText.slice(1, i);
+  }
+  return callText.slice(1);
+}
+
 /** Identifiers whose initialiser mentions the route literal (e.g. `const CONTENT_API = '/api/...'`). */
 function aliasesFor(src: string, route: string): string[] {
   const out: string[] = [];
   const re = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=]+)?=\s*([^;]+);/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(src))) {
-    if (m[2].includes(`'${route}'`) || m[2].includes(`"${route}"`) || m[2].includes(`\`${route}\``)) out.push(m[1]);
+    if (m[2].includes(route)) out.push(m[1]); // a literal, template or concatenation
   }
   return out;
 }
@@ -71,16 +92,17 @@ export function isRequired(entry: RegistryEntry, value: string | null): boolean 
 export function scanSource(file: string, src: string, entries: readonly RegistryEntry[]): CallSite[] {
   const sites: CallSite[] = [];
   for (const entry of entries) {
-    const literal = [`'${entry.route}'`, `"${entry.route}"`, `\`${entry.route}\``];
     const aliases = aliasesFor(src, entry.route);
-    if (!literal.some((l) => src.includes(l)) && aliases.length === 0) continue;
+    if (!src.includes(entry.route) && aliases.length === 0) continue;
     CALLERS.lastIndex = 0;
     let m: RegExpExecArray | null;
     while ((m = CALLERS.exec(src))) {
       const open = m.index + m[0].length - 1;
       const callText = balancedFrom(src, open);
-      const firstArg = callText.slice(1).trimStart();
-      const hits = literal.some((l) => firstArg.startsWith(l)) || aliases.some((a) => new RegExp(`^${escapeRe(a)}\\b`).test(firstArg));
+      // 7c: the path may be a literal, a template with a query string, or a concatenation. The call
+      // counts if its FIRST ARGUMENT contains the path anywhere, or names an alias of it.
+      const firstArg = firstArgument(callText);
+      const hits = firstArg.includes(entry.route) || aliases.some((a) => new RegExp(`\\b${escapeRe(a)}\\b`).test(firstArg));
       if (!hits) continue;
       const vm = new RegExp(`\\b${entry.field}\\s*:\\s*(['"\`])([^'"\`]+)\\1`).exec(callText);
       const value = vm ? vm[2] : null;
