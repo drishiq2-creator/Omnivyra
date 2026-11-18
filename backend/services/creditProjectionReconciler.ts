@@ -220,9 +220,40 @@ async function loadLedger(organizationId: string): Promise<LedgerRow[] | null> {
   return rows;
 }
 
+/**
+ * Optimistic-concurrency SNAPSHOT of the org's ledger (b3 2026-11-19, BLOCKING follow-up to the keyset fix): the exact
+ * row count, read before and after the scan. credit_transactions is APPEND-ONLY - 20260663's
+ * credit_transactions_immutable_update / _delete triggers raise on UPDATE/DELETE, and no application code updates or
+ * deletes ledger rows (the only writers are the SQL credit functions, which INSERT) - so the count is a COMPLETE change
+ * detector: any write during the scan changes it. (Whether the triggers are live in prod is on cb's read pack; if they
+ * were not, an in-place UPDATE would escape the count - no app path performs one.) Returns null on a read error.
+ */
+async function countLedger(organizationId: string): Promise<number | null> {
+  const { count, error } = await supabase
+    .from('credit_transactions')
+    .select('id', { count: 'exact', head: true })
+    .eq('organization_id', organizationId);
+  if (error || typeof count !== 'number') {
+    diag('ledger_count_failed', { organizationId, message: error?.message ?? 'no count' });
+    return null;
+  }
+  return count;
+}
+
 async function reconcileImpl(organizationId: string): Promise<ReconcileResult> {
+  const countBefore = await countLedger(organizationId);
+  if (countBefore === null) return { outcome: 'failed', organizationId };
   const ledger = await loadLedger(organizationId);
   if (ledger === null) {
+    return { outcome: 'failed', organizationId };
+  }
+  // The scan must describe ONE ledger state: the count did not move during it, and the scan saw exactly that many rows
+  // (a row inserted mid-scan below the keyset cursor is missed by the scan but not by the count). Otherwise ABORT and
+  // write nothing - an absolute rebuild from a moving ledger is a wrong balance.
+  const countAfter = await countLedger(organizationId);
+  if (countAfter === null) return { outcome: 'failed', organizationId };
+  if (countAfter !== countBefore || ledger.length !== countAfter) {
+    diag('reconcile_aborted_ledger_changed', { organizationId, countBefore, countAfter, scanned: ledger.length });
     return { outcome: 'failed', organizationId };
   }
 

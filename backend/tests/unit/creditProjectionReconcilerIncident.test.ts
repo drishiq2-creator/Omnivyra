@@ -25,7 +25,12 @@ jest.mock('../../db/supabaseClient', () => ({
     from: (table: string) => {
       const builder: any = {};
       let after: string | null = null;
-      for (const op of ['select', 'eq', 'order']) builder[op] = () => builder;
+      for (const op of ['eq', 'order']) builder[op] = () => builder;
+      // c6 2026-11-19: the snapshot guard's head-count read (select('id', { count: 'exact', head: true })).
+      builder.select = (_c: string, opts?: { head?: boolean }) => {
+        if (opts?.head) builder.then = (res: any, rej: any) => Promise.resolve({ count: ledgerRows.length, error: null }).then(res, rej);
+        return builder;
+      };
       // keyset paging (loadLedger: .gt('id', last).order('id').limit(n))
       builder.gt = (_c: string, v: string) => { after = v; return builder; };
       builder.limit = (n: number) => ({
