@@ -141,6 +141,9 @@ function makeDeps(opts: {
     // adapter + the orchestrator's normalization together.
     dispatchCheckout: async (req) => getProviderAdapter(req.provider)!.createCheckoutSession(req),
     getProviderAdapter,
+    // The hidden billing catalog is RETIRED (C97 1a): the real resolver refuses every reference. These cases test
+    // provider compatibility, not pricing, so they inject a test-local amount (not a pricing source).
+    resolveBillingAmount: async () => ({ ok: true, amount: { amount: 500, currency: 'INR' } }),
   };
 }
 
