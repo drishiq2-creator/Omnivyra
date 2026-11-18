@@ -3,7 +3,7 @@ import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeF
 /**
  * Save AI-generated daily plans for a week.
  * Uses execution engine saveWeekPlans (delete-then-insert).
- * Used by ComprehensivePlanningInterface when generating daily plans from weekly plan.
+ * (Its former caller, ComprehensivePlanningInterface, was retired as unreachable, 2026-11-19.)
  */
 import { NextApiRequest, NextApiResponse } from 'next';
 import { supabase } from '../../../backend/db/supabaseClient';

@@ -826,13 +826,20 @@ export function useCampaignDetailsHandlers(core: CoreState) {
             campaignId: id,
             weekNumber,
             companyId: effectiveCompanyId,
-            provider: 'demo',
           }),
         });
         if (fallbackRes.ok) {
           await loadCampaignDetails(id as string);
           setEditedWeekDailyPlans((prev) => { const next = { ...prev }; delete next[weekNumber]; return next; });
-          notify('success', `Generated 7 daily plans for week ${weekNumber}.`);
+          // b3: say the detailed plan failed, and state what the fallback ACTUALLY created (the server's count).
+          const fb = await fallbackRes.json().catch(() => ({}));
+          const created = Number(fb?.rowsInserted ?? 0);
+          notify(
+            created > 0 ? 'info' : 'error',
+            created > 0
+              ? `The detailed plan for week ${weekNumber} couldn't be built, so we created ${created} simpler daily plan${created === 1 ? '' : 's'} instead.`
+              : `The plan for week ${weekNumber} couldn't be built, and no daily plans were created. Please try again.`,
+          );
         } else {
           const fbErr = await fallbackRes.json().catch(() => ({}));
           notify('error', fbErr?.error || 'Failed to generate daily plans.');
@@ -935,7 +942,7 @@ export function useCampaignDetailsHandlers(core: CoreState) {
           const fallbackRes = await fetchWithAuth('/api/campaigns/generate-ai-daily-plans', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ campaignId: id, weekNumber, companyId: effectiveCompanyId, provider: 'demo' }),
+            body: JSON.stringify({ campaignId: id, weekNumber, companyId: effectiveCompanyId }),
           });
           if (!fallbackRes.ok) {
             const fbErr = await fallbackRes.json().catch(() => ({}));

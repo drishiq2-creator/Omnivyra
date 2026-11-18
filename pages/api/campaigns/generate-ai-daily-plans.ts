@@ -5,7 +5,6 @@ import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeF
  * Single endpoint for Source B (AI expansion). Used by:
  * - campaign-daily-plan (Generate from AI button)
  * - campaign-details (fallback when generate-weekly-structure fails)
- * - ComprehensivePlanningInterface (Generate All Days)
  */
 import { NextApiRequest, NextApiResponse } from 'next';
 import { requireCampaignAccess } from '../../../backend/services/campaignAccessService';

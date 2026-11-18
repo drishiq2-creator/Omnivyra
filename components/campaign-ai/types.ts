@@ -50,7 +50,7 @@ export interface AIChatProps {
   onBackToRecommendation?: () => void;
 }
 
-export type AIProvider = 'gpt' | 'claude' | 'demo';
+export type AIProvider = 'gpt' | 'claude'; // 'demo' (canned replies presented as AI) is retired
 
 export type ProgressiveStyleConfig = {
   primaryOptions: string[];

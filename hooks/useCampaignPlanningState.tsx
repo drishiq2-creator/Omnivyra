@@ -419,8 +419,7 @@ export function useCampaignPlanningState() {
           campaignId,
           companyId: selectedCompanyId,
           startDate: campaignData.startDate || new Date().toISOString().split('T')[0],
-          aiContent: campaignData.description || 'Generate comprehensive content marketing plan',
-          provider: 'demo'
+          aiContent: campaignData.description || 'Generate comprehensive content marketing plan'
         })
       });
 

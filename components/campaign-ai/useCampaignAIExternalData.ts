@@ -163,7 +163,7 @@ export function useCampaignAIExternalData({
     autoTriggerPlanRef: state.autoTriggerPlanRef,
     freshThreadAppliedRef: state.freshThreadAppliedRef,
     selectedProvider,
-    getProviderName: (provider: AIProvider) => (provider === 'demo' ? 'Demo AI' : 'AI Assistant'),
+    getProviderName: (_provider: AIProvider) => 'AI Assistant',
     planningSelectedPlatforms: state.planningSelectedPlatforms,
     setPlanningSelectedPlatforms: setters.setPlanningSelectedPlatforms,
     setPlanningPlatformContentRequests: setters.setPlanningPlatformContentRequests,

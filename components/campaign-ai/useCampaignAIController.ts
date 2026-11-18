@@ -1,6 +1,5 @@
 import { useEffect } from 'react';
 import { getDisplayTopic } from './chatDisplayHelpers';
-import { generateDemoResponse } from './demoResponses';
 import { applyLocalWeekTextReplacement } from './planTextReplacement';
 import {
   buildCollectedPlanningContextForApi as buildCollectedPlanningContextForApiHelper,
@@ -63,7 +62,7 @@ export function useCampaignAIController(args: any) {
   } = state;
 
   const resolvedCompanyId = external.resolvedCompanyId;
-  const getProviderName = (provider: AIProvider) => (provider === 'demo' ? 'Demo AI' : 'AI Assistant');
+  const getProviderName = (_provider: AIProvider) => 'AI Assistant';
 
   const resolveWorkingDurationWeeks = () =>
     resolveWorkingDurationWeeksHelper({
@@ -243,7 +242,7 @@ export function useCampaignAIController(args: any) {
     setQuickCustomizeMode, setQuickCustomizeText, setQuickCustomContentType, setQuickCustomContentCount, setQuickCustomPlatform,
     setQuickDateYear, setQuickDateMonth, setQuickDateDay, setQuickCapacityCounts, setQuickCapacityCreationMode,
     setShowAllTypeCounters, setInputClearKey, setIsTyping, setIsLoading, setUiErrorMessage, selectedProvider,
-    generateDemoResponse, context, campaignData, campaignLearnings: state.campaignLearnings, setModeLoading,
+    context, campaignData, campaignLearnings: state.campaignLearnings, setModeLoading,
     callCampaignPlanAPI, collectedPlanningContext: (collectedPlanningContext as Record<string, unknown> | null | undefined) ?? null,
     vetScope, planAbortRef, setLastCollectedPlanningContextFromApi, setStructuredPlanMessageId, setHasGeneratedPlanInSession,
     setPlanSource, setHasViewedPlanMessageId, serializeStructuredPlanToText: persistence.serializeStructuredPlanToText,

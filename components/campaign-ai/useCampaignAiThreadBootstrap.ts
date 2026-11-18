@@ -20,8 +20,8 @@ type Params = {
   getFirstQuestion: () => string;
   autoTriggerPlanRef: React.MutableRefObject<boolean>;
   freshThreadAppliedRef: React.MutableRefObject<Set<string>>;
-  selectedProvider: 'gpt' | 'claude' | 'demo';
-  getProviderName: (provider: 'gpt' | 'claude' | 'demo') => string;
+  selectedProvider: 'gpt' | 'claude';
+  getProviderName: (provider: 'gpt' | 'claude') => string;
   planningSelectedPlatforms: string[];
   setPlanningSelectedPlatforms: Setter<string[]>;
   setPlanningPlatformContentRequests: Setter<Record<string, Record<string, string>>>;

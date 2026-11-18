@@ -247,8 +247,7 @@ const AIIntegration = {
         body: JSON.stringify({
           campaignId,
           startDate: new Date().toISOString().split('T')[0],
-          aiContent: 'Generate comprehensive content marketing plan',
-          provider: 'demo'
+          aiContent: 'Generate comprehensive content marketing plan'
         })
       });
       

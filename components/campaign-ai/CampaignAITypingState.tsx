@@ -118,9 +118,7 @@ export function CampaignAITypingState(props: any) {
             </div>
           )}
           <span className="text-sm text-gray-600">
-            {selectedProvider === 'demo'
-              ? 'Demo AI is analyzing campaign data...'
-              : selectedProvider === 'gpt'
+            {selectedProvider === 'gpt'
                 ? 'AI Assistant is learning from past campaigns...'
                 : 'Claude is reasoning with campaign context...'}
           </span>

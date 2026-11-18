@@ -520,7 +520,6 @@ export default function CampaignDailyPlanPage() {
           campaignId: id,
           weekNumber,
           companyId: companyId || undefined,
-          provider: 'demo',
         }),
       });
       const data = res.ok ? await res.json().catch(() => ({})) : null;

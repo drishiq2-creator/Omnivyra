@@ -40,7 +40,6 @@ type Params = {
   setIsLoading: (value: boolean) => void;
   setUiErrorMessage: (value: string | null) => void;
   selectedProvider: AIProvider;
-  generateDemoResponse: (userMessage: string, context: string, campaignData: any, learnings: CampaignLearning[]) => string;
   context: string;
   campaignData: any;
   campaignLearnings: CampaignLearning[];
@@ -120,7 +119,6 @@ export function useCampaignAiSendMessage(params: Params) {
     setIsLoading,
     setUiErrorMessage,
     selectedProvider,
-    generateDemoResponse,
     context,
     campaignData,
     campaignLearnings,
@@ -210,15 +208,7 @@ export function useCampaignAiSendMessage(params: Params) {
         campaignId,
       };
 
-      if (selectedProvider === 'demo') {
-        await new Promise((resolve) => setTimeout(resolve, 1500));
-        response = generateDemoResponse(messageText, context, campaignData, campaignLearnings);
-        provider = 'Demo AI';
-        aiResponse.message = response;
-        aiResponse.provider = provider;
-        setMessages((prev) => [...prev, aiResponse]);
-        await saveCampaignMessage(campaignId, aiResponse);
-      } else if (selectedProvider === 'gpt' || selectedProvider === 'claude') {
+      if (selectedProvider === 'gpt' || selectedProvider === 'claude') {
         provider = 'AI Assistant';
         aiResponse.provider = provider;
         setMessages((prev) => [...prev, aiResponse]);
