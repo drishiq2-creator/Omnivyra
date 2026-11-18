@@ -7,8 +7,9 @@ import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeF
  * domain alone, whether their company is already on Omnivyra — before the
  * user has to type anything.
  *
- * Returns the company admin's display name so the UI can tell the user
- * exactly who to contact for an invite. Email addresses are never exposed.
+ * Returns { matched: true } ONLY (CI-309, 2026-11-19): the requester learns that their own VERIFIED
+ * email domain already has a workspace - never the company's id or name, nor anything about its admins.
+ * The domain is always the session's verified email; the endpoint takes no domain from the caller.
  *
  * Returns { matched: false } for:
  *   - free/public email providers (gmail, yahoo, …)
@@ -23,12 +24,7 @@ import { supabase } from '../../../backend/db/supabaseClient';
 import { resolveAuthenticatedUser } from '../../../backend/services/authResolver';
 import { extractDomain, isFreeEmailDomain } from '../../../backend/services/companyMatchService';
 
-type MatchedResponse = {
-  matched: true;
-  companyName: string;
-  /** Display name of the first active COMPANY_ADMIN, or null if none found */
-  adminName: string | null;
-};
+type MatchedResponse = { matched: true };
 type NoMatchResponse  = { matched: false };
 type ErrorResponse    = { error: string; code?: string };
 
@@ -74,11 +70,11 @@ async function handler(
   // Check both website_domain and admin_email_domain.
   // website_domain first, then admin_email_domain - two exact reads, no interpolated .or().
   const byWebsite = await supabase
-    .from('companies').select('id, name').eq('status', 'active').eq('website_domain', emailDomain).maybeSingle();
+    .from('companies').select('id').eq('status', 'active').eq('website_domain', emailDomain).maybeSingle();
   const byAdminDomain = byWebsite.data || byWebsite.error
     ? { data: null, error: null }
     : await supabase
-        .from('companies').select('id, name').eq('status', 'active').eq('admin_email_domain', emailDomain).maybeSingle();
+        .from('companies').select('id').eq('status', 'active').eq('admin_email_domain', emailDomain).maybeSingle();
   if (byWebsite.error || byAdminDomain.error) return res.status(500).json({ error: 'Could not check your company.' });
   const company = byWebsite.data ?? byAdminDomain.data;
 
@@ -95,33 +91,7 @@ async function handler(
 
   if (existingMembership) return res.status(200).json({ matched: false });
 
-  // ── 6. Find the first active COMPANY_ADMIN for display name ──────────────
-  const { data: adminRole } = await supabase
-    .from('user_company_roles')
-    .select('user_id')
-    .eq('company_id', company.id)
-    .eq('role', 'COMPANY_ADMIN')
-    .eq('status', 'active')
-    .limit(1)
-    .maybeSingle();
-
-  let adminName: string | null = null;
-  if (adminRole?.user_id) {
-    const { data: adminUser } = await supabase
-      .from('users')
-      .select('name')
-      .eq('id', adminRole.user_id)
-      .maybeSingle();
-
-    // Display name only - never the email (nor its local-part).
-    adminName = (adminUser as any)?.name?.trim() || null;
-  }
-
-  return res.status(200).json({
-    matched: true,
-    companyName: company.name,
-    adminName,
-  });
+  return res.status(200).json({ matched: true });
 }
 
 // W0-1 (Gate A): canonical route pipeline — pass-through observability + request context.

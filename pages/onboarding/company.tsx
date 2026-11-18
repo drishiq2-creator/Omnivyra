@@ -26,6 +26,8 @@ import { userScopedStorageKey } from '../../utils/authStorage';
 
 type Step = 'loading' | 'details' | 'saving' | 'joined' | 'company-exists';
 const COMPANY_DRAFT_KEY = 'onboarding_company_draft_v1';
+const EXISTING_COMPANY_DEFAULT_MESSAGE =
+  "Your organization already has an Omnivyra workspace. Ask your organization's administrator to invite you.";
 
 const INDUSTRIES = [
   'Technology & Software',
@@ -98,11 +100,8 @@ export default function CompanySetupPage() {
   const [joinedCompanyName, setJoinedCompanyName] = useState<string | null>(null);
   const [companyDraftKey, setCompanyDraftKey] = useState(COMPANY_DRAFT_KEY);
 
-  // Company-exists state — shown when this company is already on Omnivyra
-  const [existingCompanyId,   setExistingCompanyId]   = useState<string | null>(null);
-  const [existingCompanyName, setExistingCompanyName] = useState<string | null>(null);
-  /** Display name of the company's admin (name, or email local-part as fallback) */
-  const [existingAdminName,   setExistingAdminName]   = useState<string | null>(null);
+  // Company-exists state (CI-309): only a neutral line - never a company or admin name.
+  const [existingCompanyMessage, setExistingCompanyMessage] = useState<string>(EXISTING_COMPANY_DEFAULT_MESSAGE);
 
   // ── Check Supabase session + existing company + domain match on load ─────
   useEffect(() => {
@@ -177,13 +176,9 @@ export default function CompanySetupPage() {
       try {
         const checkRes = await apiFetch('/api/onboarding/company-domain-check');
         if (checkRes.ok) {
-          const check = await checkRes.json() as
-            | { matched: true; companyId: string; companyName: string; adminName: string | null }
-            | { matched: false };
+          const check = await checkRes.json() as { matched: boolean };
           if (check.matched) {
-            setExistingCompanyId(check.companyId);
-            setExistingCompanyName(check.companyName);
-            setExistingAdminName(check.adminName);
+            setExistingCompanyMessage(EXISTING_COMPANY_DEFAULT_MESSAGE);
             setStep('company-exists');
             return;
           }
@@ -252,10 +247,8 @@ export default function CompanySetupPage() {
       } catch { /* ignore */ }
 
       if (json.companyExists) {
-        // Company already exists — show admin contact info, no self-registration
-        setExistingCompanyId(json.matchedCompanyId);
-        setExistingCompanyName(json.matchedCompanyName ?? companyName.trim());
-        setExistingAdminName(json.adminName ?? null);
+        // Company already exists — a neutral join-request notice, no self-registration
+        setExistingCompanyMessage(typeof json.message === 'string' && json.message ? json.message : EXISTING_COMPANY_DEFAULT_MESSAGE);
         setStep('company-exists');
         return;
       }
@@ -509,27 +502,8 @@ export default function CompanySetupPage() {
                   Your company is already on Omnivyra
                 </h1>
                 <p className="mt-3 text-sm leading-relaxed text-[#6B7C93] max-w-sm mx-auto">
-                  <strong className="text-[#0B1F33]">{existingCompanyName}</strong> already has a workspace.
-                  New members can only join by invitation from the company administrator.
+                  {existingCompanyMessage}
                 </p>
-
-                {/* Admin contact card */}
-                <div className="mt-6 rounded-2xl border border-[#0A66C2]/20 bg-[#EBF3FD] px-5 py-4 text-left">
-                  <p className="text-xs font-semibold text-[#6B7C93] uppercase tracking-wide mb-3">
-                    Contact to get access
-                  </p>
-                  <div className="flex items-center gap-3">
-                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-[#0A66C2] to-[#3FA9F5] text-sm font-bold text-white">
-                      {existingAdminName ? existingAdminName.charAt(0).toUpperCase() : '?'}
-                    </div>
-                    <div>
-                      <p className="text-sm font-semibold text-[#0B1F33]">
-                        {existingAdminName ?? 'Company Administrator'}
-                      </p>
-                      <p className="text-xs text-[#6B7C93]">Company Administrator</p>
-                    </div>
-                  </div>
-                </div>
 
                 <p className="mt-5 text-xs leading-relaxed text-[#6B7C93] max-w-xs mx-auto">
                   Once they send you an invite, you'll receive an email with a link to join your workspace.

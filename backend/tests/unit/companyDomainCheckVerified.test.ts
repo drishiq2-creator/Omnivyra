@@ -2,8 +2,10 @@
  * e1 (2026-11-12): /api/onboarding/company-domain-check uses the session email's DOMAIN as its only
  * evidence, but never required that email to be verified - an unverified session at someone else's
  * domain learned their company id, name and admin (with the admin's email local-part as fallback).
- * Now: 403 EMAIL_NOT_VERIFIED before any read; a verified match returns the company name and the
- * admin's DISPLAY name only - no company id, never any part of an email.
+ * Now: 403 EMAIL_NOT_VERIFIED before any read. CI-309 (2026-11-19): a verified match returns
+ * { matched: true } ONLY - no company id or name, no admin (the requester learns only that their own
+ * verified domain already has a workspace). The domain is always the session's verified email; a
+ * domain the caller passes is never read.
  */
 export {};
 type Row = Record<string, any>;
@@ -37,11 +39,11 @@ jest.mock('../../services/authResolver', () => ({
 /* eslint-disable @typescript-eslint/no-var-requires */
 const route = require('../../../pages/api/onboarding/company-domain-check').default;
 /* eslint-enable @typescript-eslint/no-var-requires */
-async function get() {
+async function get(query: Record<string, unknown> = {}) {
   const res: any = { statusCode: 0, body: null };
   res.status = (c: number) => { res.statusCode = c; return res; };
   res.json = (x: unknown) => { res.body = x; return res; };
-  await route({ method: 'GET', headers: {}, query: {} }, res);
+  await route({ method: 'GET', headers: {}, query }, res);
   return res;
 }
 beforeEach(() => {
@@ -58,12 +60,24 @@ it('an UNVERIFIED session is refused before anything is read', async () => {
   expect(r.body.code).toBe('EMAIL_NOT_VERIFIED');
   expect(mockReads).toEqual([]);
 });
-it('a verified match returns the company name and admin display name - no id', async () => {
+it('a verified match returns { matched: true } only - no company id or name, no admin', async () => {
   const r = await get();
-  expect(r.body).toEqual({ matched: true, companyName: 'Acme', adminName: 'Ada Admin' });
+  expect(r.statusCode).toBe(200);
+  expect(r.body).toEqual({ matched: true });
 });
-it('an admin with no display name is null - never the email local-part', async () => {
+it("an admin with no display name changes nothing - never the email's local-part", async () => {
   mockDb.users[1].name = null;
   const r = await get();
-  expect(r.body).toEqual({ matched: true, companyName: 'Acme', adminName: null });
+  expect(r.body).toEqual({ matched: true });
+  expect(JSON.stringify(r.body)).not.toContain('ada');
+});
+it('the admin is never looked up (nothing about them can reach the reply)', async () => {
+  await get();
+  expect(mockReads.filter((t) => t === 'user_company_roles')).toHaveLength(1); // the caller's own membership only
+});
+it("control: a domain passed by the caller is ignored - only the session's verified email domain is checked", async () => {
+  mockDb.companies.push({ id: 'c-other', name: 'Other', status: 'active', website_domain: 'other.com', admin_email_domain: 'other.com' });
+  mockDb.companies = mockDb.companies.filter((c) => c.id !== 'c-acme');
+  const r = await get({ domain: 'other.com', email: 'x@other.com' });
+  expect(r.body).toEqual({ matched: false });
 });
