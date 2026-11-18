@@ -16,8 +16,7 @@ import {
   hasPermission,
   isPlatformSuperAdmin,
   isSuperAdmin,
-  Role,
-} from '../../services/rbacService';
+  Role, ROLE_LOOKUP_FAILED, respondRoleRefusal } from '../../services/rbacService';
 import { encryptCredential } from '../../auth/credentialEncryption';
 import { checkAndGrantSetupCredits } from '../../services/earnCreditsService';
 import { requireCapability } from '../../security/requireCapability';
@@ -67,6 +66,11 @@ export const requireExternalApiAccess = async (
       role = fallbackRole;
       roleError = null;
     }
+  }
+  if (roleError === ROLE_LOOKUP_FAILED) {
+    // 7c (getUserRole class): a FAILED role read is a retryable 503, not a final 403 (the 403 contract below is kept).
+    respondRoleRefusal(res, ROLE_LOOKUP_FAILED);   // 503 + Retry-After (one shape)
+    return null;
   }
   if (roleError || !role) {
     res.status(403).json({ error: 'FORBIDDEN_ROLE' });

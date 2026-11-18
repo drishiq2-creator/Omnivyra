@@ -3,7 +3,7 @@ import { NextApiRequest, NextApiResponse } from 'next';
 import { supabase } from '../../../../../backend/db/supabaseClient';
 import { requireCompanyContext } from '../../../../../backend/services/companyContextGuardService';
 import { getSupabaseUserFromRequest } from '../../../../../backend/services/supabaseAuthService';
-import { getUserRole, isSuperAdmin, Role } from '../../../../../backend/services/rbacService';
+import { getUserRole, isSuperAdmin, Role, ROLE_LOOKUP_FAILED, respondRoleRefusal } from '../../../../../backend/services/rbacService';
 import { normalizeRole } from '../../../../../backend/services/rbacPrimitives';
 import { requireCapability } from '../../../../../backend/security/requireCapability';
 import { IDENTITY_ADMIN_ASSIGN } from '../../../../../shared/contracts/security';
@@ -33,6 +33,7 @@ const ensureCompanyAdminAccess = async (
   }
 
   const { role, error: roleError } = await getUserRole(user.id, companyId);
+  if (roleError === ROLE_LOOKUP_FAILED) { respondRoleRefusal(res, roleError); return null; }   // a FAILED read is a retryable 503 (getUserRole class)
   if (roleError === 'COMPANY_ACCESS_DENIED') {
     res.status(403).json({ error: 'COMPANY_ACCESS_DENIED' });
     return null;

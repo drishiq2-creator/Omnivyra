@@ -13,8 +13,7 @@ import {
   getUserRole,
   hasPermission,
   getCompanyRoleIncludingInvited,
-  Role,
-} from '../../../backend/services/rbacService';
+  Role, ROLE_LOOKUP_FAILED, respondRoleRefusal } from '../../../backend/services/rbacService';
 import { getLegacySuperAdminSession } from '../../../backend/services/superAdminSession';
 import {
   getAllowedPollingForCompany,
@@ -54,6 +53,8 @@ async function requireCompanyAccess(
   }
   let role: string | null = null;
   const { role: r, error: roleError } = await getUserRole(user.id, companyId);
+  // a FAILED read is a retryable 503 - not a silent canManage:false (getUserRole class)
+  if (roleError === ROLE_LOOKUP_FAILED) { respondRoleRefusal(res, roleError); return null; }
   if (!roleError && r) role = r;
   if (!role) {
     const fallback = await getCompanyRoleIncludingInvited(user.id, companyId);

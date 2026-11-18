@@ -8,8 +8,7 @@ import {
   getCompanyRoleIncludingInvited,
   hasPermission,
   isPlatformSuperAdmin,
-  isSuperAdmin,
-} from '../../../backend/services/rbacService';
+  isSuperAdmin, ROLE_LOOKUP_FAILED, respondRoleRefusal } from '../../../backend/services/rbacService';
 import { getLegacySuperAdminSession } from '../../../backend/services/superAdminSession';
 
 const authTypeRequiresKey = (authType?: string | null) =>
@@ -90,6 +89,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       return res.status(200).json({ requests: data || [] });
     }
     let { role, error: roleError } = await getUserRole(user.id, companyId);
+    if (roleError === ROLE_LOOKUP_FAILED) return respondRoleRefusal(res, roleError);   // a FAILED read is a retryable 503 (getUserRole class)
     if (!role && (roleError === 'COMPANY_ACCESS_DENIED' || roleError === null)) {
       const fallbackRole = await getCompanyRoleIncludingInvited(user.id, companyId);
       if (fallbackRole) {
@@ -137,6 +137,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method === 'POST') {
     if (!legacySession) {
       const { role, error: roleError } = await getUserRole(user.id, companyId);
+      if (roleError === ROLE_LOOKUP_FAILED) return respondRoleRefusal(res, roleError);   // a FAILED read is a retryable 503 (getUserRole class)
       if (roleError || !role) {
         return res.status(403).json({ error: 'FORBIDDEN_ROLE' });
       }

@@ -1,5 +1,5 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { getUserRole } from '../../../../backend/services/rbacService';
+import { getUserRole, ROLE_LOOKUP_FAILED, respondRoleRefusal } from '../../../../backend/services/rbacService';
 import { hasCommunityAiCapability } from '../../../../backend/services/rbac/communityAiCapabilities';
 import { getSupabaseUserFromRequest } from '../../../../backend/services/supabaseAuthService';
 import { encodeOAuthState, decodeOAuthState } from '../../../../backend/auth/oauthState';
@@ -55,6 +55,7 @@ export const requireManageConnectors = async (
     return null;
   }
   const { role, error: roleError } = await getUserRole(resolvedUser.id, companyId);
+  if (roleError === ROLE_LOOKUP_FAILED) { respondRoleRefusal(res, roleError); return null; }   // a FAILED read is a retryable 503 (getUserRole class)
   if (roleError || !role) {
     const err = roleError === 'COMPANY_ACCESS_DENIED' ? 'COMPANY_ACCESS_DENIED' : 'FORBIDDEN_ROLE';
     res.status(403).json({ error: err });

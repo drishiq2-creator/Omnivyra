@@ -6,8 +6,7 @@ import {
   getUserRole,
   isPlatformSuperAdmin,
   isSuperAdmin,
-  Role,
-} from '../../../../backend/services/rbacService';
+  Role, ROLE_LOOKUP_FAILED, respondRoleRefusal } from '../../../../backend/services/rbacService';
 import { requireCapability } from '../../../../backend/security/requireCapability';
 import { ORGANIZATION_MANAGE } from '../../../../shared/contracts/security';
 
@@ -37,6 +36,7 @@ const requirePlaybookAccess = async (
     return { userId: user.id, role: 'SUPER_ADMIN' };
   }
   const { role, error: roleError } = await getUserRole(user.id, companyId);
+  if (roleError === ROLE_LOOKUP_FAILED) { respondRoleRefusal(res, roleError); return null; }   // a FAILED read is a retryable 503 (getUserRole class)
   if (roleError || !role) {
     res.status(403).json({ error: 'FORBIDDEN_ROLE' });
     return null;

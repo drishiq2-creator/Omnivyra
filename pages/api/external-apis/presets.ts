@@ -13,8 +13,7 @@ import {
   hasPermission,
   isPlatformSuperAdmin,
   isSuperAdmin,
-  Role,
-} from '../../../backend/services/rbacService';
+  Role, ROLE_LOOKUP_FAILED, respondRoleRefusal } from '../../../backend/services/rbacService';
 
 // Phase 2: requirePlatformAdmin migrated to canonical capability gate.
 // Replaces the previous legacy-session-synthesizer + Supabase + role-string
@@ -61,6 +60,7 @@ const requireExternalApiAccess = async (
     return { userId: user.id, role: 'SUPER_ADMIN' };
   }
   let { role, error: roleError } = await getUserRole(user.id, companyId);
+  if (roleError === ROLE_LOOKUP_FAILED) { respondRoleRefusal(res, roleError); return null; }   // a FAILED read is a retryable 503 (getUserRole class)
   if (!role && (roleError === 'COMPANY_ACCESS_DENIED' || roleError === null)) {
     const fallbackRole = await getCompanyRoleIncludingInvited(user.id, companyId);
     if (

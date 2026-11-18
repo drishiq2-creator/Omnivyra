@@ -8,8 +8,7 @@ import {
   getCompanyRoleIncludingInvited,
   hasPermission,
   isSuperAdmin,
-  Role,
-} from '../../services/rbacService';
+  Role, respondRoleRefusal } from '../../services/rbacService';
 import { createAndSendInvitation } from '../../services/invitationService';
 import { withIdempotency } from '../../middleware/withIdempotency';
 import { logger } from '../../services/logger';
@@ -51,7 +50,9 @@ export const ensureCompanyAccess = async (
     }
   }
   if (roleError) {
-    res.status(403).json({ error: roleError === 'COMPANY_ACCESS_DENIED' ? 'COMPANY_ACCESS_DENIED' : 'FORBIDDEN_ROLE' });
+    // 7c (getUserRole class): a FAILED role read (ROLE_LOOKUP_FAILED) is a retryable 503, not a final 403. The helper
+    // keeps this site's existing mapping for COMPANY_ACCESS_DENIED / everything else.
+    respondRoleRefusal(res, roleError);
     return null;
   }
   if (!role) {

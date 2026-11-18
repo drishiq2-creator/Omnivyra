@@ -1,6 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { getSupabaseUserFromRequest } from './supabaseAuthService';
-import { getUserRole, isSuperAdmin } from './rbacService';
+import { getUserRole, isSuperAdmin, ROLE_LOOKUP_FAILED, respondRoleRefusal } from './rbacService';
 import { getCompanyRoleIncludingInvited, Role } from './rbacPrimitives';
 import {
   LEGACY_BRIDGE_HARD_EXPIRY_AT,
@@ -136,6 +136,11 @@ export async function resolveCompanyAccess(
   if (roleError || !role) {
     if (isContentArchitectSession(req)) {
       return { userId: 'content_architect', role: 'CONTENT_ARCHITECT' };
+    }
+    if (roleError === ROLE_LOOKUP_FAILED) {
+      // 7c (getUserRole class): a FAILED role read is a retryable 503, not a final 403.
+      respondRoleRefusal(res, ROLE_LOOKUP_FAILED);   // 503 + Retry-After (one shape)
+      return null;
     }
     res.status(403).json({ error: 'FORBIDDEN_ROLE' });
     return null;

@@ -501,8 +501,11 @@ export const ROLE_LOOKUP_FAILED = 'ROLE_LOOKUP_FAILED';
  * a lookup failure is a retryable 503 (same shape as enforceRole); the one known denial code keeps its existing 403
  * contract; anything else is the generic 403 FORBIDDEN_ROLE - never echoed text.
  */
+export const ROLE_LOOKUP_RETRY_AFTER_SECONDS = '5';
+
 export function respondRoleRefusal(res: NextApiResponse, roleError: string | null | undefined): void {
   if (roleError === ROLE_LOOKUP_FAILED) {
+    res.setHeader('Retry-After', ROLE_LOOKUP_RETRY_AFTER_SECONDS);   // b3: a retryable 503 says when to retry
     res.status(503).json({ error: 'ROLE_LOOKUP_FAILED', retryable: true });
     return;
   }
