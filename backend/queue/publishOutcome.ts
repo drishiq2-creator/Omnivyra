@@ -49,6 +49,44 @@ export function publishClaimCode(token: string): string {
 }
 
 /**
+ * Marker at the start of the claim TOKEN taken by a manual publish-now that
+ * supersedes the post's queued publish jobs (publishNowService
+ * `supersede_queued_jobs`). The stored claim then reads
+ * `PUBLISH_CLAIMED:SUPERSEDE:<uuid>`: it is still an ordinary pre-call claim
+ * (isPreCallClaim, publishClaimCode and every compare-and-set on the token
+ * treat it exactly like `PUBLISH_CLAIMED:<uuid>`), and it carries, in the SAME
+ * write that took the post, the evidence that a supersede was in progress.
+ *
+ * Why the marker must travel with the first write: while such a claim is still
+ * pre-call, the post's queued job may be ALIVE (its cancel failed, and the
+ * fence write that would have taken the row out of reach failed too, or the
+ * holder died before the cancel finished). A marked pre-call claim must
+ * therefore never become claimable again: it is not taken over when stale
+ * (claimScheduledPostForPublish) and the stuck-publishing sweeper fences it to
+ * 'cancelled' / PRIOR_JOB_CANCEL_FAILED, never 'failed' / PUBLISH_NOT_ATTEMPTED.
+ * No second write is needed to record it, so no second write can fail.
+ */
+export const PUBLISH_SUPERSEDE_CLAIM_MARK = 'SUPERSEDE:' as const;
+/** `PUBLISH_CLAIMED:SUPERSEDE:` — the error_code prefix of a marked claim. */
+export const PUBLISH_SUPERSEDE_CLAIM_PREFIX = `${PUBLISH_CLAIMED_PREFIX}${PUBLISH_SUPERSEDE_CLAIM_MARK}` as const;
+
+/** The claim token a superseding publish-now holds: `SUPERSEDE:<nonce>`. */
+export function supersedeClaimToken(nonce: string): string {
+  return `${PUBLISH_SUPERSEDE_CLAIM_MARK}${nonce}`;
+}
+
+/**
+ * Terminal fence for a post whose queued publish job could not be shown
+ * retired: status 'cancelled' (no publisher claims it, the publish
+ * authorization gate does not release it, the cron never selects it) with this
+ * code. Written by publishNow (from its own marked claim) and by the
+ * stuck-publishing sweeper (for a marked claim left pre-call).
+ */
+export const PRIOR_JOB_CANCEL_FAILED = 'PRIOR_JOB_CANCEL_FAILED' as const;
+export const PRIOR_JOB_CANCEL_FAILED_MESSAGE =
+  'Not posted: its queued publish job could not be retired, so it was cancelled to prevent a later or duplicate post.';
+
+/**
  * Prefix of the claim a tenant retry (POST /api/scheduler/retry) writes on a
  * 'failed' post BEFORE it touches the post's queue jobs:
  * RETRY_PREPARING:<epochMs>:<uuid>, compare-and-set on the error_code it read.
@@ -68,6 +106,24 @@ export function retryPreparingCode(nowMs: number, token: string): string {
 /** 'live' while a retry may still be acting on the post, 'stale' once it is provably dead, null if not a retry claim. */
 export function retryClaimState(errorCode: string | null | undefined, nowMs: number): 'live' | 'stale' | null {
   return timedFenceState(errorCode, RETRY_PREPARING_PREFIX, nowMs);
+}
+
+/**
+ * Did a `cancelScheduledPostQueueEntry` run (backend/scheduler) leave a publish
+ * job whose state is UNDECIDED, i.e. one that may still publish? True when any
+ * `queue_jobs` step reported an error: the old job's database state is then
+ * unknown. A BullMQ removal error alone does not count, because the row is
+ * already 'cancelled' and the worker obeys that (publishProcessor refuses a
+ * cancelled row).
+ *
+ * Shared by every caller that supersedes a post's queued attempt with its own:
+ * the tenant retry (pages/api/scheduler/retry.ts, Closure-014C) and the manual
+ * publish-now (publishNowService `supersede_queued_jobs`). It lives in this pure
+ * module, not beside the cancel helper, so suites that stub the scheduler
+ * module keep the real predicate.
+ */
+export function queueCancelLeftJobUndecided(cancel: { errors: string[] }): boolean {
+  return cancel.errors.some((e) => e.startsWith('queue_jobs'));
 }
 
 /**
@@ -161,6 +217,16 @@ export function isPreCallClaim(row: { status?: string | null; error_code?: strin
     && typeof row.error_code === 'string'
     && row.error_code.startsWith(PUBLISH_CLAIMED_PREFIX)
     && row.error_code.length > PUBLISH_CLAIMED_PREFIX.length;
+}
+
+/**
+ * A pre-call claim taken by a superseding publish-now
+ * (PUBLISH_CLAIMED:SUPERSEDE:...): its post may still have a live queued job.
+ * Fails closed: anything carrying the marker prefix counts, nonce or not.
+ */
+export function isSupersedePreCallClaim(row: { status?: string | null; error_code?: string | null }): boolean {
+  return isPreCallClaim(row)
+    && (row.error_code as string).startsWith(PUBLISH_SUPERSEDE_CLAIM_PREFIX);
 }
 
 /**
