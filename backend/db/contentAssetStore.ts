@@ -4,10 +4,11 @@ import { resolveCampaignOwnership } from '../services/campaignOwnershipService';
 /**
  * S2-55 (2026-11-14): content_assets has no company column (campaign_id is text, no FK to campaigns), the request
  * gate allows a campaign id that matches NO campaign, and assets of a deleted campaign survive. So a list keyed on
- * campaign_id alone can return another company's orphaned assets. When the caller passes the AUTHORIZED companyId,
- * the campaign must first be proven that company's own by the canonical resolver (campaigns.company_id plus every
+ * campaign_id alone can return another company's orphaned assets. The scoped lists REQUIRE the AUTHORIZED companyId
+ * (7c, 2026-11-18: the type does not allow omitting it), and the campaign must first be proven that company's own by the canonical resolver (campaigns.company_id plus every
  * campaign_versions row agree on it); otherwise nothing is read. A failed owner lookup throws (fail closed: never
  * "unknown, so read").
+ * There is no unscoped variant (owner rule: no dormant code; the last caller-less ones were removed in 7c).
  */
 async function campaignOwnedByCompany(campaignId: string, companyId: string): Promise<boolean> {
   const ownership = await resolveCampaignOwnership(campaignId);
@@ -84,10 +85,14 @@ export async function getContentAssetById(assetId: string): Promise<any | null> 
 export async function listContentAssets(input: {
   campaignId: string;
   weekNumber?: number;
-  /** S2-55: the authorized company; when given, a campaign that is not its own lists nothing. */
-  companyId?: string;
+  /** S2-55: the authorized company (REQUIRED); a campaign that is not its own lists nothing. */
+  companyId: string;
 }): Promise<any[]> {
-  if (input.companyId !== undefined && !(await campaignOwnedByCompany(input.campaignId, input.companyId))) return [];
+  if (!(await campaignOwnedByCompany(input.campaignId, input.companyId))) return [];
+  return listContentAssetsByCampaignId(input);
+}
+
+async function listContentAssetsByCampaignId(input: { campaignId: string; weekNumber?: number }): Promise<any[]> {
   let query = supabase.from('content_assets').select('*').eq('campaign_id', input.campaignId);
   if (input.weekNumber) {
     query = query.eq('week_number', input.weekNumber);
@@ -135,15 +140,15 @@ export async function listAssetsWithLatestContent(input: {
   campaignId: string;
   weekNumber?: number;
   status?: string;
-  /** S2-55: the authorized company; when given, a campaign that is not its own lists nothing (see listContentAssets). */
-  companyId?: string;
+  /** S2-55: the authorized company (REQUIRED); a campaign that is not its own lists nothing (see listContentAssets). */
+  companyId: string;
 }): Promise<any[]> {
-  const assets = await listContentAssets({
-    campaignId: input.campaignId,
-    weekNumber: input.weekNumber,
-    ...(input.companyId !== undefined ? { companyId: input.companyId } : {}),
-  });
-  const filtered = input.status ? assets.filter((asset) => asset.status === input.status) : assets;
+  const assets = await listContentAssets({ campaignId: input.campaignId, weekNumber: input.weekNumber, companyId: input.companyId });
+  return withLatestContent(assets, input.status);
+}
+
+async function withLatestContent(assets: any[], status: string | undefined): Promise<any[]> {
+  const filtered = status ? assets.filter((asset) => asset.status === status) : assets;
   const enriched = await Promise.all(
     filtered.map(async (asset) => {
       const versions = await listContentVersions(asset.asset_id);

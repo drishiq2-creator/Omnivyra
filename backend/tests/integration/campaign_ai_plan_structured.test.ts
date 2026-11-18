@@ -82,7 +82,7 @@ jest.mock('../../db/supabaseClient', () => ({
           eq: jest.fn().mockReturnThis(),
           order: jest.fn().mockReturnThis(),
           limit: jest.fn().mockReturnThis(),
-          maybeSingle: jest.fn().mockResolvedValue({ data: { company_id: 'comp123' }, error: null }),
+          maybeSingle: jest.fn().mockResolvedValue({ data: { company_id: '00000000-0000-4000-8000-000000000123' }, error: null }),
         };
       }
 
@@ -103,7 +103,7 @@ jest.mock('../../db/supabaseClient', () => ({
 // the deny paths are covered by routeAuth001CampaignBinding2Planner.
 jest.mock('../../services/campaignAccessService', () => ({
   requireCampaignAccess: jest.fn(async (_req: unknown, _res: unknown, campaignId: string) =>
-    ({ userId: 'user-1', companyId: 'comp123', campaignId })),
+    ({ userId: 'user-1', companyId: '00000000-0000-4000-8000-000000000123', campaignId })),
 }));
 jest.mock('../../services/rbacService', () => ({
   getUserCompanyRole: jest.fn().mockResolvedValue({ userId: 'user-1', role: 'COMPANY_ADMIN' }),
@@ -255,7 +255,7 @@ describe('Campaign AI Plan Structured', () => {
       method: 'POST',
       body: {
         campaignId: 'camp123',
-        companyId: 'comp123',
+        companyId: '00000000-0000-4000-8000-000000000123',
         mode: 'generate_plan',
         message: 'generate plan',
         durationWeeks: 12,
@@ -317,5 +317,69 @@ describe('Campaign AI Plan Structured', () => {
     expect(payload.plan.weeks.length).toBeGreaterThan(0);
     expect(payload.plan.weeks[0].week).toBe(1);
     expect(payload.plan.weeks[0].theme || payload.plan.weeks[0].phase_label).toBe('Launch');
+  });
+
+  // 7c (2026-11-19): the draft save is NON-blocking, but a seam fan-out it throws must still raise the alertable
+  // server signal (ERROR log tenant_parent_fanout + counter tenant_parent_fanout_total{table}) - once - and the
+  // request still succeeds.
+  it('a fan-out thrown by the non-blocking draft save fires the fanout log + counter once and the request still succeeds', async () => {
+    const { assessVirality } = require('../../services/viralityAdvisorService');
+    const { requestDecision } = require('../../services/omnivyreClient');
+    const { saveDraftBlueprint } = require('../../db/campaignPlanStore');
+    const { TenantSeamError } = require('../../db/tenantTable');
+    const { logger } = require('../../services/logger');
+    const { registry } = require('../../observability/registry');
+    (assessVirality as jest.Mock).mockResolvedValue({
+      snapshot_hash: 'hash123', model_version: 'v1',
+      diagnostics: { asset_coverage: {}, platform_opportunity: {}, engagement_readiness: {} },
+      comparisons: {}, overall_summary: 'ok',
+    });
+    (requestDecision as jest.Mock).mockResolvedValue({
+      decision_id: 'dec123', recommendation: 'HOLD', confidence: 0.7, explanation: 'test explanation',
+      guardrails_triggered: [], required_actions: [], trace_id: 'trace123', policy_version: 'default', timestamp: '2026-01-01T00:00:00Z',
+    });
+    (saveDraftBlueprint as jest.Mock).mockReset();
+    (saveDraftBlueprint as jest.Mock).mockRejectedValueOnce(
+      new TenantSeamError('TENANT_PARENT_FANOUT', 'campaign_week_plan: parent key matches more than 50 campaigns rows (availability limit, not a tenant mismatch)'),
+    );
+    const fanoutCount = (): number => registry.counterEntries()
+      .filter((e: any) => e.name === 'tenant_parent_fanout_total' && e.labels?.table === 'campaign_week_plan')
+      .reduce((n: number, e: any) => n + e.value, 0);
+    const before = fanoutCount();
+    const errSpy = jest.spyOn(logger, 'error');
+    try {
+      const req = {
+        method: 'POST',
+        body: {
+          campaignId: 'camp123',
+          companyId: '00000000-0000-4000-8000-000000000123',
+          mode: 'generate_plan',
+          message: 'generate plan',
+          durationWeeks: 12,
+          collectedPlanningContext: {
+            target_audience: 'Professionals', audience_professional_segment: 'Managers',
+            communication_style: 'Professional & expert', action_expectation: 'Visit website',
+            content_depth: 'Medium detail', topic_continuity: 'Mix of both',
+            available_content: { post: 0, video: 0, blog: 0, story: 0, thread: 0 },
+            tentative_start: '2026-08-15',
+            content_capacity: { post: 8, video: 0, blog: 0, story: 0, thread: 0 },
+            campaign_duration: 12, platforms: 'linkedin', platform_content_requests: { linkedin: { post: 8 } },
+            exclusive_campaigns: [], key_messages: 'Test key messages',
+          },
+        },
+      } as unknown as NextApiRequest;
+      const res = createMockRes();
+      const handler = (await import('../../../pages/api/campaigns/ai/plan')).default;
+      await handler(req, res);
+
+      expect(saveDraftBlueprint).toHaveBeenCalledTimes(1); // the save ran and threw (control)
+      expect(res.status).toHaveBeenCalledWith(200);
+      expect((res.json as jest.Mock).mock.calls[0][0].plan.weeks.length).toBeGreaterThan(0);
+      const fanoutLogs = errSpy.mock.calls.filter((c) => c[0] === 'tenant_parent_fanout');
+      expect(fanoutLogs).toEqual([['tenant_parent_fanout', { table: 'campaign_week_plan', parentTable: 'campaigns', key: 'id', limit: 50 }]]);
+      expect(fanoutCount() - before).toBe(1);
+    } finally {
+      errSpy.mockRestore();
+    }
   });
 });

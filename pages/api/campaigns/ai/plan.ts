@@ -37,7 +37,8 @@ import { detectCampaignConflicts, suggestAvailableDateRange } from '../../../../
 import { supabase } from '../../../../backend/db/supabaseClient';
 import { getUserCompanyRole, getCompanyRoleIncludingInvited } from '../../../../backend/services/rbacService';
 import { requireCampaignAccess, type CampaignAccessResult } from '../../../../backend/services/campaignAccessService';
-import { tenantTable, tenantContextFor } from '../../../../backend/db/tenantTable';
+import { tenantTable, tenantContextFor, TenantSeamError, type TenantContext } from '../../../../backend/db/tenantTable';
+import { seamDenial, reportTenantFanout } from '../../../../backend/db/seamDenial';
 import { resolveEffectiveCampaignRole, isCompanyOverrideRole } from '../../../../backend/services/campaignRoleService';
 import {
   getLatestCampaignContextForCompany,
@@ -354,6 +355,10 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     // before moderation (ROUTE-AUTH-001); the role checks below are unchanged.
     const resolvedCampaignId = campaignAccess!.campaignId;
     const resolvedCompanyId = campaignAccess!.companyId;
+    // S2-55 (7c): the tenant for the campaign_week_plan draft read / write below is the company requireCampaignAccess
+    // resolved and authorized for this principal - never a request value. Built at the point of use, so a context
+    // that cannot be formed only affects the draft read (uniform 404) / the non-blocking draft save.
+    const planTenant = (): TenantContext => tenantContextFor(campaignAccess!, resolvedCompanyId);
     const [roleResult, planningInputs] = await Promise.all([
       getUserCompanyRole(req, resolvedCompanyId),
       getCampaignPlanningInputs(resolvedCampaignId),
@@ -658,7 +663,13 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     const requestedWeeks = typeof durationWeeks === 'number' ? durationWeeks : null;
     const isRetryMessage = /^\s*continue\s*$/i.test(String(message).trim()) || /try again|retry/i.test(String(message));
     if (mode === 'generate_plan' && isRetryMessage && requestedWeeks != null) {
-      const existingDraft = await getLatestDraftPlan(resolvedCampaignId);
+      let existingDraft: Awaited<ReturnType<typeof getLatestDraftPlan>>;
+      try {
+        existingDraft = await getLatestDraftPlan(resolvedCampaignId, planTenant());
+      } catch (err) {
+        if (err instanceof TenantSeamError) return seamDenial(res, err, 404, { error: 'Campaign not found' });
+        throw err;
+      }
       if (existingDraft?.weeks?.length === requestedWeeks) {
         console.log('[plan] Restore: returning existing draft plan (same duration) to avoid reprocessing.');
         return res.status(200).json({
@@ -900,8 +911,10 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     if (result?.mode === 'generate_plan' && Array.isArray(result?.plan?.weeks) && result.plan.weeks.length > 0) {
       try {
         const blueprint = fromStructuredPlan({ weeks: result.plan.weeks, campaign_id: resolvedCampaignId });
-        await saveDraftBlueprint({ campaignId: resolvedCampaignId, blueprint });
+        await saveDraftBlueprint({ campaignId: resolvedCampaignId, blueprint, tenant: planTenant() });
       } catch (err) {
+        // Non-blocking, but a seam fan-out (availability limit) is still raised as the alertable server signal.
+        reportTenantFanout(err);
         console.warn('[plan] Failed to persist draft blueprint (continuing):', (err as any)?.message ?? err);
       }
     }

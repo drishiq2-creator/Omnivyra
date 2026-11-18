@@ -4,7 +4,6 @@ import {
   createContentVersion,
   getContentAssetById,
   getContentAssetByKey,
-  listContentAssets,
   listContentVersions,
   updateContentAssetStatus,
 } from '../db/contentAssetStore';
@@ -135,8 +134,4 @@ export async function rejectContentAsset(input: { assetId: string; reason: strin
   });
   console.log('CONTENT REJECTED', { asset_id: asset.asset_id });
   return updatedAsset;
-}
-
-export async function listAssets(input: { campaignId: string; weekNumber?: number }): Promise<any[]> {
-  return listContentAssets({ campaignId: input.campaignId, weekNumber: input.weekNumber });
 }

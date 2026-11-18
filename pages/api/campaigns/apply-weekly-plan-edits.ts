@@ -73,7 +73,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       });
     }
 
-    const draft = await getLatestDraftPlan(campaignId);
+    const draft = await getLatestDraftPlan(campaignId, tenant);
     const blueprint = await getUnifiedCampaignBlueprint(campaignId);
 
     if (!blueprint?.weeks?.length && !draft?.weeks?.length) {
@@ -144,7 +144,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     });
 
     if (draft?.weeks?.length) {
-      await saveDraftBlueprint({ campaignId, blueprint: fullBlueprint });
+      await saveDraftBlueprint({ campaignId, blueprint: fullBlueprint, tenant });
     } else {
       const { data: committed } = await supabase
         .from('campaign_week_plan')
@@ -158,7 +158,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       if (committed?.id) {
         await updateToEditedCommitted({ campaignId, blueprint: fullBlueprint });
       } else {
-        await saveDraftBlueprint({ campaignId, blueprint: fullBlueprint });
+        await saveDraftBlueprint({ campaignId, blueprint: fullBlueprint, tenant });
       }
     }
 
@@ -169,6 +169,8 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       message: `Applied ${result.applied} edit(s) to Week ${weekNum}. Refresh the board to see changes.`,
     });
   } catch (error) {
+    // S2-55 (7c): the draft read / write is seam-scoped; a refusal answers the route's campaign not-found (or 503).
+    if (error instanceof TenantSeamError) return seamDenial(res, error, 404, { error: 'Campaign not found', code: 'CAMPAIGN_NOT_FOUND' });
     console.error('Error in apply-weekly-plan-edits:', error);
     return res.status(500).json({
       error: 'Failed to apply plan edits',

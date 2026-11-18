@@ -16,6 +16,7 @@
  */
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { ownerOfChildRow, tenantChildTable, tenantContextFor, TenantSeamError } from '../../../db/tenantTable';
+import { reportTenantFanout } from '../../../db/seamDenial';
 import { enforceCompanyAccess, resolveUserContext } from '../../userContextService';
 import type { UserContext } from '../../userContextService';
 
@@ -90,6 +91,7 @@ export async function loadAuthorizedPlanRow(
   } catch (err) {
     if (!(err instanceof TenantSeamError)) throw err;
     if (err.retryable) { res.status(500).json({ error: 'load failed' }); return null; }
+    reportTenantFanout(err); // answers the uniform 404 below; a fan-out is still alertable
     res.status(404).json(NOT_FOUND_BODY); return null;
   }
   if (!row) { res.status(404).json(NOT_FOUND_BODY); return null; }

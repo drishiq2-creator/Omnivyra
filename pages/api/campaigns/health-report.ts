@@ -105,7 +105,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     const weeklyPlans = resolved.weekly_plan;
     const dailyPlans = resolved.daily_plan;
     const trendSnapshots = await getTrendSnapshots(companyId, campaignId);
-    const contentAssets = await listAssetsWithLatestContent({ campaignId });
+    const contentAssets = await listAssetsWithLatestContent({ campaignId, companyId: campaignAccess.organizationId });
     const analyticsReport = await getLatestAnalyticsReport(companyId, campaignId);
     const learningInsights = await getLatestLearningInsights(companyId, campaignId);
 

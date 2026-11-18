@@ -160,7 +160,7 @@ export async function generateCampaignAuditReport(
     weekNumber: weeklyPlan?.[0]?.week_number ?? 1,
   });
   const contentAssets = campaignId
-    ? await listAssetsWithLatestContent({ campaignId })
+    ? await listAssetsWithLatestContent({ campaignId, companyId: resolvedCompanyId })
     : [];
   const analyticsReport = await getLatestAnalyticsReport(resolvedCompanyId, campaignId);
   const learningInsights = await getLatestLearningInsights(resolvedCompanyId, campaignId);
