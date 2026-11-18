@@ -11,8 +11,14 @@
 const mockStore = require('../helpers/fakeIdempotencyStore').makeFakeIdempotencyStore();
 jest.mock('../../db/writeOwner', () => ({ ownedDbTable: (t: string) => mockStore.ownedDbTable(t) }));
 const mockReplayFailures = new Map<string, number>();
+// credit_transactions rows the in-flight check reads (by idempotency_key)
+const mockLedgerRows: Array<{ idempotency_key: string; created_at: string }> = [];
+let mockLedgerReadFails = false;
 jest.mock('../../db/supabaseClient', () => ({
-  supabase: { rpc: async (_f: string, a: any) => {
+  supabase: { from: (_t: string) => ({ select: () => ({ in: async (_c: string, keys: string[]) => (mockLedgerReadFails
+      ? { data: null, error: { message: 'timeout' } }
+      : { data: mockLedgerRows.filter((r) => keys.includes(r.idempotency_key)), error: null }) }) }),
+    rpc: async (_f: string, a: any) => {
     const k = `${a.p_scope}|${a.p_caller_id}|${a.p_key}`;
     const n = (mockReplayFailures.get(k) ?? 0) + 1; mockReplayFailures.set(k, n);
     return { data: [{ failures: n, first_failed_at: new Date().toISOString() }], error: null };
@@ -62,7 +68,7 @@ import { billedRouteHttpError } from '../../services/billing/billedRouteHttpErro
 
 const ORG = '11111111-1111-4111-8111-111111111111';
 const USER = '22222222-2222-4222-8222-222222222222';
-beforeEach(() => { ledger.clear(); charges = 0; mockAiCalls = 0; mockStore.rows.length = 0; mockStore.failRead = false; mockStore.failInsert = false; mockReplayFailures.clear(); mockRefundCalls.length = 0; });
+beforeEach(() => { mockLedgerRows.length = 0; mockLedgerReadFails = false; ledger.clear(); charges = 0; mockAiCalls = 0; mockStore.rows.length = 0; mockStore.failRead = false; mockStore.failInsert = false; mockReplayFailures.clear(); mockRefundCalls.length = 0; });
 
 describe('generate_variants: runReservedFixedWorkflow with recovery', () => {
   const run = (header: unknown, executor = jest.fn(async () => ({ v: 1 }))) => runReservedFixedWorkflow({
@@ -97,6 +103,27 @@ describe('generate_variants: runReservedFixedWorkflow with recovery', () => {
     await run('click-key-001', jest.fn(async () => { throw new Error('provider 500'); })).catch(() => undefined);
     const e = await run('click-key-001').catch((x) => x);
     expect(billedRouteHttpError(e)?.body.code).toBe('REQUEST_ENDED');
+  });
+  // the generate_variants base key the in-flight check reads: makeIdempotencyKey(user, action, identity, note)
+  const baseKeyFor = (clientKey: string) => {
+    const h = require('crypto').createHash('sha256').update(clientKey).digest('hex').slice(0, 24);
+    return [USER, 'content_basic', `workspace:k:${h}`, 'Generated platform variants'].join(':');
+  };
+  test('the same key while its first attempt is IN FLIGHT (a fresh unsettled hold) -> 409 REQUEST_IN_PROGRESS, no second run', async () => {
+    mockLedgerRows.push({ idempotency_key: `${baseKeyFor('click-key-001')}:hold`, created_at: new Date().toISOString() });
+    const ex = jest.fn(async () => ({ v: 1 }));
+    const e = await run('click-key-001', ex).catch((x) => x);
+    expect(billedRouteHttpError(e)).toEqual({ status: 409, body: expect.objectContaining({ code: 'REQUEST_IN_PROGRESS', retryable: true }) });
+    expect(ex).not.toHaveBeenCalled();
+  });
+  test('an unsettled hold OLDER than the window (a run that died) does not strand the key: the engine resumes it', async () => {
+    mockLedgerRows.push({ idempotency_key: `${baseKeyFor('click-key-001')}:hold`, created_at: new Date(Date.now() - 11 * 60 * 1000).toISOString() });
+    expect(await run('click-key-001')).toEqual({ v: 1 });
+  });
+  test('the in-flight check cannot read the ledger -> proceeds (the engine resume is single-charge)', async () => {
+    mockLedgerReadFails = true;
+    expect(await run('click-key-001')).toEqual({ v: 1 });
+    expect(charges).toBe(1);
   });
   test('durable read failures: 503 twice, then TERMINAL -> the original charge is refunded by the system', async () => {
     await run('click-key-001');

@@ -54,7 +54,7 @@ import { checkAiBillingGuard, runWithCreditHandle, type CreditHandle } from './a
 import { buildBillingIdempotencyKey } from './billingIdempotencyService';
 import {
   BilledResultUnpersistedError, BilledRouteKeyRequiredError, BilledRouteRequestEndedError,
-  clientIdempotencyKey, persistBilledResultOrThrow, replayOrRefund,
+  clientIdempotencyKey, persistBilledResultOrThrow, refuseIfInFlight, replayOrRefund,
 } from './billedRequestRecovery';
 
 export interface RunBilledAiCompletionArgs {
@@ -141,6 +141,7 @@ export async function runBilledAiCompletion(
       return { text: typeof replay.value === 'string' ? replay.value : '', value: replay.value, replayed: true,
         operationId: '', correlationId: '', idempotencyKey: root.root, promptTokens: 0, completionTokens: 0, provider: '', model: '' };
     }
+    await refuseIfInFlight({ surface: args.recovery.surface, baseKey: root.root });
   }
 
   let orchestratorResult: OrchestratorResult<string>;
