@@ -9,6 +9,7 @@ import {
   createMockRes,
   playbookStore,
   resetCommunityAiStores,
+  seedConnectedAccount,
   seedPlaybook,
   setRole,
   tokenStore,
@@ -36,6 +37,22 @@ jest.mock('../../db/supabaseClient', () => ({
 jest.mock('../../services/platformConnectors/linkedinConnector', () => ({
   executeAction: jest.fn().mockResolvedValue({ ok: true, platform: 'linkedin' }),
 }));
+
+// Fixture drift: production getToken decrypts social_accounts.access_token, so the legacy plaintext tokenStore row no
+// longer yields a token. Same pattern as community_ai_action_connectors: route the canonical token reader through the
+// harness's socialAccountStore (seeded with seedConnectedAccount).
+jest.mock('../../auth/tokenStore', () => {
+  const harness = jest.requireActual('./communityAiTestHarness');
+  return {
+    getToken: jest.fn(async (socialAccountId: string) => {
+      const row = harness.socialAccountStore.find((r: any) => r.id === socialAccountId);
+      return row ? { access_token: row.access_token, refresh_token: undefined, expires_at: undefined, token_type: 'Bearer' } : null;
+    }),
+    isTokenExpiringSoon: jest.fn(() => false),
+    setToken: jest.fn(async () => {}),
+  };
+});
+jest.mock('../../auth/tokenRefresh', () => ({ refreshPlatformToken: jest.fn(async () => null) }));
 
 jest.mock('../../services/rpaWorker/rpaWorkerService', () => ({
   executeRpaTask: jest.fn().mockResolvedValue({ success: true, screenshot_path: 'rpa-shot.png' }),
@@ -89,6 +106,10 @@ describe('Community-AI Scheduling', () => {
 
   it('scheduler executes due actions and logs execution', async () => {
     setRole('CONTENT_PUBLISHER');
+    seedConnectedAccount({ platform: 'linkedin', accessToken: 'token-1' });
+    // 'executed' requires an explicit, VERIFIED connector success: runApiExecution deliberately reports
+    // 'sent_unverified' for a permissive `{ ok: true }` response (honest about the missing success signal).
+    (executeLinkedinAction as jest.Mock).mockResolvedValueOnce({ success: true, platform_id: 'li-post-11' });
     tokenStore.push({
       tenant_id: 'tenant-1',
       organization_id: 'tenant-1',

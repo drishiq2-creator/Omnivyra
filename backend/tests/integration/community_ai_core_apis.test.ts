@@ -39,6 +39,14 @@ jest.mock('../../services/companyProfileService', () => ({
   getProfile: jest.fn(),
 }));
 
+// Fixture drift (since Wave 2F, 107c21d1f): pages/api/community-ai/utils.ts resolveBrandVoice reads
+// getCanonicalProfile (context/canonicalProfileAdapter), and the adapter imports getProfile DIRECTLY from
+// companyProfileServiceRest1Rest2Pulse - not through the companyProfileService barrel mocked above. Route that module
+// to the same mock so the brand_voice each case seeds actually reaches the route.
+jest.mock('../../services/companyProfileServiceRest1Rest2Pulse', () => ({
+  getProfile: (...args: any[]) => jest.requireMock('../../services/companyProfileService').getProfile(...args),
+}));
+
 jest.mock('../../services/omnivyraClientV1', () => ({
   isOmnivyraEnabled: jest.fn().mockReturnValue(true),
   evaluateCommunityAiEngagement: jest.fn().mockResolvedValue({
