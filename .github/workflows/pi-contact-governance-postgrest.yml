@@ -71,6 +71,11 @@ on:
   push:
     branches:
       - main
+      # c6/cb 2026-11-18 (stage 0, CI-558): cb's cumulative CI stacks push to integration/**. Without this the suite
+      # appeared ONLY in the loopback integration job, where it is env-gated off (0 assertions = NOT-RUN), so the one
+      # proof that read_at is a real PostgREST computed field went unmeasured on every stack. Still loopback-only, no
+      # secret, no workflow_dispatch.
+      - 'integration/**'
 
 permissions:
   contents: read
