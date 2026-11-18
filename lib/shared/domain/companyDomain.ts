@@ -22,20 +22,6 @@
 
 import { publicSuffixLabelCount } from './publicSuffix';
 
-/**
- * LEGACY: the hand-maintained multi-part suffix list that `registrableRoot`
- * used before the Public Suffix List. No longer consulted here; kept exported
- * because backend/services/prospectIdentity/accountSeeding.ts still imports it
- * for its bare-suffix guard. Prefer `isPublicSuffix` from ./publicSuffix.
- */
-export const KNOWN_MULTI_PART_TLDS = new Set([
-  'co.uk', 'org.uk', 'ac.uk', 'gov.uk',
-  'co.jp', 'or.jp', 'ne.jp', 'ac.jp', 'go.jp',
-  'com.au', 'net.au', 'org.au', 'edu.au', 'gov.au',
-  'co.in', 'net.in', 'org.in',
-  'com.br', 'com.mx', 'com.ar', 'com.cn',
-  'co.kr', 'co.za', 'co.nz',
-]);
 
 /** Strip protocol / path / query / fragment / `www.` / port → bare host. */
 export function normalizeDomain(raw: string): string {
