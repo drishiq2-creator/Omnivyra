@@ -168,3 +168,17 @@ describe('vendored PSL snapshot carries its dated provenance', () => {
     expect(PUBLIC_SUFFIX_LIST_META.sha256).toBe(meta.sha256);
   });
 });
+
+// c6/89 2026-11-19: the owner's rule - ONE company per REGISTRABLE domain, and the website's registrable domain must equal
+// the admin email's - is enforced by the onboarding binding through isSameCompanyDomain ONLY, so these pin what it will
+// decide. Each case is one the pre-PSL helper got WRONG (control: it fails on main's companyDomain.ts).
+describe('owner rule (onboarding binding): one company per registrable domain', () => {
+  it('two Shopify shops are two companies (myshopify.com is a PRIVATE-section public suffix)', () => {
+    expect(isSameCompanyDomain('owner@shop1.myshopify.com', 'https://shop2.myshopify.com')).toBe(false);
+    expect(normalizeCompanyDomain('https://shop1.myshopify.com/collections')).toBe('shop1.myshopify.com');
+  });
+  it('website = admin email domain holds across a multi-part ICANN suffix the old list lacked (com.sg)', () => {
+    expect(isSameCompanyDomain('jane@acme.com.sg', 'https://www.acme.com.sg')).toBe(true);
+    expect(isSameCompanyDomain('jane@acme.com.sg', 'https://www.other.com.sg')).toBe(false);
+  });
+});
