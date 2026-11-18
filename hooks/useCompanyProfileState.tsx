@@ -20,6 +20,7 @@ import {
   buildSocialProfilesFromScalars,
 } from '../pages/company-profile.types';
 import { normalizeCanonicalWebsite } from '../utils/companyProfileValidation';
+import { saveProfileWithListEdits } from '../lib/companyProfile/listReplace';
 import {
   mergeCampaignPurposeIntent,
   mergeNonEmptyFields,
@@ -811,16 +812,25 @@ export function useCompanyProfileState() {
         transformation_mechanism: source.transformation_mechanism ?? null,
         authority_domains: Array.isArray(source.authority_domains) ? source.authority_domains : splitToList(String(source.authority_domains || '')),
       };
-      const response = await fetchWithAuth('/api/company-profile', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+      // D2 (CI-397): a user can DELETE a list item; the request (rebased on a re-read, bulk confirm) lives in
+      // lib/companyProfile/listReplace so it is one tested unit.
+      const outcome = await saveProfileWithListEdits({
+        fetch: fetchWithAuth as any,
+        companyId,
+        base: profile as Record<string, unknown> | null,
+        payload,
+        confirm: (text) => typeof window !== 'undefined' && window.confirm(text),
       });
-      if (!response.ok) {
-        const errorBody = await response.json().catch(() => null);
-        throw new Error(errorBody?.error || errorBody?.details || 'Failed to save profile');
+      if (outcome.kind === 'cancelled') {
+        setErrorMessage('Nothing was saved.');
+        return false;
       }
-      const data = await response.json();
+      if (outcome.kind === 'reread_failed') {
+        setErrorMessage('We couldn’t check the latest profile, so nothing was saved. Please try again.');
+        return false;
+      }
+      if (outcome.kind === 'failed') throw new Error(outcome.error);
+      const data = outcome.data;
       setProfile(data.profile || source);
       setDraftProfile(data.profile || source);
       setOverallProfileCompletion(

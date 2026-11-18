@@ -1,6 +1,7 @@
 import type { CompanyProfile } from './types';
 import { mergeStringArrays, splitToList } from './normalization';
 import { withRecommendationContextDefaults } from '../../../utils/safeJson';
+import { REPLACEABLE_LISTS, type ReplaceableList } from '../../../lib/companyProfile/listReplace';
 
 function serializeRecommendationContext(
   value: CompanyProfile['recommendation_context'] | undefined,
@@ -17,17 +18,9 @@ function serializeRecommendationContext(
  * body). AI refine / enrich (source 'ai_refined', or any caller that does not name a list) keeps the union.
  * The route refuses a bulk removal without explicit confirmation (assessListReplace).
  */
-export const REPLACEABLE_LISTS = {
-  industry_list: 'industry',
-  category_list: 'category',
-  geography_list: 'geography',
-  content_themes_list: 'content_themes',
-  products_services_list: 'products_services',
-  target_audience_list: 'target_audience',
-  goals_list: 'goals',
-  brand_voice_list: 'brand_voice',
-} as const;
-export type ReplaceableList = keyof typeof REPLACEABLE_LISTS;
+// ONE definition, shared with the client's save (lib/companyProfile/listReplace).
+export { REPLACEABLE_LISTS };
+export type { ReplaceableList };
 
 /** The requested replacements: known list names whose new list is present as an array. */
 export function readReplaceLists(input: Record<string, unknown>): { valid: ReplaceableList[]; invalid: string[] } {
