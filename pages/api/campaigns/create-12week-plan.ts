@@ -298,6 +298,9 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     res.status(200).json({ 
       success: true, 
       message: 'Campaign plan created successfully',
+      // Phase 1 of the deleted-campaign takeover fix (owner ruling 2026-11-18): the id this
+      // request actually used. Clients continue with it; the server will mint it in phase 2.
+      campaign_id: campaignId,
       data: {
         campaignId,
         startDate,

@@ -1,3 +1,5 @@
+import { resolveReturnedCampaignId } from './campaign/returnedCampaignId';
+
 // LOGICAL CAMPAIGN FLOW IMPLEMENTATION
 // This file contains the corrected navigation flow and button logic
 
@@ -251,8 +253,13 @@ const AIIntegration = {
       });
       
       if (response.ok) {
+        // Phase 1 of the deleted-campaign takeover fix (owner ruling 2026-11-18): adopt the server's
+        // campaign_id; the server will mint it in phase 2. Changed by orchestration (89) under the
+        // owner's ruling while no UI session was running.
+        const result = await response.json().catch(() => null);
+        const adoptedCampaignId = resolveReturnedCampaignId(campaignId, result);
         // Redirect to campaign details to view the generated plan
-        window.location.href = Routes.viewCampaign(campaignId);
+        window.location.href = Routes.viewCampaign(adoptedCampaignId);
       }
     } catch (error) {
       console.error('Error generating campaign plan:', error);
