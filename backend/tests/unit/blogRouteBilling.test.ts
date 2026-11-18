@@ -11,6 +11,10 @@ const ledger: Array<{ fn: string; n?: number }> = [];
 let reserveStatus = 'reserved';
 const settledKeys = new Set<string>();
 let mockSwitchEnabled = true;
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const mockStore = require('../helpers/fakeIdempotencyStore').makeFakeIdempotencyStore();
+jest.mock('../../db/writeOwner', () => ({ ownedDbTable: (t: string) => mockStore.ownedDbTable(t) }));
+jest.mock('../../services/billing/billingAuditEmitter', () => ({ emitAnomaly: jest.fn() }));
 jest.mock('../../services/intelligenceConfigService', () => ({
   getResolvedConfigStrict: async () => ({ job_type: 'blog_generation', enabled: mockSwitchEnabled }),
 }));
@@ -46,7 +50,7 @@ function call(body: any, headers: Record<string, string> = {}, handler: any = ro
   res.setHeader = () => res; res.end = () => res;
   return Promise.resolve((handler as any)({ method: 'POST', body, headers, query: {}, url: '/api/blogs/generate', socket: {} }, res)).then(() => res);
 }
-beforeEach(() => { gens.length = 0; ledger.length = 0; genOutcome = 'ok'; reserveStatus = 'reserved'; settledKeys.clear(); mockSwitchEnabled = true; });
+beforeEach(() => { gens.length = 0; ledger.length = 0; genOutcome = 'ok'; reserveStatus = 'reserved'; settledKeys.clear(); mockSwitchEnabled = true; mockStore.rows.length = 0; mockStore.failRead = false; mockStore.failInsert = false; });
 
 test('a refused hold -> 402 INSUFFICIENT_CREDITS and NO generation (no AI call)', async () => {
   reserveStatus = 'insufficient';
@@ -87,13 +91,31 @@ describe.each([['company /api/blogs/generate', route], ['super-admin /api/admin/
     expect(ledger).toEqual([]);
     expect(gens).toEqual([]);
   });
-  test('the SAME key twice -> one 40 charge, one generation; the 2nd is 409', async () => {
-    const a = await call({ company_id: CO, topic: 'x', mode: 'full' }, KEY, handler);
+  test('LOST RESPONSE: a retry with the SAME key gets the SAME blog back (200), one 40 charge, one generation', async () => {
+    const a = await call({ company_id: CO, topic: 'x', mode: 'full' }, KEY, handler);   // pretend this response was lost
     const b = await call({ company_id: CO, topic: 'x', mode: 'full' }, KEY, handler);
-    expect(a.statusCode).toBe(200);
-    expect(b.statusCode).toBe(409);
+    expect([a.statusCode, b.statusCode]).toEqual([200, 200]);
+    expect(b.body.blog).toEqual(a.body.blog);
+    expect(b.body.billing).toEqual({ charged: 0, released: 0, reason: 'replayed' });
     expect(ledger.filter((l) => l.fn === 'confirm')).toEqual([{ fn: 'confirm', n: 40 }]);
+    expect(ledger.filter((l) => l.fn === 'reserve')).toHaveLength(1);   // the replay takes no new hold
     expect(gens).toHaveLength(1);
+  });
+  test('a different org with the same key -> no replay: its own hold, generation and charge', async () => {
+    const OTHER = '44444444-4444-4444-8444-444444444444';
+    await call({ company_id: CO, topic: 'x', mode: 'full' }, KEY, handler);
+    const b = await call({ company_id: OTHER, topic: 'x', mode: 'full' }, KEY, handler);
+    expect(b.statusCode).toBe(200);
+    expect(b.body.billing).toEqual({ charged: 40, released: 0, reason: 'completed' });
+    expect(gens).toHaveLength(2);
+  });
+  test('the replay store cannot be read -> 503 retryable, nothing held, nothing generated', async () => {
+    mockStore.failRead = true;
+    const r = await call({ company_id: CO, topic: 'x', mode: 'full' }, KEY, handler);
+    expect(r.statusCode).toBe(503);
+    expect(r.body).toMatchObject({ code: 'BLOG_RESULT_READ_FAILED', retryable: true });
+    expect(ledger).toEqual([]);
+    expect(gens).toEqual([]);
   });
   test("'Blog Create' switched OFF -> 403 BLOG_GENERATION_DISABLED, nothing held, no AI call (every mode)", async () => {
     mockSwitchEnabled = false;
