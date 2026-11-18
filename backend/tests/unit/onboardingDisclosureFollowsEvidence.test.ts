@@ -1,10 +1,11 @@
 /**
  * e1 (2026-11-12, 05 breadth check) - setup-company disclosed matchedCompanyId, matchedCompanyName and
  * the admin's name (falling back to the admin's EMAIL local-part) on ANY match, including a name-only
- * or typed-website match, and emailed the matched company's admin on every such probe. Now the
- * disclosure and the admin notice follow the binding evidence: only a match proven by the user's
- * VERIFIED email domain names the company + admin display name (never id, never email) and notifies
- * the admin; a name / typed-website match answers only { companyExists: true, taken: true }.
+ * or typed-website match, and emailed the matched company's admin on every such probe.
+ * CI-309 re-derivation (2026-11-19, owner + coordinator ruling): a name / typed website is no longer a
+ * match at all, and even a VERIFIED email-domain match discloses nothing - the requester gets the same
+ * neutral join-request notice whatever the admin-notice outcome, the admin is notified after the
+ * response, and the requester is never sent the admin's contact (notifyProspect: false).
  * Harness: closure015m's routeAuthHarness wiring (real setup-company over in-memory tables).
  */
 import { seed, calls, invoke } from '../helpers/routeAuthHarness';
@@ -97,11 +98,6 @@ jest.mock('../../services/validatedWebsiteService', () => ({
   deriveWebsiteFromEmail: () => '',
   resolveValidatedWebsite: async () => ({ canonicalWebsite: mockCanonical }),
 }));
-let mockMatch: Record<string, unknown> | null = null;
-jest.mock('../../services/companyMatchService', () => ({
-  ...jest.requireActual('../../services/companyMatchService'),
-  findMatchingCompany: jest.fn(async () => mockMatch),
-}));
 jest.mock('../../services/initialFreeCreditService', () => ({ grantInitialFreeCredit: jest.fn(async () => ({ ok: true })) }));
 jest.mock('../../services/earnCreditsService', () => ({ grantEarnCredit: jest.fn(async () => ({ ok: true })) }));
 jest.mock('../../services/companyProfile/refinementHelpers', () => ({ crawlWebsiteSources: jest.fn(async () => ({})), mergeDiscoveredSocialProfiles: jest.fn(() => ({})) }));
@@ -161,70 +157,71 @@ const leaks = (body: unknown) => {
 
 beforeEach(() => {
   mockSecurityAudit.length = 0; mockFail.clear(); mockBeforeWrite.fn = null; mockRpc.fn = null;
-  mockNotified.length = 0; mockAdminNotice = 'sent'; mockMatch = null; mockCanonical = '';
+  mockNotified.length = 0; mockAdminNotice = 'sent'; mockCanonical = '';
   jest.spyOn(console, 'warn').mockImplementation(() => undefined);
   jest.spyOn(console, 'error').mockImplementation(() => undefined);
   jest.spyOn(console, 'log').mockImplementation(() => undefined);
 });
 afterEach(() => { jest.restoreAllMocks(); });
 
-describe('findMatchingCompany path', () => {
-  for (const evidence of ['name', 'entered_website'] as const) {
-    it(`a ${evidence} match discloses nothing about the company and notifies nobody`, async () => {
-      world();
-      mockMatch = { company_id: CO_W, company_name: 'Acme', match_type: evidence === 'name' ? 'name' : 'website_domain', evidence };
-      const r = await setup();
-      expect(r.status).toBe(200);
-      expect(r.body).toEqual({ companyExists: true, taken: true });
-      expect(leaks(r.body)).toEqual([]);
-      expect(mockNotified).toEqual([]);
-      expect(membershipWrites()).toEqual([]);
-    });
-  }
+/** Let after-response work (the admin notice) run. */
+const settle = async () => { for (let i = 0; i < 30; i++) await new Promise((r) => setImmediate(r)); };
+const NEUTRAL = { companyExists: true, joinRequested: true, message: expect.stringMatching(/administrator/i) };
 
-  it('a VERIFIED email-domain match names the company + admin display name (never id/email) and notifies', async () => {
+describe('a name / typed website is not a match', () => {
+  it("a name naming ANOTHER company is ignored: only the requester's own verified domain counts, nothing about the named company leaks", async () => {
     world();
-    mockMatch = { company_id: CO_W, company_name: 'Acme', match_type: 'admin_email_domain', evidence: 'verified_email_domain' };
-    const r = await setup();
+    const r = await setup({ companyName: 'Other Co' });
+    await settle();
     expect(r.status).toBe(200);
-    expect(r.body).toEqual({ companyExists: true, matchedCompanyName: 'Acme', adminName: 'Ada Admin', joinRequested: true });
+    expect(r.body).toEqual(NEUTRAL);
+    expect(leaks(r.body)).toEqual([]);
     expect(mockNotified).toHaveLength(1);
+    expect(mockNotified[0]).toMatchObject({ companyId: CO_W, notifyProspect: false });
     expect(membershipWrites()).toEqual([]);
   });
 
-  it('verified match: joinRequested is false when the admin notice did not go out', async () => {
-    world();
-    mockAdminNotice = 'failed';
-    mockMatch = { company_id: CO_W, company_name: 'Acme', match_type: 'admin_email_domain', evidence: 'verified_email_domain' };
-    expect((await setup()).body.joinRequested).toBe(false);
-  });
-
-  it("an admin with no display name is null - never the email's local-part", async () => {
-    world(null);
-    mockMatch = { company_id: CO_W, company_name: 'Acme', match_type: 'admin_email_domain', evidence: 'verified_email_domain' };
-    const r = await setup();
-    expect(r.body.adminName).toBeNull();
-    expect(JSON.stringify(r.body)).not.toContain('ada');
-  });
-});
-
-describe('domain-first lookup path (no findMatchingCompany match)', () => {
-  it('the verified email domain matches: names the company and notifies', async () => {
-    world();
-    const r = await setup({ companyName: 'Brand New' });
-    expect(r.status).toBe(200);
-    expect(r.body).toMatchObject({ companyExists: true, matchedCompanyName: 'Acme', adminName: 'Ada Admin', joinRequested: true });
-    expect(r.body.matchedCompanyId).toBeUndefined();
-    expect(mockNotified).toHaveLength(1);
-  });
-
-  it("only the TYPED website matches another company: 'taken', nothing disclosed, nobody notified", async () => {
+  it("a TYPED website naming another company is never bound: that company is neither disclosed nor notified", async () => {
     world();
     mockCanonical = 'https://other.test';
     const r = await setup({ companyName: 'Brand New', website: 'https://other.test' });
+    await settle();
     expect(r.status).toBe(200);
-    expect(r.body).toEqual({ companyExists: true, taken: true });
+    expect(r.body).toEqual(NEUTRAL);
     expect(leaks(r.body)).toEqual([]);
-    expect(mockNotified).toEqual([]);
+    expect(mockNotified.map((n) => (n as { companyId: string }).companyId)).toEqual([CO_W]);
+  });
+});
+
+describe('verified email-domain match (domain-first lookup)', () => {
+  it('names nothing (no company id/name, no admin name/email): the neutral notice only; the admin is notified, the prospect is not', async () => {
+    world();
+    const r = await setup({ companyName: 'Brand New' });
+    await settle();
+    expect(r.status).toBe(200);
+    expect(r.body).toEqual(NEUTRAL);
+    expect(leaks(r.body)).toEqual([]);
+    expect(mockNotified).toEqual([expect.objectContaining({ companyId: CO_W, prospectEmail: WORK, notifyProspect: false })]);
+    expect(membershipWrites()).toEqual([]);
+  });
+
+  it('the reply is identical whatever happened to the admin notice (sent / failed / no_admin)', async () => {
+    const bodies: unknown[] = [];
+    for (const outcome of ['sent', 'failed', 'no_admin']) {
+      world();
+      mockAdminNotice = outcome;
+      const r = await setup();
+      await settle();
+      bodies.push([r.status, r.body]);
+    }
+    expect(bodies[1]).toEqual(bodies[0]);
+    expect(bodies[2]).toEqual(bodies[0]);
+  });
+
+  it("an admin with no display name changes nothing - never the email's local-part", async () => {
+    world(null);
+    const r = await setup();
+    expect(r.body).toEqual(NEUTRAL);
+    expect(JSON.stringify(r.body)).not.toContain('ada');
   });
 });

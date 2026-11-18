@@ -14,9 +14,8 @@ import { ownedDbTable } from '../db/writeOwner';
  *   1. companies.website_domain == user email domain  (indexed, primary)
  *   2. companies.admin_email_domain == user email domain  (fallback for companies
  *      created without a real website URL)
- *   3. Normalised company name  (last resort)
- *
- * Free/public email providers (gmail, yahoo, …) are never matched by domain.
+ * Free/public email providers (gmail, yahoo, …) are never matched by domain, and a company name or a
+ * typed website never matches at all (CI-231) - see findCompaniesByVerifiedEmailDomain.
  */
 
 import { supabase } from '../db/supabaseClient';
@@ -24,6 +23,7 @@ import { supabase } from '../db/supabaseClient';
 // the signup validators (AUTH-001 Section 5). Previously this file carried
 // its own divergent copy.
 import { isPublicEmailDomain } from '../../lib/auth/publicEmailDomains';
+import { normalizeCompanyDomain } from '../../lib/shared/domain/companyDomain';
 
 /** Extract the domain portion from a URL or email address, stripping www. */
 export function extractDomain(input: string): string | null {
@@ -83,32 +83,20 @@ export function validatePublicWebsite(website: string): string | null {
   return null;
 }
 
-/** Normalise a company name for fuzzy comparison (strips legal suffixes). */
-function normaliseName(name: string): string {
-  return name
-    .toLowerCase()
-    .trim()
-    .replace(/\b(inc|llc|ltd|limited|corp|corporation|co|company|plc|gmbh|sas|bv|ag)\b\.?/gi, '')
-    .replace(/[^a-z0-9]+/g, ' ')
-    .trim();
-}
-
-/**
- * What PROVES the match (e1, 2026-11-12 - disclosure follows the binding evidence):
- *  'verified_email_domain' - the signed-in user's VERIFIED email domain equals the company's domain;
- *  'entered_website'       - only the website the user TYPED matches (unverified request input);
- *  'name'                  - only the company name matches (exact, case-insensitive).
- * Callers may name the company / its admin, and notify the admin, ONLY for 'verified_email_domain'.
- */
-export type MatchEvidence = 'verified_email_domain' | 'entered_website' | 'name';
-
-export type MatchedCompany = {
+/** A company reached by the requester's verified email domain. */
+export type VerifiedDomainCompany = {
   company_id: string;
   company_name: string;
-  /** How the match was made — shown in the notification to the admin. */
-  match_type: 'website_domain' | 'admin_email_domain' | 'name';
-  evidence: MatchEvidence;
 };
+
+/**
+ * `ok: false` = the lookup itself failed (a failed read is never "no company").
+ * `domain` = the registrable domain that was looked up, or null when the email has no usable
+ * corporate domain (free / public provider, malformed) - then nothing can match.
+ */
+export type VerifiedDomainLookup =
+  | { ok: true; domain: string | null; companies: VerifiedDomainCompany[] }
+  | { ok: false };
 
 export type CompanyAdmin = {
   user_id: string;
@@ -116,109 +104,39 @@ export type CompanyAdmin = {
 };
 
 /**
- * Find an existing active company that the signing-up user likely belongs to.
+ * CI-231 exact-domain binding (owner + coordinator ruling, 2026-11-19): the ONLY way a signing-up user
+ * reaches an existing company is their own VERIFIED email domain. A company name or a website the user
+ * typed never matches anything (the former name / entered-website steps let anyone with a verified
+ * non-free email learn another company's id, name and admin).
  *
- * Matching order:
- *   1. Website URL they entered  →  companies.website_domain  (primary, always checked)
- *      e.g. panaceathebook@hotmail.com enters "www.drishiq.com"
- *           → websiteDomain = "drishiq.com" → matches existing Drishiq company
- *      *** Email provider is irrelevant here — the website is the signal. ***
- *
- *   2. Corporate email domain  →  companies.website_domain or admin_email_domain
- *      e.g. jane@drishiq.com (no website entered)
- *           → emailDomain = "drishiq.com" → matches existing Drishiq company
- *      Skipped for free providers (gmail, hotmail, etc.).
- *
- *   3. Normalised company name  (last resort, website-unaware users)
+ * The comparison key is the registrable domain from lib/shared/domain/companyDomain
+ * (normalizeCompanyDomain) - the same helper companyIdentityWriter uses to STORE
+ * companies.website_domain / admin_email_domain, so equality here is equality of registrable domains
+ * (acme.co.uk and foo.co.uk stay distinct). ALL matching companies are returned (bounded) so the
+ * caller can refuse an ambiguous domain instead of guessing.
  */
-export async function findMatchingCompany(params: {
-  companyName: string;
-  website?: string | null;
-  userEmail?: string | null;
-}): Promise<MatchedCompany | null> {
-  const { companyName, website, userEmail } = params;
-  const emailDomain = userEmail ? extractDomain(userEmail) : null;
-  const isCorporateEmail = emailDomain != null && !isFreeEmailDomain(emailDomain);
-
-  // ── 1. Website URL the user entered (primary, no email-domain restriction) ─
-  const enteredWebsiteDomain = website ? extractDomain(website) : null;
-  if (enteredWebsiteDomain && !isFreeEmailDomain(enteredWebsiteDomain)) {
-    const { data: rows, error } = await ownedDbTable('companies')
+const MAX_DOMAIN_CANDIDATES = 10;
+export async function findCompaniesByVerifiedEmailDomain(
+  verifiedEmail: string | null | undefined,
+): Promise<VerifiedDomainLookup> {
+  const host = extractDomain(verifiedEmail ?? '');
+  const domain = normalizeCompanyDomain(verifiedEmail);
+  if (!host || !domain || isFreeEmailDomain(host) || isFreeEmailDomain(domain)) {
+    return { ok: true, domain: null, companies: [] };
+  }
+  const byId = new Map<string, VerifiedDomainCompany>();
+  for (const column of ['website_domain', 'admin_email_domain'] as const) {
+    const { data, error } = await ownedDbTable('companies')
       .select('id, name')
-      .eq('status', 'active')
-      .eq('website_domain', enteredWebsiteDomain)
-      .limit(1);
-
-    if (!error && rows?.length) {
-      return {
-        company_id: rows[0].id,
-        company_name: rows[0].name,
-        match_type: 'website_domain',
-        // A typed website proves nothing - unless it IS the user's verified email domain.
-        evidence: isCorporateEmail && enteredWebsiteDomain === emailDomain ? 'verified_email_domain' : 'entered_website',
-      };
+      .eq(column, domain)
+      .limit(MAX_DOMAIN_CANDIDATES);
+    if (error) return { ok: false };
+    for (const row of (data ?? []) as Array<{ id?: unknown; name?: unknown }>) {
+      if (row?.id == null) continue;
+      byId.set(String(row.id), { company_id: String(row.id), company_name: String(row.name ?? '') });
     }
   }
-
-  // ── 2. Corporate email domain (skipped for gmail/hotmail/etc.) ────────────
-
-  if (isCorporateEmail) {
-    // 2a. Against website_domain
-    const { data: wRows } = await ownedDbTable('companies')
-      .select('id, name')
-      .eq('status', 'active')
-      .eq('website_domain', emailDomain)
-      .limit(1);
-
-    if (wRows?.length) {
-      return {
-        company_id: wRows[0].id,
-        company_name: wRows[0].name,
-        match_type: 'website_domain',
-        evidence: 'verified_email_domain',
-      };
-    }
-
-    // 2b. Against admin_email_domain (fallback for companies without a real website)
-    const { data: aRows } = await ownedDbTable('companies')
-      .select('id, name')
-      .eq('status', 'active')
-      .eq('admin_email_domain', emailDomain)
-      .limit(1);
-
-    if (aRows?.length) {
-      return {
-        company_id: aRows[0].id,
-        company_name: aRows[0].name,
-        match_type: 'admin_email_domain',
-        evidence: 'verified_email_domain',
-      };
-    }
-  }
-
-  // ── 3. Exact name match (last resort) ─────────────────────────────────────
-  // EXACT only (case-insensitive): candidates come from an ESCAPED pattern (no wildcard reaches the
-  // query - SQL % _ \ escaped, PostgREST * mapped to a single-char _) and the decision is equality in
-  // code. The former first-word `%word%` fallback is gone. A name match binds nothing and discloses
-  // nothing about the company (evidence 'name').
-  const trimmedName = companyName?.trim() ?? '';
-  if (normaliseName(trimmedName).length >= 3) {
-    const pattern = trimmedName.replace(/[\\%_]/g, (c) => `\\${c}`).replace(/\*/g, '_');
-    const { data: rows } = await ownedDbTable('companies')
-      .select('id, name')
-      .eq('status', 'active')
-      .ilike('name', pattern)
-      .limit(10);
-
-    const wanted = trimmedName.toLowerCase();
-    const exact = (rows ?? []).find((row: { name?: unknown }) =>
-      typeof row.name === 'string' && row.name.trim().toLowerCase() === wanted);
-    if (exact) {
-      return { company_id: exact.id, company_name: exact.name, match_type: 'name', evidence: 'name' };
-    }
-  }
-
-  return null;
+  return { ok: true, domain, companies: [...byId.values()] };
 }
 
 /**

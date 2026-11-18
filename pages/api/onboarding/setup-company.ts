@@ -12,16 +12,18 @@ import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeF
  */
 
 import type { NextApiRequest, NextApiResponse } from 'next';
-import type { SupabaseClient } from '@supabase/supabase-js';
 import { supabase } from '../../../backend/db/supabaseClient';
 import { randomUUID } from 'crypto';
 import { getSupabaseUserFromRequest } from '../../../backend/services/supabaseAuthService';
 import { acceptInvitationViaOnboarding } from '../../../backend/services/onboardingInvitationAcceptance';
 import {
-  findMatchingCompany,
+  findCompaniesByVerifiedEmailDomain,
   extractDomain,
   isFreeEmailDomain,
 } from '../../../backend/services/companyMatchService';
+import { isSameCompanyDomain } from '../../../lib/shared/domain/companyDomain';
+import { keepAliveAfterResponse } from '../../../lib/runtime/keepAlive';
+import { logger } from '../../../backend/services/logger';
 import { grantInitialFreeCredit } from '../../../backend/services/initialFreeCreditService';
 import { grantEarnCredit } from '../../../backend/services/earnCreditsService';
 import {
@@ -59,11 +61,10 @@ import {
 
 type Result =
   | { companyId: string; selfJoined?: boolean; matchedCompanyName?: string }
-  // Disclosure follows the binding evidence (e1, 2026-11-12): only a VERIFIED email-domain match names
-  // the company and its admin (display name only) and notifies the admin; a typed-website or name match
-  // says only that it is taken. The company id is never returned (the client never used it).
-  | { companyExists: true; matchedCompanyName: string; adminName: string | null; joinRequested: boolean }
-  | { companyExists: true; taken: true }
+  // CI-309 ruling (2026-11-19): a same-verified-domain signup becomes a join request for the company's
+  // admins. The requester learns NOTHING about the company (no id, name, admin, count) - only this
+  // neutral notice, identical whatever happens to the admin email afterwards.
+  | { companyExists: true; joinRequested: true; message: string }
   | { code: string; error: string; limit?: number; current?: number | null }
   | { error: string };
 
@@ -71,32 +72,8 @@ type Result =
 // (single source shared with the onboarding /validated-identity endpoint so the
 // website shown in onboarding is byte-identical to what is persisted here).
 
-/** Returns the display name of the first active COMPANY_ADMIN for a company. */
-async function fetchAdminName(
-  db: SupabaseClient,
-  companyId: string,
-): Promise<string | null> {
-  const { data: roleRow } = await db
-    .from('user_company_roles')
-    .select('user_id')
-    .eq('company_id', companyId)
-    .eq('role', 'COMPANY_ADMIN')
-    .eq('status', 'active')
-    .limit(1)
-    .maybeSingle();
-
-  const userId = (roleRow as { user_id: string } | null)?.user_id;
-  if (!userId) return null;
-
-  const { data: adminUser } = await db
-    .from('users')
-    .select('name')
-    .eq('id', userId)
-    .maybeSingle();
-
-  // Display name only - never the email (nor its local-part).
-  return (adminUser as any)?.name?.trim() || null;
-}
+const JOIN_REQUEST_MESSAGE =
+  "Your organization already uses Omnivyra. Your request to join was sent to your organization's administrator.";
 
 async function handler(req: NextApiRequest, res: NextApiResponse<Result>) {
   if (req.method !== 'POST') return res.status(405).end();
@@ -142,31 +119,41 @@ async function handler(req: NextApiRequest, res: NextApiResponse<Result>) {
     });
 
   /**
-   * Rule 5 — a verified user from an already-claimed domain tried to create an
-   * account. Don't auto-join; email both the prospect (admin contact details)
-   * and the company admin (someone from your domain tried to sign up). The
-   * "company-exists" screen the client already renders is the on-screen
-   * "consult your admin" message; this adds the two emails. Best-effort: the
-   * shared service never throws, so onboarding is never blocked by it.
+   * Rule 5 / CI-309 - a verified user whose email domain belongs to an existing company they are not a
+   * member of. No auto-join and NO disclosure: the requester gets only the neutral join-request notice,
+   * and the company's active admins are emailed (requester's email; they approve by inviting from team
+   * settings). The requester is never sent the admin's contact (notifyProspect: false).
+   *
+   * Called ONLY with a company reached by the requester's verified email domain. The admin email is sent
+   * AFTER the response (keepAliveAfterResponse: the platform's waitUntil, else after the reply is
+   * flushed), so a slow or failing sender never changes the status, body or latency the requester sees.
+   * The shared service never throws; the extra catch keeps the background work unconditionally safe.
    */
-  // Called ONLY for a verified email-domain match: a name / typed-website probe must never email a
-  // company's admin (that was the probe-notification vector - each probed company was notified once).
-  const notifyClaimedDomain = async (
-    matchedCompanyId: string,
-    matchedCompanyName: string | null,
-  ): Promise<boolean> => {
+  const respondJoinRequested = (companyIdToJoin: string, companyNameToJoin: string | null, reason: string): void => {
+    res.status(200).json({ companyExists: true, joinRequested: true, message: JOIN_REQUEST_MESSAGE });
     const emailDomain = extractDomain(user.email ?? '') ?? '';
-    if (!user.email || !emailDomain || isFreeEmailDomain(emailDomain)) return false;
-    const notice = await notifyAdminAndProspectOfClaimedDomain(supabase, {
-      prospectUserId: user.id,
-      prospectEmail:  user.email,
-      emailDomain,
-      companyId:      matchedCompanyId,
-      companyName:    matchedCompanyName,
-      nowIso:         new Date().toISOString(),
-    });
-    // A request is genuinely in place only when the admin was notified, now or on an earlier attempt.
-    return notice?.adminNotice === 'sent' || notice?.adminNotice === 'already_sent';
+    const work = (async () => {
+      try {
+        await emitCompanyEvent('CompanyExists', 'denied', reason, companyIdToJoin);
+        if (!user.email || !emailDomain || isFreeEmailDomain(emailDomain)) return;
+        const outcome = await notifyAdminAndProspectOfClaimedDomain(supabase, {
+          prospectUserId: user.id,
+          prospectEmail:  user.email,
+          emailDomain,
+          companyId:      companyIdToJoin,
+          companyName:    companyNameToJoin,
+          nowIso:         new Date().toISOString(),
+          notifyProspect: false,
+        });
+        logger.info('onboarding_join_request_admin_notice', { companyId: companyIdToJoin, reason, adminNotice: outcome.adminNotice });
+      } catch (err) {
+        logger.warn('onboarding_join_request_notify_failed', {
+          companyId: companyIdToJoin,
+          message:   err instanceof Error ? err.message : String(err),
+        });
+      }
+    })();
+    void keepAliveAfterResponse(work);
   };
 
   // Service role bypasses RLS — required for inserts into companies,
@@ -221,10 +208,17 @@ async function handler(req: NextApiRequest, res: NextApiResponse<Result>) {
   // CONSUME the website validated once at signup (system-of-record). No probe,
   // no existence/canonical/forwarding check happens here. Falls back to the pure
   // email-derived value, then any user-entered value, for paths without an intent.
-  const { canonicalWebsite } = await resolveValidatedWebsite(user.email, {
+  const { canonicalWebsite: resolvedWebsite } = await resolveValidatedWebsite(user.email, {
     emailDerived: emailDerivedWebsite,
     userEntered:  website,
   });
+  // CI-231 binding: the website this company is created with (and its website_domain, which decides
+  // uniqueness) must BE the requester's verified email domain (isSameCompanyDomain) - a typed or stale
+  // website naming someone else's domain is never stored, so it can never collide with (and reveal)
+  // their company.
+  const canonicalWebsite = resolvedWebsite && isSameCompanyDomain(resolvedWebsite, user.email ?? '')
+    ? resolvedWebsite
+    : (emailDerivedWebsite ?? '');
 
   if (!companyName.trim()) return res.status(400).json({ error: 'companyName is required' });
 
@@ -385,42 +379,18 @@ async function handler(req: NextApiRequest, res: NextApiResponse<Result>) {
       });
     }
 
-    // ── 3. Check if a matching company already exists in the system ───────────
-    const matched = await findMatchingCompany({
-      companyName: companyName.trim(),
-      website: canonicalWebsite || null,
-      userEmail: user.email ?? null,
-    });
-
-    if (matched) {
-      // Company already exists — do NOT auto-join. Return a signal so the
-      // onboarding UI can prompt the user to request access from the admin.
-
-      // Idempotent: if the user is already a member just let them through
-      const { data: existingRole } = await supabase
-        .from('user_company_roles')
-        .select('id')
-        .eq('user_id', user.id)
-        .eq('company_id', matched.company_id)
-        .maybeSingle();
-
-      if (existingRole) {
-        // Already a member — go straight to dashboard
-        return res.status(200).json({ companyId: matched.company_id });
-      }
-
-      await emitCompanyEvent('CompanyExists', 'denied', 'MATCHED_EXISTING_COMPANY', matched.company_id);
-      if (matched.evidence !== 'verified_email_domain') {
-        return res.status(200).json({ companyExists: true, taken: true });
-      }
-      const adminName = await fetchAdminName(supabase, matched.company_id);
-      const joinRequested = await notifyClaimedDomain(matched.company_id, matched.company_name);
-      return res.status(200).json({
-        companyExists:      true,
-        matchedCompanyName: matched.company_name,
-        adminName,
-        joinRequested,
-      });
+    // ── 3. CI-231: an existing company is reachable ONLY by the verified email domain ──
+    // Compared by registrable domain (findCompaniesByVerifiedEmailDomain -> normalizeCompanyDomain). A
+    // company name or typed website never matches: such a request proceeds exactly like any new company.
+    const domainLookup = await findCompaniesByVerifiedEmailDomain(user.email);
+    if (!domainLookup.ok) {
+      return res.status(503).json({ error: 'Could not resolve your company. Please try again.' });
+    }
+    if (domainLookup.companies.length > 1) {
+      // Several companies claim this domain: never guess which to bind, and reveal none of them.
+      console.error('[setup-company] ambiguous company domain', { count: domainLookup.companies.length });
+      await emitCompanyEvent('CompanyExists', 'denied', 'COMPANY_DOMAIN_AMBIGUOUS');
+      return res.status(409).json({ code: 'COMPANY_DOMAIN_AMBIGUOUS', error: 'Your company could not be resolved. Please contact support.' });
     }
 
     const companyId = randomUUID();
@@ -441,27 +411,10 @@ async function handler(req: NextApiRequest, res: NextApiResponse<Result>) {
     })();
 
     // ── STEP 1: Domain-first lookup — prevent duplicate companies per domain ──
-    // Check website_domain first (www. is stripped so omnivyra.com and
-    // www.omnivyra.com resolve to the same record), then admin_email_domain.
-    const websiteDomainMatch = websiteDomain
-      ? await supabase
-          .from('companies')
-          .select('id, name')
-          .eq('website_domain', websiteDomain)
-          .maybeSingle()
-          .then(r => r.data)
+    // The single verified-domain match from step 3 (website_domain or admin_email_domain).
+    const domainLookupResult = domainLookup.companies[0]
+      ? { id: domainLookup.companies[0].company_id, name: domainLookup.companies[0].company_name }
       : null;
-
-    const adminEmailDomainMatch = adminEmailDomain && !websiteDomainMatch
-      ? await supabase
-          .from('companies')
-          .select('id, name')
-          .eq('admin_email_domain', adminEmailDomain)
-          .maybeSingle()
-          .then(r => r.data)
-      : null;
-
-    const domainLookupResult = websiteDomainMatch ?? adminEmailDomainMatch;
 
     if (adminEmailDomain) {
       const domainCompany = domainLookupResult;
@@ -499,21 +452,8 @@ async function handler(req: NextApiRequest, res: NextApiResponse<Result>) {
 
         // Not a member — do NOT auto-join. Only the first user creates the
         // company; everyone else must be invited by the company admin.
-        await emitCompanyEvent('CompanyExists', 'denied', 'DOMAIN_ALREADY_CLAIMED', domainCompany.id);
-        // Verified only when the match came from the user's own email domain (the typed website
-        // proves nothing unless it IS that domain).
-        const verifiedMatch = !websiteDomainMatch || websiteDomain === adminEmailDomain;
-        if (!verifiedMatch) {
-          return res.status(200).json({ companyExists: true, taken: true });
-        }
-        const adminName = await fetchAdminName(supabase, domainCompany.id);
-        const joinRequested = await notifyClaimedDomain(domainCompany.id, domainCompany.name);
-        return res.status(200).json({
-          companyExists:      true,
-          matchedCompanyName: domainCompany.name,
-          adminName,
-          joinRequested,
-        });
+        // Verified by construction: domainLookupResult comes only from the verified email domain.
+        return respondJoinRequested(domainCompany.id, domainCompany.name, 'DOMAIN_ALREADY_CLAIMED');
       }
     }
 
@@ -570,21 +510,17 @@ async function handler(req: NextApiRequest, res: NextApiResponse<Result>) {
     // (20260322) or website_domain (20260713, AUTH-001 §8). Re-resolve the
     // winner by whichever domain key we hold.
     if (companyErr?.code === '23505' && (adminEmailDomain || websiteDomain)) {
-      const { data: raceWinnerByAdmin } = adminEmailDomain
-        ? await supabase
-            .from('companies')
-            .select('id, name')
-            .eq('admin_email_domain', adminEmailDomain)
-            .maybeSingle()
-        : { data: null };
-      const { data: raceWinnerByWebsite } = !raceWinnerByAdmin && websiteDomain
-        ? await supabase
-            .from('companies')
-            .select('id, name')
-            .eq('website_domain', websiteDomain)
-            .maybeSingle()
-        : { data: null };
-      const raceWinner = (raceWinnerByAdmin ?? raceWinnerByWebsite) as { id: string; name: string } | null;
+      // Both domain keys are the verified email domain (the website is bound to it above), so the
+      // winner is re-resolved by the same verified-domain lookup.
+      const raceLookup = await findCompaniesByVerifiedEmailDomain(user.email);
+      if (raceLookup.ok && raceLookup.companies.length > 1) {
+        console.error('[setup-company] ambiguous company domain after race', { count: raceLookup.companies.length });
+        await emitCompanyEvent('CompanyExists', 'denied', 'COMPANY_DOMAIN_AMBIGUOUS');
+        return res.status(409).json({ code: 'COMPANY_DOMAIN_AMBIGUOUS', error: 'Your company could not be resolved. Please contact support.' });
+      }
+      const raceWinner = raceLookup.ok && raceLookup.companies[0]
+        ? { id: raceLookup.companies[0].company_id, name: raceLookup.companies[0].company_name }
+        : null;
 
       if (raceWinner) {
         // Another concurrent request won the INSERT race for this domain.
@@ -601,16 +537,8 @@ async function handler(req: NextApiRequest, res: NextApiResponse<Result>) {
           return res.status(200).json({ companyId: raceWinner.id });
         }
 
-        // Different user won the race — treat as existing company.
-        const adminName = await fetchAdminName(supabase, raceWinner.id);
-        await notifyClaimedDomain(raceWinner.id, raceWinner.name);
-        await emitCompanyEvent('CompanyExists', 'denied', 'DOMAIN_UNIQUE_RACE_LOST', raceWinner.id);
-        return res.status(200).json({
-          companyExists:      true,
-          matchedCompanyId:   raceWinner.id,
-          matchedCompanyName: raceWinner.name,
-          adminName,
-        });
+        // Different user won the race — a join request, exactly like DOMAIN_ALREADY_CLAIMED.
+        return respondJoinRequested(raceWinner.id, raceWinner.name, 'DOMAIN_UNIQUE_RACE_LOST');
       }
     }
 

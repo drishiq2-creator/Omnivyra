@@ -57,6 +57,12 @@ export interface ClaimedDomainNotifyInput {
   companyId: string;
   companyName: string | null;
   nowIso: string;
+  /**
+   * false = do NOT send the prospect the "company referral" email (it carries the admin's name and
+   * email). Onboarding's join request passes false: the requester learns nothing about the company's
+   * admins (CI-309 ruling, 2026-11-19). Omitted = true (the pre-signup gate in pages/api/auth/signup.ts).
+   */
+  notifyProspect?: boolean;
 }
 
 /**
@@ -159,8 +165,9 @@ export async function notifyAdminAndProspectOfClaimedDomain(
       shouldSendProspectEmail = !(existingReferral as { admin_email_sent_at?: string | null }).admin_email_sent_at;
     }
 
-    // 1) Prospect email — admin contact details (deduped via admin_email_sent_at).
-    if (shouldSendProspectEmail) {
+    // 1) Prospect email — admin contact details (deduped via admin_email_sent_at). Never for a caller
+    //    that opted out (onboarding join request: no admin contact reaches the requester).
+    if (shouldSendProspectEmail && input.notifyProspect !== false) {
       try {
         await sendCompanyAdminReferral(
           input.prospectEmail,

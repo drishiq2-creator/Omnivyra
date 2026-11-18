@@ -16,7 +16,8 @@ import { expectContainsAll, expectMatchesAll, readRepoFile } from '../contracts/
  *      response codes.
  *   2. pages/api/onboarding/setup-company.ts calls grantInitialFreeCredit and
  *      keeps the companies.website_domain -> admin_email_domain "already in
- *      system" lookup that returns companyExists.
+ *      system" lookup (verified email domain only) that returns companyExists
+ *      as a neutral join request - never the matched company or its admin.
  *   3. backend/services/initialFreeCreditService.ts sources the amount/expiry
  *      from free_credit_config WHERE category='initial_free_credit'.
  *   4. GUARD: grantInitialFreeCredit is still imported AND invoked by
@@ -53,20 +54,23 @@ describe('stability/billing signup -> credits contract', () => {
 
   test('setup-company.ts keeps the domain-first "already in system" lookup returning companyExists', () => {
     const setup = readRepoFile('pages/api/onboarding/setup-company.ts');
+    const matcher = readRepoFile('backend/services/companyMatchService.ts');
 
+    // CI-231/309 (2026-11-19): the lookup is the requester's VERIFIED email domain only (website_domain,
+    // then admin_email_domain, by registrable domain), and the "already in system" answer is a neutral
+    // join-request notice - it never carries the matched company's id/name or its admin.
     expectContainsAll(setup, [
-      "from('companies')",
-      ".eq('website_domain', websiteDomain)",
-      ".eq('admin_email_domain', adminEmailDomain)",
-      'companyExists:      true,',
-      'matchedCompanyId:',
-      'matchedCompanyName:',
+      'findCompaniesByVerifiedEmailDomain(user.email)',
+      'companyExists: true, joinRequested: true',
+      "'COMPANY_DOMAIN_AMBIGUOUS'",
     ]);
-
-    // website_domain must be checked first, then admin_email_domain as fallback.
-    expectMatchesAll(setup, [
-      /\.eq\('website_domain', websiteDomain\)[\s\S]*?\.eq\('admin_email_domain', adminEmailDomain\)/,
+    expectContainsAll(matcher, [
+      "for (const column of ['website_domain', 'admin_email_domain'] as const)",
+      'normalizeCompanyDomain(verifiedEmail)',
     ]);
+    for (const leak of ['matchedCompanyId', 'matchedCompanyName:', 'adminName']) {
+      expect([leak, setup.includes(leak)]).toEqual([leak, false]);
+    }
   });
 
   test('setup-company.ts grants initial free credit via the shared service for the new company', () => {
