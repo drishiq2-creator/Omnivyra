@@ -113,6 +113,16 @@ export interface WorkerRunResult {
 const REARMABLE_STATUSES: readonly PublishingJobStatus[] = ['queued', 'retrying', 'scheduled', 'failed', 'cancelled'];
 
 /**
+ * 7c (CI-124 CMS review): an UPDATE job that is `published` is also re-armable. Its key is stable per (blog,
+ * integration), so `published` only means the PREVIOUS edit went out - returning it untouched skipped a new edit
+ * and reported "already published". Re-running an update pushes content to the existing external post: it cannot
+ * create a duplicate, so the RULE above holds. A published CREATE (publish/schedule) is never re-armable.
+ */
+function isRearmable(job: Pick<PublishingJob, 'status' | 'job_type'>): boolean {
+  return REARMABLE_STATUSES.includes(job.status) || (job.job_type === 'update_post' && job.status === 'published');
+}
+
+/**
  * Create the job for (company, idempotency key), or return the one that already holds the key.
  *
  * CLASS-2 (e9 sweep, 2026-11-12): this was an upsert with ON CONFLICT DO UPDATE, which reset ANY
@@ -150,7 +160,7 @@ export async function createPublishingJob(input: CreatePublishingJobInput): Prom
   if (Array.isArray(inserted) && inserted.length > 0) return inserted[0] as PublishingJob;
 
   const existing = await readJobByKey(input.companyId, input.idempotencyKey);
-  if (!REARMABLE_STATUSES.includes(existing.status)) return existing;
+  if (!isRearmable(existing)) return existing;
   const { data: rearmed, error: rearmError } = await ownedDbTable('publishing_jobs')
     .update({
       ...fields,

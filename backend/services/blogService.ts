@@ -744,7 +744,9 @@ export async function publishBlogPost(
             ? 'schedule_post'
             : 'publish_post';
         const idempotencyKey = blog.external_id
-          ? `blog:${blog.id}:update:${integration.id}:${new Date().toISOString().slice(0, 16)}`
+          // One key per (blog, integration) - no time bucket (7c): a bucket both merged two edits inside a minute
+          // and split one edit across a minute boundary into two concurrent jobs.
+          ? `blog:${blog.id}:update:${integration.id}`
           : `blog:${blog.id}:publish:${integration.id}`;
         const job = await createPublishingJob({
           companyId,

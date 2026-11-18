@@ -45,6 +45,7 @@ import { publishBlogPost } from '../../services/blogService';
 
 const CO = 'co-a';
 const KEY = 'blog:b1:publish:int1';
+const UPDATE_KEY = 'blog:b1:update:int1';
 const LOCK = '2026-11-12T09:59:00.000Z';
 const PAST = '2026-01-01T00:00:00.000Z';
 const FUTURE = '2099-01-01T00:00:00.000Z';
@@ -120,6 +121,38 @@ describe('D1 createPublishingJob never resets a live job', () => {
   });
 });
 
+describe('7c: an UPDATE of a live post is never skipped as "already published"', () => {
+  const liveBlog = () => blogRow({ status: 'published', external_id: 'wp-live', external_url: 'https://site/p/live', published_at: DL });
+
+  it('a PUBLISHED update_post job is re-armed with the new payload (a create would stay untouched)', async () => {
+    seed([jobRow({ job_type: 'update_post', idempotency_key: UPDATE_KEY, status: 'published', external_id: 'wp-live' })]);
+    const got = await createPublishingJob(input({ idempotencyKey: UPDATE_KEY, jobType: 'update_post' }));
+    expect(got).toMatchObject({ id: 'j1', status: 'queued', request_payload: { title: 'new' } });
+  });
+
+  it('a second edit after the first update published: the CMS IS called again (no silent skip)', async () => {
+    seed([jobRow({ job_type: 'update_post', idempotency_key: UPDATE_KEY, status: 'published', external_id: 'wp-live' })], liveBlog());
+    const r = await publishBlogPost('b1', CO);
+    expect(mockAdapter.calls).toBe(1);
+    expect(r).toMatchObject({ success: true });
+  });
+
+  it('a second Update while the first is PROCESSING: the same key, returned in progress, the CMS is NOT called', async () => {
+    seed([jobRow({ job_type: 'update_post', idempotency_key: UPDATE_KEY, status: 'processing', locked_by: 'w', locked_at: LOCK, lock_expires_at: FUTURE })], liveBlog());
+    await publishBlogPost('b1', CO);
+    expect(mockAdapter.calls).toBe(0);
+    expect(fakeDb.tables.publishing_jobs).toHaveLength(1);
+  });
+
+  it('the update key carries no clock: two calls a minute apart use the same key', async () => {
+    seed([], liveBlog());
+    mockAdapter.impl = async () => ({ success: true, message: 'ok', externalId: 'wp-live', externalUrl: 'https://site/p/live' });
+    await publishBlogPost('b1', CO);
+    const keys = fakeDb.tables.publishing_jobs.map((j) => j.idempotency_key);
+    expect(keys).toEqual([UPDATE_KEY]);
+  });
+});
+
 describe('D2 Publish now never claims a job another run holds', () => {
   it('processing job: notClaimed, the CMS is NOT called, nothing written', async () => {
     seed([jobRow({ status: 'processing', locked_by: 'w', locked_at: LOCK, lock_expires_at: FUTURE })]);
@@ -181,13 +214,9 @@ describe('the double click: two Publish requests for one blog publish ONCE', () 
 });
 
 describe('D3 a failed publish never erases the live external id', () => {
-  // Only Date is faked: the update job's key carries the minute, so it is seeded with the database's
-  // column defaults (attempt_count 0, max_attempts 3), which the fake does not apply on insert.
-  beforeEach(() => jest.useFakeTimers({ now: new Date('2026-11-12T12:00:30.000Z'), doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] }));
-  afterEach(() => jest.useRealTimers());
-
+  // The update key is stable per (blog, integration) - no clock - so the job is seeded on it directly.
   it('an update of a live post fails: external_id / external_url kept, status failed', async () => {
-    seed([jobRow({ job_type: 'update_post', idempotency_key: 'blog:b1:update:int1:2026-11-12T12:00' })], blogRow({ status: 'published', external_id: 'wp-live', external_url: 'https://site/p/live', published_at: DL }));
+    seed([jobRow({ job_type: 'update_post', idempotency_key: UPDATE_KEY })], blogRow({ status: 'published', external_id: 'wp-live', external_url: 'https://site/p/live', published_at: DL }));
     mockAdapter.impl = async () => ({ success: false, message: 'WordPress returned status 500.' });
     expect(await publishBlogPost('b1', CO)).toMatchObject({ success: false });
     expect(mockAdapter.calls).toBe(1);
