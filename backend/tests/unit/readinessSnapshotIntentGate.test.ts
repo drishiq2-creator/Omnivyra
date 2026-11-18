@@ -70,8 +70,11 @@ describe('readinessSnapshot is exempt from the inactive-company gate', () => {
     expect(blocked).toHaveLength(7);
   });
 
-  test('the always-run set is exactly the previous ten jobs plus readinessSnapshot', () => {
+  // c6 2026-11-18 (b3): + billingOwedRefundComplete, the grant-only job that pays refunds the system OWES (must run
+  // regardless of company activity). The set stays EXACT so any other addition is still caught.
+  test('the always-run set is exactly the previous ten jobs plus readinessSnapshot and billingOwedRefundComplete', () => {
     expect([...ALWAYS_RUN_JOBS].sort()).toEqual([
+      'billingOwedRefundComplete',
       'confidenceCalibration', 'connectorTokenRefresh', 'conversationTriageWorker', 'engagementSignalArchive',
       'findDuePostsAndEnqueue', 'governanceAudit', 'intelligenceEventCleanup', 'leadThreadQueueCleanup',
       'performanceAggregation', 'readinessSnapshot', 'staleExecutionSweep',

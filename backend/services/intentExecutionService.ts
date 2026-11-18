@@ -176,6 +176,9 @@ const ALWAYS_RUN_JOBS = new Set([
   // inactive-company gate ONLY — the 24h interval, usage overlay and admin
   // override still apply.
   'readinessSnapshot',
+  // c6 2026-11-18 (b3): the grant-only owed-refund completer pays credits the system OWES customers. It must run
+  // regardless of company activity (a customer owed a refund may be inactive). Grant-only: never releases a hold.
+  'billingOwedRefundComplete',
 ]);
 
 // Frequency tier → milliseconds
