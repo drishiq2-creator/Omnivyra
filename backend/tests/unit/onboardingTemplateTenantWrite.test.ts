@@ -22,6 +22,13 @@ jest.mock('../../db/writeOwner', () => ({
       insert: (r: Row) => { insertRow = r; return q; },
       eq: (c: string, v: unknown) => { filters.push([c, v]); return q; },
       select: () => q,
+      maybeSingle: async () => {
+        const hit = mockRows.filter(matches);
+        if (hit.length > 1) return { data: null, error: { message: 'multiple rows' } };
+        if (hit.length === 0) return { data: null, error: null };
+        Object.assign(hit[0], patch);
+        return { data: { ...hit[0] }, error: null };
+      },
       single: async () => {
         if (insertRow) {
           const row = { id: `new-${mockRows.length}`, ...insertRow };
@@ -38,16 +45,16 @@ jest.mock('../../db/writeOwner', () => ({
   },
 }));
 
-import { upsertOnboardingTemplate } from '../../services/enterpriseOnboardingService';
+import { upsertOnboardingTemplate, OnboardingTemplateNotFoundError } from '../../services/enterpriseOnboardingService';
 
 const CO_A = 'c0a00000-0000-4000-8000-00000000000a';
 const CO_B = 'c0b00000-0000-4000-8000-00000000000b';
 const original = (id: string, org: string | null, shared: boolean): Row => ({
-  id, organization_id: org, template_kind: 'industry_pack', name: `orig-${id}`, industry: null,
+  id, organization_id: org, template_kind: 'industry_preset', name: `orig-${id}`, industry: null,
   description: 'original', payload: { v: 'original' }, recommended_explanation: 'original', shared, owner_user_id: 'owner-orig',
 });
 const attack = (id: string) => upsertOnboardingTemplate({
-  organizationId: CO_A, id, templateKind: 'industry_pack' as any, name: 'HIJACKED', description: 'x',
+  organizationId: CO_A, id, templateKind: 'industry_preset' as any, name: 'HIJACKED', description: 'x',
   payload: { v: 'attacker' }, recommendedExplanation: 'x', shared: false, ownerUserId: 'attacker-user',
 });
 
@@ -63,13 +70,13 @@ const row = (id: string) => mockRows.find((r) => r.id === id)!;
 describe('upsertOnboardingTemplate: an update never reaches another organization\'s template', () => {
   it("company A cannot overwrite company B's SHARED template by id: refused, B's row unchanged", async () => {
     const before = { ...row('tpl-b-shared') };
-    await expect(attack('tpl-b-shared')).rejects.toThrow(/onboarding_template_update_failed/);
+    await expect(attack('tpl-b-shared')).rejects.toBeInstanceOf(OnboardingTemplateNotFoundError);
     expect(row('tpl-b-shared')).toEqual(before);
   });
 
   it('company A cannot overwrite a NULL-org PLATFORM preset by id: refused, the preset unchanged', async () => {
     const before = { ...row('tpl-platform') };
-    await expect(attack('tpl-platform')).rejects.toThrow(/onboarding_template_update_failed/);
+    await expect(attack('tpl-platform')).rejects.toBeInstanceOf(OnboardingTemplateNotFoundError);
     expect(row('tpl-platform')).toEqual(before);
   });
 
@@ -81,7 +88,7 @@ describe('upsertOnboardingTemplate: an update never reaches another organization
 
   it('CONTROL: a create (no id) is stamped with the caller organization, never another', async () => {
     const out = await upsertOnboardingTemplate({
-      organizationId: CO_A, templateKind: 'industry_pack' as any, name: 'new', payload: {}, ownerUserId: 'u',
+      organizationId: CO_A, templateKind: 'industry_preset' as any, name: 'new', payload: {}, ownerUserId: 'u',
     });
     expect(out).toMatchObject({ organization_id: CO_A });
   });

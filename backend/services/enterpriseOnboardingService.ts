@@ -28,6 +28,18 @@ import {
 import { publishRealtime } from './realtimePublisherService';
 import { publishOnboardingTemplateApplied } from '../events/listeningEvents';
 
+/**
+ * An update that matched no template in the caller's organization: the id is unknown, or belongs to another tenant or
+ * to a platform preset. Routes answer it as a uniform 404, so a probe cannot tell "exists elsewhere" from "never
+ * existed", and no database text reaches the caller.
+ */
+export class OnboardingTemplateNotFoundError extends Error {
+  constructor() {
+    super('onboarding_template_not_found');
+    this.name = 'OnboardingTemplateNotFoundError';
+  }
+}
+
 export type UpsertOnboardingTemplateInput = {
   organizationId: string | null;
   id?: string;
@@ -66,8 +78,10 @@ export async function upsertOnboardingTemplate(
       .eq('organization_id', input.organizationId)
       .eq('id', input.id)
       .select('*')
-      .single();
-    if (upd.error || !upd.data) throw new Error(`onboarding_template_update_failed:${upd.error?.message ?? 'unknown'}`);
+      .maybeSingle();
+    if (upd.error) throw new Error(`onboarding_template_update_failed:${upd.error.message ?? 'unknown'}`);
+    // Zero rows matched under the caller's organization: not found (never "failed", never the PostgREST text).
+    if (!upd.data) throw new OnboardingTemplateNotFoundError();
     return upd.data as EnterpriseOnboardingTemplate;
   }
   const ins = await ownedDbTable('enterprise_onboarding_templates')
