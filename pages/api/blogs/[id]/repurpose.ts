@@ -11,17 +11,50 @@ import { createApiRoute as __createApiRoute } from '../../../../lib/platform/rou
  *   tone?:   'professional' | 'conversational' | 'bold' | 'educational'
  *   source?: 'company' | 'public'  — defaults to 'company'
  *
- * Auth: company members can repurpose their own blogs;
- *       public blogs require no auth (pass source=public).
+ * Auth: company members can repurpose their own blogs; a public blog (source=public) requires login too and is
+ *       charged to the CALLER's company (see the ruling below).
  */
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { supabase } from '../../../../backend/db/supabaseClient';
-import { enforceCompanyAccess } from '../../../../backend/services/userContextService';
+import { enforceCompanyAccess, resolveUserContext } from '../../../../backend/services/userContextService';
 import { runCompletionWithOperation } from '../../../../backend/services/aiGateway';
 import { resolveCompanyGroundingGuard } from '../../../../backend/services/context/canonicalContentContextResolver';
 import { createHash } from 'crypto';
 import { wirePhase2Route } from '../../../../backend/services/billing/phase2RouteWiring';
 import { PaymentRequiredError } from '../../../../backend/services/billing/phase2EnforcementGate';
+import { checkRateLimit, type RateLimitConfig } from '../../../../lib/auth/rateLimit';
+import { authRequestIpOrNull } from '../../../../backend/auth/requestClientIp';
+
+/**
+ * BLOCKING (money), 2026-11-13. source=public WAS an anonymous, unbilled model call (the gateway's AI guard saw no
+ * user and no IP for it, so only platform-wide fail-open caps applied). OWNER RULING (via e9): repurpose REQUIRES
+ * LOGIN and is CHARGED to the caller's company, like every AI feature - no anonymous free AI. A public blog is now
+ * just a SOURCE; the company billed is the CALLER's (explicit company_id, else their only ACTIVE membership; never
+ * the blog's, never the users.active_company_id pointer).
+ *
+ * Limits (e9 ruling after 05 review): the request is authenticated AND billed, so the charge is the economic
+ * defence and the limits key on the PRINCIPAL, not on colocation: per COMPANY 30/h is the real limit, global 3000/h
+ * the platform backstop, per trusted IP 120/h only a loose single-host burst backstop (applied only when an IP is
+ * known - a paying user behind a header-stripping proxy is not refused). On a Redis failure all are 'strict': the
+ * real configured cap in an in-process bucket - never a paid-feature outage, never unlimited. (Anonymous anti-bot
+ * paths such as signup stay fail-CLOSED; that ruling is unchanged.)
+ */
+export const PUBLIC_REPURPOSE_COMPANY_LIMIT: RateLimitConfig = {
+  keyPrefix: 'rl:public:blog-repurpose:company', limit: 30, windowSecs: 3600, onRedisFailure: 'strict',
+};
+/**
+ * INVARIANT (05 review): GLOBAL must stay a RUNAWAY backstop, never the limit that catches normal customers:
+ *   GLOBAL.limit >= active_companies x COMPANY.limit  (headroom for ~100 companies at their own cap).
+ * REVIEW TRIGGER: revisit when active companies approach GLOBAL.limit / COMPANY.limit (100) - a fixed number beside a
+ * per-tenant number crosses over eventually; at 300/h it already did at 10 companies.
+ */
+export const PUBLIC_REPURPOSE_GLOBAL_LIMIT: RateLimitConfig = {
+  keyPrefix: 'rl:public:blog-repurpose:global', limit: 3000, windowSecs: 3600, onRedisFailure: 'strict',
+};
+export const PUBLIC_REPURPOSE_GLOBAL_HEADROOM_COMPANIES = 100;
+export const PUBLIC_REPURPOSE_IP_LIMIT: RateLimitConfig = {
+  keyPrefix: 'rl:public:blog-repurpose:ip', limit: 120, windowSecs: 3600, onRedisFailure: 'strict',
+};
 import { extractBlogContext } from '../../../../lib/blog/blockExtractor';
 import {
   buildRepurposeSystemPrompt,
@@ -87,19 +120,51 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     ? req.body.tone as BlogRepurposeInput['tone']
     : 'professional';
 
-  // ── Auth: company blogs require company membership ────────────────────────
-  let companyId: string | null = null;
-
+  // ── Auth: EVERY repurpose is a signed-in, billed action for the caller's company ──
+  let companyId: string;
   if (source === 'company') {
+    // Company source: unchanged from before the public-source fix (raw company_id, enforceCompanyAccess).
     const companyIdParam =
       typeof req.query.company_id === 'string' ? req.query.company_id :
       typeof req.body?.company_id  === 'string' ? req.body.company_id : null;
 
     if (!companyIdParam) return res.status(400).json({ error: 'company_id is required for company blogs' });
-
     const access = await enforceCompanyAccess({ req, res, companyId: companyIdParam });
     if (!access) return;
     companyId = companyIdParam;
+  } else {
+    // Public source: ONE normalized company id is used for access, limits, grounding and billing.
+    const companyIdParam =
+      typeof req.query.company_id === 'string' && req.query.company_id.trim() ? req.query.company_id.trim() :
+      typeof req.body?.company_id  === 'string' && req.body.company_id.trim()  ? req.body.company_id.trim()  : null;
+    const user = await resolveUserContext(req);
+    if (!user?.userId) return res.status(401).json({ error: 'Sign in to repurpose a blog.', code: 'AUTH_REQUIRED' });
+    // The caller's company: the one they name, else their first ACTIVE membership (resolveUserContext never yields
+    // the raw pointer). Membership is enforced either way.
+    // DETERMINISTIC (e1): a multi-company caller must NAME the company to charge - never whichever membership row
+    // comes back first (two identical clicks could otherwise bill different companies under different keys).
+    if (!companyIdParam && (user.companyIds?.length ?? 0) > 1) {
+      return res.status(400).json({ error: 'company_id is required: you belong to more than one company.', code: 'COMPANY_REQUIRED' });
+    }
+    const callerCompanyId = companyIdParam ?? (user.defaultCompanyId || null);
+    if (!callerCompanyId) return res.status(403).json({ error: 'An active company membership is required.', code: 'NO_ACTIVE_COMPANY' });
+    const access = await enforceCompanyAccess({ req, res, companyId: callerCompanyId });
+    if (!access) return;
+    companyId = callerCompanyId;
+  }
+
+  // ── Public source: per-company (real limit), global (backstop), per-IP (loose burst backstop) ───
+  if (source === 'public') {
+    const tooMany = () => res.status(429).json({ error: 'Too many requests. Try again later.', code: 'RATE_LIMITED' });
+    const perCompany = await checkRateLimit(companyId, PUBLIC_REPURPOSE_COMPANY_LIMIT);
+    if (!perCompany.allowed) return tooMany();
+    const global = await checkRateLimit('all', PUBLIC_REPURPOSE_GLOBAL_LIMIT);
+    if (!global.allowed) return tooMany();
+    const ip = authRequestIpOrNull(req);
+    if (ip) {
+      const perIp = await checkRateLimit(ip, PUBLIC_REPURPOSE_IP_LIMIT);
+      if (!perIp.allowed) return tooMany();
+    }
   }
 
   // ── Fetch blog ────────────────────────────────────────────────────────────
@@ -111,7 +176,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     .eq('id', id)
     .eq('status', 'published');
 
-  if (source === 'company' && companyId) {
+  if (source === 'company') {
     query.eq('company_id', companyId);
   }
 
@@ -133,7 +198,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   let output: RepurposeOutput | null = null;
 
   // Deterministic company grounding: repurposed posts speak for the active
-  // company only (public blogs → no company; the directive still forbids
+  // company: the CALLER's company for both sources (the directive still forbids
   // naming any company not present in the blog content).
   const grounding = await resolveCompanyGroundingGuard(companyId);
 
@@ -152,19 +217,22 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   });
 
   try {
-    // Public blogs have no company → nothing to charge; passthrough (honest).
-    const result = companyId
-      ? await wirePhase2Route({
-          surface:        'blogs.repurpose',
-          organizationId: companyId,
-          action:         'content_repurpose',
-          referenceType:  'content_repurpose',
-          referenceId:    createHash('sha256')
-            .update([companyId, String(id), String(tone)].join('|'))
-            .digest('hex').slice(0, 40),
-          run: runAi,
-        })
-      : await runAi();
+    // ONE billed path for both sources (owner ruling): the caller's company is charged through the same
+    // wirePhase2Route call as the authenticated company path. 'public' is part of the public reference so a public
+    // and a company blog with the same id are distinct charges; the company reference is unchanged.
+    const referenceParts = source === 'public'
+      ? [companyId, 'public', String(id), String(tone)]
+      : [companyId, String(id), String(tone)];
+    const result = await wirePhase2Route({
+      surface:        'blogs.repurpose',
+      organizationId: companyId,
+      action:         'content_repurpose',
+      referenceType:  'content_repurpose',
+      referenceId:    createHash('sha256')
+        .update(referenceParts.join('|'))
+        .digest('hex').slice(0, 40),
+      run: runAi,
+    });
 
     const raw = result.output ? JSON.parse(result.output) : null;
     output = validateRepurposeOutput(raw);
