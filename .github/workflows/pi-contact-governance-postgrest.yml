@@ -75,7 +75,7 @@ on:
       # appeared ONLY in the loopback integration job, where it is env-gated off (0 assertions = NOT-RUN), so the one
       # proof that read_at is a real PostgREST computed field went unmeasured on every stack. Still loopback-only, no
       # secret, no workflow_dispatch.
-      - 'integration/**'
+      - 'integration/stranded-**'   # cb: stranded-line stacks only; other pushes don't pay for the containers
 
 permissions:
   contents: read
