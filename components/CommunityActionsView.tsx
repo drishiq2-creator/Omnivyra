@@ -12,6 +12,10 @@ import {
 
 const tabs = ['Pending', 'Scheduled', 'Completed', 'Skipped'];
 
+/** b3 (consent pass, B7): Execute likes/replies/shares on the platform at once, publicly. */
+export const EXECUTE_TOOLTIP = 'Posts this action publicly now';
+export const EXECUTE_CONFIRM_TEXT = 'Post this action publicly now? It goes out on the platform straight away.';
+
 import type { useCommunityActions } from '../hooks/useCommunityActions';
 type S = ReturnType<typeof useCommunityActions>;
 export default function CommunityActionsView({ d }: { d: S }) {
@@ -328,11 +332,15 @@ export default function CommunityActionsView({ d }: { d: S }) {
                         {showAutoExecute && (
                           <button
                             className="px-2 py-1 text-xs rounded border border-emerald-500 text-emerald-600"
-                            onClick={() => handleExecute(action)}
+                            onClick={() => {
+                              // b3: this acts publicly at once, so confirm first.
+                              if (typeof window !== 'undefined' && !window.confirm(EXECUTE_CONFIRM_TEXT)) return;
+                              handleExecute(action);
+                            }}
                             disabled={!permissions.canExecute || isExecuting || !autoExecutionAllowed}
                             title={
                               autoExecutionAllowed
-                                ? 'Execute via configured automation path'
+                                ? EXECUTE_TOOLTIP
                                 : 'Blocked by Playbook execution mode'
                             }
                           >

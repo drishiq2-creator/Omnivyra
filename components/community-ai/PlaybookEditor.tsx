@@ -182,7 +182,7 @@ export default function PlaybookEditor({ playbook, onSave, onCancel }: PlaybookE
                 })
               }
             />
-            Auto-execute low risk
+            Send low-risk replies automatically: they post publicly without your review
           </label>
           <label className="flex items-center gap-2 text-xs">
             <input

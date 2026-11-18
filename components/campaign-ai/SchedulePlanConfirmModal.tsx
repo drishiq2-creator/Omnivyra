@@ -23,7 +23,7 @@ export function SchedulePlanConfirmModal({
         <div className="text-center mb-6">
           <h3 className="text-xl font-bold text-gray-900 mb-2">Schedule This Plan</h3>
           <p className="text-gray-600">
-            This will create scheduled posts for each day and platform in your plan.
+            This will create scheduled posts for each day and platform in your plan. They publish automatically at those times.
           </p>
         </div>
 
