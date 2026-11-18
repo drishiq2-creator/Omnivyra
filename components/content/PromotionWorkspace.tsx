@@ -40,7 +40,20 @@ type PlatformState = {
  * exception is an UNCERTAIN outcome (the post may be live), shown as the
  * server words it.
  */
+/**
+ * 04 review: a request that never returned a response (a rejected fetch), or a staging success that returned no post
+ * id, is UNCERTAIN. If the publish request was lost, the server-side supersede never ran, so the staged row's delayed
+ * job is alive and can publish shortly; if it arrived, the post may be live. Never "Not posted".
+ */
+export const POST_NOW_CONNECTION_LOST_MESSAGE =
+  "We lost the connection, so we're not sure whether this posted or is set to post shortly. Check your scheduled and published posts before trying again.";
+
+function connectionLost(): Error {
+  return Object.assign(new Error(POST_NOW_CONNECTION_LOST_MESSAGE), { connectionLost: true });
+}
+
 export function postNowFailureDetail(e: unknown): string {
+  if (e instanceof Error && (e as { connectionLost?: boolean }).connectionLost === true) return POST_NOW_CONNECTION_LOST_MESSAGE;
   // Not a failure we can call "not posted": the post may already be live
   // (backend/queue/publishOutcome PUBLISH_OUTCOME_UNCERTAIN). The server's own
   // words are shown, unchanged, as before.
@@ -284,11 +297,11 @@ export default function PromotionWorkspace({
           accountId: s.accountId,
           contentType: 'post',
         }),
-      });
+      }).catch(() => { throw connectionLost(); });
       const stageData = await stageRes.json().catch(() => ({}));
       if (!stageRes.ok) throw new Error(stageData?.error || `Could not stage the post (status ${stageRes.status}).`);
       const postId = stageData?.id;
-      if (!postId) throw new Error('Scheduler did not return a post id.');
+      if (!postId) throw connectionLost();
 
       // OR-07 Action 1: one key per logical publish. `postId` is minted by the
       // scheduler call above on every run, so each attempt is a genuinely new
@@ -298,7 +311,7 @@ export default function PromotionWorkspace({
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...publishOp.headers },
         body: JSON.stringify({ post_id: postId }),
-      });
+      }).catch(() => { throw connectionLost(); });
       const pubData = await pubRes.json().catch(() => ({}));
       // The post MAY be live (an attempt reached the platform, result unsaved):
       // never reported as "not posted".

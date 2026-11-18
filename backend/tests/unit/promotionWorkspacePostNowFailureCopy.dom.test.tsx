@@ -29,7 +29,7 @@ jest.mock('../../../lib/content/promotionDraft', () => {
   };
 });
 
-import PromotionWorkspace, { postNowFailureDetail } from '../../../components/content/PromotionWorkspace';
+import PromotionWorkspace, { postNowFailureDetail, POST_NOW_CONNECTION_LOST_MESSAGE } from '../../../components/content/PromotionWorkspace';
 
 const json = (status: number, body: unknown) => ({ ok: status >= 200 && status < 300, status, json: async () => body });
 
@@ -109,6 +109,37 @@ describe('PromotionWorkspace Post Now (DOM)', () => {
     renderWorkspace();
     fireEvent.click(screen.getByRole('button', { name: /post now/i }));
     expect(await screen.findByText('It may already be live.')).toBeInTheDocument();
+    expect(screen.queryByText(/Not posted/)).toBeNull();
+  });
+
+  // 04 review: a request that never returned a response is UNCERTAIN. A lost publish request means the server-side
+  // supersede never ran (the staged delayed job is alive); a lost staging response means the row and its job may exist.
+  test('the PUBLISH request is lost (fetch rejects): the lost-connection copy, never "Not posted" / "Nothing will be posted"', async () => {
+    mockFetch
+      .mockResolvedValueOnce(json(200, { id: 'sp-5' }))
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'));
+    renderWorkspace();
+    fireEvent.click(screen.getByRole('button', { name: /post now/i }));
+    expect(await screen.findByText(POST_NOW_CONNECTION_LOST_MESSAGE)).toBeInTheDocument();
+    expect(screen.queryByText(/Not posted/)).toBeNull();
+    expect(screen.queryByText(/Nothing will be posted/)).toBeNull();
+    expect(screen.queryByText(/Failed to fetch/)).toBeNull();
+  });
+
+  test('the STAGING response is lost (fetch rejects): the same lost-connection copy, and no publish attempt', async () => {
+    mockFetch.mockRejectedValueOnce(new TypeError('Failed to fetch'));
+    renderWorkspace();
+    fireEvent.click(screen.getByRole('button', { name: /post now/i }));
+    expect(await screen.findByText(POST_NOW_CONNECTION_LOST_MESSAGE)).toBeInTheDocument();
+    expect(screen.queryByText(/Not posted/)).toBeNull();
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  test('staging SUCCEEDS without a post id (the row and its job may exist): uncertain, never "Not posted"', async () => {
+    mockFetch.mockResolvedValueOnce(json(200, {}));
+    renderWorkspace();
+    fireEvent.click(screen.getByRole('button', { name: /post now/i }));
+    expect(await screen.findByText(POST_NOW_CONNECTION_LOST_MESSAGE)).toBeInTheDocument();
     expect(screen.queryByText(/Not posted/)).toBeNull();
   });
 
