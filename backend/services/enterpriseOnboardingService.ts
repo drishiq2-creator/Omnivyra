@@ -58,6 +58,12 @@ export async function upsertOnboardingTemplate(
         shared: input.shared ?? false,
         owner_user_id: input.ownerUserId,
       })
+      // TENANT (2026-11-18, cross-tenant write fix): an update is scoped to the CALLER's organization, like the
+      // sibling application update below. listOnboardingTemplates hands every caller the ids of shared templates
+      // (other tenants' shared rows and the NULL-org platform presets), so an id-only update let any capability
+      // holder rewrite another tenant's - or every tenant's platform - template. A NULL-org platform row never
+      // matches this filter: platform presets are not tenant-editable through this function.
+      .eq('organization_id', input.organizationId)
       .eq('id', input.id)
       .select('*')
       .single();
