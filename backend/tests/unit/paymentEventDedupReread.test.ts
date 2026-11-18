@@ -6,6 +6,7 @@
  * The fake mirrors PostgREST: insert().select().maybeSingle() and select().eq().eq().maybeSingle() resolve
  * { data, error } and never throw.
  */
+export {}; // a module, not a global script: top-level names must not collide with other test files (CI-496)
 type Res = { data: unknown; error: { code?: string; message: string } | null };
 const db: { insert: Res; reread: Res; rereadFilters: Array<[string, unknown]> } = {
   insert: { data: null, error: null }, reread: { data: null, error: null }, rereadFilters: [],

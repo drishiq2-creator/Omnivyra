@@ -7,6 +7,7 @@
  * (2) "two runs in one period grant once" lives in allocationUnreadableRecoverable.test.ts (it needs the real service).
  * runJob is faked with its real DLQ semantics (a DLQ'd key -> dead_letter_skip; otherwise the job runs and completes).
  */
+export {}; // a module, not a global script: top-level names must not collide with other test files (CI-496)
 const dlq = new Set<string>();
 const keys: string[] = [];
 let sweeps = 0;

@@ -7,6 +7,7 @@
  * on holds whose report state WOULD otherwise confirm (completed) or release (failed).
  * The fake mirrors PostgREST: maybeSingle() / await resolve { data, error } and never throw.
  */
+export {}; // a module, not a global script: top-level names must not collide with other test files (CI-496)
 type Res = { data: unknown; error: { message: string } | null };
 const db: { parentRead: Res; keyedRead: Res; reportStatus: string; reads: string[] } = {
   parentRead: { data: null, error: null }, keyedRead: { data: null, error: null }, reportStatus: 'failed', reads: [],

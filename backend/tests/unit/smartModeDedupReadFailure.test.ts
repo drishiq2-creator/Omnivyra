@@ -6,6 +6,7 @@
  * The fake mirrors PostgREST (maybeSingle resolves { data, error }, never throws); the dedup read is identified by its
  * filters (credit_transactions + execution_phase).
  */
+export {}; // a module, not a global script: top-level names must not collide with other test files (CI-496)
 type Res = { data: unknown; error: { message: string } | null };
 const st: { dedup: Res; dedupReads: number } = { dedup: { data: null, error: null }, dedupReads: 0 };
 
