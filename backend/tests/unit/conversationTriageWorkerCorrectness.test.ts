@@ -7,8 +7,8 @@
  *   d) a failed messages / classifications read ends the tick with no AI call.
  */
 type Row = Record<string, any>;
-const db: { threads: Row[]; messages: Row[]; classifications: Row[]; controls: Row[]; failRead: Set<string>; failWrite: number } = {
-  threads: [], messages: [], classifications: [], controls: [], failRead: new Set(), failWrite: 0,
+const db: { threads: Row[]; messages: Row[]; classifications: Row[]; controls: Row[]; failRead: Set<string>; failWrite: number; optInAll: boolean } = {
+  threads: [], messages: [], classifications: [], controls: [], failRead: new Set(), failWrite: 0, optInAll: true,
 };
 const writes: Array<{ table: string; op: string }> = [];
 
@@ -18,6 +18,8 @@ function query(table: string) {
     : table === 'engagement_thread_classification' ? db.classifications : table === 'engagement_system_controls' ? db.controls : []);
   const run = () => {
     if (db.failRead.has(table)) return { data: null, error: { message: `read ${table} failed` } };
+    // Owner 2026-11-18: triage is OPT-IN. Most cases model companies that opted in; the opt-in cases turn this off.
+    if (table === 'engagement_system_controls' && db.optInAll) return { data: [{ triage_engine_enabled: true }], error: null };
     let out = rows().filter((r) => st.filters.every((f) => f(r)));
     for (const [col, asc] of [...st.order].reverse()) {
       out = [...out].sort((a, b) => (a[col] === b[col] ? 0 : (a[col] ?? '') < (b[col] ?? '') ? (asc ? -1 : 1) : (asc ? 1 : -1)));
@@ -56,6 +58,19 @@ jest.mock('../../services/workerRetryService', () => ({
   },
 }));
 const classified: string[] = [];
+const ewc: any[] = [];
+const charged: string[] = [];
+const released: string[] = [];
+const refuseOrgs = new Set<string>();
+jest.mock('../../services/creditExecutionService', () => ({
+  makeIdempotencyKey: (...p: string[]) => p.join(':'),
+  executeWithCredits: async (o: any) => {
+    ewc.push(o);
+    if (refuseOrgs.has(o.orgId)) return { status: 'insufficient_credits', available: 0, required: o.amountOverride };
+    try { const r = await o.executor(); charged.push(o.referenceId); return { status: 'executed', result: r }; }
+    catch (e) { released.push(o.referenceId); throw e; }   // executeWithCredits releases the hold, then rethrows
+  },
+}));
 let classifyResult: any = { classification_category: 'general_comment', classification_confidence: 0.9, sentiment: 'neutral', triage_priority: 3 };
 jest.mock('../../services/conversationTriageService', () => ({
   classifyThread: async (threadId: string) => { classified.push(threadId); return classifyResult; },
@@ -69,8 +84,8 @@ function thread(i: number, org: string, updatedMinAgo: number): Row {
   return { id: `t${String(i).padStart(4, '0')}`, organization_id: org, ignored: false, updated_at: iso(updatedMinAgo) };
 }
 beforeEach(() => {
-  db.threads = []; db.messages = []; db.classifications = []; db.controls = []; db.failRead = new Set(); db.failWrite = 0;
-  writes.length = 0; attempts.length = 0; classified.length = 0;
+  db.threads = []; db.messages = []; db.classifications = []; db.controls = []; db.failRead = new Set(); db.failWrite = 0; db.optInAll = true;
+  writes.length = 0; attempts.length = 0; classified.length = 0; ewc.length = 0; charged.length = 0; released.length = 0; refuseOrgs.clear();
   classifyResult = { classification_category: 'general_comment', classification_confidence: 0.9, sentiment: 'neutral', triage_priority: 3 };
   jest.spyOn(console, 'error').mockImplementation(() => undefined);
 });
@@ -159,8 +174,66 @@ describe('b) engagement controls fail closed on a read error', () => {
     expect(classified).toEqual([]);
   });
 
-  test('control: no row (not an error) still means the defaults (triage on)', async () => {
+  test('owner 2026-11-18 OPT-IN: no row (not an error) -> triage OFF, the other controls keep their defaults', async () => {
+    db.optInAll = false;
     const c = await getControls('org-a');
-    expect(c.triage_engine_enabled).toBe(true);
+    expect(c.triage_engine_enabled).toBe(false);
+    expect(c.auto_reply_enabled).toBe(true);
+  });
+
+  test('OPT-IN: a row written for ANOTHER setting (triage column absent from the read) is still triage OFF', async () => {
+    db.optInAll = false;
+    db.controls.push({ organization_id: 'org-a', auto_reply_enabled: false });
+    expect((await getControls('org-a')).triage_engine_enabled).toBe(false);
+  });
+});
+
+describe('billing (owner 2026-11-18: fixed 1 credit per classified conversation, opt-in)', () => {
+  test('a company that has NOT opted in is never classified or charged', async () => {
+    db.optInAll = false;
+    db.threads.push(thread(1, 'org-a', 1));
+    await runConversationTriageWorker();
+    expect(classified).toEqual([]);
+    expect(ewc).toEqual([]);
+  });
+
+  test('an opted-in thread is classified inside executeWithCredits: conversation_triage, 1 credit, per-attempt key, system-initiated', async () => {
+    db.threads.push(thread(1, 'org-a', 1));
+    await runConversationTriageWorker();
+    expect(ewc).toHaveLength(1);
+    expect(ewc[0]).toMatchObject({ action: 'conversation_triage', amountOverride: 1, orgId: 'org-a', userId: 'org-a',
+      referenceType: 'conversation_triage', referenceId: 't0001', validateMembership: false });
+    expect(ewc[0].idempotencyKey).toMatch(/^org-a:conversation_triage:t0001:tick:\d+$/);
+    expect(charged).toEqual(['t0001']);
+  });
+
+  test('a null classification is NOT charged (released) - one AI call, no write', async () => {
+    db.threads.push(thread(1, 'org-a', 1));
+    classifyResult = null;
+    const r = await runConversationTriageWorker();
+    expect(classified).toEqual(['t0001']);
+    expect(charged).toEqual([]);
+    expect(released).toEqual(['t0001']);
+    expect(r).toEqual({ processed: 0, errors: 1 });
+  });
+
+  test('a write that keeps failing is NOT charged (released) - the AI ran once, the write was retried', async () => {
+    db.threads.push(thread(1, 'org-a', 1));
+    db.failWrite = 5;
+    await runConversationTriageWorker();
+    expect(classified).toEqual(['t0001']);
+    expect(attempts).toEqual([3]);
+    expect(charged).toEqual([]);
+    expect(released).toEqual(['t0001']);
+  });
+
+  test('a refused hold (no credits) skips that company for the rest of the tick; other companies continue', async () => {
+    for (let i = 0; i < 3; i++) db.threads.push(thread(i, 'org-poor', i));
+    db.threads.push(thread(10, 'org-rich', 5));
+    refuseOrgs.add('org-poor');
+    await runConversationTriageWorker();
+    expect(ewc.filter((o) => o.orgId === 'org-poor')).toHaveLength(1);   // one refusal, then skipped
+    expect(classified).toEqual(['t0010']);
+    expect(charged).toEqual(['t0010']);
   });
 });

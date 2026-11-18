@@ -30,6 +30,7 @@ export const CREDIT_ACTIONS = [
   'deep_analysis',
   'full_strategy',
   'campaign_generation',
+  'conversation_triage',
 ] as const;
 
 export type CreditAction = typeof CREDIT_ACTIONS[number];
@@ -76,6 +77,18 @@ export interface MonetizationFeatureRegistryEntry {
 }
 
 const BASE_FEATURES: MonetizationFeatureRegistryEntry[] = [
+  // OWNER 2026-11-18: conversation triage is its own billed, opt-in feature (1 credit per classified conversation,
+  // conversationTriageWorker). Declared as a base entry so the triage AI operation resolves to it.
+  {
+    ...feature('engagement.conversation_triage', 'engagement_center', 'Conversation Triage', 'AI Replies', 'bg-emerald-400'),
+    process_type_mapping: ['conversationTriage'],
+    pricing_keys: {
+      action_key: 'conversation_triage',
+      credit_cost_config: 'conversation_triage',
+      action_pricing_config: 'conversation_triage',
+      usage_action_key: 'conversation_triage',
+    },
+  },
   {
     feature_key: 'reports.snapshot',
     category: 'reports',
@@ -467,7 +480,8 @@ const BASE_FEATURES: MonetizationFeatureRegistryEntry[] = [
     process_type_mapping: [
       'chatModeration',
       'extractPlannerCommands',
-      'conversationTriage',
+      // conversationTriage moved to engagement.conversation_triage (owner 2026-11-18: its own billed feature).
+      // (Name UNQUOTED on purpose: aiOperationMonetizationMappingF0 counts quoted names in these arrays as claims.)
       'conversationMemorySummary',
       'responseGeneration',
       'runDiagnosticPrompt',
@@ -663,6 +677,7 @@ const SIMPLE_CREDIT_FEATURES: Record<CreditAction, Omit<MonetizationFeatureRegis
   campaign_optimization: feature('campaigns.campaign_optimization', 'campaigns', 'Campaign Optimization', 'Campaigns', 'bg-violet-500'),
   strategy_evolution: feature('intelligence.strategy_evolution_legacy', 'intelligence', 'Strategy Evolution', 'Insights & Trends', 'bg-blue-500'),
   campaign_generation: feature('campaigns.campaign_generation', 'campaigns', 'Campaign Generation', 'Campaigns', 'bg-violet-500'),
+  conversation_triage: feature('engagement.conversation_triage', 'engagement_center', 'Conversation Triage', 'AI Replies', 'bg-emerald-400'),
   insight_generation: feature('intelligence.insight_generation_legacy', 'intelligence', 'Insight Generation', 'Insights & Trends', 'bg-blue-500'),
 };
 

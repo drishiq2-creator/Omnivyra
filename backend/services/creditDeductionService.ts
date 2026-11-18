@@ -53,6 +53,7 @@ export type CreditAction =
   | 'deep_analysis'       // 60
   | 'full_strategy'       // 80
   | 'campaign_generation' // 50 — autonomous campaign generation
+  | 'conversation_triage' // 1 per classified conversation (owner 2026-11-18); opt-in
   // Phase 2 §C.4 coverage (catalog rows: migration 20260665). Resolved via
   // getCreditCost DB fallback (?? action); no registry feature entry needed.
   | 'blog_generation'
@@ -110,6 +111,7 @@ export const CREDIT_ACTIONS: CreditAction[] = [
   'deep_analysis',
   'full_strategy',
   'campaign_generation',
+  'conversation_triage',
   // Phase 2 §C.4 coverage
   'blog_generation',
   'blog_rewrite_hook',

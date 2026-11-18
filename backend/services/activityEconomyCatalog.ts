@@ -85,6 +85,7 @@ export const ACTIVITY_CLASS_ECONOMICS: Record<ActivityClass, ActivityClassEconom
 export const ACTIVITY_CLASS_MAP: Record<CreditAction, ActivityClass> = {
   // REPLY — micro single-shot
   ai_reply:                        'REPLY',
+  conversation_triage:             'REPLY',
   auto_post:                       'REPLY',
   reply_generation:                'REPLY',
   blog_brief_suggestions:          'REPLY',

@@ -20,7 +20,10 @@ const DEFAULTS: EngagementControls = {
   auto_reply_enabled: true,
   bulk_reply_enabled: true,
   ai_suggestions_enabled: true,
-  triage_engine_enabled: true,
+  // OWNER 2026-11-18: triage is billed (1 credit per classified conversation) and OPT-IN - off unless the company
+  // turns it on. (Migration 20270217000056 makes the column default false too, so a row written for another setting
+  // never opts a company in.)
+  triage_engine_enabled: false,
   opportunity_detection_enabled: true,
   response_strategy_learning_enabled: true,
   digest_generation_enabled: true,
@@ -52,15 +55,15 @@ export async function getControls(organizationId: string): Promise<EngagementCon
     console.error('[engagementGovernance] engagement_controls_read_failed', { organizationId, message: error.message });
     return { ...ALL_OFF };
   }
-  // DELIBERATE product behaviour, not a leftover (7c): a company that never wrote its controls gets DEFAULTS. Whether
-  // paid engagement AI (e.g. triage) should be OPT-IN once it is billed is an OWNER decision pending (c6, 2026-11-18).
+  // DELIBERATE product behaviour, not a leftover (7c): a company that never wrote its controls gets DEFAULTS. Triage is
+  // OPT-IN (owner 2026-11-18) so its default is OFF; the other controls keep their defaults.
   if (!data) return DEFAULTS;
 
   return {
     auto_reply_enabled: data.auto_reply_enabled ?? true,
     bulk_reply_enabled: data.bulk_reply_enabled ?? true,
     ai_suggestions_enabled: data.ai_suggestions_enabled ?? true,
-    triage_engine_enabled: data.triage_engine_enabled ?? true,
+    triage_engine_enabled: data.triage_engine_enabled ?? false,
     opportunity_detection_enabled: data.opportunity_detection_enabled ?? true,
     response_strategy_learning_enabled: data.response_strategy_learning_enabled ?? true,
     digest_generation_enabled: data.digest_generation_enabled ?? true,
@@ -100,7 +103,7 @@ export async function updateControls(
     auto_reply_enabled: data?.auto_reply_enabled ?? true,
     bulk_reply_enabled: data?.bulk_reply_enabled ?? true,
     ai_suggestions_enabled: data?.ai_suggestions_enabled ?? true,
-    triage_engine_enabled: data?.triage_engine_enabled ?? true,
+    triage_engine_enabled: data?.triage_engine_enabled ?? false,
     opportunity_detection_enabled: data?.opportunity_detection_enabled ?? true,
     response_strategy_learning_enabled: data?.response_strategy_learning_enabled ?? true,
     digest_generation_enabled: data?.digest_generation_enabled ?? true,

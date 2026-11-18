@@ -21,6 +21,19 @@ import { classifyThread } from '../services/conversationTriageService';
 import { recordMetric } from '../services/systemHealthMetricsService';
 import { executeWithRetry } from '../services/workerRetryService';
 import { getControls } from '../services/engagementGovernanceService';
+import { executeWithCredits, makeIdempotencyKey } from '../services/creditExecutionService';
+
+/**
+ * OWNER 2026-11-18: triage is billed at a FIXED 1 credit per classified conversation, and is OPT-IN
+ * (engagement_system_controls.triage_engine_enabled, default false). Billing runs through executeWithCredits, which owns
+ * the hold lifecycle: the EXECUTOR classifies AND writes the classification, so the credit is confirmed only when a
+ * classification was actually stored - a null result or a failed write throws inside the executor and the hold is
+ * released (nothing charged). The idempotency key is per ATTEMPT (thread + tick), so a released attempt never blocks
+ * the next tick's retry; a stored classification takes the thread out of selection, so a success is not re-charged.
+ * A refused hold (no credits / no account / org control) skips that company for the rest of the tick - no retry.
+ */
+export const TRIAGE_CREDITS_PER_CONVERSATION = 1;
+const TRIAGE_ACTION = 'conversation_triage' as const;
 
 export const TRIAGE_BATCH_LIMIT = 15;
 export const TRIAGE_PAGE_SIZE = 100;
@@ -143,24 +156,42 @@ export async function runConversationTriageWorker(): Promise<{
     return { processed: 0, errors: 1 };
   }
 
+  const tick = String(startMs);
+  const refusedOrgs = new Set<string>();
   for (const { threadId, organizationId } of candidates) {
+    if (refusedOrgs.has(organizationId)) continue;
     const controls = await getControls(organizationId);
-    if (!controls.triage_engine_enabled) continue;
-
-    // ONE provider call per thread per tick (F2c). A null result is final for this tick.
-    const result = await classifyThread(threadId, organizationId);
-    if (!result) {
-      errors++;
-      continue;
-    }
+    if (!controls.triage_engine_enabled) continue;   // OPT-IN: off unless the company turned it on
 
     try {
-      // Only the idempotent DB write is retried - never the AI call.
-      await executeWithRetry('conversationTriageWorker', { threadId, organizationId },
-        () => writeClassification(threadId, organizationId, result));
-      processed++;
+      const outcome = await executeWithCredits({
+        userId: organizationId,
+        orgId: organizationId,
+        action: TRIAGE_ACTION,
+        referenceType: TRIAGE_ACTION,
+        referenceId: threadId,
+        idempotencyKey: makeIdempotencyKey(organizationId, TRIAGE_ACTION, threadId, `tick:${tick}`),
+        amountOverride: TRIAGE_CREDITS_PER_CONVERSATION,
+        validateMembership: false,   // system-initiated (the company opted in)
+        note: 'Conversation triage',
+        executor: async () => {
+          // ONE provider call per thread per tick (F2c); a null result throws -> hold released, nothing charged.
+          const result = await classifyThread(threadId, organizationId);
+          if (!result) throw new Error('TRIAGE_NO_RESULT');
+          // Only the idempotent DB write is retried - never the AI call. A failed write throws -> released.
+          await executeWithRetry('conversationTriageWorker', { threadId, organizationId },
+            () => writeClassification(threadId, organizationId, result));
+          return true;
+        },
+      });
+      if (outcome.status === 'executed') {
+        processed++;
+      } else if (outcome.status === 'insufficient_credits' || outcome.status === 'no_credit_account'
+        || outcome.status === 'org_control_blocked' || outcome.status === 'not_a_member') {
+        refusedOrgs.add(organizationId);   // skip this company for the rest of the tick; no retry storm
+      }
     } catch {
-      errors++;
+      errors++;   // executor threw (null result / failed write) - the hold was released by executeWithCredits
     }
   }
 
