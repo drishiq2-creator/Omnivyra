@@ -38,6 +38,8 @@ export type BilledOutcome =
 export const SETTLEMENT_PENDING_MESSAGE = 'Done. Billing for this is still being finalised. You won’t be charged twice, so there’s no need to run it again.';
 export const RECLAIM_MESSAGE = 'That didn’t finish on our side and you weren’t charged. Please try again.';
 export const UNCERTAIN_MESSAGE = 'We’re not sure this went through. Please check the result before trying again.';
+/** c6 engagement-v2 (b3adbc688): the stored result for this key can't be read right now; nothing new ran. */
+export const REPLAY_UNAVAILABLE_MESSAGE = 'We couldn’t load the result just now. Please try again in a moment.';
 /** c6's agreed contract (2026-11-13): a 2xx `executed` body may carry settlementPending. */
 export const SETTLE_AMBIGUOUS_CODE = 'CREDIT_SETTLE_AMBIGUOUS';
 const isSettlementPendingBody = (b: Record<string, unknown>) =>
@@ -95,6 +97,12 @@ export function classifyBilledResponse(status: number, body: unknown, fallback: 
     return { kind: 'settlement_pending', message: SETTLEMENT_PENDING_MESSAGE };
   }
   // c6 (MP billing): a refused credit hold creates nothing; billing being down is retryable.
+  // c6 engagement-v2: results are stored before the charge and REPLAYED for the same key; a 503
+  // REPLAY_UNAVAILABLE means the stored result is unreadable right now. Nothing new ran or was
+  // charged: a plain retry (with the same key), never "not sure it went through".
+  if (code === 'REPLAY_UNAVAILABLE') {
+    return { kind: 'retry', message: REPLAY_UNAVAILABLE_MESSAGE };
+  }
   if (code === 'BILLING_UNAVAILABLE') {
     return { kind: 'retry', message: 'Billing is unavailable right now, so nothing was started. Please try again shortly.' };
   }

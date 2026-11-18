@@ -7,10 +7,18 @@
 import React from 'react';
 import '@testing-library/jest-dom';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
-import { classifyBilledResponse, billedOutcomeText, TOP_UP_HREF, KNOWN_UNVERIFIABLE_CODES, UNVERIFIABLE_MESSAGE, SETTLEMENT_PENDING_MESSAGE, UNCERTAIN_MESSAGE, RECLAIM_MESSAGE } from '../../../lib/billing/billedResponse';
+import { classifyBilledResponse, billedOutcomeText, TOP_UP_HREF, KNOWN_UNVERIFIABLE_CODES, UNVERIFIABLE_MESSAGE, SETTLEMENT_PENDING_MESSAGE, UNCERTAIN_MESSAGE, RECLAIM_MESSAGE, REPLAY_UNAVAILABLE_MESSAGE } from '../../../lib/billing/billedResponse';
 import { createBilledActionKeyGate } from '../../../lib/idempotency';
 
 describe('classifyBilledResponse: keyed on status + code only', () => {
+  it('503 REPLAY_UNAVAILABLE (c6 engagement-v2) is a plain retry, never "not sure it went through"', () => {
+    const o = classifyBilledResponse(503, { code: 'REPLAY_UNAVAILABLE', retryable: true }, 'x');
+    expect(o).toEqual({ kind: 'retry', message: REPLAY_UNAVAILABLE_MESSAGE });
+    expect(billedOutcomeText(o)).not.toBe(UNCERTAIN_MESSAGE);
+    // control: an unclassified 503 is still uncertain
+    expect(classifyBilledResponse(503, { code: 'SOMETHING_ELSE' }, 'x').kind).toBe('uncertain');
+  });
+
   it('final 402 shape: readable `error`, code INSUFFICIENT_CREDITS, `balance`', () => {
     const o = classifyBilledResponse(402, { error: 'Insufficient credits to generate content', code: 'INSUFFICIENT_CREDITS', required: 5, balance: 2 }, 'x');
     expect(o).toEqual({ kind: 'credits', code: 'insufficient_credits', message: 'Insufficient credits to generate content', required: 5, available: 2 });
