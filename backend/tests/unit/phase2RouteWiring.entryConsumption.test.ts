@@ -22,6 +22,22 @@ jest.mock('../../services/creditExecutionService', () => engine);
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const mockStore = require('../helpers/fakeIdempotencyStore').makeFakeIdempotencyStore();
 jest.mock('../../db/writeOwner', () => ({ ownedDbTable: (t: string) => mockStore.ownedDbTable(t) }));
+// the durable replay-failure counter (record_billed_result_replay_failure) + the base owedRefunds module
+const mockReplayFailures = new Map<string, number>();
+jest.mock('../../db/supabaseClient', () => ({
+  supabase: { rpc: async (_f: string, a: any) => {
+    const k = `${a.p_scope}|${a.p_caller_id}|${a.p_key}`;
+    const n = (mockReplayFailures.get(k) ?? 0) + 1; mockReplayFailures.set(k, n);
+    return { data: [{ failures: n, first_failed_at: new Date().toISOString() }], error: null };
+  } },
+}));
+const mockCharges = new Map<string, any>();
+let mockRefund: (a: any) => any = (a) => ({ status: 'granted', credits: a.charge.free + a.charge.paid + a.charge.incentive });
+const mockRefundCalls: any[] = [];
+jest.mock('../../services/billing/owedRefunds', () => ({
+  readOriginalCharge: async (k: string) => mockCharges.get(k) ?? null,
+  refundOriginalCharge: async (a: any) => { mockRefundCalls.push(a); return mockRefund(a); },
+}));
 const mockCtx: { idempotencyKey?: string; requestId?: string } = {};
 jest.mock('../../services/requestContext', () => ({ getRequestContext: () => mockCtx }));
 
@@ -86,6 +102,8 @@ beforeEach(() => {
   jest.clearAllMocks();
   ledger.clear(); charges = 0; mockCounters.length = 0; mockAnomalies.length = 0;
   mockStore.rows.length = 0; mockStore.failInsert = false; mockStore.failRead = false;
+  mockReplayFailures.clear(); mockCharges.clear(); mockRefundCalls.length = 0;
+  mockRefund = (a) => ({ status: 'granted', credits: a.charge.free + a.charge.paid + a.charge.incentive });
   delete mockCtx.idempotencyKey; delete mockCtx.requestId;
   faithfulEngine();
 });
@@ -141,6 +159,48 @@ describe('wirePhase2Route ENFORCE - token-actual, per-request identity, never a 
     const err = await wirePhase2Route({ ...ARGS, run }).catch((e) => e);
     expect(billedRouteHttpError(err)).toEqual({ status: 503, body: expect.objectContaining({ code: 'REPLAY_UNAVAILABLE', retryable: true }) });
     expect(run).toHaveBeenCalledTimes(1);
+  });
+
+  // b3/7c: the read failures are counted DURABLY; the 3rd is TERMINAL -> the system refunds the slot's ORIGINAL charges
+  describe('terminal replay -> refund (owedRefunds)', () => {
+    const slotKey = () => {
+      const base = 'ref-1:k:' + require('crypto').createHash('sha256').update('click-1').digest('hex').slice(0, 24);
+      return engine.makeIdempotencyKey('user-1', 'content_basic', base);
+    };
+    const charged = async () => {
+      mockCtx.idempotencyKey = 'click-1';
+      await wirePhase2Route({ ...ARGS, run: async () => 'WORK' });
+      mockCharges.set(`${slotKey()}:entry:confirm`, { confirmTxnId: 'c-entry', free: 2, paid: 0, incentive: 0 });
+      mockCharges.set(`${slotKey()}:exposure:confirm`, { confirmTxnId: 'c-exp', free: 5, paid: 2, incentive: 0 });
+      mockStore.failRead = true;
+    };
+    it('read failures 1-2 are 503 REPLAY_UNAVAILABLE (retry); the 3rd refunds BOTH original charges -> 409 "have been returned"', async () => {
+      await charged();
+      for (let i = 0; i < 2; i++) {
+        const e = await wirePhase2Route({ ...ARGS, run: jest.fn() }).catch((x) => x);
+        expect(billedRouteHttpError(e)?.body.code).toBe('REPLAY_UNAVAILABLE');
+      }
+      const e = await wirePhase2Route({ ...ARGS, run: jest.fn() }).catch((x) => x);
+      expect(billedRouteHttpError(e)).toEqual({ status: 409, body: { code: 'RESULT_UNAVAILABLE', retryable: false,
+        error: "We couldn't recover this result, so your 9 credits have been returned." } });
+      expect(mockRefundCalls.map((c) => [c.charge.confirmTxnId, c.grantKeyPrefix, c.reason])).toEqual([
+        ['c-entry', 'billed_refund', 'billed_result_unavailable'], ['c-exp', 'billed_refund', 'billed_result_unavailable']]);
+    });
+    it('a refund RECORDED but not yet paid -> "are being returned" (the job pays it)', async () => {
+      await charged();
+      mockRefund = (a) => ({ status: 'owed', credits: a.charge.free + a.charge.paid });
+      for (let i = 0; i < 2; i++) await wirePhase2Route({ ...ARGS, run: jest.fn() }).catch(() => undefined);
+      const e = await wirePhase2Route({ ...ARGS, run: jest.fn() }).catch((x) => x);
+      expect(billedRouteHttpError(e)?.body.error).toBe("We couldn't recover this result, so your 9 credits are being returned to your account.");
+    });
+    it('a refund that cannot be RECORDED -> 503 REFUND_PENDING retryable, nothing promised', async () => {
+      await charged();
+      mockRefund = () => ({ status: 'unrecorded' });
+      for (let i = 0; i < 2; i++) await wirePhase2Route({ ...ARGS, run: jest.fn() }).catch(() => undefined);
+      const e = await wirePhase2Route({ ...ARGS, run: jest.fn() }).catch((x) => x);
+      expect(billedRouteHttpError(e)).toEqual({ status: 503, body: expect.objectContaining({ code: 'REFUND_PENDING', retryable: true }) });
+      expect(billedRouteHttpError(e)?.body.error).not.toMatch(/returned/);
+    });
   });
 
   it('INVARIANT: the result cannot be persisted -> the charge is NOT confirmed (engine releases), the work is still returned', async () => {

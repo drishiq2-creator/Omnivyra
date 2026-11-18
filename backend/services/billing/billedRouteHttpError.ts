@@ -10,6 +10,10 @@
  *   503 { error, code: 'PRICING_UNAVAILABLE' } the action has no active price - a configuration gap, never "top up"
  *   503 { error, code: 'REPLAY_UNAVAILABLE', retryable: true }   an already-charged request's stored result could not
  *                                               be read - retry with the same key (never "start a new request")
+ *   409 { error, code: 'RESULT_UNAVAILABLE', retryable: false }  the charged result cannot be returned (durable read
+ *                                               failures): the original charge is refunded by the system; the text says
+ *                                               'have been returned' / 'are being returned' / 'not charged' truthfully
+ *   503 { error, code: 'REFUND_PENDING', retryable: true }   the refund could not be recorded yet - retry; nothing promised
  * Returns null for any other error - the route's own handling applies.
  */
 import { PaymentRequiredError } from './phase2EnforcementGate';
@@ -19,6 +23,8 @@ import {
   BilledRoutePaymentRequiredError,
   BilledRoutePricingUnavailableError,
   BilledRouteReplayUnavailableError,
+  BilledRouteResultUnavailableError,
+  BilledRouteRefundPendingError,
 } from './phase2RouteWiring';
 
 export type BilledRouteHttpBody = { error: string; code: string; required?: number; balance?: number; retryable?: boolean };
@@ -39,6 +45,12 @@ export function billedRouteHttpError(err: unknown): { status: number; body: Bill
   }
   if (err instanceof BilledRouteReclaimExhaustedError) {
     return { status: 500, body: { error: err.message, code: 'RECLAIM_CAP_EXHAUSTED', retryable: false } };
+  }
+  if (err instanceof BilledRouteResultUnavailableError) {
+    return { status: 409, body: { error: err.message, code: 'RESULT_UNAVAILABLE', retryable: false } };
+  }
+  if (err instanceof BilledRouteRefundPendingError) {
+    return { status: 503, body: { error: err.message, code: 'REFUND_PENDING', retryable: true } };
   }
   if (err instanceof BilledRouteReplayUnavailableError) {
     return { status: 503, body: { error: err.message, code: 'REPLAY_UNAVAILABLE', retryable: true } };
