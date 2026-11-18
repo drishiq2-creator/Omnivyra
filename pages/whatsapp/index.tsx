@@ -21,6 +21,7 @@ import {
   Wifi,
   WifiOff,
 } from 'lucide-react';
+import { WhatsAppGate } from '@/lib/whatsapp/whatsappAvailability';
 
 type WaAccount = {
   social_account_id: string | null;
@@ -69,7 +70,7 @@ const NAV_ITEMS = [
   },
 ];
 
-export default function WhatsAppHubPage() {
+function WhatsAppHubPageInner() {
   const { selectedCompanyId } = useCompanyContext();
   const companyId = selectedCompanyId || '';
 
@@ -266,5 +267,14 @@ export default function WhatsAppHubPage() {
         </main>
       </div>
     </>
+  );
+}
+
+/** b3 launch gate: hidden (coming soon) unless WhatsApp is enabled; fails closed. */
+export default function WhatsAppHubPage() {
+  return (
+    <WhatsAppGate>
+      <WhatsAppHubPageInner />
+    </WhatsAppGate>
   );
 }

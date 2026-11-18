@@ -29,6 +29,7 @@ import {
   Plus,
   FileText,
 } from 'lucide-react';
+import { WhatsAppGate } from '@/lib/whatsapp/whatsappAvailability';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -84,7 +85,7 @@ const StatusIcon = ({ status }: { status: string }) => {
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
-export default function WhatsAppBroadcastsPage() {
+function WhatsAppBroadcastsPageInner() {
   const { selectedCompanyId } = useCompanyContext();
   const companyId = selectedCompanyId || '';
 
@@ -588,5 +589,14 @@ export default function WhatsAppBroadcastsPage() {
         </main>
       </div>
     </>
+  );
+}
+
+/** b3 launch gate: hidden (coming soon) unless WhatsApp is enabled; fails closed. */
+export default function WhatsAppBroadcastsPage() {
+  return (
+    <WhatsAppGate>
+      <WhatsAppBroadcastsPageInner />
+    </WhatsAppGate>
   );
 }

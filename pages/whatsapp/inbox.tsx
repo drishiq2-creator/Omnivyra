@@ -22,6 +22,7 @@ import {
   Clock,
   CheckCircle,
 } from 'lucide-react';
+import { WhatsAppGate } from '@/lib/whatsapp/whatsappAvailability';
 
 type Thread = {
   id: string;
@@ -52,7 +53,7 @@ function windowTimeLeft(expiresAt: string | null | undefined): string | null {
   return h > 0 ? `${h}h ${m}m left` : `${m}m left`;
 }
 
-export default function WhatsAppInboxPage() {
+function WhatsAppInboxPageInner() {
   const { selectedCompanyId } = useCompanyContext();
   const companyId = selectedCompanyId || '';
 
@@ -363,5 +364,14 @@ export default function WhatsAppInboxPage() {
         </div>
       </div>
     </>
+  );
+}
+
+/** b3 launch gate: hidden (coming soon) unless WhatsApp is enabled; fails closed. */
+export default function WhatsAppInboxPage() {
+  return (
+    <WhatsAppGate>
+      <WhatsAppInboxPageInner />
+    </WhatsAppGate>
   );
 }

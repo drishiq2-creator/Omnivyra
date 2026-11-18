@@ -24,6 +24,7 @@ import {
   ChevronUp,
   Copy,
 } from 'lucide-react';
+import { WhatsAppGate } from '@/lib/whatsapp/whatsappAvailability';
 
 type Template = {
   id: string;
@@ -70,7 +71,7 @@ const LANGUAGE_OPTIONS = [
   { code: 'hi',    label: 'Hindi' },
 ];
 
-export default function WhatsAppTemplatesPage() {
+function WhatsAppTemplatesPageInner() {
   const { selectedCompanyId } = useCompanyContext();
   const companyId = selectedCompanyId || '';
 
@@ -497,5 +498,14 @@ export default function WhatsAppTemplatesPage() {
         </main>
       </div>
     </>
+  );
+}
+
+/** b3 launch gate: hidden (coming soon) unless WhatsApp is enabled; fails closed. */
+export default function WhatsAppTemplatesPage() {
+  return (
+    <WhatsAppGate>
+      <WhatsAppTemplatesPageInner />
+    </WhatsAppGate>
   );
 }

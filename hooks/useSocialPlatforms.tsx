@@ -33,6 +33,7 @@ import {
   Settings2,
   ChevronRight,
 } from 'lucide-react';
+import { useWhatsAppAvailability } from '../lib/whatsapp/whatsappAvailability';
 
 interface PlatformStatus {
   platform_key: string;
@@ -127,6 +128,9 @@ function isStale(result: CheckResult): boolean {
 
 
 export function useSocialPlatforms() {
+  // b3 launch gate: WhatsApp connect is hidden (and not named in the Meta consent copy) until
+  // WhatsApp is enabled; fails closed. a9's callback also skips the WhatsApp token while it's off.
+  const whatsapp = useWhatsAppAvailability();
   const router = useRouter();
   const { selectedCompanyId } = useCompanyContext();
   const [platforms, setPlatforms] = useState<PlatformStatus[]>([]);
@@ -708,7 +712,9 @@ export function useSocialPlatforms() {
                     <span className="ml-1 italic text-amber-600">
                       {isThreads
                         ? '- connect Instagram to enable Threads'
-                        : '- connects Facebook, Instagram & WhatsApp in one Meta consent'}
+                        : whatsapp === 'enabled'
+                          ? '- connects Facebook, Instagram & WhatsApp in one Meta consent'
+                          : '- connects Facebook & Instagram in one Meta consent'}
                     </span>
                   )}
                 </div>
@@ -787,7 +793,9 @@ export function useSocialPlatforms() {
                 onClick={() => handleConnect({ ...p, auth_path: authPath, oauth_configured: oauthConfigured })}
                 title={
                   p.platform_key === 'facebook' || p.platform_key === 'instagram' || p.platform_key === 'whatsapp'
-                    ? 'Meta requires one consent for Facebook, Instagram, and WhatsApp — all three will be connected together.'
+                    ? whatsapp === 'enabled'
+                      ? 'Meta requires one consent for Facebook, Instagram, and WhatsApp — all three will be connected together.'
+                      : 'Meta requires one consent for Facebook and Instagram — both will be connected together.'
                     : isThreads
                       ? 'Connect Instagram to enable Threads.'
                     : `Connect ${p.platform_label}`
@@ -1016,7 +1024,7 @@ export function useSocialPlatforms() {
   const connectedCount = platforms.filter((p) => p.connected).length;
 
   // All users see all platforms. oauth_configured controls whether Connect is available.
-  const visibleSocial = socialPlatforms;
+  const visibleSocial = socialPlatforms.filter((p) => p.platform_key !== 'whatsapp' || whatsapp === 'enabled');
   // Catalog API tab data — only active APIs visible to company admin
   const trendApis        = catalogApis.filter((a) => a.is_active && getCatalogApiCategory(a) === 'trend');
   const imageApis        = catalogApis.filter((a) => a.is_active && getCatalogApiCategory(a) === 'image');

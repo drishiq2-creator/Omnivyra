@@ -1,6 +1,7 @@
 import React from 'react';
 import Link from 'next/link';
 import IntegrationHubNav from '../../components/integrations/IntegrationHubNav';
+import { useWhatsAppAvailability, WHATSAPP_COMING_SOON } from '../../lib/whatsapp/whatsappAvailability';
 
 /**
  * PHASE 1 — Engagement & Outreach, a configuration HOME that currently has
@@ -99,6 +100,8 @@ const CHANNELS: readonly ChannelRow[] = Object.freeze([
 ]);
 
 export default function OutreachConfigurationPage() {
+  // b3 launch gate: the WhatsApp link shows only when WhatsApp is enabled (fails closed).
+  const whatsapp = useWhatsAppAvailability();
   return (
     <div className="min-h-screen bg-gray-50">
       <div className="mx-auto max-w-6xl px-4 py-6 sm:px-6 sm:py-8">
@@ -142,7 +145,11 @@ export default function OutreachConfigurationPage() {
                   </div>
                   <p className="mt-1 text-sm text-gray-500">{channel.note}</p>
                 </div>
-                {channel.href && (
+                {channel.name === 'WhatsApp' && whatsapp !== 'enabled' ? (
+                  whatsapp === 'hidden' ? (
+                    <span className="shrink-0 text-sm text-gray-500">{WHATSAPP_COMING_SOON}</span>
+                  ) : null
+                ) : channel.href && (
                   <Link
                     href={channel.href}
                     className="shrink-0 text-sm font-medium text-indigo-700 hover:text-indigo-900"
