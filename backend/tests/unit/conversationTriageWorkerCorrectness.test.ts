@@ -38,10 +38,29 @@ function query(table: string) {
     limit: (n: number) => { st.limit = n; return b; },
     maybeSingle: async () => { const r = run(); return { data: r.data ? r.data[0] ?? null : null, error: r.error }; },
     then: (ok: any, ko: any) => Promise.resolve(run()).then(ok, ko),
-    update: () => ({ eq: () => ({ eq: async () => { writes.push({ table, op: 'update' }); return { error: null }; } }) }),
-    insert: async () => {
+    update: (row: Row) => {
+      const conds: Array<[string, unknown]> = [];
+      const u: any = {
+        eq: (c: string, v: unknown) => { conds.push([c, v]); return u; },
+        select: async () => {
+          writes.push({ table, op: 'update' });
+          const hit = db.classifications.filter((r) => conds.every(([c, v]) => r[c] === v));
+          for (const r of hit) Object.assign(r, row);
+          return { data: hit.map(() => ({ id: 'x' })), error: null };
+        },
+        then: (ok: any, ko: any) => u.select().then(() => ({ error: null })).then(ok, ko),
+      };
+      return u;
+    },
+    insert: async (row: Row) => {
       writes.push({ table, op: 'insert' });
       if (db.failWrite > 0) { db.failWrite--; return { error: { message: 'write failed' } }; }
+      if (table === 'engagement_thread_classification') {
+        if (db.classifications.some((r) => r.thread_id === row.thread_id && r.organization_id === row.organization_id)) {
+          return { error: { code: '23505', message: 'duplicate key value violates unique constraint "idx_thread_classification_thread_org"' } };
+        }
+        db.classifications.push({ ...row });
+      }
       return { error: null };
     },
   };
@@ -103,7 +122,7 @@ describe('a) selection', () => {
     for (let i = 100; i < 103; i++) db.threads.push(thread(i, 'org-late', 1000 + i));
     const r = await runConversationTriageWorker();
     expect(classified.sort()).toEqual(['t0100', 't0101', 't0102']);
-    expect(r).toEqual({ processed: 3, errors: 0 });
+    expect(r).toEqual({ processed: 3, errors: 0, refused: 0 });
   });
 
   test(`a company gets at most ${TRIAGE_PER_ORG_CAP} threads per tick; others still get theirs`, async () => {
@@ -140,7 +159,7 @@ describe('d) reads fail closed', () => {
       db.failRead.add(table);
       const r = await runConversationTriageWorker();
       expect(classified).toEqual([]);
-      expect(r).toEqual({ processed: 0, errors: 1 });
+      expect(r).toEqual({ processed: 0, errors: 1, refused: 0 });
     });
 });
 
@@ -151,7 +170,7 @@ describe('c) one provider call per thread per tick', () => {
     const r = await runConversationTriageWorker();
     expect(classified).toEqual(['t0001']);
     expect(writes).toEqual([]);
-    expect(r).toEqual({ processed: 0, errors: 1 });
+    expect(r).toEqual({ processed: 0, errors: 1, refused: 0 });
   });
 
   test('a failing DB write is retried WITHOUT re-running the AI call', async () => {
@@ -160,7 +179,7 @@ describe('c) one provider call per thread per tick', () => {
     const r = await runConversationTriageWorker();
     expect(classified).toEqual(['t0001']);
     expect(attempts).toEqual([3]);
-    expect(r).toEqual({ processed: 1, errors: 0 });
+    expect(r).toEqual({ processed: 1, errors: 0, refused: 0 });
   });
 });
 
@@ -225,7 +244,7 @@ describe('billing (owner 2026-11-18: fixed 1 credit per classified conversation,
     expect(classified).toEqual(['t0001']);
     expect(charged).toEqual([]);
     expect(released).toEqual(['t0001']);
-    expect(r).toEqual({ processed: 0, errors: 1 });
+    expect(r).toEqual({ processed: 0, errors: 1, refused: 0 });
   });
 
   test('a write that keeps failing is NOT charged (released) - the AI ran once, the write was retried', async () => {
@@ -246,5 +265,72 @@ describe('billing (owner 2026-11-18: fixed 1 credit per classified conversation,
     expect(ewc.filter((o) => o.orgId === 'org-poor')).toHaveLength(1);   // one refusal, then skipped
     expect(classified).toEqual(['t0010']);
     expect(charged).toEqual(['t0010']);
+  });
+});
+
+describe('7c/b3: exactly one winner per selection state; one clock', () => {
+  test('first classification: a concurrent winner already inserted -> unique violation -> released, NOT charged, not retried', async () => {
+    db.threads.push(thread(1, 'org-a', 1));
+    // Another replica classifies the thread between our selection read and our insert.
+    const orig = classifyResult;
+    classifyResult = orig;
+    const mod = require('../../services/conversationTriageService');
+    const real = mod.classifyThread;
+    mod.classifyThread = async (id: string) => {
+      db.classifications.push({ thread_id: id, organization_id: 'org-a', classified_at: iso(0) });
+      return real(id);
+    };
+    try {
+      const r = await runConversationTriageWorker();
+      expect(charged).toEqual([]);
+      expect(released).toEqual(['t0001']);
+      expect(writes.filter((w) => w.op === 'insert')).toHaveLength(1);   // the lost race is not retried
+      expect(r.errors).toBe(1);
+    } finally { mod.classifyThread = real; }
+  });
+
+  test('re-classification is a compare-and-swap on classified_at: a concurrent re-classification wins -> we are NOT charged', async () => {
+    db.threads.push(thread(1, 'org-a', 1));
+    db.messages.push({ thread_id: 't0001', platform_created_at: iso(5) });
+    db.classifications.push({ thread_id: 't0001', organization_id: 'org-a', classified_at: iso(60) });   // stale
+    const mod = require('../../services/conversationTriageService');
+    const real = mod.classifyThread;
+    mod.classifyThread = async (id: string) => {
+      db.classifications[0].classified_at = iso(4);   // the other replica swapped first
+      return real(id);
+    };
+    try {
+      await runConversationTriageWorker();
+      expect(charged).toEqual([]);
+      expect(released).toEqual(['t0001']);
+    } finally { mod.classifyThread = real; }
+  });
+
+  test('re-classification that wins the swap is charged once and stores the newest MESSAGE time (no app clock)', async () => {
+    db.threads.push(thread(1, 'org-a', 1));
+    db.messages.push({ thread_id: 't0001', platform_created_at: iso(5) });
+    db.classifications.push({ thread_id: 't0001', organization_id: 'org-a', classified_at: iso(60) });
+    await runConversationTriageWorker();
+    expect(charged).toEqual(['t0001']);
+    expect(db.classifications[0].classified_at).toBe(iso(5));
+  });
+
+  test('a platform clock ahead of ours cannot re-select the thread next tick (message time vs message time)', async () => {
+    const future = new Date(Date.now() + 3600_000).toISOString();   // platform stamps 1h ahead of the worker
+    db.threads.push(thread(1, 'org-a', 1));
+    db.messages.push({ thread_id: 't0001', platform_created_at: future });
+    await runConversationTriageWorker();
+    expect(charged).toEqual(['t0001']);
+    charged.length = 0; ewc.length = 0;
+    await runConversationTriageWorker();   // no new message: must not be re-selected or re-charged
+    expect(ewc).toEqual([]);
+    expect(charged).toEqual([]);
+  });
+
+  test('a refused company is counted, not silent', async () => {
+    db.threads.push(thread(1, 'org-poor', 1));
+    refuseOrgs.add('org-poor');
+    const r = await runConversationTriageWorker();
+    expect(r).toEqual({ processed: 0, errors: 0, refused: 1 });
   });
 });

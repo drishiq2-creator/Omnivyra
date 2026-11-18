@@ -85,6 +85,9 @@ export const ACTIVITY_CLASS_ECONOMICS: Record<ActivityClass, ActivityClassEconom
 export const ACTIVITY_CLASS_MAP: Record<CreditAction, ActivityClass> = {
   // REPLY — micro single-shot
   ai_reply:                        'REPLY',
+  // OWNER 2026-11-18: triage is a FIXED 1 credit per classified conversation. REPLY's economics allow up to 3 - inert
+  // today (the worker charges amountOverride 1 via executeWithCredits, not the entry path); routing triage through an
+  // entry-consumption path would break the fixed fee, so conversationTriageFixedFee.test pins the price at 1.
   conversation_triage:             'REPLY',
   auto_post:                       'REPLY',
   reply_generation:                'REPLY',

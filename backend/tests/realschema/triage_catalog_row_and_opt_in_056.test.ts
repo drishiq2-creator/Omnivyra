@@ -56,6 +56,40 @@ describe('20270217000056 triage catalog row + opt-in', () => {
     });
   });
 
+  it('7c/b3: the single-charge index exists, is unique + valid; if ABSENT, re-applying 056 rebuilds it', async () => {
+    const idx = async () => (await db.query(
+      `SELECT i.indisunique, i.indisvalid, i.indisready, pg_get_indexdef(i.indexrelid) AS def FROM pg_index i
+         JOIN pg_class c ON c.oid = i.indexrelid WHERE c.relname = 'idx_thread_classification_thread_org'`)).rows;
+    expect(await idx()).toEqual([expect.objectContaining({ indisunique: true, indisvalid: true, indisready: true,
+      def: expect.stringContaining('(thread_id, organization_id)') })]);
+    await inRollback(async () => {
+      await db.query('DROP INDEX public.idx_thread_classification_thread_org');
+      expect(await idx()).toEqual([]);
+      await db.query(MIG);
+      expect(await idx()).toEqual([expect.objectContaining({ indisunique: true, indisvalid: true })]);
+    });
+  });
+
+  it('7c/b3: with the index absent and DUPLICATE (thread, org) rows present, 056 refuses (no silent delete)', async () => {
+    await inRollback(async () => {
+      await db.query('DROP INDEX public.idx_thread_classification_thread_org');
+      const T = '00000000-0000-4000-8000-0000000056b1';
+      // thread_id references engagement_threads (FK) - the thread must exist.
+      await db.query(
+        `INSERT INTO public.engagement_threads (id, platform, platform_thread_id, organization_id) VALUES ($1, 'test', 'c6-056-dup', $2)`, [T, ORG]);
+      for (let i = 0; i < 2; i++) {
+        await db.query(
+          `INSERT INTO public.engagement_thread_classification (organization_id, thread_id, classification_category, classification_confidence, sentiment, triage_priority, classified_at)
+           VALUES ($1, $2, 'general_comment', 0.5, 'neutral', 3, now())`, [ORG, T]);
+      }
+      await db.query('SAVEPOINT s056');
+      let msg = 'ok';
+      try { await db.query(MIG); } catch (e: any) { msg = String(e.message); }
+      await db.query('ROLLBACK TO SAVEPOINT s056');
+      expect(msg).toMatch(/duplicate \(thread_id, organization_id\) group/);
+    });
+  });
+
   it('rollback restores default true, deletes exactly the 056 row, and switches nobody back on', async () => {
     await inRollback(async () => {
       await db.query(`INSERT INTO public.engagement_system_controls (organization_id, triage_engine_enabled) VALUES ($1, false)`, [ORG]);

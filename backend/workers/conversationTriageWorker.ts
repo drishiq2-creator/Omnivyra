@@ -40,7 +40,7 @@ export const TRIAGE_PAGE_SIZE = 100;
 export const TRIAGE_MAX_PAGES = 5;
 export const TRIAGE_PER_ORG_CAP = 5;
 
-type Candidate = { threadId: string; organizationId: string };
+type Candidate = { threadId: string; organizationId: string; classifiedAt: string | null; latestMsgTime: string };
 
 /** Pick up to TRIAGE_BATCH_LIMIT threads needing classification; null = a read failed (fail closed). */
 async function selectCandidates(): Promise<Candidate[] | null> {
@@ -101,7 +101,8 @@ async function selectCandidates(): Promise<Candidate[] | null> {
       const n = perOrg.get(th.organization_id) ?? 0;
       if (n >= TRIAGE_PER_ORG_CAP) continue;
       perOrg.set(th.organization_id, n + 1);
-      picked.push({ threadId: th.id, organizationId: th.organization_id });
+      picked.push({ threadId: th.id, organizationId: th.organization_id,
+        classifiedAt: classifiedAt.has(th.id) ? (classifiedAt.get(th.id) ?? null) : null, latestMsgTime });
       if (picked.length >= TRIAGE_BATCH_LIMIT) break;
     }
     if (threads.length < TRIAGE_PAGE_SIZE) break;
@@ -109,41 +110,58 @@ async function selectCandidates(): Promise<Candidate[] | null> {
   return picked;
 }
 
-async function writeClassification(threadId: string, organizationId: string, result: NonNullable<Awaited<ReturnType<typeof classifyThread>>>): Promise<void> {
-  const { data: existing, error: readErr } = await supabase
-    .from('engagement_thread_classification')
-    .select('id')
-    .eq('thread_id', threadId)
-    .eq('organization_id', organizationId)
-    .maybeSingle();
-  if (readErr) throw new Error(readErr.message);
+/** Thrown when another worker already wrote this classification (lost CAS / unique violation): the hold is released. */
+export class TriageWriteLostRace extends Error {
+  constructor(threadId: string) { super(`triage write lost the race for ${threadId}`); this.name = 'TriageWriteLostRace'; }
+}
 
+/**
+ * Write the classification so that EXACTLY ONE worker wins per selection state - the charge follows the write (7c):
+ *   - first classification: INSERT; a concurrent winner makes it fail on the UNIQUE (thread_id, organization_id) index
+ *     (20270217000056 asserts that index exists and is valid) -> throw -> the loser's hold is released;
+ *   - re-classification: compare-and-swap UPDATE ... WHERE classified_at = <the value selection read>; 0 rows = another
+ *     worker already re-classified -> throw -> released.
+ * classified_at = the NEWEST MESSAGE TIMESTAMP seen at selection (b3/7c, one clock): the re-classify test is then
+ * `latest message > classified_at` on message timestamps only - the app clock never enters it, so clock skew cannot
+ * re-select (and re-charge) a thread every tick. A thread with no messages stores now() and is never re-selected
+ * (its latest-message time is '' and fails the comparison). classified_at has no other reader.
+ */
+async function writeClassification(c: Candidate, result: NonNullable<Awaited<ReturnType<typeof classifyThread>>>): Promise<void> {
+  const now = new Date().toISOString();
   const row = {
-    organization_id: organizationId,
-    thread_id: threadId,
+    organization_id: c.organizationId,
+    thread_id: c.threadId,
     classification_category: result.classification_category,
     classification_confidence: result.classification_confidence,
     sentiment: result.sentiment,
     triage_priority: result.triage_priority,
-    classified_at: new Date().toISOString(),
+    classified_at: c.latestMsgTime || now,
   };
 
-  if (existing) {
-    const { error: updateErr } = await supabase
-      .from('engagement_thread_classification')
-      .update(row)
-      .eq('thread_id', threadId)
-      .eq('organization_id', organizationId);
-    if (updateErr) throw new Error(updateErr.message);
-  } else {
+  if (c.classifiedAt === null) {
     const { error: insertErr } = await supabase.from('engagement_thread_classification').insert(row);
-    if (insertErr) throw new Error(insertErr.message);
+    if (insertErr) {
+      if ((insertErr as { code?: string }).code === '23505') throw new TriageWriteLostRace(c.threadId);
+      throw new Error(insertErr.message);
+    }
+    return;
   }
+  const { data: swapped, error: updateErr } = await supabase
+    .from('engagement_thread_classification')
+    .update(row)
+    .eq('thread_id', c.threadId)
+    .eq('organization_id', c.organizationId)
+    .eq('classified_at', c.classifiedAt)
+    .select('id');
+  if (updateErr) throw new Error(updateErr.message);
+  if (!Array.isArray(swapped) || swapped.length !== 1) throw new TriageWriteLostRace(c.threadId);
 }
 
 export async function runConversationTriageWorker(): Promise<{
   processed: number;
   errors: number;
+  /** Companies whose hold was refused this tick (no credits / no account / org control) - visible, not silent (7c). */
+  refused: number;
 }> {
   const startMs = Date.now();
   let processed = 0;
@@ -153,12 +171,13 @@ export async function runConversationTriageWorker(): Promise<{
   if (candidates === null) {
     console.error('[conversationTriage] triage_selection_read_failed - tick skipped, no AI call');
     void recordMetric('conversation_triage_worker', 'errors', 1, 'jobs').catch(() => {});
-    return { processed: 0, errors: 1 };
+    return { processed: 0, errors: 1, refused: 0 };
   }
 
   const tick = String(startMs);
   const refusedOrgs = new Set<string>();
-  for (const { threadId, organizationId } of candidates) {
+  for (const cand of candidates) {
+    const { threadId, organizationId } = cand;
     if (refusedOrgs.has(organizationId)) continue;
     const controls = await getControls(organizationId);
     if (!controls.triage_engine_enabled) continue;   // OPT-IN: off unless the company turned it on
@@ -178,9 +197,16 @@ export async function runConversationTriageWorker(): Promise<{
           // ONE provider call per thread per tick (F2c); a null result throws -> hold released, nothing charged.
           const result = await classifyThread(threadId, organizationId);
           if (!result) throw new Error('TRIAGE_NO_RESULT');
-          // Only the idempotent DB write is retried - never the AI call. A failed write throws -> released.
-          await executeWithRetry('conversationTriageWorker', { threadId, organizationId },
-            () => writeClassification(threadId, organizationId, result));
+          // Only the DB write is retried - never the AI call. A lost race is final (not retried); any failure throws ->
+          // the hold is released, nothing charged.
+          // A lost race is caught INSIDE the retried function (executeWithRetry would otherwise retry it and dead-letter
+          // it) and re-thrown after, so the hold is still released.
+          let lostRace = false;
+          await executeWithRetry('conversationTriageWorker', { threadId, organizationId }, async () => {
+            try { await writeClassification(cand, result); }
+            catch (e) { if (e instanceof TriageWriteLostRace) { lostRace = true; return; } throw e; }
+          });
+          if (lostRace) throw new TriageWriteLostRace(threadId);
           return true;
         },
       });
@@ -189,6 +215,7 @@ export async function runConversationTriageWorker(): Promise<{
       } else if (outcome.status === 'insufficient_credits' || outcome.status === 'no_credit_account'
         || outcome.status === 'org_control_blocked' || outcome.status === 'not_a_member') {
         refusedOrgs.add(organizationId);   // skip this company for the rest of the tick; no retry storm
+        void recordMetric('conversation_triage_worker', 'refused_org', 1, 'jobs').catch(() => {});
       }
     } catch {
       errors++;   // executor threw (null result / failed write) - the hold was released by executeWithCredits
@@ -197,7 +224,8 @@ export async function runConversationTriageWorker(): Promise<{
 
   void recordMetric('conversation_triage_worker', 'processed', processed, 'jobs').catch(() => {});
   void recordMetric('conversation_triage_worker', 'errors', errors, 'jobs').catch(() => {});
+  void recordMetric('conversation_triage_worker', 'refused', refusedOrgs.size, 'jobs').catch(() => {});
   void recordMetric('conversation_triage_worker', 'duration_ms', Date.now() - startMs, 'ms').catch(() => {});
 
-  return { processed, errors };
+  return { processed, errors, refused: refusedOrgs.size };
 }
