@@ -62,7 +62,7 @@ import {
 type Result =
   | { companyId: string; selfJoined?: boolean; matchedCompanyName?: string }
   | { companyExists: true; matchedCompanyId: string; matchedCompanyName: string; adminName: string | null }
-  | { code: string; error: string; limit?: number; current?: number | null }
+  | { code: string; error: string; limit?: number; current?: number | null; retryable?: boolean; conflict?: string }
   | { error: string };
 
 // Website-resolution helpers now live in backend/services/validatedWebsiteService.ts

@@ -18,8 +18,12 @@ const ins = (id: string, cols: Record<string, unknown>) => {
   const vals = [id, `C050 ${id.slice(-2)}`, ...Object.values(cols)];
   return db.query(`INSERT INTO public.companies (${keys.join(', ')}) VALUES (${keys.map((_, i) => `$${i + 1}`).join(', ')})`, vals);
 };
-const errOf = async (p: Promise<unknown>) => {
-  try { await p; return null; } catch (e) { return e as { code?: string; message?: string; detail?: string }; }
+// CI-491: each probe runs under its own SAVEPOINT - an expected error must not abort the surrounding transaction (the next
+// statement then failed with 25P02 instead of reaching the CHECK). Takes a THUNK so the SAVEPOINT is queued before the probe.
+const errOf = async (fn: () => Promise<unknown>) => {
+  await db.query('SAVEPOINT e050');
+  try { await fn(); await db.query('RELEASE SAVEPOINT e050'); return null; }
+  catch (e) { await db.query('ROLLBACK TO SAVEPOINT e050'); return e as { code?: string; message?: string; detail?: string }; }
 };
 
 describe('20270217000050 companies_domain_unique_partial', () => {
@@ -37,7 +41,7 @@ describe('20270217000050 companies_domain_unique_partial', () => {
     'a duplicate %s -> 23505 naming the index, classified by the app', async (col, expected) => {
       await inRollback(async () => {
         await ins(A, { [col]: 'acme-050.example' });
-        const e = await errOf(ins(B, { [col]: 'acme-050.example' }));
+        const e = await errOf(() => ins(B, { [col]: 'acme-050.example' }));
         expect(e?.code).toBe('23505');
         expect(classifyCompanyDomainConflict({ code: e?.code, message: e?.message, details: e?.detail })).toBe(expected);
       });
@@ -46,23 +50,23 @@ describe('20270217000050 companies_domain_unique_partial', () => {
   it.each([['website_domain'], ['admin_email_domain']])(
     'a NON-CANONICAL %s (case / spaces) is refused by the CHECK (23514) - the index and exact .eq lookups agree', async (col) => {
       await inRollback(async () => {
-        expect((await errOf(ins(A, { [col]: '  ACME-050.example ' })))?.code).toBe('23514');
-        expect((await errOf(ins(B, { [col]: 'Acme-050.example' })))?.code).toBe('23514');
+        expect((await errOf(() => ins(A, { [col]: '  ACME-050.example ' })))?.code).toBe('23514');
+        expect((await errOf(() => ins(B, { [col]: 'Acme-050.example' })))?.code).toBe('23514');
       });
     });
 
   it('a DELETED holder and empty strings do not conflict; an INACTIVE holder still does', async () => {
     await inRollback(async () => {
       await ins(A, { website_domain: 'gone-050.example', deleted_at: new Date().toISOString() });
-      expect(await errOf(ins(B, { website_domain: 'gone-050.example' }))).toBeNull();
+      expect(await errOf(() => ins(B, { website_domain: 'gone-050.example' }))).toBeNull();
     });
     await inRollback(async () => {
       await ins(A, { website_domain: '' });
-      expect(await errOf(ins(B, { website_domain: '' }))).toBeNull();
+      expect(await errOf(() => ins(B, { website_domain: '' }))).toBeNull();
     });
     await inRollback(async () => {
       await ins(A, { website_domain: 'paused-050.example', status: 'inactive' });
-      expect((await errOf(ins(B, { website_domain: 'paused-050.example' })))?.code).toBe('23505');
+      expect((await errOf(() => ins(B, { website_domain: 'paused-050.example' })))?.code).toBe('23505');
     });
   });
 
