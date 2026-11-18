@@ -14,6 +14,7 @@ import { ownedDbTable } from '../db/writeOwner';
  * Changes are logged to `strategy_evolution_log` for audit and rollback.
  */
 
+import { logger } from './logger';
 import { supabase } from '../db/supabaseClient';
 import { rankPlatformsByPerformance } from './platformPerformanceRanker';
 import { evaluateMarketPosition } from './marketPositioningEngine';
@@ -213,8 +214,12 @@ export async function evolveStrategy(companyId: string): Promise<StrategyEvoluti
 
   // ── Persist to strategy_evolution_log ─────────────────────────────────────
   let logId: string | undefined;
+  // c6 2026-11-18 (b3, the "ignored write" group): the charge below is for an evolution that is RECORDED. The insert
+  // reports failure as { error } (it does not throw), which was ignored - a failed save was still charged. Now a save
+  // that fails (or returns no row) means NO charge, loudly.
+  let persisted = false;
   try {
-    const { data: log } = await ownedDbTable('strategy_evolution_log').insert({
+    const { data: log, error: logErr } = await ownedDbTable('strategy_evolution_log').insert({
       company_id:       companyId,
       previous_snapshot: current,
       new_snapshot:      evolved,
@@ -223,8 +228,12 @@ export async function evolveStrategy(companyId: string): Promise<StrategyEvoluti
       confidence,
       created_at:        new Date().toISOString(),
     }).select('id').maybeSingle();
+    if (logErr) throw new Error(logErr.message);
     logId = (log as { id: string } | null)?.id;
-  } catch (_) { /* non-blocking */ }
+    persisted = Boolean(logId);
+  } catch (err) {
+    logger.error('strategy_evolution_unpersisted_not_charged', { companyId, message: (err as Error)?.message });
+  }
 
   await logDecision({
     company_id:    companyId,
@@ -239,7 +248,7 @@ export async function evolveStrategy(companyId: string): Promise<StrategyEvoluti
     outcome: `Log ID: ${logId}`,
   });
 
-  await deductCreditsIfValueAwaited(companyId, 'strategy_evolution', changes.length > 0, { note: `Strategy evolved: ${changes.length} changes` });
+  await deductCreditsIfValueAwaited(companyId, 'strategy_evolution', persisted && changes.length > 0, { note: `Strategy evolved: ${changes.length} changes` });
 
   return {
     company_id:        companyId,
