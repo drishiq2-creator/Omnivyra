@@ -166,9 +166,11 @@ type EmailPayload =
   | CreditAlertPayload;
 
 /**
- * A DIRECT send. `context.idempotencyKey` is for the log line ONLY: send-transactional-email does not
- * read it, so a direct send is NOT deduplicated (CLASS-2 D11). A send that must be once-only goes
- * through the email_jobs queue (enqueueEmailJob), whose unique idempotency_key is the constraint.
+ * A DIRECT send. `context.idempotencyKey` is put in the body, and send-transactional-email honours it
+ * (reserve-first; a duplicate is answered without sending; an uncertain send is never resent - CI-248).
+ * CLASS-2 D11 predates that: when the function still ignored the key, a once-only send had to go through
+ * the email_jobs queue (enqueueEmailJob, unique idempotency_key), which is why the inbound signup notice
+ * is QUEUED. Both mechanisms now deduplicate; the queue also gives that notice its retry/dead-letter path.
  */
 async function invokeEdgeFunction(payload: EmailPayload, context: { idempotencyKey?: string }): Promise<void> {
   // The key travels IN THE BODY: the function honours it (reserve-first idempotency). It used to be logged here

@@ -7,11 +7,14 @@ const invoked: Array<{ fn: string; body: Record<string, unknown> }> = [];
 jest.mock('../../db/supabaseClient', () => ({
   supabase: { functions: { invoke: async (fn: string, opts: { body: Record<string, unknown> }) => { invoked.push({ fn, body: opts.body }); return { data: { ok: true }, error: null }; } } },
 }));
+// The inbound signup notice is QUEUED (CLASS-2 D11, re-landed with CI-248): its key is the email_jobs constraint.
+const enqueued: Array<Record<string, unknown>> = [];
+jest.mock('../../services/emailJobsService', () => ({ enqueueEmailJob: async (job: Record<string, unknown>) => { enqueued.push(job); return { id: 'ej-1' }; } }));
 jest.mock('../../services/logger', () => ({ logger: { warn: () => undefined, info: () => undefined, error: () => undefined, debug: () => undefined } }));
 
 import { sendCompanyAdminReferral, sendCreditAlert, sendInboundSignupNoticeToAdmin, sendInvite } from '../../services/emailService';
 
-beforeEach(() => { invoked.length = 0; });
+beforeEach(() => { invoked.length = 0; enqueued.length = 0; });
 
 it('each live keyed helper puts its key in the body sent to the function', async () => {
   await sendInvite('a@example.test', 'https://app.test/i', 'reinvite:co:u');
@@ -21,8 +24,11 @@ it('each live keyed helper puts its key in the body sent to the function', async
   expect(invoked.map((i) => [i.fn, i.body.type, i.body.idempotencyKey])).toEqual([
     ['send-transactional-email', 'team_invite', 'reinvite:co:u'],
     ['send-transactional-email', 'company_referral', 'company-referral:p@example.test'],
-    ['send-transactional-email', 'inbound_signup_notice', 'inbound-signup-notice:co:p@example.test'],
     ['send-transactional-email', 'credit_alert', 'credit_alert:org:2026-11'],
+  ]);
+  // The inbound signup notice carries its key into the QUEUE (D11), not a direct send.
+  expect(enqueued.map((j) => [j.templateKey, j.idempotencyKey])).toEqual([
+    ['inbound_signup_notice', 'inbound-signup-notice:co:p@example.test'],
   ]);
 });
 
