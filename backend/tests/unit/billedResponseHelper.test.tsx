@@ -88,10 +88,10 @@ describe('classifyBilledResponse: keyed on status + code only', () => {
     expect(classifyBilledResponse(422, { error: 'Bad input' }, 'Failed')).toEqual({ kind: 'error', message: 'Bad input' });
   });
 
-  it('RECLAIM_CAP_EXHAUSTED never claims "not charged" (c6: earlier attempts may have used a start fee)', () => {
+  it('RECLAIM_CAP_EXHAUSTED: a full refund, so "not charged" (owner ruling; c6 releases the entry fee on failure)', () => {
     const out = classifyBilledResponse(500, { code: 'RECLAIM_CAP_EXHAUSTED', retryable: false }, 'x');
     expect(out).toEqual({ kind: 'retry', message: RECLAIM_MESSAGE });
-    expect(billedOutcomeText(out)).not.toMatch(/weren.t charged|not charged/i);
+    expect(billedOutcomeText(out)).toBe('That didn’t finish on our side and you weren’t charged. Please try again.');
   });
 
   it('a failure that SAYS what was charged states it (blog billing object), instead of "uncertain"', () => {

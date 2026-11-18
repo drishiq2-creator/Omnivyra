@@ -36,7 +36,7 @@ export type BilledOutcome =
   | { kind: 'error'; message: string };
 
 export const SETTLEMENT_PENDING_MESSAGE = 'Done. Billing for this is still being finalised. You won’t be charged twice, so there’s no need to run it again.';
-export const RECLAIM_MESSAGE = 'This request failed repeatedly, so we stopped retrying it. Any attempt that had already started used a small start fee; nothing more will be charged for it.';
+export const RECLAIM_MESSAGE = 'That didn’t finish on our side and you weren’t charged. Please try again.';
 export const UNCERTAIN_MESSAGE = 'We’re not sure this went through. Please check the result before trying again.';
 /** c6's agreed contract (2026-11-13): a 2xx `executed` body may carry settlementPending. */
 export const SETTLE_AMBIGUOUS_CODE = 'CREDIT_SETTLE_AMBIGUOUS';
@@ -98,9 +98,10 @@ export function classifyBilledResponse(status: number, body: unknown, fallback: 
   if (code === 'BILLING_UNAVAILABLE') {
     return { kind: 'retry', message: 'Billing is unavailable right now, so nothing was started. Please try again shortly.' };
   }
-  // Matched on the code alone, deliberately: it is unique to the reclaim path. c6 (2026-11-18):
-  // NOT "you weren't charged" - earlier failed attempts may each have used a small
-  // non-refundable start fee. Wording is c6's proposal, pending b3's confirmation.
+  // Matched on the code alone, deliberately: it is unique to the reclaim path. "You weren't
+  // charged" is TRUE only because of the owner's ruling (b3, 2026-11-18): failures on our side
+  // are refunded in full, and c6 releases the entry fee on failure, pinned server-side.
+  // RELEASE DEPENDENCY: ship this helper WITH or AFTER that c6 change, never before.
   if (code === 'RECLAIM_CAP_EXHAUSTED') {
     return { kind: 'retry', message: RECLAIM_MESSAGE };
   }
