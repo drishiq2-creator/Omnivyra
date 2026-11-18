@@ -541,7 +541,9 @@ async function writeUrnCache(
 ): Promise<{ ok: true } | { ok: false; error: LinkedInUploadFailure }> {
   const fail = (message: string): { ok: false; error: LinkedInUploadFailure } => ({
     ok: false,
-    error: { code: 'LINKEDIN_MEDIA_CACHE_WRITE_FAILED', message, retryable: true },
+    // NOT retryable (7c): the only caller logs this and continues (the asset IS uploaded). Were the error ever
+    // propagated, 'retryable' would retry the UPLOAD - re-uploading every time, since the cache never persists.
+    error: { code: 'LINKEDIN_MEDIA_CACHE_WRITE_FAILED', message, retryable: false },
   });
   try {
     for (let attempt = 1; attempt <= URN_CACHE_WRITE_ATTEMPTS; attempt += 1) {

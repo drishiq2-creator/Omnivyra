@@ -3,6 +3,8 @@
 -- the media again). The code treats a missing column as a cache miss, so it keeps working.
 -- SOUND TO DROP: only while the column carries the mark the apply records ('owned by migration 20270217000020 (Linke...'); a
 -- column of this name WITHOUT the mark predates the migration and is refused, never dropped.
+-- The mark literal here must match the apply's COMMENT ON COLUMN (20270217000020) exactly; a drift fails
+-- safe (this rollback refuses) but would wrongly report the column as not ours (7c).
 BEGIN;
 DO $owned$
 BEGIN

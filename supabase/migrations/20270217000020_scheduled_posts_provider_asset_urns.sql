@@ -34,6 +34,9 @@ END
 $preflight$;
 
 ALTER TABLE public.scheduled_posts ADD COLUMN IF NOT EXISTS provider_asset_urns jsonb;
+-- The ownership mark literal below must match, character for character, the one the rollback
+-- (rollbacks/scheduled_posts_provider_asset_urns_rollback.sql) checks. A drift fails SAFE (the rollback
+-- refuses to drop its own column) but says, misleadingly, that the column is not ours (7c).
 COMMENT ON COLUMN public.scheduled_posts.provider_asset_urns IS 'owned by migration 20270217000020 (LinkedIn URN cache); its rollback drops it only while this comment stands';
 
 DO $verify$
