@@ -130,9 +130,10 @@ function isRearmable(job: Pick<PublishingJob, 'status' | 'job_type'>): boolean {
  * `processing` job and ran it again (a DUPLICATE post), and re-armed a `published` job or an
  * outcome-unknown `dead_letter` one past the confirm gate. Now: insert ON CONFLICT DO NOTHING (the
  * unique key publishing_jobs_idempotency_unique is the constraint); an existing job is re-armed
- * only from REARMABLE_STATUSES, by a compare-and-set on the status read with the row count
- * checked. A job that is processing / published / dead_letter is returned UNTOUCHED and the
- * caller decides from its status.
+ * only when isRearmable() says so (REARMABLE_STATUSES, plus a PUBLISHED update_post - see
+ * isRearmable), by a compare-and-set on the status read with the row count checked. Any other job -
+ * processing, dead_letter, or a published CREATE - is returned UNTOUCHED and the caller decides
+ * from its status.
  */
 export async function createPublishingJob(input: CreatePublishingJobInput): Promise<PublishingJob> {
   const now = new Date().toISOString();
