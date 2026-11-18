@@ -26,7 +26,12 @@
  */
 import * as fs from 'fs';
 import * as path from 'path';
-import { db, inRollback, seedTenants, attempt, ORG_A, ORG_B, newPerson, newLead } from './setup';
+import { db, inRollback as baseInRollback, seedTenants, attempt, ORG_A, ORG_B, newPerson, newLead } from './setup';
+import { expireOrgFreeCreditsProductionState } from './pre053FunctionState';
+
+// CI-486: every case re-applies SEC-B, whose preflight requires expire_org_free_credits - present in production when
+// SEC-B ran, dropped later by 20270217000053. Each transaction restores it first (no-op on a replay without 053).
+const inRollback = <T,>(fn: () => Promise<T>): Promise<T> => baseInRollback(async () => { await expireOrgFreeCreditsProductionState(); return fn(); });
 
 const MIG = path.join(__dirname, '..', '..', '..', 'supabase', 'migrations');
 const ROLLBACKS = path.join(MIG, 'rollbacks');
