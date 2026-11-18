@@ -1,9 +1,12 @@
 /**
  * OWNER rulings 2026-11-18 (via b3): a blog is a FIXED 40 credits on both blog routes.
  *   hold 40 BEFORE any AI call (refusal -> typed 402, nothing generated); success -> 40; quality-gate 422 -> refunded in
- *   full; any other failure -> min(40, ceil(40 x provider calls / 32)) counted by the gateway inside the blog's credit
- *   scope; 0 calls -> released. One blog = one hold (the routes no longer use wirePhase2Route('blog_generation')).
- *   Every AI call carries the blog's reference id (b3: measure real cost per blog).
+ *   full. OWNER general rule 2026-11-18: ANY failure on our side with nothing delivered -> released in full (was:
+ *   min(40, ceil(40 x calls / 32)); that formula is now only the price of a DELIVERED partial blog, which no path
+ *   produces). One blog = one hold. Every AI call carries the blog's reference id; the gateway's provider-call count
+ *   is logged on every settle (b3: measure real cost per blog).
+ *   b3 BLOCKING (7c): the Idempotency-Key is REQUIRED (no random fallback); a key still held by an in-flight run is
+ *   409, never a second run; super-admin 'Blog Create' (job_type blog_generation) gates both routes.
  */
 import * as fs from 'fs';
 import * as path from 'path';
@@ -20,10 +23,19 @@ jest.mock('../../services/creditExecutionService', () => ({
   releaseCreditReservation: async (h: any) => { if (settleThrows) throw new Error('ledger down'); calls.push({ fn: 'release', args: [h] }); return { status: 'released' }; },
   makeIdempotencyKey: (...p: string[]) => p.join(':'),
 }));
-jest.mock('../../services/logger', () => ({ logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn() } }));
+const mockInfo = jest.fn();
+jest.mock('../../services/logger', () => ({ logger: { info: (...a: unknown[]) => mockInfo(...a), warn: jest.fn(), error: jest.fn() } }));
+let mockSwitch: any = { enabled: true };
+jest.mock('../../services/intelligenceConfigService', () => ({
+  getResolvedConfigStrict: async (companyId: string | null, jobType: string) => {
+    if (mockSwitch instanceof Error) throw mockSwitch;
+    return mockSwitch ? { job_type: jobType, companyId, ...mockSwitch } : null;
+  },
+}));
 
 import {
   BLOG_CREDITS, holdBlog, isBlogHoldRefusal, partialBlogCredits, runBlogWithBilling, blogBillingOf,
+  blogReferenceId, blogGenerationRefusal, isBlogRefusal,
 } from '../../services/blog/blogBilling';
 import { getActiveCreditHandle } from '../../services/billing/aiGatewayBillingGuard';
 
@@ -33,7 +45,7 @@ class QualityGate extends Error {}
 /** Simulates the gateway: each provider dispatch inside the scope calls the handle's onProviderCall. */
 const providerCalls = (n: number) => { for (let i = 0; i < n; i++) getActiveCreditHandle()?.onProviderCall?.(); };
 
-beforeEach(() => { calls.length = 0; reserveResult = { status: 'reserved' }; settleThrows = false; });
+beforeEach(() => { calls.length = 0; reserveResult = { status: 'reserved' }; settleThrows = false; mockSwitch = { enabled: true }; mockInfo.mockClear(); });
 
 async function held() {
   const h = await holdBlog({ orgId: ORG, userId: ORG, referenceId: REF, validateMembership: false });
@@ -46,6 +58,16 @@ describe('hold', () => {
   test('holds exactly 40 as blog_post, keyed on the request reference', async () => {
     await holdBlog({ orgId: ORG, userId: ORG, referenceId: REF, validateMembership: true });
     expect(calls[0].args[0]).toMatchObject({ action: 'blog_post', amountOverride: 40, referenceId: REF, referenceType: 'blog_post' });
+  });
+  test('a key still HELD by an in-flight run (already_reserved) -> 409 BLOG_ALREADY_IN_PROGRESS, never a second run', async () => {
+    reserveResult = { status: 'already_reserved' };
+    const r = await holdBlog({ orgId: ORG, userId: ORG, referenceId: REF, validateMembership: true });
+    expect(r).toMatchObject({ ok: false, status: 409, code: 'BLOG_ALREADY_IN_PROGRESS', retryable: true });
+  });
+  test('a key already settled (already_confirmed) -> 409 RESERVATION_ALREADY_SETTLED (the same click is charged once)', async () => {
+    reserveResult = { status: 'already_confirmed' };
+    const r = await holdBlog({ orgId: ORG, userId: ORG, referenceId: REF, validateMembership: true });
+    expect(r).toMatchObject({ ok: false, status: 409, code: 'RESERVATION_ALREADY_SETTLED', retryable: false });
   });
   test('a refused hold is a typed 402 with required/available', async () => {
     reserveResult = { status: 'insufficient_credits', required: 40, available: 12 };
@@ -76,13 +98,14 @@ describe('settle', () => {
     expect(calls.map((c) => c.fn)).toEqual(['release']);
   });
 
-  test('a run stopped after 8 provider calls -> charged 10, the rest released', async () => {
+  test('OWNER: a failure AFTER 8 provider calls (nothing delivered) -> released in full, nothing charged', async () => {
     const h = await held();
     let caught: unknown;
-    try { await runBlogWithBilling({ reservation: h, run: async () => { providerCalls(8); throw new Error('boom'); }, isQualityGateRefusal: () => false }); }
+    try { await runBlogWithBilling({ reservation: h, run: async () => { providerCalls(8); throw new Error('provider 500'); }, isQualityGateRefusal: () => false }); }
     catch (e) { caught = e; }
-    expect(blogBillingOf(caught)).toEqual({ charged: 10, released: 30, reason: 'partial' });
-    expect(calls).toEqual([{ fn: 'confirmToActual', args: [expect.anything(), 10] }]);
+    expect(blogBillingOf(caught)).toEqual({ charged: 0, released: 40, reason: 'failed' });
+    expect(calls.map((c) => c.fn)).toEqual(['release']);
+    expect(mockInfo).toHaveBeenCalledWith('blog_credit_settled', expect.objectContaining({ reason: 'failed', charged: 0, providerCalls: 8 }));
   });
 
   test('a failure before any provider call -> released, nothing charged', async () => {
@@ -90,7 +113,7 @@ describe('settle', () => {
     let caught: unknown;
     try { await runBlogWithBilling({ reservation: h, run: async () => { throw new Error('boom'); }, isQualityGateRefusal: () => false }); }
     catch (e) { caught = e; }
-    expect(blogBillingOf(caught)).toEqual({ charged: 0, released: 40, reason: 'not_started' });
+    expect(blogBillingOf(caught)).toEqual({ charged: 0, released: 40, reason: 'failed' });
     expect(calls.map((c) => c.fn)).toEqual(['release']);
   });
 
@@ -104,8 +127,36 @@ describe('settle', () => {
   test('the counting scope is per blog: calls outside it are not counted', async () => {
     const h = await held();
     providerCalls(10);   // no active handle here
-    const r = await runBlogWithBilling({ reservation: h, run: async () => { throw new Error('x'); }, isQualityGateRefusal: () => false }).catch((e) => e);
-    expect(blogBillingOf(r)).toMatchObject({ reason: 'not_started' });
+    await runBlogWithBilling({ reservation: h, run: async () => { providerCalls(2); return 1; }, isQualityGateRefusal: () => false });
+    expect(mockInfo).toHaveBeenCalledWith('blog_credit_settled', expect.objectContaining({ reason: 'completed', providerCalls: 2 }));
+  });
+});
+
+describe('Idempotency-Key required (b3 BLOCKING)', () => {
+  test.each([[undefined], [''], ['short'], [['   ']]])('%p -> 400 IDEMPOTENCY_KEY_REQUIRED (no random fallback)', (h) => {
+    const r = blogReferenceId(h);
+    expect(isBlogRefusal(r)).toBe(true);
+    expect(r).toMatchObject({ ok: false, status: 400, code: 'IDEMPOTENCY_KEY_REQUIRED', retryable: false });
+  });
+  test('a sent key is the reference (trimmed), deterministic across calls', () => {
+    expect(blogReferenceId('  click-key-123  ')).toEqual({ ok: true, referenceId: 'click-key-123' });
+    expect(blogReferenceId(['click-key-123'])).toEqual(blogReferenceId('click-key-123'));
+  });
+});
+
+describe("kill-switch: super-admin 'Blog Create' (job_type blog_generation)", () => {
+  test('switched off -> 403 BLOG_GENERATION_DISABLED', async () => {
+    mockSwitch = { enabled: false };
+    expect(await blogGenerationRefusal(ORG)).toMatchObject({ ok: false, status: 403, code: 'BLOG_GENERATION_DISABLED', retryable: false });
+  });
+  test('on -> allowed (null)', async () => { expect(await blogGenerationRefusal(ORG)).toBeNull(); });
+  test('a read error REFUSES (503, retryable) - never read as "on"', async () => {
+    mockSwitch = new Error('db down');
+    expect(await blogGenerationRefusal(ORG)).toMatchObject({ ok: false, status: 503, code: 'BLOG_SWITCH_UNAVAILABLE', retryable: true });
+  });
+  test('no switch row configured -> allowed (logged)', async () => {
+    mockSwitch = null;
+    expect(await blogGenerationRefusal(ORG)).toBeNull();
   });
 });
 
@@ -124,6 +175,15 @@ describe('source pins', () => {
     expect(s).toMatch(/runBlogWithBilling\(/);
     expect(s).not.toMatch(/wirePhase2Route\(/);
     expect(s).toMatch(/referenceType: 'blog_post', referenceId/);   // every AI call carries the blog's reference id
+    expect(s).toMatch(/blogGenerationRefusal\(company_id\)/);        // the kill-switch gates the route
+    expect(s).toMatch(/if \(isBlogRefusal\(ref\)\)/);                 // no key -> refused before the hold
+    expect(s.indexOf('isBlogRefusal(ref)')).toBeLessThan(s.indexOf('holdBlog('));
+  });
+  test('the customer billing page prices the CHARGED key blog_post, never blog_generation (price shown = price charged)', () => {
+    const s = read('pages/company/billing/index.tsx');
+    const list = s.slice(s.indexOf('const COST_REFERENCE_ACTIONS'), s.indexOf('];', s.indexOf('const COST_REFERENCE_ACTIONS')));
+    expect(list).toContain("'blog_post'");
+    expect(list).not.toContain("'blog_generation'");
   });
   test('BLOG_CREDITS is the owner price 40', () => { expect(BLOG_CREDITS).toBe(40); });
 });

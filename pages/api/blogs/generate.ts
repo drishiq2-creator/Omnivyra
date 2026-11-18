@@ -37,7 +37,7 @@ import {
   type BlogGenerationRequest,
 } from '../../../lib/blog/runBlogGeneration';
 import { runUnifiedLongFormGeneration } from '../../../lib/content/unifiedLongFormEngine';
-import { blogBillingOf, blogReferenceId, holdBlog, isBlogHoldRefusal, runBlogWithBilling } from '../../../backend/services/blog/blogBilling';
+import { blogBillingOf, blogGenerationRefusal, blogReferenceId, holdBlog, isBlogHoldRefusal, isBlogRefusal, runBlogWithBilling } from '../../../backend/services/blog/blogBilling';
 import type { BlogAngle } from '../../../lib/blog/blogGenerationEngine';
 import { isValidBlogFormat } from '../../../lib/blog/blogStructureTemplates';
 import { ThoughtLeadershipQualityGateError } from '../../../backend/services/longForm/thoughtLeadershipQualityGate';
@@ -79,6 +79,13 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     allowedRoles: [Role.COMPANY_ADMIN, Role.CONTENT_CREATOR, Role.CONTENT_REVIEWER, Role.CONTENT_PUBLISHER, Role.SUPER_ADMIN],
   });
   if (!roleGate) return;
+
+  // Super-admin activity control 'Blog Create' gates this route (every mode); a read error refuses (blogBilling).
+  const switchRefusal = await blogGenerationRefusal(company_id);
+  if (switchRefusal) {
+    const { status: switchStatus, ...switchBody } = switchRefusal;
+    return res.status(switchStatus).json(switchBody);
+  }
 
   // ── 2. Enrich with company context ──────────────────────────────────────────
   let builtContext: Awaited<ReturnType<typeof buildContentContext>> | undefined;
@@ -149,7 +156,12 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
 
       // OWNER 2026-11-18: a blog is a FIXED 40 credits - held BEFORE any AI call; a refusal writes nothing
       // (backend/services/blog/blogBilling). Every AI call carries the blog's reference id (b3: measure cost per blog).
-      const referenceId = blogReferenceId(req.headers['idempotency-key']);
+      const ref = blogReferenceId(req.headers['idempotency-key']);
+      if (isBlogRefusal(ref)) {
+        const { status: refStatus, ...refBody } = ref;
+        return res.status(refStatus).json(refBody);   // no key -> 400, nothing held, no AI call
+      }
+      const referenceId = ref.referenceId;
       const hold = await holdBlog({ orgId: company_id, userId: roleGate.userId, referenceId, validateMembership: true });
       if (isBlogHoldRefusal(hold)) {
         const { status, ...refusal } = hold;
