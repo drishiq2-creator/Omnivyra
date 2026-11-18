@@ -180,6 +180,16 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   let threadChildrenCancelled = 0;
   if (linkedPost) {
     const lock = await tryAcquireScheduledPostQueueLock(linkedPost.id);
+    if (!lock.acquired && lock.mode === 'none') {
+      // The database could not be read (CLASS-2 fail-closed): NOT a concurrent mutation, and nothing was
+      // changed - say so, instead of the contention message (7c).
+      return res.status(503).json({
+        error: "We couldn't reach the database, so nothing was changed. Please try again.",
+        code: 'QUEUE_LOCK_STATE_UNREADABLE',
+        scheduled_post_id: linkedPost.id,
+        retryable: true,
+      });
+    }
     if (!lock.acquired) {
       return res.status(409).json({
         error: 'Another reschedule / unschedule is in progress for this post. Refresh and retry.',

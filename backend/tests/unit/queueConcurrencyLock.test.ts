@@ -162,12 +162,13 @@ describe('queue concurrency lock + atomic re-enqueue', () => {
   // CLASS-2 (e9, 05's audit): the advisory RPC exists in no environment, so this fallback is what runs.
   // When even its read FAILED it answered acquired:true - "go ahead" from a database that had just
   // failed to answer (and a RETURNED error was not even read). Both now refuse.
-  test.each(['error', 'throw'] as const)('the fallback read fails (%s): acquired:false - both callers answer 409 / lock_contention', async (mode) => {
+  test.each(['error', 'throw'] as const)('the fallback read fails (%s): acquired:false, mode none (UNREADABLE, not contention)', async (mode) => {
     mockRpcResponses['try_scheduled_post_lock'] = new Error('rpc missing');
     mockQueueRead.mode = mode;
     const { tryAcquireScheduledPostQueueLock } = await import('../../scheduler/schedulerService');
     const lock = await tryAcquireScheduledPostQueueLock('00000000-0000-0000-0000-000000000004');
     expect(lock.acquired).toBe(false);
+    expect(lock.mode).toBe('none');
   });
 
   test('a reschedule whose lock fallback cannot read the database touches nothing', async () => {
@@ -178,7 +179,8 @@ describe('queue concurrency lock + atomic re-enqueue', () => {
     const r = await atomicCancelAndReEnqueueScheduledPost({
       scheduledPostId: 'sp-9', newScheduledFor: new Date(Date.now() + 3_600_000).toISOString(), socialAccountId: 'sa-1', userId: 'u-1',
     } as never);
-    expect(r).toMatchObject({ ok: false, locked: false });
+    // 7c: reported as UNREADABLE, never as contention.
+    expect(r).toMatchObject({ ok: false, locked: false, lock_unreadable: true, cancel: { errors: ['lock_state_unreadable'] } });
     expect(ownedQueueJobOps).toEqual([]);
     expect(queueOps.add).toEqual([]);
   });
@@ -214,6 +216,9 @@ describe('queue concurrency lock + atomic re-enqueue', () => {
     });
     expect(result.ok).toBe(false);
     expect(result.locked).toBe(false);
+    // Genuine contention stays contention (7c): not reported as an unreadable database.
+    expect(result.lock_unreadable).toBe(false);
+    expect(result.cancel.errors).toEqual(['lock_contention']);
     expect(queueOps.add.length).toBe(0);
     expect(queueOps.remove).toBe(0);
   });

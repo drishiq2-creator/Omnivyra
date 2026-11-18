@@ -457,6 +457,8 @@ export async function atomicCancelAndReEnqueueScheduledPost(input: {
 }): Promise<{
   ok: boolean;
   locked: boolean;
+  /** locked:false because the database could NOT be read (lock mode 'none') - NOT contention (7c). */
+  lock_unreadable?: boolean;
   cancel: { db_cancelled: number; queue_removed: number; errors: string[] };
   enqueue: 'enqueued' | 'duplicate' | 'past' | 'failed';
   rollback?: QueueJobRollbackOutcome;
@@ -470,10 +472,13 @@ export async function atomicCancelAndReEnqueueScheduledPost(input: {
 
   const lock = await tryAcquireScheduledPostQueueLock(input.scheduledPostId);
   if (!lock.acquired) {
+    // mode 'none' = the database could not be read: a different cause from contention, and a different answer.
+    const unreadable = lock.mode === 'none';
     return {
       ok: false,
       locked: false,
-      cancel: { db_cancelled: 0, queue_removed: 0, errors: ['lock_contention'] },
+      lock_unreadable: unreadable,
+      cancel: { db_cancelled: 0, queue_removed: 0, errors: [unreadable ? 'lock_state_unreadable' : 'lock_contention'] },
       enqueue: 'failed',
       idempotency_key: idempotencyKey,
     };

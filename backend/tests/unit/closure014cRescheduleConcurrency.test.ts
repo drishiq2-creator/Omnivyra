@@ -263,6 +263,30 @@ describe('the RESCHEDULING fence', () => {
   });
 });
 
+describe('the queue lock refuses: an unreadable database is NOT reported as contention (7c, CI-156)', () => {
+  const atomic = () => require('../../scheduler/schedulerService').atomicCancelAndReEnqueueScheduledPost as jest.Mock;
+
+  it('lock_unreadable -> 503 QUEUE_LOCK_STATE_UNREADABLE (new time saved, not re-queued), the repeat marker recorded', async () => {
+    world();
+    atomic().mockImplementationOnce(async () => ({ ok: false, locked: false, lock_unreadable: true, enqueue: 'failed',
+      cancel: { db_cancelled: 0, queue_removed: 0, errors: ['lock_state_unreadable'] }, idempotency_key: 'k' }));
+    const r = await reschedule(AT_12);
+    expect(r.status).toBe(503);
+    expect(r.body).toMatchObject({ code: 'QUEUE_LOCK_STATE_UNREADABLE', partial: true, recovery: 'repeat_reschedule', retryable: true });
+    expect(String(r.body.error)).not.toMatch(/in progress/i);
+    expect(planContent()).toHaveProperty('reschedule_incomplete');
+  });
+
+  it('genuine contention (locked:false, NOT unreadable) -> 409 CONCURRENT_QUEUE_MUTATION, as before', async () => {
+    world();
+    atomic().mockImplementationOnce(async () => ({ ok: false, locked: false, lock_unreadable: false, enqueue: 'failed',
+      cancel: { db_cancelled: 0, queue_removed: 0, errors: ['lock_contention'] }, idempotency_key: 'k' }));
+    const r = await reschedule(AT_12);
+    expect(r.status).toBe(409);
+    expect(r.body).toMatchObject({ code: 'CONCURRENT_QUEUE_MUTATION' });
+  });
+});
+
 describe('failure paths', () => {
   it('a plan write that fails after the post write is UNDONE in a database whose trigger owns updated_at', async () => {
     world();

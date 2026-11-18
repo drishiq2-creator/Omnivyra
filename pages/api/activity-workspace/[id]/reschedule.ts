@@ -903,6 +903,20 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
           newScheduledFor: newScheduledAtIso,
           reason: isMove ? 'reschedule_full_move' : 'reschedule_retime',
         });
+        if (!atomicResult.locked && atomicResult.lock_unreadable) {
+          // The database could not be read (not contention, 7c): the new time IS saved, the queue is not.
+          await releaseFence();
+          const incompleteRecorded = await recordIncomplete('lock_state_unreadable');
+          return res.status(503).json({
+            error: "We couldn't reach the database to re-queue the publish job. The new time is saved but the post was not re-queued; repeat the reschedule.",
+            code: 'QUEUE_LOCK_STATE_UNREADABLE',
+            scheduled_post_id: priorScheduledPostId,
+            partial: true,
+            recovery: 'repeat_reschedule',
+            incomplete_recorded: incompleteRecorded,
+            retryable: true,
+          });
+        }
         if (!atomicResult.locked) {
           emitCreatorEvent({
             event: CREATOR_EVENTS.QUEUE_LOCK_CONTENTION,
