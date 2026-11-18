@@ -44,6 +44,23 @@ export function generateFailureMessage(args: {
   return typeof data.error === 'string' && data.error ? data.error : 'Generation failed.';
 }
 
+/** c6: a delivered blog the server couldn't store; its hold was released, so it is free. */
+export const BLOG_UNPERSISTED_NOTE = 'Your blog is ready. We couldn’t save a backup copy of it, so you weren’t charged.';
+
+/**
+ * The note a SUCCESSFUL billed blog must show before the editor opens, or '' for none.
+ * - settlementPending -> the shared "still finalising, don't run it again" note;
+ * - billing.reason 'unpersisted' (c6) -> not charged;
+ * - billing.reason 'replayed' (c6: the same result for a retried key, charged once earlier) -> none.
+ */
+export function blogSuccessNote(status: number, data: Record<string, unknown>): string {
+  const outcome = classifyBilledResponse(status, data, '');
+  if (outcome.kind === 'settlement_pending') return billedOutcomeText(outcome);
+  const billing = data.billing as { reason?: unknown } | undefined;
+  if (billing && typeof billing === 'object' && billing.reason === 'unpersisted') return BLOG_UNPERSISTED_NOTE;
+  return '';
+}
+
 /** A billed request that lost its connection: the key is kept (lib/blog/blogGenerateKey), so a retry can't hold twice. */
 export const BILLED_NETWORK_UNCERTAIN = 'We lost the connection, so we’re not sure this finished. Trying again won’t charge you twice.';
 
@@ -390,9 +407,11 @@ export default function BlogGenerateModal({
         resultWithSeo.secondary_keywords = seo.secondary_keywords;
       }
 
-      if (billed && classifyBilledResponse(res.status, data, '').kind === 'settlement_pending') {
-        const outcome = classifyBilledResponse(res.status, data, '');
-        setPendingDraft({ note: billedOutcomeText(outcome), args: [resultWithSeo, confidence, hookAssessment, selectedAngle?.type ?? null] });
+      // Hold the draft (note stays until the user clicks) when its charge needs saying:
+      // settlement still finalising, or c6's 'unpersisted' (no stored copy, so the hold was released).
+      const holdNote = billed ? blogSuccessNote(res.status, data) : '';
+      if (holdNote) {
+        setPendingDraft({ note: holdNote, args: [resultWithSeo, confidence, hookAssessment, selectedAngle?.type ?? null] });
         return;
       }
 

@@ -63,8 +63,13 @@ export function blogRefusalText(body: unknown): string | null {
       return BLOG_IN_PROGRESS_TEXT;
     case 'IDEMPOTENCY_KEY_REQUIRED':
       return KEY_MISSING_TEXT;
-    case 'RESERVATION_ALREADY_SETTLED':
-      return serverText || 'This blog request has already finished. Start a new request to generate again.';
+    // c6 @3551360d9 (replay): RESERVATION_ALREADY_SETTLED is gone from the blog routes, split into:
+    case 'BLOG_RESULT_READ_FAILED': // 503, retryable: the stored blog couldn't be read; the key is KEPT
+      return serverText || 'We couldn’t check on this blog just now. Please try again.';
+    case 'BLOG_RESULT_UNAVAILABLE': // 409: charged earlier, no stored copy (support case); never "start a new request"
+      return serverText || 'We couldn’t find this blog. Please contact support; you won’t be charged again.';
+    case 'BLOG_REQUEST_ENDED': // 409: this request failed and was released (not charged)
+      return serverText || 'This request didn’t finish and you weren’t charged. Please try again.';
     case 'BLOG_GENERATION_DISABLED':
       return serverText || 'Blog generation is turned off for this account.';
     case 'BLOG_SWITCH_UNAVAILABLE':

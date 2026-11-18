@@ -54,7 +54,10 @@ describe('keepBlogKey: keep only while the outcome is unknown', () => {
     ['200 done', 200, { result: {} }, false],
     ['402 not enough credits', 402, { code: 'INSUFFICIENT_CREDITS', required: 40, available: 3 }, false],
     ['422 quality refund', 422, { billing: { charged: 0, released: 40, reason: 'quality_refund' } }, false],
-    ['409 already settled', 409, { code: 'RESERVATION_ALREADY_SETTLED' }, false],
+    ['503 stored result unreadable (retry the same request)', 503, { code: 'BLOG_RESULT_READ_FAILED', retryable: true }, true],
+    ['409 charged earlier, no stored copy (support case)', 409, { code: 'BLOG_RESULT_UNAVAILABLE' }, false],
+    ['409 this request failed and was released', 409, { code: 'BLOG_REQUEST_ENDED' }, false],
+    ['200 replay of a charged success', 200, { result: {}, billing: { charged: 0, released: 0, reason: 'replayed' } }, false],
     ['403 switched off', 403, { code: 'BLOG_GENERATION_DISABLED' }, false],
   ])('%s', (_n, status, body, keep) => {
     expect(keepBlogKey(status as number, body)).toBe(keep);
@@ -68,7 +71,10 @@ describe('blogRefusalText', () => {
     expect(blogRefusalText({ code: 'IDEMPOTENCY_KEY_REQUIRED', error: 'An Idempotency-Key header...' })).not.toMatch(/Idempotency|header/);
     expect(blogRefusalText({ code: 'BLOG_GENERATION_DISABLED', error: 'Blog generation is turned off for this account.' })).toBe('Blog generation is turned off for this account.');
     expect(blogRefusalText({ code: 'BLOG_SWITCH_UNAVAILABLE', error: 'Blog generation is temporarily unavailable. Please try again.' })).toMatch(/temporarily unavailable/);
-    expect(blogRefusalText({ code: 'RESERVATION_ALREADY_SETTLED' })).toMatch(/already finished/);
+    expect(blogRefusalText({ code: 'BLOG_RESULT_READ_FAILED' })).toMatch(/try again/);
+    expect(blogRefusalText({ code: 'BLOG_RESULT_UNAVAILABLE' })).toMatch(/contact support/);
+    expect(blogRefusalText({ code: 'BLOG_RESULT_UNAVAILABLE' })).not.toMatch(/start a new request/i);
+    expect(blogRefusalText({ code: 'BLOG_REQUEST_ENDED' })).toMatch(/weren’t charged/);
     expect(blogRefusalText({ code: 'INSUFFICIENT_CREDITS', error: 'x' })).toBeNull();
     expect(blogRefusalText({})).toBeNull();
   });

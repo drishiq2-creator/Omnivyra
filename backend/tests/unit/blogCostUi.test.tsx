@@ -16,7 +16,7 @@ const fetchWithAuth = jest.fn();
 jest.mock('../../../components/community-ai/fetchWithAuth', () => ({ fetchWithAuth: (...a: unknown[]) => fetchWithAuth(...a) }));
 
 import RunCostLine, { runCostText } from '../../../components/billing/RunCostLine';
-import BlogGenerateModal, { generateFailureMessage, BILLED_NETWORK_UNCERTAIN } from '../../../components/blog/BlogGenerateModalMain';
+import BlogGenerateModal, { generateFailureMessage, BILLED_NETWORK_UNCERTAIN, BLOG_UNPERSISTED_NOTE } from '../../../components/blog/BlogGenerateModalMain';
 import { UNCERTAIN_MESSAGE, SETTLEMENT_PENDING_MESSAGE } from '../../../lib/billing/billedResponse';
 
 const BLOG = { actionKey: 'blog_post', minCredits: 40, maxCredits: 40, expectedCredits: 40, tokenPriced: false, source: 'credit_cost_config' };
@@ -150,6 +150,58 @@ describe('BlogGenerateModal (rendered)', () => {
     await waitFor(() => expect(onGenerated).toHaveBeenCalledTimes(1));
     expect((onGenerated.mock.calls[0] as unknown[])[0]).toMatchObject({ title: 'Draft' });
     expect(full).toHaveLength(1);
+  });
+
+  // c6 @3551360d9: a lost response after a charged success is answered by a REPLAY of the stored
+  // result for the same key (billing.reason 'replayed', nothing new charged).
+  it('replay: lost connection -> retry with the SAME key -> 200 replayed -> the editor opens, no third request', async () => {
+    const { full, write, onGenerated } = await toWriteStep('blog', 'C-replay', [
+      new TypeError('Failed to fetch'),
+      reply(200, { result: { title: 'Draft' }, billing: { charged: 0, released: 0, reason: 'replayed' } }),
+    ]);
+    fireEvent.click(write());
+    await screen.findByText(new RegExp(BILLED_NETWORK_UNCERTAIN.slice(0, 30)));
+    fireEvent.click(write());
+    await waitFor(() => expect(onGenerated).toHaveBeenCalledTimes(1));
+    expect(keyOf(full[1])).toBe(keyOf(full[0]));
+    expect(full).toHaveLength(2);
+    expect(screen.queryByRole('button', { name: /Open the editor/ })).toBeNull();
+  });
+
+  it('unpersisted (c6: no stored copy, hold released) -> held with "you weren’t charged" until the user clicks', async () => {
+    const { write, onGenerated } = await toWriteStep('blog', 'C-unpersisted', [
+      reply(200, { result: { title: 'Draft' }, billing: { charged: 0, released: 40, reason: 'unpersisted' } }),
+    ]);
+    fireEvent.click(write());
+    expect(await screen.findByText(BLOG_UNPERSISTED_NOTE)).toBeInTheDocument();
+    expect(onGenerated).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: /Open the editor/ }));
+    await waitFor(() => expect(onGenerated).toHaveBeenCalledTimes(1));
+  });
+
+  it('503 stored result unreadable -> "try again" (not "not sure"), and the retry reuses the key', async () => {
+    const { full, write } = await toWriteStep('blog', 'C-readfail', [
+      reply(503, { code: 'BLOG_RESULT_READ_FAILED', retryable: true }),
+      reply(200, { result: { title: 't' } }),
+    ]);
+    fireEvent.click(write());
+    expect(await screen.findByText(/couldn’t check on this blog just now/)).toBeInTheDocument();
+    fireEvent.click(write());
+    await waitFor(() => expect(full).toHaveLength(2));
+    expect(keyOf(full[1])).toBe(keyOf(full[0]));
+  });
+
+  it('409 no stored copy -> contact support, never "start a new request"; the request is over (new key)', async () => {
+    const { full, write } = await toWriteStep('blog', 'C-unavailable', [
+      reply(409, { code: 'BLOG_RESULT_UNAVAILABLE', retryable: false }),
+      reply(200, { result: { title: 't' } }),
+    ]);
+    fireEvent.click(write());
+    expect(await screen.findByText(/contact support/)).toBeInTheDocument();
+    expect(screen.queryByText(/start a new request/i)).toBeNull();
+    fireEvent.click(write());
+    await waitFor(() => expect(full).toHaveLength(2));
+    expect(keyOf(full[1])).not.toBe(keyOf(full[0]));
   });
 
   it('control: a plain 2xx opens the editor straight away (no hold)', async () => {
