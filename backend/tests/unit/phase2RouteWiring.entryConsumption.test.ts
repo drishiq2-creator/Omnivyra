@@ -19,6 +19,9 @@ const engine = {
 };
 jest.mock('../../services/creditExecutionService', () => engine);
 
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const mockStore = require('../helpers/fakeIdempotencyStore').makeFakeIdempotencyStore();
+jest.mock('../../db/writeOwner', () => ({ ownedDbTable: (t: string) => mockStore.ownedDbTable(t) }));
 const mockCtx: { idempotencyKey?: string; requestId?: string } = {};
 jest.mock('../../services/requestContext', () => ({ getRequestContext: () => mockCtx }));
 
@@ -82,6 +85,7 @@ function faithfulEngine(): void {
 beforeEach(() => {
   jest.clearAllMocks();
   ledger.clear(); charges = 0; mockCounters.length = 0; mockAnomalies.length = 0;
+  mockStore.rows.length = 0; mockStore.failInsert = false; mockStore.failRead = false;
   delete mockCtx.idempotencyKey; delete mockCtx.requestId;
   faithfulEngine();
 });
@@ -92,7 +96,10 @@ describe('wirePhase2Route ENFORCE - token-actual, per-request identity, never a 
     const run = jest.fn(async () => 'WORK');
     expect(await wirePhase2Route({ ...ARGS, run })).toBe('WORK');
     const call = engine.executeWithEntryConsumption.mock.calls[0][0];
-    expect(call).toMatchObject({ action: 'content_basic', collectViaCollector: true, executor: run, orgId: 'org-1' });
+    expect(call).toMatchObject({ action: 'content_basic', collectViaCollector: true, orgId: 'org-1' });
+    // the executor is the route's run() wrapped so the result is PERSISTED before the engine can confirm (b3/7c)
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(mockStore.rows).toHaveLength(1);
     expect(call.llmPricing).toEqual(routeLlmPricingFor('content_basic' as any));
     expect(call.llmPricing.actionKey).toBe('content_basic');
   });
@@ -103,14 +110,63 @@ describe('wirePhase2Route ENFORCE - token-actual, per-request identity, never a 
     expect(routeLlmPricingFor('blog_generation' as any).maxInputTokens).toBe(one.maxInputTokens * 7);
   });
 
-  it('the SAME Idempotency-Key twice: the 2nd is 409 ALREADY_PROCESSED - no AI call, no second charge', async () => {
+  // b3 + 7c 2026-11-18 replaces "the SAME Idempotency-Key twice: the 2nd is 409 ALREADY_PROCESSED": a lost response
+  // must not mean paid-for-nothing, so the 2nd REPLAYS the stored result (still no AI call, no second charge).
+  it('the SAME Idempotency-Key twice: the 2nd REPLAYS the stored result - no AI call, no second charge', async () => {
+    mockCtx.idempotencyKey = 'click-1';
+    const run = jest.fn(async () => ({ text: 'WORK' }));
+    const first = await wirePhase2Route({ ...ARGS, run });
+    const second = await wirePhase2Route({ ...ARGS, run });
+    expect(second).toEqual(first);
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(charges).toBe(1);
+    expect(mockCounters).toContain('phase2_route_replayed_total');
+  });
+
+  it('a charged request with NO stored result (before the store existed) is still 409 ALREADY_PROCESSED, never re-run', async () => {
     mockCtx.idempotencyKey = 'click-1';
     const run = jest.fn(async () => 'WORK');
     await wirePhase2Route({ ...ARGS, run });
+    mockStore.rows.length = 0;
     await expect(wirePhase2Route({ ...ARGS, run })).rejects.toBeInstanceOf(BilledRouteAlreadyProcessedError);
     expect(run).toHaveBeenCalledTimes(1);
-    expect(charges).toBe(1);
     expect(billedRouteHttpError(new BilledRouteAlreadyProcessedError('s' as any))).toMatchObject({ status: 409, body: { code: 'ALREADY_PROCESSED' } });
+  });
+
+  it('the stored result cannot be READ on a charged retry -> 503 REPLAY_UNAVAILABLE retryable (never "start a new request")', async () => {
+    mockCtx.idempotencyKey = 'click-1';
+    const run = jest.fn(async () => 'WORK');
+    await wirePhase2Route({ ...ARGS, run });
+    mockStore.failRead = true;
+    const err = await wirePhase2Route({ ...ARGS, run }).catch((e) => e);
+    expect(billedRouteHttpError(err)).toEqual({ status: 503, body: expect.objectContaining({ code: 'REPLAY_UNAVAILABLE', retryable: true }) });
+    expect(run).toHaveBeenCalledTimes(1);
+  });
+
+  it('INVARIANT: the result cannot be persisted -> the charge is NOT confirmed (engine releases), the work is still returned', async () => {
+    mockCtx.idempotencyKey = 'click-1';
+    mockStore.failInsert = true;
+    const out = await wirePhase2Route({ ...ARGS, run: async () => 'WORK' });
+    expect(out).toBe('WORK');
+    expect(charges).toBe(0);
+    expect(mockCounters).toContain('phase2_route_result_unpersisted_total');
+  });
+
+  it('INVARIANT: persisted but NOT READABLE back -> not confirmed either', async () => {
+    mockCtx.idempotencyKey = 'click-1';
+    mockStore.failRead = true;
+    expect(await wirePhase2Route({ ...ARGS, run: async () => 'WORK' })).toBe('WORK');
+    expect(charges).toBe(0);
+  });
+
+  it('replay is TENANT-SCOPED: another org with the same key and reference is a new, charged run', async () => {
+    mockCtx.idempotencyKey = 'click-1';
+    const run = jest.fn(async () => 'WORK');
+    await wirePhase2Route({ ...ARGS, run });
+    ledger.clear();   // the other org's ledger keys differ in reality (user/org are in the key); isolate the store check
+    await wirePhase2Route({ ...ARGS, organizationId: 'org-2', userId: 'user-2', run });
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(mockStore.rows.map((r: any) => r.caller_id).sort()).toEqual(['org:org-1', 'org:org-2']);
   });
 
   it('two DELIBERATE identical requests (different Idempotency-Keys) are charged twice - never a free regeneration', async () => {
