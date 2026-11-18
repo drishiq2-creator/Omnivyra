@@ -417,7 +417,46 @@ export async function executeWithEntryConsumption<T>(
   if (entry > 0 && !entryPromise && !opts.llmPricing) {
     entryPromise = holdEntry();
   }
-  if (entryPromise) entryConsumed = await settleEntry(await entryPromise);
+  if (entryPromise) {
+    // 7c finding (BLOCKING, money): this runs AFTER the work succeeded. A throw here must never turn finished work
+    // into an apparent failure - a re-click would be a new key, a new hold and a SECOND charge. Same rule as
+    // RuntimeCore's partial-confirm branch: return the result with settlementPending; the holds stay for the resolver.
+    let held: EntryHold = { kind: 'none' };
+    try {
+      held = await entryPromise;
+    } catch (holdErr: any) {
+      // The entry hold itself failed: nothing reserved under entryKey -> cost comes from the exposure (as 'none').
+      logger.error('entry_consumption_first_event_reserve_failed', { orgId: opts.orgId, action, message: holdErr?.message });
+    }
+    try {
+      entryConsumed = await settleEntry(held);
+    } catch (entryErr: any) {
+      const msg = entryErr?.message ?? '';
+      const entryHoldId = held.kind === 'held' ? held.handle.holdTransactionId : null;
+      const { confirmKey: entryConfirmKey, releaseKey: entryReleaseKey } = getReservationKeys(entryKey);
+      let settled: Awaited<ReturnType<typeof readHoldSettlementState>>;
+      try {
+        settled = await readHoldSettlementState({ holdId: entryHoldId, confirmKey: entryConfirmKey, releaseKey: entryReleaseKey });
+      } catch (readErr: any) {
+        settled = { state: 'unreadable', message: String(readErr?.message ?? readErr) };   // post-work: never throw
+      }
+      if (settled.state === 'confirmed') {
+        logger.warn('entry_consumption_entry_confirm_error_but_committed', { orgId: opts.orgId, action, confirmId: settled.transactionId, message: msg });
+        entryConsumed = entry;
+      } else {
+        logger.error('credit_settle_pending', { path: 'entry_confirm', orgId: opts.orgId, action, idempotencyKey: opts.idempotencyKey, holdId: entryHoldId, confirmKey: entryConfirmKey, releaseKey: entryReleaseKey, exposureHoldId: exposureHandle?.holdTransactionId ?? null, intendedCredits: actualCredits, settledState: settled.state, message: msg });
+        return {
+          status: 'executed',
+          result: executorResult,
+          settlement: {
+            entryConsumed: 0, exposureReserved: reservation, additionalConsumed: 0, exposureReleased: 0,
+            totalConsumed: 0, underfunded: false, pricing, amountsUnknown: true,
+          },
+          settlementPending: pendingSettlement(entryHoldId, settled, msg),
+        };
+      }
+    }
+  }
 
   // ── STAGE 4 — SETTLEMENT (TASK 4): consume actual−entry from exposure ────────
   const plan = planEntryConsumptionSettlement({ entry: entryConsumed, reservation, actualCredits });
