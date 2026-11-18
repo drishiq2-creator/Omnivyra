@@ -277,10 +277,17 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
         });
       }
 
+      // An explicit publish-now SUPERSEDES the post's queued publish job
+      // (ruling 2026-11-18): "Post Now" stages its row with a delayed job, and
+      // a job left behind would publish a post this request reports as failed,
+      // or duplicate it. publishNow retires it after taking the post-level
+      // claim and before the platform call; this route is the only caller
+      // that asks (never the cron or the queue worker).
       const result = await publishNow({
         scheduled_post_id: post.id,
         social_account_id: socialAccountId,
         user_id: post.user_id,
+        supersede_queued_jobs: true,
       });
 
       // A suppressed result means the post's status belongs to someone else —
@@ -294,6 +301,24 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
           status: result.status,
           external_post_id: result.external_post_id,
           last_error: result.status === 'PUBLISHED' ? undefined : result.message,
+        });
+      }
+
+      // The queued job could not be retired, so nothing was published (and the
+      // row was taken out of every publisher's reach). Not a 200: the client
+      // must show it as not posted.
+      // (A literal, not the imported constant: suites that stub publishNowService
+      // with only `publishNow` would otherwise compare against undefined.)
+      if (result.code === 'PRIOR_JOB_CANCEL_FAILED') {
+        return res.status(503).json({
+          status: result.status,
+          code: result.code,
+          error: result.message,
+          message: result.message,
+          platform: post.platform,
+          post_fenced: result.post_fenced === true,
+          retryable: true,
+          timestamp: result.timestamp,
         });
       }
 
