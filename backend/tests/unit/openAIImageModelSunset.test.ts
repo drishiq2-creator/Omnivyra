@@ -5,7 +5,9 @@
  * gpt-image-1 is already unavailable to the production account. A renderer that
  * still asks for any of them renders nothing once they are gone, so:
  *   - both creator renderers ask for a supported model by default;
- *   - OPENAI_IMAGE_MODEL still wins, so the model can change without a deploy;
+ *   - OPENAI_IMAGE_MODEL still wins, so the model can change without a deploy - UNLESS it names a
+ *     retiring model, which is dropped with a warning (a stale pin would make the change a no-op);
+ *   - the worker provider walks the same chain: a refused model falls through to the next;
  *   - a main-subject reference edit never sends input_fidelity to a model outside
  *     the gpt-image-1 family, and still raises quality above 'low'.
  */
@@ -38,13 +40,13 @@ jest.mock('../../services/aiUsageCollector', () => ({ recordAssetCredits: jest.f
 
 /* eslint-disable @typescript-eslint/no-var-requires */
 const { generateProviderImage } = require('../../services/creatorAssetRendererMedia');
-const { openAIImageModelCandidates, imageUsageForLog, OPENAI_IMAGE_MODEL_DEFAULTS } = require('../../services/creator/openAIImageModel');
+const { openAIImageModelCandidates, imageUsageForLog, OPENAI_IMAGE_MODEL_DEFAULTS, RETIRING_OPENAI_IMAGE_MODELS } = require('../../services/creator/openAIImageModel');
 const { referenceEditParams } = require('../../services/creator/creatorMultimodalReferences');
 const { createOpenAIRenderProvider } = require('../../services/creator/rendering/providers/openAIRenderProvider');
 /* eslint-enable @typescript-eslint/no-var-requires */
 
-/** Every model OpenAI has shut down or scheduled for shutdown, as of 2026-11-19. */
-const RETIRING = ['gpt-image-1', 'gpt-image-1.5', 'gpt-image-1.5-2025-12-16', 'gpt-image-1-mini', 'chatgpt-image-latest', 'gpt-image-2', 'gpt-image-2-2026-04-21', 'dall-e-2', 'dall-e-3'];
+/** THE production list (single source, 7c): the guard and these assertions read the same constant. */
+const RETIRING: string[] = [...RETIRING_OPENAI_IMAGE_MODELS];
 
 const ORIGINAL = { model: process.env.OPENAI_IMAGE_MODEL, mode: process.env.CREATOR_IMAGE_REFERENCE_MODE, key: process.env.OPENAI_API_KEY };
 beforeEach(() => {
@@ -134,5 +136,106 @@ describe('creator image model: off the models OpenAI is shutting down', () => {
     expect(imageUsageForLog('m', { usage: { input_tokens: 5, output_tokens: 7 }, data: [{ b64_json: 'SECRET' }] }))
       .toEqual({ model: 'm', input_tokens: 5, output_tokens: 7 });
     expect(imageUsageForLog('m', { data: [] })).toEqual({ model: 'm', input_tokens: null, output_tokens: null });
+  });
+  it('the retiring list is the one the guard uses, and pins the ids known on 2026-11-19 (exact ids, no prefix)', () => {
+    for (const id of ['gpt-image-1', 'gpt-image-1.5', 'gpt-image-1.5-2025-12-16', 'gpt-image-1-mini', 'chatgpt-image-latest', 'gpt-image-2', 'gpt-image-2-2026-04-21', 'dall-e-2', 'dall-e-3']) {
+      expect(RETIRING).toContain(id);
+    }
+    // No replacement is on it (a prefix match on gpt-image-2 would have swallowed them).
+    for (const m of OPENAI_IMAGE_MODEL_DEFAULTS) expect(RETIRING).not.toContain(m);
+  });
+
+  it('a RETIRING OPENAI_IMAGE_MODEL is dropped with one warning naming it and the model used; the defaults render', () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      for (const id of RETIRING) {
+        warn.mockClear();
+        expect(openAIImageModelCandidates(id)).toEqual(['gpt-image-2.6-sunburst', 'gpt-image-2.6-flare', 'gpt-image-2.5-sunburst']);
+        const events = warn.mock.calls.map((c) => c[1]).filter((d: any) => d?.event === 'creator_image_model_override_ignored');
+        expect(events).toEqual([expect.objectContaining({ ignored: id, using: 'gpt-image-2.6-sunburst' })]);
+      }
+      // Case and whitespace do not smuggle a retired id past the filter.
+      expect(openAIImageModelCandidates('  GPT-IMAGE-1.5 ')[0]).toBe('gpt-image-2.6-sunburst');
+      // Control: a live id on NO list (a future model) is honoured with no warning - never an allow-list.
+      warn.mockClear();
+      expect(openAIImageModelCandidates('gpt-image-3-future')[0]).toBe('gpt-image-3-future');
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('env = gpt-image-1.5 (a stale pin): the in-request renderer and the worker both use 2.6 Sunburst first', async () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      process.env.OPENAI_API_KEY = 'test-key';
+      process.env.OPENAI_IMAGE_MODEL = 'gpt-image-1.5';
+      const result = await generateProviderImage({ prompt: 'a lighthouse at dawn' });
+      expect(result.image?.model).toBe('gpt-image-2.6-sunburst');
+      expect(generateRequests.map((r) => r.model)).toEqual(['gpt-image-2.6-sunburst']);
+      const seen: string[] = [];
+      await createOpenAIRenderProvider({ apiKey: 'test-key', fetchImpl: workerFetch({}, seen) }).submit(WORKER_SPEC, 'idem-stale');
+      expect(seen).toEqual(['gpt-image-2.6-sunburst']);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
+
+const WORKER_SPEC = {
+  render_modality: 'image',
+  canonical_asset_family: 'image',
+  platform_projection: { resolution: { w: 1024, h: 1024 } },
+  blueprint_projection: { visual_prompt: 'a lighthouse', scene_direction: null, reference_image_url: null },
+};
+
+/** A fetch stub answering per model: 'ok', a model refusal, a server error or a bad key. */
+function workerFetch(answers: Record<string, 'ok' | 'refused' | 'server_error' | 'auth'>, seen: string[]) {
+  return (async (_url: string, init: { body: string }) => {
+    const model = String(JSON.parse(init.body).model);
+    seen.push(model);
+    const a = answers[model] ?? 'ok';
+    if (a === 'ok') return { ok: true, status: 200, json: async () => ({ data: [{ url: `https://img.example/${model}.png` }] }) };
+    if (a === 'refused') return { ok: false, status: 404, json: async () => ({ error: { code: 'model_not_found', message: `The model '${model}' does not exist or you do not have access to it.` } }) };
+    if (a === 'auth') return { ok: false, status: 401, json: async () => ({ error: { code: 'invalid_api_key', message: 'Incorrect API key provided' } }) };
+    return { ok: false, status: 500, json: async () => ({ error: { message: 'The server had an error' } }) };
+  }) as unknown as typeof fetch;
+}
+
+describe('the render-worker provider walks the same model chain as the in-request renderer (7c, 2026-11-20)', () => {
+  let warn: jest.SpyInstance;
+  beforeEach(() => { process.env.OPENAI_API_KEY = 'test-key'; warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined); });
+  afterEach(() => warn.mockRestore());
+
+  it('the first candidate REFUSED for this account falls through to the next, and the handle names the model used', async () => {
+    const seen: string[] = [];
+    const provider = createOpenAIRenderProvider({ apiKey: 'test-key', fetchImpl: workerFetch({ 'gpt-image-2.6-sunburst': 'refused' }, seen) });
+    const handle = await provider.submit(WORKER_SPEC, 'idem-refused');
+    expect(seen).toEqual(['gpt-image-2.6-sunburst', 'gpt-image-2.6-flare']);
+    expect(handle.provider_metadata).toEqual(expect.objectContaining({ model: 'gpt-image-2.6-flare', url: 'https://img.example/gpt-image-2.6-flare.png' }));
+  });
+
+  it('every candidate refused: each is tried once, then the last refusal is thrown', async () => {
+    const seen: string[] = [];
+    const all = Object.fromEntries((OPENAI_IMAGE_MODEL_DEFAULTS as readonly string[]).map((m) => [m, 'refused' as const]));
+    const provider = createOpenAIRenderProvider({ apiKey: 'test-key', fetchImpl: workerFetch(all, seen) });
+    await expect(provider.submit(WORKER_SPEC, 'idem-all')).rejects.toThrow('OpenAI image API 404');
+    expect(seen).toEqual([...OPENAI_IMAGE_MODEL_DEFAULTS]);
+  });
+
+  it('a failure that is NOT a model refusal (500, bad key) throws at once: no second paid call on another model', async () => {
+    for (const kind of ['server_error', 'auth'] as const) {
+      const seen: string[] = [];
+      const provider = createOpenAIRenderProvider({ apiKey: 'test-key', fetchImpl: workerFetch({ 'gpt-image-2.6-sunburst': kind }, seen) });
+      await expect(provider.submit(WORKER_SPEC, `idem-${kind}`)).rejects.toThrow(/OpenAI image API (500|401)/);
+      expect(seen).toEqual(['gpt-image-2.6-sunburst']);
+    }
+  });
+
+  it('an explicitly configured cfg.model is the only candidate', async () => {
+    const seen: string[] = [];
+    const provider = createOpenAIRenderProvider({ apiKey: 'test-key', model: 'gpt-image-2.6-flare', fetchImpl: workerFetch({ 'gpt-image-2.6-flare': 'refused' }, seen) });
+    await expect(provider.submit(WORKER_SPEC, 'idem-cfg')).rejects.toThrow('OpenAI image API 404');
+    expect(seen).toEqual(['gpt-image-2.6-flare']);
   });
 });

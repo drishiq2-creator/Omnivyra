@@ -11,7 +11,7 @@
  * `supports()` / `capabilities()` / `estimateCost()` are PURE.
  */
 
-import { openAIImageModelCandidates } from '../../openAIImageModel';
+import { classifyProviderImageError, openAIImageModelCandidates } from '../../openAIImageModel';
 import type {
   RenderProvider,
   RenderCapabilityMatrix,
@@ -56,8 +56,13 @@ export interface OpenAIProviderConfig {
 export function createOpenAIRenderProvider(
   cfg: OpenAIProviderConfig = {},
 ): RenderProvider {
-  // The same model choice as the in-request renderer (env override first; gpt-image-1.5 leaves the API 2026-12-01).
-  const model = cfg.model || openAIImageModelCandidates()[0];
+  // The same model chain as the in-request renderer (env override first unless it names a retiring model; gpt-image-1.5
+  // leaves the API 2026-12-01). Generation walks the chain exactly as creatorAssetRendererMedia does: a model this
+  // account is refused ("does not exist" / not available) falls through to the next, so a worker render never fails
+  // where the in-request render succeeds (7c, 2026-11-20). An explicitly configured cfg.model is the only candidate.
+  const models = cfg.model ? [cfg.model] : openAIImageModelCandidates();
+  // The first candidate: the cost basis and the reference-edit attempt (as the in-request renderer's editModel).
+  const model = models[0];
 
   const capabilities = (): RenderCapabilityMatrix => ({
     modalities: ['image'],
@@ -175,23 +180,45 @@ export function createOpenAIRenderProvider(
       }
     }
 
-    const resp = await doFetch('https://api.openai.com/v1/images/generations', {
-      method: 'POST',
-      signal: AbortSignal.timeout(OPENAI_RENDER_TIMEOUT_MS),
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
-      body: JSON.stringify({ model, prompt, n: 1, size }),
-    });
-    if (!resp.ok) {
-      throw new Error(`OpenAI image API ${resp.status}`);
+    let refused: Error | null = null;
+    for (const candidate of models) {
+      const resp = await doFetch('https://api.openai.com/v1/images/generations', {
+        method: 'POST',
+        signal: AbortSignal.timeout(OPENAI_RENDER_TIMEOUT_MS),
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+        body: JSON.stringify({ model: candidate, prompt, n: 1, size }),
+      });
+      if (!resp.ok) {
+        // The provider's own error code/message decide whether this MODEL was refused; the thrown message is unchanged.
+        let body: any = null;
+        try { body = await resp.json(); } catch { body = null; }
+        const failure = Object.assign(new Error(`OpenAI image API ${resp.status}`), {
+          status: resp.status,
+          code: typeof body?.error?.code === 'string' ? body.error.code : undefined,
+        });
+        const kind = classifyProviderImageError({
+          status: resp.status,
+          code: failure.code,
+          message: `${failure.message} ${typeof body?.error?.message === 'string' ? body.error.message : ''}`,
+        });
+        if (kind === 'model_unavailable') {
+          console.warn('[openai-render-provider] model refused for this account; trying the next candidate', { model: candidate, status: resp.status });
+          refused = failure;
+          continue;
+        }
+        throw failure;
+      }
+      const json: any = await resp.json();
+      const url = json?.data?.[0]?.url || json?.data?.[0]?.b64_json;
+      if (!url) throw new Error('OpenAI returned no image');
+      return {
+        provider: 'openai',
+        external_job_id: idempotencyKey,
+        provider_metadata: { model: candidate, size, url },
+      };
     }
-    const json: any = await resp.json();
-    const url = json?.data?.[0]?.url || json?.data?.[0]?.b64_json;
-    if (!url) throw new Error('OpenAI returned no image');
-    return {
-      provider: 'openai',
-      external_job_id: idempotencyKey,
-      provider_metadata: { model, size, url },
-    };
+    // Every candidate was refused as unavailable to this account: the last refusal, as before.
+    throw refused ?? new Error('OpenAI image API: no image model candidates');
   };
 
   // Synchronous provider: submit already produced the image, so poll is
