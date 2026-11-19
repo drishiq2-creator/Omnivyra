@@ -22,6 +22,7 @@ import { openBillingOperation } from '../billing/enterpriseBillingOrchestrator';
 // jsonb-hygiene cap instead of being silently excluded from resume.
 import { compressIfLarge, decompressIfNeeded } from '../../../lib/platform/cacheCore';
 import { defineRolloutFlag, resolveRolloutSync } from '../../../lib/platform/rollout';
+import { AiResultUnreadableError } from './aiExecutionResultErrors';
 
 const RESULT_STORE_COMPRESSION_FLAG = defineRolloutFlag({
   key: 'result-store-compression',
@@ -46,18 +47,8 @@ interface StoredAiResultV2 {
   payload_gz: string;
 }
 
-/**
- * Reads contract (e9 BLOCKING, e1): the stored-result READ failed. Not "no stored result" - answered as absent, the
- * runtime re-ran the AI work uncharged (platform cost) on every transient DB failure. Typed and retryable.
- */
-export class AiResultUnreadableError extends Error {
-  readonly code = 'AI_RESULT_UNREADABLE' as const;
-  readonly retryable = true as const;
-  constructor(message: string) {
-    super(message);
-    this.name = 'AiResultUnreadableError';
-  }
-}
+// Defined in its own module so a mock of THIS store cannot remove it from the runtime's instanceof (7c).
+export { AiResultUnreadableError };
 
 export async function loadAiExecutionResult<T = unknown>(
   idempotencyKey: string,

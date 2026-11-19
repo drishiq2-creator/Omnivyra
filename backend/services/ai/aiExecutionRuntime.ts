@@ -34,7 +34,9 @@ import {
   makeIdempotencyKey,
 } from '../creditExecutionService';
 import { getCreditEconomyExecutionMode } from '../billing/creditEconomyActivation';
-import { loadAiExecutionResult, saveAiExecutionResult, AiResultUnreadableError } from './aiExecutionResultStore';
+import { loadAiExecutionResult, saveAiExecutionResult } from './aiExecutionResultStore';
+// Its own module: a mock of the store must not turn the instanceof checks below into a throw inside their catch (7c).
+import { AiResultUnreadableError } from './aiExecutionResultErrors';
 
 /* ── Outcome model ── */
 

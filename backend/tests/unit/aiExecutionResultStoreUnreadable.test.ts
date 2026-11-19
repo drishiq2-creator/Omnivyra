@@ -38,6 +38,17 @@ it('NEGATIVE CONTROL: a readable read with no row is a real absence -> null', as
   await expect(loadAiExecutionResult('key-1')).resolves.toBeNull();
 });
 
+// 7c (2026-11-19): an error class defined inside a module that suites MOCK breaks `instanceof` in every caller whose
+// suite's factory omits it - the check throws INSIDE its catch. Pin that the callers import the classes from their
+// own, never-mocked modules (by content, not line).
+it.each([
+  ['backend/services/ai/aiExecutionRuntime.ts', /import \{ AiResultUnreadableError \} from '\.\/aiExecutionResultErrors';/],
+  ['pages/api/active-leads/cost-governance.ts', /import \{ BudgetUnverifiableError \} from '[./]+backend\/services\/costGovernanceErrors';/],
+])('%s imports its error class from the dedicated module, not the mocked service', (rel, re) => {
+  const src = require('fs').readFileSync(require('path').resolve(__dirname, '../../..', rel), 'utf8') as string;
+  expect(src).toMatch(re);
+});
+
 it('NEGATIVE CONTROL: a readable row with a v1 result returns it', async () => {
   mockRead.mode = 'row';
   mockRead.row = { metadata: { ai_result: { v: 1, action: 'content_basic', saved_at: '2026-11-19T00:00:00Z', payload: { a: 'b' } } } };
