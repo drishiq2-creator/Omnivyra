@@ -973,16 +973,18 @@ async function processPublishJobInner(params: {
 
       // The code lands in the same update as the status (and replaces the
       // PUBLISH_CALL_STARTED marker), so the row is never failed-without-code.
+      // Unpinned BY DESIGN (05, CLASS-2): this is the platform's own answer after OUR call started, and
+      // at this moment the row is either publishing + PUBLISH_CALL_STARTED (refused `call_in_flight` by
+      // the claim) or failed + PUBLISH_OUTCOME_UNCERTAIN, the sweeper's relabel (refused
+      // `outcome_uncertain`). Neither is claimable, so no other execution can hold it. If either code is
+      // ever made claimable, this write becomes a D5 instance and must be pinned.
       await updateScheduledPostOnFailure(scheduled_post_id, platformError.user_message, undefined, platformError.code);
       
-      // Update scheduled_post with error code
-      await supabase
-        .from('scheduled_posts')
-        .update({
-          error_code: platformError.code,
-          error_message: platformError.user_message,
-        })
-        .eq('id', scheduled_post_id);
+      // CLASS-2 D6: a second, blind write of the same error_code/message used to follow. It was
+      // redundant (the write above carries both) and harmful: by then the row was `failed` with a
+      // claimable code, so another execution could already hold it - and this write erased that
+      // run's PUBLISH_CLAIMED fence or its PUBLISH_CALL_STARTED evidence. Removed (publishNow
+      // removed its mirror the same way).
 
       // Calculate next retry time (exponential backoff)
       const attempts = queueJob.attempts || 0;
