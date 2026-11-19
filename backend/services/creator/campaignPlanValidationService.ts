@@ -18,14 +18,17 @@ type Rec = Record<string, unknown>;
 function str(v: unknown): string { return typeof v === 'string' ? v.trim() : v == null ? '' : String(v).trim(); }
 function num(v: unknown): number | undefined { return typeof v === 'number' && Number.isFinite(v) ? v : undefined; }
 
-/** Resolve a plan template by id — system first, then load+register a user template. */
-export async function resolvePlanTemplate(templateId: string): Promise<CreatorTemplate | null> {
+/**
+ * Resolve a plan template by id — system first, then a user template OF THIS COMPANY (CI-176). Another company's
+ * template id resolves to null, exactly like an unknown id (graceful: the renderer, whose chokepoint also drops it,
+ * uses the default style), so validation never reads or reports on another company's template.
+ */
+export async function resolvePlanTemplate(templateId: string, companyId: string | null | undefined): Promise<CreatorTemplate | null> {
   const id = str(templateId);
   if (!id) return null;
   const sys = getTemplateById(id);
-  if (sys) return sys;
-  await loadAndRegisterUserTemplate(id);
-  return getTemplateById(id) ?? null;
+  if (sys && sys.ownership !== 'user') return sys;
+  return loadAndRegisterUserTemplate(id, companyId);
 }
 
 /** Project a creator_card onto a PlannedAsset (template_id + planned params). */
@@ -52,10 +55,10 @@ export function plannedAssetFromCard(card: Rec, contentType: string): PlannedAss
  * / stale-template campaigns are never broken); resolved-but-incompatible plans
  * return explicit errors.
  */
-export async function validatePlannedCard(card: Rec, contentType: string): Promise<PlannedAssetValidation | null> {
+export async function validatePlannedCard(card: Rec, contentType: string, companyId: string | null | undefined): Promise<PlannedAssetValidation | null> {
   const planned = plannedAssetFromCard(card, contentType);
   if (!planned) return null;
-  const template = await resolvePlanTemplate(planned.templateId);
+  const template = await resolvePlanTemplate(planned.templateId, companyId);
   if (!template) return { ok: true, errors: [], descriptor: null }; // graceful: unresolved → default
   return validatePlannedAsset(template, planned);
 }
@@ -90,7 +93,7 @@ export function plannedAssetsFromActivities(activities: unknown): PlannedAsset[]
 }
 
 /** Validate a whole campaign plan (multi-asset, mixed families) before approval. */
-export async function validateCampaignPlanAssets(planned: PlannedAsset[]): Promise<CampaignPlanValidation> {
-  const items = await Promise.all(planned.map(async (p) => ({ planned: p, template: await resolvePlanTemplate(p.templateId) })));
+export async function validateCampaignPlanAssets(planned: PlannedAsset[], companyId: string | null | undefined): Promise<CampaignPlanValidation> {
+  const items = await Promise.all(planned.map(async (p) => ({ planned: p, template: await resolvePlanTemplate(p.templateId, companyId) })));
   return validateCampaignPlan(items);
 }

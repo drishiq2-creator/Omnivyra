@@ -100,6 +100,7 @@ import { uploadRenderedPng, IMAGE_SUBTYPE_HINTS, resolveImageSubtype, resolveAtt
 import { composeSingleVisualAsset, computeCompositionQuality } from './creatorAssetRendererImage';
 import { renderCarouselAsset, renderPdfAsset, renderSliderAsset } from './creatorAssetRendererCompose';
 import { renderInfographicAsset } from './creatorAssetRendererInfographic';
+import { dropForeignUserTemplateRefs } from './creator/userTemplateTenancy';
 
 async function renderBrandCardAsset(
   assetPayload: Record<string, unknown>,
@@ -506,6 +507,10 @@ export async function renderAsset(
   // payload that already carries `novelty_seed` (minted per request by the
   // execution engine, or a true retry / reproduction) keeps it.
   pinNoveltySeed(assetPayload);
+  // CI-176 — THE template tenancy chokepoint: a template id naming ANOTHER company's user template (loaded into this
+  // process's registry by its own render, or never) is cleared before anything resolves it, so this render uses
+  // the family default exactly as for an unknown id. Every render caller passes through here.
+  dropForeignUserTemplateRefs(assetPayload, options.companyId ?? null);
   // Avoid-recent (best-effort, read-only, time-boxed, fail-open): the last few
   // same-company same-look generations' picks ride as `novelty_avoid`, so this
   // generation's primary picks differ when the pools allow. Pinned on the

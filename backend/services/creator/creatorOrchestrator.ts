@@ -488,7 +488,7 @@ async function runRenderDispatch(input: {
     // PART A — register a user template_id before the inline render.
     try {
       const { ensureUserTemplateRegisteredForAsset } = await import('./userTemplateService');
-      await ensureUserTemplateRegisteredForAsset(renderInput);
+      await ensureUserTemplateRegisteredForAsset(renderInput, input.companyId);
     } catch { /* best-effort */ }
     // THE single runtime entry into the composition-asset resolver. Everything
     // downstream — routing, tenant checks, lifecycle, byte retrieval, the
@@ -577,7 +577,7 @@ async function runCreatorOrchestrationCore(
     const card = safeObject(input.creatorCard);
     if (typeof card.template_id === 'string' && card.template_id.trim()) {
       const { validatePlannedCard } = await import('./campaignPlanValidationService');
-      const planCheck = await validatePlannedCard(card, effectiveContentType);
+      const planCheck = await validatePlannedCard(card, effectiveContentType, input.companyId);
       if (planCheck && !planCheck.ok) {
         throw new Error(`Invalid campaign plan — generated asset rejected before generation: ${planCheck.errors.join(' ')}`);
       }

@@ -46,7 +46,8 @@ export async function processCreatorRenderJob(job: Job<CreatorDurableRenderJobDa
   // resolver, no duplicate registration). Best-effort: system/absent ids no-op.
   try {
     const { ensureUserTemplateRegisteredForAsset } = await import('./creator/userTemplateService');
-    await ensureUserTemplateRegisteredForAsset(assetPayload);
+    // CI-176: the job's company (the same value renderAsset receives as workerCompanyId below).
+    await ensureUserTemplateRegisteredForAsset(assetPayload, typeof options.companyId === 'string' ? options.companyId : null);
   } catch { /* best-effort — system + default-style resolution unaffected */ }
 
   /*

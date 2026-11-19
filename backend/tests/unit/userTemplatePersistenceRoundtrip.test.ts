@@ -69,15 +69,17 @@ describe('TEMPLATE-019 Part A — worker resolution + round-trip fidelity', () =
 
   it('ensureUserTemplateRegisteredForAsset registers from the asset payload → resolveTemplate resolves it', async () => {
     expect(getTemplateById('ut-round')).toBeNull(); // not registered yet
-    await ensureUserTemplateRegisteredForAsset({ media_bundle: { metadata: { template_id: 'ut-round' } } });
+    // CI-176: the render's company is passed; the row's company_id ('co') owns it, and the registered copy is stamped.
+    await ensureUserTemplateRegisteredForAsset({ media_bundle: { metadata: { template_id: 'ut-round' } } }, 'co');
     const rt = resolveTemplate('ut-round', { family: 'infographic' });
     expect(rt.matched).toBe(true);
+    expect((rt.template?.metadata as any)?.companyId).toBe('co');
     expect(rt.infographicStyle).toEqual(sysInfo.infographicStyle); // same pipeline + faithful style
   });
 
   it('is a no-op for system ids and missing ids', async () => {
-    await ensureUserTemplateRegisteredForAsset({ media_bundle: { metadata: { template_id: sysInfo.id } } });
-    await ensureUserTemplateRegisteredForAsset({});
+    await ensureUserTemplateRegisteredForAsset({ media_bundle: { metadata: { template_id: sysInfo.id } } }, 'co');
+    await ensureUserTemplateRegisteredForAsset({}, 'co');
     expect(resolveTemplate(sysInfo.id).matched).toBe(true); // system unaffected
   });
 });

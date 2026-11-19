@@ -14,6 +14,7 @@
 
 import { type CreatorTemplate, registerUserTemplate } from '../../../lib/creator-templates';
 import { buildPreviewIntent } from '../../../lib/creator-templates/userTemplatePreview';
+import { stampUserTemplateCompany } from './userTemplateTenancy';
 import { setPreviewStatus, setPreviewResult } from './userTemplateService';
 
 function safeObject(v: unknown): Record<string, unknown> {
@@ -33,7 +34,8 @@ export interface GeneratedPreview {
 export async function generateUserTemplatePreview(template: CreatorTemplate, companyId: string): Promise<GeneratedPreview> {
   // Register the user template so the renderer's resolveTemplate(template_id)
   // resolves ITS style + contract (not the default) — same pipeline as system.
-  registerUserTemplate(template);
+  // CI-176: stamped with the company whose preview this is, so the render chokepoint accepts it for that company only.
+  registerUserTemplate(stampUserTemplateCompany(template, companyId));
   const assetPayload = buildPreviewIntent(template);
 
   // Configure fontconfig BEFORE the renderer (sharp) is imported — same ordering

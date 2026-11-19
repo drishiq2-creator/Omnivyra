@@ -2,6 +2,7 @@ import { createApiRoute as __createApiRoute } from '../../../../lib/platform/rou
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { enforceCompanyAccess, resolveUserContext } from '../../../../backend/services/userContextService';
 import { listUserTemplates, createUserTemplate } from '../../../../backend/services/creator/userTemplateService';
+import { SourceTemplateNotFoundError } from '../../../../backend/services/creator/userTemplateTenancy';
 import { filterUserTemplates, type OrganizationFilter } from '../../../../lib/creator-templates/userTemplate';
 import { familyForCreatorType } from '../../../../lib/creator-templates';
 
@@ -40,14 +41,22 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     if (!access) return;
     const family = familyForCreatorType(typeof body.family === 'string' ? body.family : '');
     if (!family) return res.status(400).json({ error: 'family must be image | carousel | infographic' });
-    const created = await createUserTemplate({
+    let created;
+    try {
+      created = await createUserTemplate({
       companyId,
       ownerUserId: user.userId,
       family,
       sourceTemplateId: typeof body.source_template_id === 'string' ? body.source_template_id : null,
       name: typeof body.name === 'string' ? body.name : undefined,
       teamId: typeof body.team_id === 'string' ? body.team_id : null,
-    });
+      });
+    } catch (e) {
+      // CI-176: a source that is not a system template nor one of THIS company's - unknown and another company's
+      // template get the same 404 (no existence signal); nothing is created.
+      if (e instanceof SourceTemplateNotFoundError) return res.status(404).json({ error: 'Source template not found' });
+      throw e;
+    }
     if (!created) return res.status(503).json({ error: 'Could not create template (user template storage unavailable).' });
     return res.status(201).json({ template: created });
   }

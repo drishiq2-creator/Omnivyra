@@ -31,6 +31,7 @@ import {
   type TemplateRole,
   type TemplateVersionSnapshot,
 } from '../../../lib/creator-templates/userTemplate';
+import { stampUserTemplateCompany, getTemplateForCompany, isForeignUserTemplate, SourceTemplateNotFoundError } from './userTemplateTenancy';
 
 const TABLE = 'creator_user_templates';
 const VERSIONS = 'creator_user_template_versions';
@@ -62,6 +63,9 @@ function hydrate(row: Record<string, unknown>): CreatorTemplate | null {
     updatedAt: String(row.updated_at ?? ''),
     createdAt: String(row.created_at ?? ''),
   };
+  // CI-176: the owning company rides on every registered template; the render chokepoint
+  // (userTemplateTenancy.dropForeignUserTemplateRefs) refuses it to any other company.
+  stampUserTemplateCompany(t, row.company_id == null ? '' : String(row.company_id));
   // Register into the canonical runtime registry so getTemplateById() /
   // resolveTemplate() resolve this user template identically to a system one
   // (same rendering pipeline) wherever it is loaded.
@@ -119,11 +123,16 @@ export async function getUserTemplate(id: string): Promise<CreatorTemplate | nul
  * worker, before renderAsset) resolves its style + contract — the cross-process
  * integration hook for Campaign Creator / Calendar / Publishing renders. Returns
  * null (and registers nothing) for non-user ids; system ids already resolve.
+ * CI-176: only a template `companyId` owns is returned (a foreign id, registered or not, yields null).
  */
-export async function loadAndRegisterUserTemplate(id: string): Promise<CreatorTemplate | null> {
+export async function loadAndRegisterUserTemplate(id: string, companyId: string | null | undefined): Promise<CreatorTemplate | null> {
   const normalized = String(id || '').trim();
-  if (!normalized || getTemplateById(normalized)) return null; // system id resolves already
-  return getUserTemplate(normalized); // hydrate() registers on success
+  if (!normalized) return null;
+  const registered = getTemplateById(normalized);
+  if (registered && registered.ownership !== 'user') return null; // system id resolves already
+  if (registered && !isForeignUserTemplate(registered, companyId)) return registered; // this company's, already loaded
+  // The existing company-scoped read (collection/design-system resolvers use it too); a read failure is null.
+  return getUserTemplateForCompany(normalized, String(companyId || '')); // hydrate() registers on success
 }
 
 /**
@@ -135,7 +144,7 @@ export async function loadAndRegisterUserTemplate(id: string): Promise<CreatorTe
  * its style/contract. Idempotent + best-effort: system ids / missing ids /
  * unavailable storage are no-ops, so existing renders are unaffected.
  */
-export async function ensureUserTemplateRegisteredForAsset(assetPayload: unknown): Promise<void> {
+export async function ensureUserTemplateRegisteredForAsset(assetPayload: unknown, companyId: string | null | undefined): Promise<void> {
   try {
     const payload = (assetPayload && typeof assetPayload === 'object' ? assetPayload : {}) as Record<string, unknown>;
     const bundle = (payload.media_bundle && typeof payload.media_bundle === 'object' ? payload.media_bundle : {}) as Record<string, unknown>;
@@ -143,16 +152,20 @@ export async function ensureUserTemplateRegisteredForAsset(assetPayload: unknown
     const card = (md.creator_card && typeof md.creator_card === 'object' ? md.creator_card : {}) as Record<string, unknown>;
     const raw = md.template_id ?? md.infographic_template_id ?? card.template_id;
     const id = typeof raw === 'string' ? raw.trim() : '';
-    if (!id || getTemplateById(id)) return; // empty or system id → nothing to load
+    if (!id) return;
+    const registered = getTemplateById(id);
+    if (registered && registered.ownership !== 'user') return; // system id → nothing to load
+    // CI-176: a version is loaded only for a template this company owns (verified below); a foreign id loads
+    // nothing, and renderAsset's chokepoint drops it if another company's copy is already registered.
     // PART B — a historical asset pins the version it was created with; load THAT
     // version snapshot so the renderer resolves the immutable historical template.
     const verRaw = md.template_version ?? card.template_version;
     const version = typeof verRaw === 'number' ? verRaw : Number.isFinite(Number(verRaw)) ? Number(verRaw) : null;
     if (version && version > 0) {
-      const pinned = await loadAndRegisterUserTemplateVersion(id, version);
+      const pinned = await loadAndRegisterUserTemplateVersion(id, version, companyId);
       if (pinned) return;
     }
-    await loadAndRegisterUserTemplate(id); // else current version
+    await loadAndRegisterUserTemplate(id, companyId); // else current version
   } catch { /* best-effort — system + default-style resolution is unaffected */ }
 }
 
@@ -161,15 +174,20 @@ export async function ensureUserTemplateRegisteredForAsset(assetPayload: unknown
  * renderer's resolveTemplate(id) resolves the historical version for a render of
  * a historical asset. Falls back to null when the version is unavailable.
  */
-export async function loadAndRegisterUserTemplateVersion(id: string, version: number): Promise<CreatorTemplate | null> {
+export async function loadAndRegisterUserTemplateVersion(id: string, version: number, companyId: string | null | undefined): Promise<CreatorTemplate | null> {
   const normalized = String(id || '').trim();
-  if (!normalized || getTemplateById(normalized)) return null; // system ids are immutable in-code
+  if (!normalized) return null;
+  const registered = getTemplateById(normalized);
+  if (registered && registered.ownership !== 'user') return null; // system ids are immutable in-code
+  // CI-176: the versions table is keyed by template id only, so ownership is proven on the template row FIRST.
+  if (!(await getUserTemplateForCompany(normalized, String(companyId || '')))) return null;
   const versions = await listUserTemplateVersions(normalized);
   const snap = versions.find((v) => v.version === version);
   if (!snap) return null;
   const t = snap.template;
   t.id = normalized;
   t.ownership = 'user';
+  stampUserTemplateCompany(t, String(companyId || ''));
   registerUserTemplate(t);
   return t;
 }
@@ -201,16 +219,24 @@ export interface CreateInput {
   companyId: string;
   ownerUserId: string;
   family: TemplateAssetFamily;
-  /** Source: a system OR user template id, or null for blank. */
+  /** Source: a system template id, a user template id OF THIS COMPANY (CI-176), or null for blank. */
   sourceTemplateId?: string | null;
   name?: string;
   teamId?: string | null;
 }
 
 export async function createUserTemplate(input: CreateInput): Promise<CreatorTemplate | null> {
-  const source = input.sourceTemplateId
-    ? (getTemplateById(input.sourceTemplateId) ?? (await getUserTemplate(input.sourceTemplateId)))
-    : null;
+  // CI-176: a clone source is a system template or a user template this company owns; another company's id
+  // (registered in this process or not) is refused - it was cloned into the caller's company before.
+  let source: CreatorTemplate | null = null;
+  if (input.sourceTemplateId) {
+    source = getTemplateForCompany(input.sourceTemplateId, input.companyId);
+    if (!source) {
+      source = await getUserTemplateForCompany(input.sourceTemplateId, input.companyId);
+      // Unknown and foreign alike (an unknown id used to clone a BLANK template silently).
+      if (!source) throw new SourceTemplateNotFoundError();
+    }
+  }
   const now = nowIso();
   // Insert first to obtain the DB id, then re-clone with the real id.
   try {
