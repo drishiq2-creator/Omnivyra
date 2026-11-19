@@ -3,7 +3,7 @@
  * only objects an activity-workspace route may read or delete on behalf of an
  * authorized activity are the ones that belong to it. Both upload paths name
  * them that way:
- *   TUS client (creatorMediaUploadHandlers / ActivityWorkspacePrimaryBrief):
+ *   TUS client (creatorMediaUploadHandlers; formerly also ActivityWorkspacePrimaryBrief, deleted 2026-11-19, CI-394):
  *     `<activityId>/<subdir>/<session>.<ext>`
  *   upload-media-direct deriveObjectPath:
  *     `<companyId>/<activityId>/<subdir>/<stem>.<ext>`

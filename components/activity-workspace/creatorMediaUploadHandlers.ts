@@ -2,7 +2,7 @@
  * Creator media upload handlers — shared, reusable implementation.
  *
  * These functions were previously defined inline in the (orphaned)
- * pages/activity-workspace/ActivityWorkspacePrimaryBrief.tsx. They are the
+ * pages/activity-workspace/ActivityWorkspacePrimaryBrief.tsx (deleted 2026-11-19, CI-394). They are the
  * SINGLE source of truth for the attachment-required (video/reel/short/
  * podcast) upload journey:
  *

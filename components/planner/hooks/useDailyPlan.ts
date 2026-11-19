@@ -1,5 +1,5 @@
 /**
- * useDailyPlan — all state and fetch/mutation logic extracted from DailyPlanningInterface.
+ * useDailyPlan — all state and fetch/mutation logic extracted from DailyPlanningInterface (that component was deleted 2026-11-19, CI-420; the extraction came first).
  * Pure data/logic hook; no JSX.
  */
 
