@@ -23,19 +23,10 @@ import type {
   CostEvent,
 } from '../types/costGovernance';
 import { COST_BUDGET_WINDOW_MS } from '../types/costGovernance';
+import { BudgetUnverifiableError } from './costGovernanceErrors';
 
-/**
- * Reads contract (B3, e9 BLOCKING): the budget or the rolling spend could not be READ. Answered as "no active budget"
- * / "0 spent" it allowed spend past the hard ceiling. Typed and retryable; evaluateCost refuses instead (503).
- */
-export class BudgetUnverifiableError extends Error {
-  readonly code = 'BUDGET_UNVERIFIABLE' as const;
-  readonly retryable = true as const;
-  constructor(message: string) {
-    super(message);
-    this.name = 'BudgetUnverifiableError';
-  }
-}
+// Defined in its own module so a mock of THIS service cannot remove it from a route's instanceof (CI-609).
+export { BudgetUnverifiableError };
 
 async function loadBudget(
   organizationId: string,

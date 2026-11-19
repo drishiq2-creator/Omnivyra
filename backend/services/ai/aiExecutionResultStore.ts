@@ -62,12 +62,21 @@ export class AiResultUnreadableError extends Error {
 export async function loadAiExecutionResult<T = unknown>(
   idempotencyKey: string,
 ): Promise<StoredAiResult<T> | null> {
-  const { data, error } = await supabase
-    .from('billing_operations')
-    .select('metadata')
-    .eq('idempotency_key', idempotencyKey)
-    .maybeSingle();
-  if (error) throw new AiResultUnreadableError(`stored AI result read failed for ${idempotencyKey}: ${error.message}`);
+  // Both failure forms - an error object AND a thrown read - are the same unreadable state (b3, 2026-11-19). A thrown
+  // read used to escape as a raw error (500 echoing its text) once the old catch-all around this read was removed.
+  let data: { metadata?: unknown } | null = null;
+  try {
+    const res = await supabase
+      .from('billing_operations')
+      .select('metadata')
+      .eq('idempotency_key', idempotencyKey)
+      .maybeSingle();
+    if (res.error) throw new AiResultUnreadableError(`stored AI result read failed for ${idempotencyKey}: ${res.error.message}`);
+    data = (res.data as { metadata?: unknown } | null) ?? null;
+  } catch (err) {
+    if (err instanceof AiResultUnreadableError) throw err;
+    throw new AiResultUnreadableError(`stored AI result read threw for ${idempotencyKey}: ${(err as Error)?.message ?? 'error'}`);
+  }
   // Below: a row that WAS read but holds no / an undecodable result is a real absence (re-run is the right answer).
   try {
     const stored = (data?.metadata as { ai_result?: StoredAiResult<T> | StoredAiResultV2 } | null)?.ai_result;

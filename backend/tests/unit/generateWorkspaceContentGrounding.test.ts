@@ -74,6 +74,9 @@ jest.mock('../../db/supabaseClient', () => ({
     from: () => ({
       select: () => ({
         eq: () => ({
+          // The stored-AI-result read (billing_operations: select -> eq -> maybeSingle): no stored result. Unmodelled
+          // before - the runtime's old catch-all swallowed the missing method as "absent" (CI-609, 2026-11-19).
+          maybeSingle: async () => ({ data: null, error: null }),
           order: () => ({
             order: () => ({
               limit: () => ({

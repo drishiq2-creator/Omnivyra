@@ -17,8 +17,9 @@ import {
   listBudgets,
   recordCost,
   upsertBudget,
-  BudgetUnverifiableError,
 } from '../../../backend/services/costGovernanceService';
+// Imported from its own module, not the service: a service mock must not turn the instanceof below into a throw.
+import { BudgetUnverifiableError } from '../../../backend/services/costGovernanceErrors';
 import { COST_CATEGORIES, type CostCategory } from '../../../backend/types/costGovernance';
 import { publishRealtime } from '../../../backend/services/realtimePublisherService';
 

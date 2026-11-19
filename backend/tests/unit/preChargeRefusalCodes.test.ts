@@ -46,6 +46,8 @@ const CONTRACTS = 'backend/services/creditExecutionServiceContracts.ts';
 const RUNTIME_CORE = 'backend/services/creditExecutionServiceRuntimeCore.ts';
 const ORG = 'backend/services/orgControlService.ts';
 const COST = 'backend/services/costGovernanceService.ts';
+// BudgetUnverifiableError's own module (CI-609): the code literal lives there; the throws stay in COST.
+const COST_ERRORS = 'backend/services/costGovernanceErrors.ts';
 const COST_ROUTE = 'pages/api/active-leads/cost-governance.ts';
 
 /** The body of `export async function <name>` up to the next top-level `export `. */
@@ -82,7 +84,7 @@ it('isPreChargeRefusal: true for the set; FALSE for CREDIT_STATE_UNREADABLE (set
 it.each([
   ['DAILY_LIMIT_UNVERIFIABLE', [ORG]],
   ['ORG_CONTROLS_UNVERIFIABLE', [ORG]],
-  ['BUDGET_UNVERIFIABLE', [COST]],
+  ['BUDGET_UNVERIFIABLE', [COST_ERRORS]],
 ])('%s: produced ONLY by %j (a new producer must be traced before it can stay in the set)', (code, producers) => {
   // The module itself, the derived StateUnreadableCode type and the owned client copies (ALLOWED_COPIES, below)
   // name the codes without producing them - a copy is a consumer, so 04's literal landing first stays green here.
@@ -136,7 +138,7 @@ it('every ledger entry is still a real copy - remove it once its file imports th
 it('POSITIVE CONTROL: the copy detector sees a literal list and the module, and ignores a single-code producer', () => {
   expect(listsAllThree("['DAILY_LIMIT_UNVERIFIABLE', 'BUDGET_UNVERIFIABLE', 'ORG_CONTROLS_UNVERIFIABLE']")).toBe(true);
   expect(listsAllThree(read(MODULE))).toBe(true);
-  expect(listsAllThree(read(COST))).toBe(false);
+  expect(listsAllThree(read(COST_ERRORS))).toBe(false);
 });
 
 // Type-level pin (tsc; ts-jest is transpile-only): StateUnreadableCode keeps EXACTLY its three members - derived from

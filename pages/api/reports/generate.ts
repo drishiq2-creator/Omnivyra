@@ -44,6 +44,8 @@ type GenerateReportResponse = {
   message?: string;
   error?: string;
   code?: string;
+  /** A read that FAILED (503 + Retry-After) - not a refusal on the facts (reads contract). */
+  retryable?: boolean;
   requestId?: string;
   correlationId?: string;
 };

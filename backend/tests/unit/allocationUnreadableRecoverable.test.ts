@@ -40,7 +40,8 @@ jest.mock('../../db/supabaseClient', () => ({
     },
   },
 }));
-const createCredit = jest.fn(async () => ({ status: 'created' }));
+// Typed with its command parameter: a later mockImplementation((cmd) => ...) must fit (tsc TS2345, CI-609 sweep).
+const createCredit = jest.fn(async (_cmd?: unknown) => ({ status: 'created' }));
 jest.mock('../../services/creditExecutionService', () => ({ createCredit: (...a: unknown[]) => (createCredit as any)(...a) }));
 const events: Array<{ eventName: string; metadata?: any }> = [];
 jest.mock('../../services/monetizationOpsService', () => ({ recordMonetizationOperationalEvent: async (e: any) => { events.push(e); } }));
