@@ -18,6 +18,7 @@ import { createCredit, type CreditCategory } from '../creditExecutionService';
 import { logger } from '../logger';
 import { emitAnomaly, emitFinancialAudit } from './billingAuditEmitter';
 import { incrCounter } from './billingMetrics';
+import { isConfirmPhase } from '../../../shared/billing/creditPhaseVocabulary';
 
 const TABLE = 'billing_owed_refunds';
 export const PROTECTED_ORG_PREFIXES: readonly string[] = ['73e5fa6f'];
@@ -42,7 +43,7 @@ export async function readOriginalCharge(confirmKey: string): Promise<OriginalCh
   if (error) throw new Error(`original charge read failed: ${error.message}`);
   const row = data as { id: string; execution_phase: string | null; free_delta: number | null; paid_delta: number | null; incentive_delta: number | null } | null;
   if (!row) return null;
-  if (!['confirm', 'confirm_partial'].includes(String(row.execution_phase))) return null;
+  if (!isConfirmPhase(String(row.execution_phase))) return null;   // the one execution_phase vocabulary (no local copy)
   return {
     confirmTxnId: row.id,
     free: Math.abs(Number(row.free_delta ?? 0)),
