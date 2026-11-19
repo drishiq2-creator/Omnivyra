@@ -82,6 +82,13 @@ export const CROSS_TENANT_ALLOW_LIST: readonly CrossTenantEntry[] = [
     reason: "Super Admin platform API preset writes (pages/api/admin/intelligence/api-presets.ts: requireSuperAdmin). external_api_sources is TENANT_OR_PLATFORM (e9 2026-11-14); a PLATFORM row (company_id NULL, is_preset) is reachable only on ownedDbTable by an SA path - tenantOrPlatformTable deliberately cannot modify platform rows",
     owner: 'virality-55',
   },
+  {
+    id: 'campaign-plan-store-legacy-unscoped-projection',
+    tables: ['campaign_resource_projection'],
+    file: 'backend/db/campaignPlanStore.ts',
+    reason: "NOT cross-tenant by design: the legacy Unscoped variant (upsertCampaignResourceProjectionUnscoped -> upsertCampaignResourceProjectionImpl with tenant null). It UPSERTS campaign_resource_projection keyed on campaign_id alone, so a deleted campaign's orphaned projection rows are reachable (recorded debt, S2-55 7c). No tenant is in scope for its only callers saveStructuredCampaignPlan / commitDraftBlueprint / updateToEditedCommitted, which take none. Frozen by backend/tests/unit/unscopedStoreCallersAllowlist.test.ts (3 call sites, by name). The same site was main's R1 write (the gate now reads it as a read because the upsert sits on the shared handle). Exit: thread a tenant through those three writers and delete the null branch and this entry",
+    owner: 'virality-55',
+  },
 ] as const;
 
 export const CROSS_TENANT_IDS: ReadonlySet<string> = new Set(CROSS_TENANT_ALLOW_LIST.map((e) => e.id));

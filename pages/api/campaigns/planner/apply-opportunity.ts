@@ -26,23 +26,27 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     return res.status(400).json({ error: 'campaignId and opportunityId are required' });
   }
 
+  // The company id is read from the body ONCE; the same value is what the gate authorizes and what the tenant is built
+  // from below, so nothing read after the check (a re-read body) can name a different company.
+  const authorizedCompanyId = req.body?.companyId as string | undefined;
+
   try {
     const access = await enforceCompanyAccess({
       req,
       res,
-      companyId: req.body?.companyId as string | undefined,
+      companyId: authorizedCompanyId,
       campaignId,
       requireCampaignId: true,
     });
     if (!access) return;
 
-    // S2 tenant seam: the tenant is req.body.companyId, the company enforceCompanyAccess above authorized for this
+    // S2 tenant seam: the tenant is authorizedCompanyId, the company enforceCompanyAccess above authorized for this
     // principal (and bound campaignId to); opportunity_radar is scoped by organization_id = that company, so another
     // company's opportunity reads as not found and is never updated.
     let opportunities: ReturnType<typeof tenantTable>;
     let tenant: TenantContext;
     try {
-      tenant = tenantContextFor(access, String(req.body?.companyId));
+      tenant = tenantContextFor(access, String(authorizedCompanyId));
       opportunities = tenantTable('opportunity_radar', tenant);
     } catch (err) {
       if (err instanceof TenantSeamError) return seamDenial(res, err, 404, { error: 'Opportunity not found' });

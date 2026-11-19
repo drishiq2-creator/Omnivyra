@@ -42,8 +42,11 @@ async function upsertCampaignResourceProjectionImpl(campaignId: string, blueprin
     platform_allocation: w.platform_allocation ?? {},
   }));
   if (rows.length === 0) return;
+  // tenant === null is the legacy unscoped path (upsertCampaignResourceProjectionUnscoped only): its handle WRITES
+  // (the .upsert below), keyed on campaign_id alone - recorded debt, see the allow-list entry for the reason.
   const projection: any = tenant
     ? await tenantChildTable('campaign_resource_projection', tenant, campaignId)
+    // cross-tenant: campaign-plan-store-legacy-unscoped-projection
     : supabase.from('campaign_resource_projection');
   const { error } = await projection.upsert(rows, {
     onConflict: 'campaign_id,week_number',
@@ -218,9 +221,7 @@ async function saveCampaignBlueprintFromRecommendationImpl(input: BlueprintFromR
     resolved_postings: Array.isArray((w as any).resolved_postings) ? (w as any).resolved_postings : undefined,
     week_extras: w.week_extras ?? undefined,
   }));
-  const weekPlan: any = tenant
-    ? await tenantChildTable('campaign_week_plan', tenant, input.campaignId)
-    : supabase.from('campaign_week_plan');
+  const weekPlan: any = await tenantChildTable('campaign_week_plan', tenant, input.campaignId);
   const { error } = await weekPlan.insert({
     campaign_id: input.campaignId,
     snapshot_hash,
@@ -289,11 +290,12 @@ async function saveDraftBlueprintImpl(input: { campaignId: string; blueprint: Ca
     updated_at: now,
   };
 
-  // With a tenant, ONE seam handle serves the read, the update and the insert: all three are pinned to this
-  // tenant's campaign, so the draft found (and overwritten) can never be another company's orphaned row.
-  const weekPlan: any = tenant ? await tenantChildTable('campaign_week_plan', tenant, input.campaignId) : null;
+  // ONE seam handle serves the read, the update and the insert: all three are pinned to this tenant's campaign, so
+  // the draft found (and overwritten) can never be another company's orphaned row. (`tenant` is non-null here -
+  // required() - so there is no unscoped fallback.)
+  const weekPlan: any = await tenantChildTable('campaign_week_plan', tenant, input.campaignId);
   let existing: { id: number } | null = null;
-  const withStatus = await (weekPlan ?? supabase.from('campaign_week_plan'))
+  const withStatus = await weekPlan
     .select('id')
     .eq('campaign_id', input.campaignId)
     .eq('status', 'draft')
@@ -307,11 +309,11 @@ async function saveDraftBlueprintImpl(input: { campaignId: string; blueprint: Ca
   (row as any).status = 'draft';
 
   if (existing?.id) {
-    const { error } = await (weekPlan ?? supabase.from('campaign_week_plan')).update(row).eq('id', existing.id);
+    const { error } = await weekPlan.update(row).eq('id', existing.id);
     if (error) throw new Error(`Failed to update draft blueprint: ${error.message}`);
   } else {
     const insertPayload = { ...row, created_at: now } as any;
-    const { error } = await (weekPlan ?? supabase.from('campaign_week_plan')).insert(insertPayload);
+    const { error } = await weekPlan.insert(insertPayload);
     if (error) throw new Error(`Failed to save draft blueprint: ${error.message}`);
   }
 }
@@ -325,7 +327,7 @@ export async function getLatestDraftPlan(campaignId: string, tenant: TenantConte
 }
 
 async function getLatestDraftPlanImpl(campaignId: string, tenant: TenantContext): Promise<{ weeks: any[] } | null> {
-  const weekPlan: any = tenant ? await tenantChildTable('campaign_week_plan', tenant, campaignId) : supabase.from('campaign_week_plan');
+  const weekPlan: any = await tenantChildTable('campaign_week_plan', tenant, campaignId);
   const { data } = await weekPlan
     .select('weeks, blueprint')
     .eq('campaign_id', campaignId)
