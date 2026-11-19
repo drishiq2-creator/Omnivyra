@@ -84,7 +84,6 @@ const ALLOWLIST: Record<string, { cls: EmbedClass; why: string; since?: string }
 
 /** content-* queue producers -> the guard that authorizes the payload company. */
 const PRODUCERS: Record<string, string> = {
-  'pages/api/blogs/generate.ts': 'enforceCompanyAccess on body company_id before the content-blog enqueue',
   'pages/api/engagement/generate-response.ts': 'enforceCompanyAccess on company_id before the content-engagement enqueue (draft thread owner-checked)',
   'backend/adapters/commandCenter/blogContentAdapter.ts': 'library: enqueues for the company its caller passes; callers must be in this list',
   'backend/adapters/engagement/responseAdapter.ts': 'library: enqueues for the company its caller passes; callers must be in this list',
@@ -150,7 +149,11 @@ describe('content-* queue producer guard', () => {
   const producers = FILES.filter((f) => !NOT_PRODUCERS.has(f) && PRODUCER_SHAPE.test(read(f)));
 
   it('POSITIVE CONTROL: the known producers are found', () => {
-    expect(producers).toEqual(expect.arrayContaining(['pages/api/blogs/generate.ts', 'pages/api/engagement/generate-response.ts']));
+    expect(producers).toEqual(expect.arrayContaining(['backend/adapters/commandCenter/blogContentAdapter.ts', 'pages/api/engagement/generate-response.ts']));
+    // c6 2026-11-19: /api/blogs/generate no longer enqueues (89267186c refuses the legacy no-mode queue path; a blog is
+    // generated in-request at a fixed 40 credits). Its PRODUCERS row is removed so a future re-introduced enqueue there
+    // must be re-attributed (an unknown producer fails the next test) - and this pins that it is not one today.
+    expect(producers).not.toContain('pages/api/blogs/generate.ts');
     expect(CONTENT_QUEUE.test("getContentQueue('content-engagement')")).toBe(true);
   });
 
