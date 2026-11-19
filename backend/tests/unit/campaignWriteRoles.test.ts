@@ -185,7 +185,8 @@ describe('inventory: no campaign write route without a role gate', () => {
   const walk = (dir: string): string[] => fs.readdirSync(dir, { withFileTypes: true })
     .flatMap((e) => (e.isDirectory() ? walk(path.join(dir, e.name)) : /\.tsx?$/.test(e.name) ? [path.join(dir, e.name)] : []));
   const ROLE_GATES = /requireCampaignAccess\(|requireCampaignTenantAccess\(|enforceCampaignWriteRole\(|enforceRole\(|hasPermission\(|withRBAC\(handler, \[|isSuperAdmin\(|isPlatformSuperAdmin\(|enforceContentWriteRole\(/;
-  const MEMBERSHIP_ONLY = /enforceCompanyAccess\(|requireTenantAccess\(|requireCompanyAccess\(|requireCompanyContext\(/;
+  // loadAuthorizedPlanRow wraps enforceCompanyAccess with no role check (main 1c1f38561): membership-only.
+  const MEMBERSHIP_ONLY = /enforceCompanyAccess\(|requireTenantAccess\(|requireCompanyAccess\(|requireCompanyContext\(|loadAuthorizedPlanRow\(/;
   const WRITES = /\b(POST|PUT|PATCH|DELETE)\b/;
   // Scoped by the GATE, not by directory (05 review): EVERY route in pages/api that answers a write method behind a
   // membership-only gate AND touches campaign data (a campaign table, campaignId / campaign_id) must reach a role

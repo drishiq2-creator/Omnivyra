@@ -74,8 +74,11 @@ const ROLE_GATES = [
   'isSuperAdmin', 'isPlatformSuperAdmin', 'enforceContentWriteRole',
 ];
 // withOrgAccess -> assertOrgAccess -> requireTenantAccess with no requireRoleIn: membership-only (e1, 2026-11-13).
+// loadAuthorizedPlanRow (backend/services/creator/rendering/authorizedPlanRow.ts, main 1c1f38561) wraps
+// enforceCompanyAccess with no role check: membership-only. Without it the Creator render routes were invisible.
 const MEMBERSHIP_GATES = [
   'enforceCompanyAccess', 'requireTenantAccess', 'requireCompanyAccess', 'requireCompanyContext', 'withOrgAccess', 'assertOrgAccess',
+  'loadAuthorizedPlanRow',
 ];
 const ROLE = new RegExp([esc(ROLE_GATES), opt.roleGate ? `(?:${opt.roleGate})\\(` : null].filter(Boolean).join('|'));
 // A role list that admits view-only roles is NOT a write gate.
