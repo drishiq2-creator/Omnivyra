@@ -166,11 +166,13 @@ function ClustersSection({ clusters, top, bottom }: { clusters: ClusterResult[];
   );
 }
 
-function AiInsightsSection({ accountId, analyticsData, clusters, hot }: {
+function AiInsightsSection({ accountId, analyticsData, clusters, hot, partial }: {
   accountId:     string;
   analyticsData: AnalyticsData;
   clusters:      ClusterResult[];
   hot:           HotSlug[];
+  /** A section could not be READ: its empty list is not real data, so no insights are generated from it. */
+  partial:       boolean;
 }) {
   const [open,    setOpen]    = useState(false);
   const [loading, setLoading] = useState(false);
@@ -178,7 +180,7 @@ function AiInsightsSection({ accountId, analyticsData, clusters, hot }: {
   const [error,   setError]   = useState(false);
 
   const fetch_ = useCallback(async () => {
-    if (result || loading) return;
+    if (result || loading || partial) return;
     setLoading(true);
     setError(false);
 
@@ -208,7 +210,7 @@ function AiInsightsSection({ accountId, analyticsData, clusters, hot }: {
       setResult(await r.json());
     } catch { setError(true); }
     finally  { setLoading(false); }
-  }, [accountId, analyticsData, clusters, hot, result, loading]);
+  }, [accountId, analyticsData, clusters, hot, result, loading, partial]);
 
   return (
     <div className="rounded-xl border border-purple-100 bg-white p-4">
@@ -226,6 +228,9 @@ function AiInsightsSection({ accountId, analyticsData, clusters, hot }: {
             <div className="flex items-center gap-2 text-gray-400 text-sm py-4">
               <Loader2 className="h-4 w-4 animate-spin" /> Analysing your content strategy…
             </div>
+          )}
+          {partial && (
+            <p className="text-sm text-amber-700">Some of your analytics couldn&apos;t be loaded just now, so insights weren&apos;t generated from incomplete data. Please try again shortly.</p>
           )}
           {error && <p className="text-sm text-red-500">Could not load AI insights. Try again later.</p>}
           {result && (
@@ -574,6 +579,9 @@ export default function BlogAnalyticsPanel({ accountId }: Props) {
   const [topCluster, setTopCluster] = useState<string | null>(null);
   const [botCluster, setBotCluster] = useState<string | null>(null);
   const [hot,      setHot]      = useState<HotSlug[]>([]);
+  // A section whose read failed (non-ok or network) - shown as unavailable, never as empty (b3, 2026-11-19).
+  const [clustersUnavailable, setClustersUnavailable] = useState(false);
+  const [hotUnavailable,      setHotUnavailable]      = useState(false);
   const [loading,  setLoading]  = useState(true);
   const [error,    setError]    = useState(false);
 
@@ -582,14 +590,16 @@ export default function BlogAnalyticsPanel({ accountId }: Props) {
     setLoading(true);
 
     Promise.all([
-      fetch(`/api/track/analytics?account_id=${encodeURIComponent(accountId)}&days=30`).then((r) => r.ok ? r.json() : null),
-      fetch(`/api/track/clusters?account_id=${encodeURIComponent(accountId)}&days=30`).then((r) => r.ok ? r.json() : null),
-      fetch(`/api/track/hot?account_id=${encodeURIComponent(accountId)}`).then((r) => r.ok ? r.json() : null),
+      fetch(`/api/track/analytics?account_id=${encodeURIComponent(accountId)}&days=30`).then((r) => r.ok ? r.json() : null).catch(() => null),
+      fetch(`/api/track/clusters?account_id=${encodeURIComponent(accountId)}&days=30`).then((r) => r.ok ? r.json() : null).catch(() => null),
+      fetch(`/api/track/hot?account_id=${encodeURIComponent(accountId)}`).then((r) => r.ok ? r.json() : null).catch(() => null),
     ])
       .then(([analytics, clustersRes, hotRes]) => {
         if (analytics)   setData(analytics);
         if (clustersRes) { setClusters(clustersRes.clusters ?? []); setTopCluster(clustersRes.top_cluster); setBotCluster(clustersRes.bottom_cluster); }
+        else setClustersUnavailable(true);
         if (hotRes)      setHot(hotRes.hot ?? []);
+        else setHotUnavailable(true);
         if (!analytics)  setError(true);
       })
       .catch(() => setError(true))
@@ -630,6 +640,12 @@ export default function BlogAnalyticsPanel({ accountId }: Props) {
     <div className="mb-6 space-y-4">
       {/* Hot content banner */}
       <HotBanner hot={hot} />
+      {(clustersUnavailable || hotUnavailable) && (
+        <div role="status" className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
+          {[hotUnavailable && 'trending posts', clustersUnavailable && 'content clusters'].filter(Boolean).join(' and ')}
+          {' '}couldn&apos;t be checked just now - this doesn&apos;t mean there are none. Please try again shortly.
+        </div>
+      )}
 
       {/* Summary stats */}
       <div className="grid grid-cols-3 gap-3">
@@ -693,7 +709,7 @@ export default function BlogAnalyticsPanel({ accountId }: Props) {
       )}
 
       {/* AI Strategy Insights */}
-      <AiInsightsSection accountId={accountId} analyticsData={data} clusters={clusters} hot={hot} />
+      <AiInsightsSection accountId={accountId} analyticsData={data} clusters={clusters} hot={hot} partial={clustersUnavailable || hotUnavailable} />
     </div>
   );
 }
