@@ -57,6 +57,9 @@ describe('the page uses it (source pins)', () => {
 test("7c rule: the server's partial-success warnings describe STATE only - the retry instruction is the client's", () => {
   const api = fs.readFileSync(path.join(process.cwd(), 'pages/api/super-admin/free-credits/grant.ts'), 'utf8');
   const warnings = [...api.matchAll(/roleWarning = '([^']*)'/g)].map((m) => m[1]);
-  expect(warnings.length).toBeGreaterThanOrEqual(2);          // non-vacuous: both partial-success warnings are found
+  // EXACT (7c): every roleWarning assignment, in ANY shape, must be one of the literal ones this scan can read - a new
+  // warning (template literal, concatenation, constant) changes a count and fails here until its author reviews it.
+  const assignments = (api.match(/roleWarning\s*=(?!=)/g) ?? []).length;
+  expect({ literal: warnings.length, assignments }).toEqual({ literal: 2, assignments: 2 });
   for (const w of warnings) expect([w, /retry|re-?send|resubmit|submit again/i.test(w)]).toEqual([w, false]);
 });
