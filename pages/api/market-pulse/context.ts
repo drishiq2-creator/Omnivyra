@@ -18,6 +18,8 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       ? { userId: 'content_architect', role: 'CONTENT_ARCHITECT' }
       : await resolveCompanyAccess(req, res, companyId);
     if (!access) return;
+    // Console-gate EXEMPT (member-level by design): a GET-only read of the company's Market Pulse context - the
+    // Executive room (/market-pulse) every member reads. See MARKET_PULSE_CONSOLE_EXEMPT in the gate test.
 
     const viewType = typeof req.query.viewType === 'string' ? req.query.viewType : 'executive';
     const safeViewType = ['executive', 'operational', 'compliance', 'workforce', 'funding'].includes(viewType)

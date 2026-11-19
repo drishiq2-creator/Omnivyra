@@ -11,6 +11,8 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     ? { userId: 'content_architect', role: 'CONTENT_ARCHITECT' }
     : await resolveCompanyAccess(req, res, companyId);
   if (!access) return;
+  // Console-gate EXEMPT (member-level by design): a GET-only read of assignable people, shown in the Executive room
+  // every member reads. See MARKET_PULSE_CONSOLE_EXEMPT in the gate test.
   const people = await listMarketPulseAssignablePeople(
     companyId,
     typeof req.query.search === 'string' ? req.query.search : null

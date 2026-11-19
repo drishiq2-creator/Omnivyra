@@ -1,8 +1,9 @@
 /**
  * Market Pulse scan CONSOLE is admin-only on the SERVER (owner ruling 2026-11-13, via e9).
  *
- * The Executive room (/market-pulse) is the one customer entry and stays member-readable (context, people,
- * watchlist, collaboration, personalization, findings/[id]/shown). The console routes - start / cancel scans, run
+ * The Executive room (/market-pulse) is the one customer entry and stays member-READABLE (context, people, and the
+ * GETs of watchlist, collaboration, personalization); their company-wide writes (POST) and findings/[id]/shown are
+ * console-gated (89/7c 2026-11-19). The console routes - start / cancel scans, run
  * detail, history, automation, finding actions, and the legacy V1 job routes - answer 403 MARKET_PULSE_ADMIN_REQUIRED
  * to anyone but COMPANY_ADMIN / SUPER_ADMIN (and the platform CONTENT_ARCHITECT session). The UI button shows only
  * for CompanyContext.isAdmin (same role set), so no button opens a page that 403s.
@@ -57,9 +58,12 @@ const CONSOLE: Array<[string, string]> = [
   ['runs/[id]/index', 'GET'], ['runs/[id]/cancel', 'POST'],
   ['findings/[id]/action', 'POST'], ['findings/[id]/generate-response', 'POST'], ['findings/[id]/promote', 'POST'],
   ['job/create', 'POST'], ['job/[id]', 'GET'], ['job/[id]/cancel', 'POST'],
+  // 89/7c 2026-11-19: company-wide writes the first pass left member-level (shown: org-keyed lifecycle row + shared
+  // finding stamp; collaboration / watchlist / personalization POST: company_id-keyed rows, no user_id).
+  ['findings/[id]/shown', 'POST'], ['collaboration', 'POST'], ['watchlist', 'POST'], ['personalization', 'POST'],
 ];
 const MEMBER_LEVEL: Array<[string, string]> = [
-  ['findings/[id]/shown', 'POST'], ['context', 'GET'], ['people', 'GET'], ['watchlist', 'GET'], ['collaboration', 'GET'], ['personalization', 'GET'],
+  ['context', 'GET'], ['people', 'GET'], ['watchlist', 'GET'], ['collaboration', 'GET'], ['personalization', 'GET'],
 ];
 
 describe('console routes: members are refused by the server', () => {

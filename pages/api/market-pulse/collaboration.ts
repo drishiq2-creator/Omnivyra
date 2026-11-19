@@ -1,6 +1,7 @@
 import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeFactory';
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { resolveCompanyAccess } from '../../../backend/services/contentArchitectService';
+import { refuseUnlessMarketPulseConsoleRole } from '../../../backend/services/marketPulse/consoleAccess';
 import {
   acknowledgeMarketPulseEntity,
   addMarketPulseInvestigationComment,
@@ -43,6 +44,11 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     }
 
     if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
+    // Market Pulse console gate (owner ruling 2026-11-13; 89/7c 2026-11-19): every POST action writes COMPANY-WIDE
+    // collaboration state keyed by company_id (threads any member sees and update_thread can re-assign, comments,
+    // acknowledgments, decision memory, company-visible annotations) - company admins only. GET stays member-level:
+    // the Executive room reads it.
+    if (!refuseUnlessMarketPulseConsoleRole(access, res)) return;
 
     const action = String(body.action || '').trim();
     if (!action) return res.status(400).json({ error: 'action is required' });

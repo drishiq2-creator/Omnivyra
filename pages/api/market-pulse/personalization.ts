@@ -1,6 +1,7 @@
 import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeFactory';
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { resolveCompanyAccess } from '../../../backend/services/contentArchitectService';
+import { refuseUnlessMarketPulseConsoleRole } from '../../../backend/services/marketPulse/consoleAccess';
 import { saveMarketPulsePersonalizationControls } from '../../../backend/services/marketPulseIntelligenceService';
 import { ownedDbTable } from '../../../backend/db/writeOwner';
 
@@ -42,10 +43,12 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   }
 
   if (req.method === 'POST') {
-    const normalizedRole = String(access.role ?? '').toUpperCase();
-    if (!['SUPER_ADMIN', 'CONTENT_ARCHITECT', 'CAMPAIGN_ARCHITECT', 'COMPANY_ADMIN', 'ADMIN'].includes(normalizedRole)) {
-      return res.status(403).json({ error: 'FORBIDDEN_ROLE' });
-    }
+    // Market Pulse console gate (owner ruling 2026-11-13; 89/7c 2026-11-19): the controls are ONE row per company
+    // (marketpulse_personalization_controls keyed by company_id, no user_id) - COMPANY-WIDE config, company admins
+    // only. Replaces the inline list (SUPER_ADMIN, CONTENT_ARCHITECT, CAMPAIGN_ARCHITECT, COMPANY_ADMIN, ADMIN):
+    // resolveCompanyAccess returns the NORMALISED role, so ADMIN already arrives as COMPANY_ADMIN and
+    // CAMPAIGN_ARCHITECT (not a Role) never arrives. GET stays member-level: a member reads the company's controls.
+    if (!refuseUnlessMarketPulseConsoleRole(access, res)) return;
     const controls = await saveMarketPulsePersonalizationControls(companyId, {
       follow_topics: list(body.follow_topics),
       mute_topics: list(body.mute_topics),

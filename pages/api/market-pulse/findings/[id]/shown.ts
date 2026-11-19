@@ -15,6 +15,7 @@ import { createApiRoute as __createApiRoute } from '../../../../../lib/platform/
 
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { resolveCompanyAccess } from '../../../../../backend/services/contentArchitectService';
+import { refuseUnlessMarketPulseConsoleRole } from '../../../../../backend/services/marketPulse/consoleAccess';
 import { ownedDbTable } from '../../../../../backend/db/writeOwner';
 import { recordFindingShown } from '../../../../../backend/services/marketPulse/learningFeedbackService';
 
@@ -30,6 +31,11 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
 
   const access = await resolveCompanyAccess(req, res, companyId);
   if (!access) return;
+  // Market Pulse console gate (owner ruling 2026-11-13; 89/7c 2026-11-19), like its siblings action / promote /
+  // generate-response: the "shown" event is NOT per-user - recordFindingShown writes an organization_id-keyed
+  // recommendation lifecycle row (no user_id) that feeds the company's weight optimizer, and stamps
+  // recommendation_shown_id on the SHARED finding row. Its only caller is the admin console (MarketPulseTabV2).
+  if (!refuseUnlessMarketPulseConsoleRole(access, res)) return;
 
   // Verify ownership before recording.
   const { data: finding } = await ownedDbTable('market_pulse_findings')

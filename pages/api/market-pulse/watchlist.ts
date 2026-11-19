@@ -1,6 +1,7 @@
 import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeFactory';
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { resolveCompanyAccess } from '../../../backend/services/contentArchitectService';
+import { refuseUnlessMarketPulseConsoleRole } from '../../../backend/services/marketPulse/consoleAccess';
 import {
   getMarketPulseExecutiveExperience,
   saveMarketPulseWatchlistItem,
@@ -22,10 +23,12 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   }
 
   if (req.method === 'POST') {
-    const normalizedRole = String(access.role ?? '').toUpperCase();
-    if (!['SUPER_ADMIN', 'CONTENT_ARCHITECT', 'CAMPAIGN_ARCHITECT', 'COMPANY_ADMIN', 'ADMIN'].includes(normalizedRole)) {
-      return res.status(403).json({ error: 'FORBIDDEN_ROLE' });
-    }
+    // Market Pulse console gate (owner ruling 2026-11-13; 89/7c 2026-11-19): a watchlist item is COMPANY-WIDE state
+    // (upsert onConflict company_id,watchlist_type,watchlist_value - no user_id; every member sees it) - company
+    // admins only. Replaces the inline list (SUPER_ADMIN, CONTENT_ARCHITECT, CAMPAIGN_ARCHITECT, COMPANY_ADMIN, ADMIN):
+    // resolveCompanyAccess returns the NORMALISED role, so ADMIN already arrives as COMPANY_ADMIN and
+    // CAMPAIGN_ARCHITECT (not a Role) never arrives. GET stays member-level: the Executive room reads it.
+    if (!refuseUnlessMarketPulseConsoleRole(access, res)) return;
     const watchlistType = String(body.watchlistType || body.watchlist_type || '').trim();
     const watchlistValue = String(body.watchlistValue || body.watchlist_value || '').trim();
     if (!watchlistType || !watchlistValue) {
