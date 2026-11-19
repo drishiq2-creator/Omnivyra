@@ -15,6 +15,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { useRouter } from 'next/router';
 import Link from 'next/link';
 import { safeFetchJson } from '@/lib/utils/safeFetchJson';
+import { createLogicalGrantKey } from '@/lib/billing/logicalGrantKey';
 import {
   ArrowLeft, Gift, ClipboardList, Zap, Activity, Users,
   CheckCircle, XCircle, Trash2, RefreshCw, Search, ChevronDown,
@@ -148,6 +149,7 @@ export default function FreeCreditsPage() {
   const [grantNote, setGrantNote] = useState('');
   const [grantLoading, setGrantLoading] = useState(false);
   const [grantSuccess, setGrantSuccess] = useState(false);
+  const [grantError, setGrantError] = useState<string | null>(null);
 
   // Activity
   const [activity, setActivity] = useState<ActivityRow[]>([]);
@@ -161,6 +163,8 @@ export default function FreeCreditsPage() {
   const [profilesLoading, setProfilesLoading] = useState(false);
 
   const orgSearchTimer = useRef<NodeJS.Timeout | null>(null);
+  // One Idempotency-Key per LOGICAL grant, kept across re-submits until a confirmed success (lib/billing/logicalGrantKey).
+  const grantKey = useRef(createLogicalGrantKey());
 
   // ── Auth check ──────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -277,27 +281,39 @@ export default function FreeCreditsPage() {
     e.preventDefault();
     if (!grantOrgId || !grantReason.trim()) return;
     setGrantLoading(true);
-    // One key per logical grant: a network retry or re-send of THIS submission
-    // resolves the same grant server-side instead of granting twice.
-    const idempotencyKey = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
-      ? crypto.randomUUID()
-      : `${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
-    const r = await fetch('/api/super-admin/free-credits/grant', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey },
-      body: JSON.stringify({
-        organizationId: grantOrgId,
-        creditsAmount:  grantAmount,
-        category:       grantCategory,
-        reason:         grantReason,
-        note:           grantNote || undefined,
-      }),
-    });
+    const payload = {
+      organizationId: grantOrgId,
+      creditsAmount:  grantAmount,
+      category:       grantCategory,
+      reason:         grantReason,
+      note:           grantNote || undefined,
+    };
+    // The SAME key for a re-submit of the same grant (a lost / failed response may already have granted it - the server
+    // resolves the repeat to that grant instead of granting twice); a new key only after a confirmed success.
+    const idempotencyKey = grantKey.current.keyFor(payload);
+    let r: Response;
+    try {
+      r = await fetch('/api/super-admin/free-credits/grant', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey },
+        body: JSON.stringify(payload),
+      });
+    } catch {
+      // No response: the grant may or may not have happened. The key is KEPT, so submitting the same form again is safe.
+      setGrantLoading(false);
+      setGrantError('No response from the server - the grant may already have gone through. Submit the same form again to safely complete it (it will not grant twice).');
+      return;
+    }
     setGrantLoading(false);
     if (r.ok) {
+      grantKey.current.settle();
+      setGrantError(null);
       setGrantSuccess(true);
       setGrantOrgId(''); setGrantOrgSearch(''); setGrantReason(''); setGrantNote('');
       setTimeout(() => setGrantSuccess(false), 4000);
+    } else {
+      const body = await r.json().catch(() => ({} as { error?: string }));
+      setGrantError(`${(body as { error?: string }).error ?? `Grant failed (${r.status})`}. Submitting the same form again will not grant twice.`);
     }
   }
 
@@ -541,6 +557,9 @@ export default function FreeCreditsPage() {
                 <div className="mb-4 p-3 rounded-lg bg-emerald-50 text-emerald-700 text-sm flex items-center gap-2">
                   <CheckCircle className="h-4 w-4" /> Credits granted successfully.
                 </div>
+              )}
+              {grantError && (
+                <div role="alert" className="mb-4 p-3 rounded-lg bg-amber-50 text-amber-800 text-sm">{grantError}</div>
               )}
 
               <form onSubmit={e => void submitGrant(e)} className="space-y-4">
