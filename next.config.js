@@ -139,6 +139,10 @@ const nextConfig = {
     // links to /settings/team, which has no page; the team page is /team-management. Redirect so every
     // email already sent lands on the team page (2026-11-20). Next.js keeps the query string.
     { source: '/settings/team', destination: '/team-management', permanent: false },
+    // Team Management "Reinvite" (pages/api/company/users/reinvite.ts) emailed /accept-invite?token=..., which
+    // has no page; the accept page is /auth/accept-invite and reads the SAME invitations table / sha256 token
+    // hash. Redirect (query kept) so already-sent re-invites work (2026-11-20).
+    { source: '/accept-invite', destination: '/auth/accept-invite', permanent: false },
   ],
   webpack: (config, { isServer, dev }) => {
     if (dev) {
