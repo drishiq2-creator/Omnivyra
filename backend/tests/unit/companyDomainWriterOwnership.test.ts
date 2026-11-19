@@ -8,8 +8,9 @@
  * This walks the source tree for writes to `companies` whose payload names either column, and requires
  * each writer to be listed with a CHECKABLE premise (the value is normalised or a literal null). A new
  * writer fails until reviewed; an existing writer that drops its normalisation fails its premise.
- * Limit (stated): a payload built in a VARIABLE is not visible to this scan; companyIdentityWriter is the
- * one such writer and is listed explicitly with its own premise.
+ * SURFACE, not column names (7c): a payload held in a VARIABLE names no column, so EVERY write to
+ * `companies` whose payload is not an inline object literal must also be listed (VARIABLE_WRITERS), with a
+ * premise saying where the record comes from. A new variable-payload write fails until reviewed.
  */
 import fs from 'fs';
 import path from 'path';
@@ -35,6 +36,35 @@ const WRITERS: Record<string, { premise: RegExp[]; why: string }> = {
     why: 'approved per-email, never claims a domain slot (literal null)',
   },
 };
+
+/** Writes to `companies` whose payload is a VARIABLE (file:op), keyed by file with the expected count. */
+const VARIABLE_WRITERS: Record<string, { count: number; premise: RegExp[]; why: string }> = {
+  'backend/services/companyIdentityWriter.ts': {
+    count: 2,
+    premise: [/website_domain = rawDomain \? normalizeCompanyDomain\(rawDomain\)/, /\.from\('companies'\)\.insert\(record\)/],
+    why: 'insert(record) / update(patch): record and patch are built by buildCompanyIdentity, which normalises',
+  },
+  'pages/api/onboarding/setup-company.ts': {
+    count: 1,
+    premise: [/insertCompany: async \(record\) =>/],
+    why: 'the insertCompany callback handed to companyIdentityWriter: it inserts the record the writer built',
+  },
+};
+
+/** Writes to `companies` whose payload is not an inline object/array literal. */
+export function variablePayloadWrites(src: string): number {
+  let n = 0;
+  const re = /(?:\.from|ownedDbTable|tenantTable)\(\s*['"]companies['"]/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(src))) {
+    const tail = src.slice(m.index, m.index + 900);
+    const next = tail.slice(10).search(/(?:\.from|ownedDbTable|tenantTable)\(/);
+    const chain = next >= 0 ? tail.slice(0, next + 10) : tail;
+    const w = /\.(insert|update|upsert)\(\s*(\S)/.exec(chain);
+    if (w && w[2] !== '{' && w[2] !== '[') n += 1;
+  }
+  return n;
+}
 
 function walk(dir: string, out: string[] = []): string[] {
   for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -84,10 +114,25 @@ describe('companies domain columns: every writer stores the normalised root', ()
     for (const p of premise) expect(src).toMatch(p);
   });
 
+  it('every VARIABLE-payload write to companies is listed with its exact count (surface, not columns)', () => {
+    const found: Record<string, number> = {};
+    for (const f of files) { const n = variablePayloadWrites(fs.readFileSync(f, 'utf8')); if (n > 0) found[rel(f)] = n; }
+    expect(Object.keys(found).length).toBeGreaterThan(0);
+    const expected = Object.fromEntries(Object.entries(VARIABLE_WRITERS).map(([k, v]) => [k, v.count]));
+    expect(found).toEqual(expected);
+  });
+
+  it.each(Object.entries(VARIABLE_WRITERS))('%s (variable payload) keeps its premise', (file, { premise }) => {
+    const src = fs.readFileSync(path.join(ROOT, file), 'utf8');
+    for (const p of premise) expect(src).toMatch(p);
+  });
+
   it('MUTANTS: the scanner sees an unlisted inline writer, and ignores reads', () => {
     expect(inlineDomainWrites(`await supabase.from('companies').insert({ name, website_domain: host })`)).toBe(1);
     expect(inlineDomainWrites(`await ownedDbTable('companies').update({ admin_email_domain: d }).eq('id', id)`)).toBe(1);
     expect(inlineDomainWrites(`await supabase.from('companies').select('id, website_domain').eq('id', id)`)).toBe(0);
     expect(inlineDomainWrites(`await supabase.from('companies').insert({ name }); await supabase.from('reports').insert({ website_domain: d })`)).toBe(0);
+    expect(variablePayloadWrites(`await supabase.from('companies').update(payload).eq('id', id)`)).toBe(1);
+    expect(variablePayloadWrites(`await supabase.from('companies').update({ status }).eq('id', id)`)).toBe(0);
   });
 });
