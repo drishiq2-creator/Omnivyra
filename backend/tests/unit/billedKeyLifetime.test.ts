@@ -58,3 +58,16 @@ describe('createBilledKeyLifetime', () => {
     expect(g.begin('x').key).not.toBe(g.begin('y').key);
   });
 });
+
+// One invariant across the two modules (c6 2026-11-19: *_UNVERIFIABLE is not a billing vocabulary; ROLE_
+// is raised AFTER the effect): where the copy says "check before trying again", the key is KEPT, so a
+// retry is the same request. Lives here because only this branch has both modules.
+describe('unlisted *_UNVERIFIABLE: copy and key lifetime agree', () => {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { classifyBilledResponse } = require('../../../lib/billing/billedResponse');
+  it.each(['ROLE_UNVERIFIABLE', 'SOME_FUTURE_UNVERIFIABLE'])('%s: uncertain copy AND the key is kept', (code) => {
+    const body = { error: 'x', code };
+    expect(classifyBilledResponse(503, body, 'fallback').kind).toBe('uncertain');
+    expect(isUnknownOutcome(503, body)).toBe(true);
+  });
+});
