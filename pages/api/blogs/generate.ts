@@ -7,7 +7,7 @@ import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeF
  * Supports the full BlogGenerateModal flow:
  *   mode: 'angles'  → synchronous angle generation via runBlogGeneration
  *   mode: 'full'    → synchronous full blog generation via runBlogGeneration
- *   (no mode)       → queue-based generation via blogContentAdapter (legacy)
+ *   (no mode)       → 400 BLOG_MODE_REQUIRED (the legacy unbilled queue path is refused, b3 2026-11-18)
  *
  * Super Admin uses /api/admin/blog/generate (public_blogs, SA role only).
  *
@@ -31,12 +31,12 @@ import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeF
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { enforceCompanyAccess } from '../../../backend/services/userContextService';
 import { enforceRole, Role } from '../../../backend/services/rbacService';
-import { generateBlogContent } from '../../../backend/adapters/commandCenter/blogContentAdapter';
 import { buildContentContext } from '../../../lib/content/buildContentContext';
 import {
   type BlogGenerationRequest,
 } from '../../../lib/blog/runBlogGeneration';
 import { runUnifiedLongFormGeneration } from '../../../lib/content/unifiedLongFormEngine';
+import { blogBillingOf, blogGenerationRefusal, blogReferenceId, blogReplay, holdBlog, isBlogHoldRefusal, isBlogRefusal, runBlogWithBilling } from '../../../backend/services/blog/blogBilling';
 import type { BlogAngle } from '../../../lib/blog/blogGenerationEngine';
 import { isValidBlogFormat } from '../../../lib/blog/blogStructureTemplates';
 import { ThoughtLeadershipQualityGateError } from '../../../backend/services/longForm/thoughtLeadershipQualityGate';
@@ -68,6 +68,11 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     return res.status(400).json({ error: 'company_id required' });
   if (!topic || typeof topic !== 'string' || !topic.trim())
     return res.status(400).json({ error: 'topic required' });
+  // b3 ruling 2026-11-18: the legacy no-mode queue path (content-blog job) ran AI UNBILLED in prod and its output lived
+  // only in the BullMQ job result. No UI calls it (every caller sends 'angles' or 'full'): REFUSED, nothing enqueued.
+  if (mode !== 'angles' && mode !== 'full') {
+    return res.status(400).json({ code: 'BLOG_MODE_REQUIRED', retryable: false, error: "Choose how to generate the blog: mode 'angles' or 'full'." });
+  }
 
   // ── 1. Auth ─────────────────────────────────────────────────────────────────
   const access = await enforceCompanyAccess({ req, res, companyId: company_id });
@@ -78,6 +83,13 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     allowedRoles: [Role.COMPANY_ADMIN, Role.CONTENT_CREATOR, Role.CONTENT_REVIEWER, Role.CONTENT_PUBLISHER, Role.SUPER_ADMIN],
   });
   if (!roleGate) return;
+
+  // Super-admin activity control 'Blog Create' gates this route (every mode); a read error refuses (blogBilling).
+  const switchRefusal = await blogGenerationRefusal(company_id);
+  if (switchRefusal) {
+    const { status: switchStatus, ...switchBody } = switchRefusal;
+    return res.status(switchStatus).json(switchBody);
+  }
 
   // ── 2. Enrich with company context ──────────────────────────────────────────
   let builtContext: Awaited<ReturnType<typeof buildContentContext>> | undefined;
@@ -129,54 +141,67 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
         companyProfile: builtContext?.companyProfile as BlogGenerationRequest['companyProfile'],
       };
 
-      const result = await runUnifiedLongFormGeneration({
-        ...generationRequest,
-        contentType: 'blog',
-        formatType: typeof generationRequest.formatType === 'string' ? generationRequest.formatType : undefined,
-        templateBlocks: generationRequest.template_blocks,
-        targetWordCount: generationRequest.answers?.target_word_count
-          ? Number.parseInt(String(generationRequest.answers.target_word_count), 10) || undefined
-          : generationRequest.target_words,
+      const runGeneration = (correlation?: { referenceType: string; referenceId: string; parentActivityId: null }) =>
+        runUnifiedLongFormGeneration({
+          ...generationRequest,
+          contentType: 'blog',
+          formatType: typeof generationRequest.formatType === 'string' ? generationRequest.formatType : undefined,
+          templateBlocks: generationRequest.template_blocks,
+          targetWordCount: generationRequest.answers?.target_word_count
+            ? Number.parseInt(String(generationRequest.answers.target_word_count), 10) || undefined
+            : generationRequest.target_words,
+          ...(correlation ? { correlation } : {}),
+        });
+
+      // 'angles' produces angle options, not a blog - not billed as a blog (owner: 40 per blog).
+      if (resolvedMode === 'angles') {
+        return res.status(200).json(await runGeneration());
+      }
+
+      // OWNER 2026-11-18: a blog is a FIXED 40 credits - held BEFORE any AI call; a refusal writes nothing
+      // (backend/services/blog/blogBilling). Every AI call carries the blog's reference id (b3: measure cost per blog).
+      const ref = blogReferenceId(req.headers['idempotency-key']);
+      if (isBlogRefusal(ref)) {
+        const { status: refStatus, ...refBody } = ref;
+        return res.status(refStatus).json(refBody);   // no key -> 400, nothing held, no AI call
+      }
+      const referenceId = ref.referenceId;
+      // b3 BLOCKING: a finished, charged blog is replayed for the same key (no new hold, no new charge).
+      const replay = await blogReplay(company_id, referenceId, { userId: roleGate.userId });
+      if (isBlogRefusal(replay)) {
+        const { status: replayStatus, ...replayBody } = replay;
+        return res.status(replayStatus).json(replayBody);
+      }
+      if (replay.body) return res.status(200).json(replay.body);
+      const hold = await holdBlog({ orgId: company_id, userId: roleGate.userId, referenceId, validateMembership: true });
+      if (isBlogHoldRefusal(hold)) {
+        const { status, ...refusal } = hold;
+        return res.status(status).json(refusal);
+      }
+      const { result, billing } = await runBlogWithBilling({
+        reservation: hold.reservation,
+        run: () => runGeneration({ referenceType: 'blog_post', referenceId, parentActivityId: null }),
+        isQualityGateRefusal: (e) => e instanceof ThoughtLeadershipQualityGateError,
       });
-      return res.status(200).json(result);
+      return res.status(200).json({ ...(result as object), billing, ...(billing.settlementPending ? { settlementPending: billing.settlementPending } : {}) });
     } catch (error) {
       // Enterprise quality gate: failed blog drafts are blocked instead of
-      // being returned as usable generation output.
+      // being returned as usable generation output (owner: refunded in full).
       if (error instanceof ThoughtLeadershipQualityGateError) {
         return res.status(422).json({
           error: error.message,
           quality_passed: false,
           thought_leadership_quality: error.report,
+          ...(blogBillingOf(error) ? { billing: blogBillingOf(error) } : {}),
         });
       }
       console.error('[blogs/generate] runBlogGeneration error:', error);
+      // Never echo internal error text to the client.
       return res.status(500).json({
-        error: error instanceof Error ? error.message : 'Failed to generate blog',
+        error: 'Failed to generate blog',
+        ...(blogBillingOf(error) ? { billing: blogBillingOf(error) } : {}),
       });
     }
-  }
-
-  // ── No mode: legacy queue-based generation ────────────────────────────────
-  try {
-    const { getContentQueue } = await import('../../../backend/queue/contentGenerationQueues');
-    const contentGenerationQueue = getContentQueue('content-blog');
-
-    const result = await generateBlogContent(company_id, contentGenerationQueue, {
-      topic: String(topic).trim(),
-      audience: typeof audience === 'string' ? audience.trim() : undefined,
-      angle_preference: typeof angle_preference === 'string' && angle_preference ?
-        angle_preference as 'analytical' | 'contrarian' | 'strategic' : null,
-    }, {
-      writing_style_instructions: builtContext?.writingStyleInstructions,
-      company_profile: builtContext?.companyProfile,
-    });
-
-    return res.status(200).json(result);
-  } catch (error) {
-    console.error('[blogs/generate]', error);
-    return res.status(500).json({
-      error: error instanceof Error ? error.message : 'Failed to generate blog',
-    });
   }
 }
 

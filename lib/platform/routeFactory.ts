@@ -28,6 +28,7 @@ import type { NextApiHandler, NextApiRequest, NextApiResponse } from 'next';
 import { withApiObservability } from '../../backend/observability';
 import { normalizeRoute } from '../../backend/observability/apiObservability';
 import { recordRawCounter } from '../../backend/observability';
+import { runWithSettlementSurface } from '../../backend/services/billing/settlementPendingSurface';
 import {
   runWithRequestExecutionContext,
   seedFromApiRequest,
@@ -137,7 +138,9 @@ export function createApiRoute(
       }
 
       try {
-        return await composed(req, res);
+        // b3 2026-11-18: billed work with an ambiguous settle answers 200 + settlementPending on EVERY route
+        // (backend/services/billing/settlementPendingSurface).
+        return await runWithSettlementSurface(res, () => composed(req, res));
       } catch (err) {
         try {
           recordRawCounter('api.request.error_class', 1, {

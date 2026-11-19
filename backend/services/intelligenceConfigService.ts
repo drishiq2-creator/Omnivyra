@@ -247,6 +247,25 @@ export async function getResolvedConfig(
   return resolveConfig(global, override);
 }
 
+/**
+ * getResolvedConfig for a GATE (c6 2026-11-18; the blog routes' kill-switch): a read error THROWS. getGlobalConfig /
+ * getCompanyOverride drop the error and read it as "no row", which a gate must never do (a null error is not an
+ * answer). companyId null = the global row only. Returns null only when the global row is absent.
+ */
+export async function getResolvedConfigStrict(companyId: string | null, jobType: string): Promise<ResolvedConfig | null> {
+  const g = await ownedDbTable('intelligence_global_config').select('*').eq('job_type', jobType).maybeSingle();
+  if (g.error) throw new Error(g.error.message);
+  if (!g.data) return null;
+  let override: CompanyOverride | null = null;
+  if (companyId) {
+    const o = await ownedDbTable('intelligence_company_overrides').select('*')
+      .eq('company_id', companyId).eq('job_type', jobType).maybeSingle();
+    if (o.error) throw new Error(o.error.message);
+    override = (o.data as CompanyOverride | null) ?? null;
+  }
+  return resolveConfig(g.data as GlobalConfig, override);
+}
+
 // ── Scheduler stack ───────────────────────────────────────────────────────────
 /**
  * Returns all active (enabled) scheduler entries across all companies,

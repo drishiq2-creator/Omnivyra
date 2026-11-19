@@ -30,6 +30,7 @@ export const CREDIT_ACTIONS = [
   'deep_analysis',
   'full_strategy',
   'campaign_generation',
+  'blog_post',
 ] as const;
 
 export type CreditAction = typeof CREDIT_ACTIONS[number];
@@ -663,6 +664,7 @@ const SIMPLE_CREDIT_FEATURES: Record<CreditAction, Omit<MonetizationFeatureRegis
   campaign_optimization: feature('campaigns.campaign_optimization', 'campaigns', 'Campaign Optimization', 'Campaigns', 'bg-violet-500'),
   strategy_evolution: feature('intelligence.strategy_evolution_legacy', 'intelligence', 'Strategy Evolution', 'Insights & Trends', 'bg-blue-500'),
   campaign_generation: feature('campaigns.campaign_generation', 'campaigns', 'Campaign Generation', 'Campaigns', 'bg-violet-500'),
+  blog_post: feature('creator_content.blog_post', 'creator_content', 'Blog Post', 'Content Generation', 'bg-blue-400'),
   insight_generation: feature('intelligence.insight_generation_legacy', 'intelligence', 'Insight Generation', 'Insights & Trends', 'bg-blue-500'),
 };
 

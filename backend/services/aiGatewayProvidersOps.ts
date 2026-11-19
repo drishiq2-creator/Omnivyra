@@ -64,6 +64,7 @@ import { resolveOrchestrationMode } from './aiOrchestration/orchestrationMode';
 import { resolveGatewayExecutionSelection } from './aiOrchestration/gatewaySynchronousResolve';
 
 import { type RetryTrackingContext, callProviderWithRetry, buildMetadata } from './aiGatewayProvidersRetry';
+import { getActiveCreditHandle } from './billing/aiGatewayBillingGuard';
 
 const executeGatewayCompletion = async (
   request: GatewayRequest & { operation: string }
@@ -369,6 +370,8 @@ const executeGatewayCompletion = async (
   }
 
   recordGptCall();
+  // A billed scope may count real provider dispatches (cache hits and coalesced duplicates returned above). Fail-safe.
+  try { getActiveCreditHandle()?.onProviderCall?.(); } catch { /* never affects the call */ }
   const trackingCtx: RetryTrackingContext = {
     companyId:   request.companyId ?? null,
     campaignId:  request.campaignId ?? null,
