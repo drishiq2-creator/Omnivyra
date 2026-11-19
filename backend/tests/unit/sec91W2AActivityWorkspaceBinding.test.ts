@@ -94,7 +94,17 @@ jest.mock('../../services/creditExecutionService', () => ({
 jest.mock('../../services/billing/creditEconomyActivation', () => ({ getCreditEconomyExecutionMode: jest.fn(async () => 'shadow') }));
 jest.mock('../../services/billing', () => ({
   isRefineVariantBillingEnabled: jest.fn(async () => ({ enabled: false, reason: 'test' })),
-  runBilledAiCompletion: jest.fn(async () => ({ text: 'BILLED' })),
+  runBilledAiCompletion: jest.fn(async (i: any) => {
+    // c6 2026-11-18: behaves like the real helper with billed-request recovery - post-process, then the route's
+    // durable write, INSIDE the charge (the route now persists through recovery, not after the confirm).
+    const text = 'BILLED';
+    if (i.recovery) {
+      const value = i.recovery.postProcess ? await i.recovery.postProcess(text) : text;
+      if (i.recovery.durableWrite) await i.recovery.durableWrite(value);
+      return { text, value };
+    }
+    return { text };
+  }),
 }));
 jest.mock('../../services/contentGenerationPipeline', () => ({
   buildPlatformVariantsFromMaster: jest.fn(async () => [{ platform: 'linkedin', content_type: 'post', generated_content: 'VARIANT BY AI' }]),
@@ -145,7 +155,8 @@ function mockRes() {
 }
 async function post(body: Record<string, unknown>) {
   const res = mockRes();
-  await handler({ method: 'POST', body, query: {}, headers: { authorization: 'Bearer tok-user-a' }, url: '/api/activity-workspace/content' } as any, res);
+  // c6 2026-11-18 (b3): billed actions REQUIRE the client's Idempotency-Key - sent on every call here.
+  await handler({ method: 'POST', body, query: {}, headers: { authorization: 'Bearer tok-user-a', 'idempotency-key': `test-key-${Math.random().toString(36).slice(2, 10)}` }, url: '/api/activity-workspace/content' } as any, res);
   return res;
 }
 const rowB = () => rows('daily_content_plans').find((r) => r.id === ACT_B)!;
