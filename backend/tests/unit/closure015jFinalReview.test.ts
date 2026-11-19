@@ -503,6 +503,13 @@ describe('R-5 / R-6 — onboarding and free credits no longer demote SUPER_ADMIN
     expect(mem('u-newcomer')).toMatchObject({ role: 'COMPANY_ADMIN', status: 'active' });
   });
 
+  const NO_RETRY_INSTRUCTION = /re-?send|resubmit|retry|try again|submit .{0,40}again/i;
+  it('POSITIVE CONTROL: the no-retry pin rejects the previous wording and accepts state-only text', () => {
+    expect('Credits granted. Membership NOT created. Do not re-send this grant: it would grant the credits again.').toMatch(NO_RETRY_INSTRUCTION);
+    expect('Submit the same form again to complete it').toMatch(NO_RETRY_INSTRUCTION);
+    expect('Credits granted. Company-admin membership NOT created. Assign the role from team settings or contact support.').not.toMatch(NO_RETRY_INSTRUCTION);
+  });
+
   // Reads contract + c6 (2026-11-19): credits are granted BEFORE the role step, so a role failure is a PARTIAL
   // SUCCESS - 200 roleEnsured:false with a warning - never a 503 that invites a retry (a retry granted again).
   it('the membership READ fails: 200, credited ONCE, roleEnsured:false, membership untouched, no retry instruction', async () => {
@@ -511,7 +518,8 @@ describe('R-5 / R-6 — onboarding and free credits no longer demote SUPER_ADMIN
     const r = await grant({ userId: 'u-newcomer' });
     expect(r.status).toBe(200);
     expect(r.body).toMatchObject({ success: true, roleEnsured: false, warning: expect.stringMatching(/NOT ensured/) });
-    expect(r.body.warning).toMatch(/Do not re-send this grant/);
+    // STATE only: no retry / re-send / resubmit instruction - the client owns that (7c/c6 rule, 2026-11-19).
+    expect(r.body.warning).not.toMatch(NO_RETRY_INSTRUCTION);
     expect(r.headers['retry-after']).toBeUndefined();
     expect(mockCreateCredit).toHaveBeenCalledTimes(1);
     expect(mem('u-newcomer')).toBeUndefined();
@@ -524,6 +532,7 @@ describe('R-5 / R-6 — onboarding and free credits no longer demote SUPER_ADMIN
     const r = await grant({ userId: 'u-newcomer' });
     expect(r.status).toBe(200);
     expect(r.body).toMatchObject({ success: true, roleEnsured: false, warning: expect.stringMatching(/NOT created/) });
+    expect(r.body.warning).not.toMatch(NO_RETRY_INSTRUCTION);
     expect(mockCreateCredit).toHaveBeenCalledTimes(1);
   });
 

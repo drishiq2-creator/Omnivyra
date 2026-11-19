@@ -106,6 +106,8 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   // invited a whole-request retry, and every request mints a new grant row and key: the retry GRANTED AGAIN (c6,
   // 2026-11-19). A failed membership read is still never "no membership" (reads contract): the role is not
   // touched, and the response says so. Same shape as c6's money SHIP, whose block replaces this one at rebase.
+  // The warning describes STATE only - never whether to retry (7c/c6 rule, 2026-11-19): only the client knows whether
+  // it reuses its key, and SHIP's page interpolates this text into its own retry instruction.
   let roleEnsured = true;
   let roleWarning: string | undefined;
   if (userId) {
@@ -118,7 +120,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
 
     if (existingRoleErr) {
       roleEnsured = false;
-      roleWarning = 'Credits granted. Company-admin membership NOT ensured (the membership could not be read). Assign the role from team settings or contact support. Do not re-send this grant: it would grant the credits again.';
+      roleWarning = 'Credits granted. Company-admin membership NOT ensured (the membership could not be read). Assign the role from team settings or contact support.';
       console.error('[free-credits/grant] role read failed - membership not changed:', organizationId, existingRoleErr.message);
     } else if (!existingRole) {
       const { error: roleInsertErr } = await sb.from('user_company_roles').insert({
@@ -129,7 +131,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       });
       if (roleInsertErr) {
         roleEnsured = false;
-        roleWarning = 'Credits granted. Company-admin membership NOT created. Assign the role from team settings or contact support. Do not re-send this grant: it would grant the credits again.';
+        roleWarning = 'Credits granted. Company-admin membership NOT created. Assign the role from team settings or contact support.';
         console.error('[free-credits/grant] role insert failed:', organizationId, roleInsertErr.message);
       }
     }
