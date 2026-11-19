@@ -9,6 +9,7 @@ import { MARKET_PULSE_CATEGORIES, type ContextResponse, type AutomationResponse,
 import { SignificanceBadge, SignalMovement, ExecutiveScanStrip, SinceLastPulseStrip, filterDeltaSummary, DimensionFilters, AttentionFilters, MarketNarrativesSection, type MarketPulseLoadError, OBJECTIVES, toTitle, buildResolvedRegionPreview, buildFocusedCategoryDefaults, buildExpandedCategoryDefaults, wait, FeedSection, ExecutivePanels } from './MarketPulseTabV2Widgets';
 import { useMarketPulseTabController } from './MarketPulseTabV2Controller';
 import { MarketPulseCreditNotice, MarketPulseRunWarnings } from './MarketPulseCreditNotices';
+import RunCostLine from '../../billing/RunCostLine';
 
 export default function MarketPulseTabV2(props: OpportunityTabProps) {
   const f = useMarketPulseTabController(props);
@@ -25,6 +26,7 @@ export default function MarketPulseTabV2(props: OpportunityTabProps) {
     setErrorMessage, setFindingStateOverrides, setHistory, setLoadingContext, setMode, setObjective,
     setPendingRun, setRegionScope, setRunId, setRunResult, setRunning, setScanSetupAutoOpened,
     setScanSetupOpen, setSelectedCategories, setSourceStrategy, shownRecordedRef, sourceStrategy, stopScan,
+    cadence, setCadence,
     tieredFindings, toggleCategory, visibleRankedFindings
   } = f;
   if (f.noCompanySelected) {
@@ -200,6 +202,17 @@ export default function MarketPulseTabV2(props: OpportunityTabProps) {
                   <Sparkles className="h-4 w-4" />
                   {running ? 'Running scan...' : 'Run Market Pulse'}
                 </button>
+                {/* Cost before consent: the catalog price for this run (never a balance check). */}
+                <RunCostLine
+                  companyId={companyId}
+                  actionKey="market_pulse"
+                  quantity={Math.max(1, resolvedRegionPreview.length)}
+                  unit="region"
+                  unitPlural="regions"
+                  free={sourceStrategy === 'api'}
+                  freeText="Scans that use only connected APIs don’t use credits."
+                  className="basis-full"
+                />
                 {running && runId && (
                   <button
                     type="button"
@@ -332,6 +345,17 @@ export default function MarketPulseTabV2(props: OpportunityTabProps) {
                 <Sparkles className="h-5 w-5" />
                 {running ? 'Running scan...' : 'Run Market Pulse'}
               </button>
+              {/* Cost before consent: the catalog price for this run (never a balance check). */}
+              <RunCostLine
+                companyId={companyId}
+                actionKey="market_pulse"
+                quantity={Math.max(1, resolvedRegionPreview.length)}
+                unit="region"
+                unitPlural="regions"
+                free={sourceStrategy === 'api'}
+                freeText="Scans that use only connected APIs don’t use credits."
+                className="basis-full"
+              />
               {running && runId && (
                 <button
                   type="button"
@@ -645,12 +669,33 @@ export default function MarketPulseTabV2(props: OpportunityTabProps) {
               <h4 className="text-sm font-semibold text-gray-900">Automation</h4>
             </div>
             <p className="text-sm text-gray-600">
-              When enabled, the Market Pulse cron runs once per UTC day (~04:30) for your company using the settings saved here. Each successful automated scan consumes credits.
+              When switched on, Market Pulse runs automatically {cadence === 'daily' ? 'once a day' : 'once a week'} with the settings saved here. Each automated run uses credits like a run you start yourself.
             </p>
+            <RunCostLine
+              companyId={companyId}
+              actionKey="market_pulse"
+              quantity={Math.max(1, resolvedRegionPreview.length)}
+              unit="region"
+              unitPlural="regions"
+              free={sourceStrategy === 'api'}
+              freeText="Scans that use only connected APIs don’t use credits."
+              className="mt-2"
+            />
             <label className="mt-4 flex items-start gap-3 text-sm text-gray-700">
               <input type="checkbox" checked={automationEnabled} onChange={(e) => setAutomationEnabled(e.target.checked)} className="mt-1" />
-              <span>Enable daily Market Pulse monitoring</span>
+              <span>Run Market Pulse automatically</span>
             </label>
+            <fieldset className="mt-3 text-sm text-gray-700" data-testid="mp-cadence">
+              <legend className="text-xs font-medium text-gray-500">How often</legend>
+              <label className="mr-4 inline-flex items-center gap-2">
+                <input type="radio" name="mp-cadence" checked={cadence === 'weekly'} onChange={() => setCadence('weekly')} />
+                Weekly
+              </label>
+              <label className="inline-flex items-center gap-2">
+                <input type="radio" name="mp-cadence" checked={cadence === 'daily'} onChange={() => setCadence('daily')} />
+                Daily
+              </label>
+            </fieldset>
             <label className="mt-3 flex items-start gap-3 text-sm text-gray-700">
               <input type="checkbox" checked={creditAcknowledged} onChange={(e) => setCreditAcknowledged(e.target.checked)} className="mt-1" />
               <span>I understand automated scans will consume credits on each completed run.</span>

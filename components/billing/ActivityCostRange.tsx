@@ -13,18 +13,12 @@
  * Read-only. Never deducts credits — purely a transparency surface.
  */
 
-import React, { useEffect, useState } from 'react';
+import React from 'react';
+import { useActivityCostRanges } from '../../hooks/useActivityCostRanges';
 import { Info } from 'lucide-react';
-import { fetchWithAuth } from '../community-ai/fetchWithAuth';
 
-export interface ActivityCreditRange {
-  actionKey: string;
-  minCredits: number;
-  maxCredits: number;
-  expectedCredits: number;
-  tokenPriced: boolean;
-  source: 'action_pricing_config' | 'credit_cost_config';
-}
+export type { ActivityCreditRange } from '../../hooks/useActivityCostRanges';
+import type { ActivityCreditRange } from '../../hooks/useActivityCostRanges';
 
 interface Props {
   companyId: string;
@@ -77,38 +71,8 @@ export default function ActivityCostRange({
   variant = 'inline',
   className,
 }: Props) {
-  const list = Array.isArray(actions) ? actions : [actions];
-  const key = list.join(',');
-  const [ranges, setRanges] = useState<ActivityCreditRange[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    if (!companyId || list.length === 0) return;
-    setLoading(true);
-    setError(null);
-    fetchWithAuth(
-      `/api/billing/activity-cost-range?companyId=${encodeURIComponent(companyId)}&actions=${encodeURIComponent(key)}`,
-    )
-      .then(async (res) => {
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        return res.json();
-      })
-      .then((j) => {
-        if (!cancelled) setRanges(Array.isArray(j?.ranges) ? j.ranges : []);
-      })
-      .catch((err) => {
-        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-    // key captures the actions list; companyId scopes the band.
-  }, [companyId, key]);
+  // One fetch path for catalog prices (shared with RunCostLine).
+  const { ranges, loading, error } = useActivityCostRanges(companyId, actions);
 
   if (loading && ranges.length === 0) {
     return <span className={`text-xs text-slate-400 ${className ?? ''}`}>Estimating cost…</span>;

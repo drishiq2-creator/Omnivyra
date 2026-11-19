@@ -14,6 +14,17 @@
  *     server says the same key is still running) the key is KEPT, so trying again reuses it and the
  *     server answers "already being written" / "already finished" instead of holding a second 40.
  * Today's main routes ignore the header, so sending it is harmless before c6's branch lands.
+ *
+ * DO NOT "FIX" THE KEPT KEY (7c, 2026-11-18). If a finished, charged blog's response is lost, the
+ * retry with the kept key can only be answered from the SERVER (owner ruling via b3: replay the
+ * same result, one charge; c6 builds it, BLOCKING for c6's feat/blog-fixed-40-20261118).
+ * CURRENT STATE (2026-11-18, until that replay ships): the generate routes do not store the draft,
+ * so a lost response after the charge is settled means a charged blog the user CANNOT recover.
+ * The replay closes this only if the stored copy is written BEFORE the charge is confirmed (7c).
+ * Ending the key on a lost connection so the retry
+ * regenerates would turn lost data into a SECOND charge. The UI line "Trying again won't charge you
+ * twice" (BlogGenerateModalMain BILLED_NETWORK_UNCERTAIN) is true only because of this rule;
+ * blogCostUi.test.tsx pins the two together.
  */
 import { createBilledActionKeyGate } from '../idempotency';
 
@@ -52,8 +63,17 @@ export function blogRefusalText(body: unknown): string | null {
       return BLOG_IN_PROGRESS_TEXT;
     case 'IDEMPOTENCY_KEY_REQUIRED':
       return KEY_MISSING_TEXT;
-    case 'RESERVATION_ALREADY_SETTLED':
-      return serverText || 'This blog request has already finished. Start a new request to generate again.';
+    // c6 @3551360d9 (replay): RESERVATION_ALREADY_SETTLED is gone from the blog routes, split into:
+    case 'BLOG_RESULT_READ_FAILED': // 503, retryable: the stored blog couldn't be read; the key is KEPT
+      return serverText || 'We couldn’t check on this blog just now. Please try again.';
+    case 'BLOG_RESULT_UNAVAILABLE': // 409: no stored copy; b3 ruling: c6 auto-refunds the original charge once
+      // No amount in the fallback (7c): it is reached only when the server says nothing, so the
+      // client must not state a sum it can't check. The server sentence carries the exact figure.
+      return serverText || 'We couldn’t recover this blog, so your credits have been returned. You can write it again.';
+    case 'BLOG_REFUND_PENDING': // 503, retryable (c6 @8f10ad7e2): refund not written yet; key KEPT, retry completes it; no "returned" claim
+      return serverText || 'We could not recover this blog and are returning your credits. Please try again in a moment.';
+    case 'BLOG_REQUEST_ENDED': // 409: this request failed and was released (not charged)
+      return serverText || 'This request didn’t finish and you weren’t charged. Please try again.';
     case 'BLOG_GENERATION_DISABLED':
       return serverText || 'Blog generation is turned off for this account.';
     case 'BLOG_SWITCH_UNAVAILABLE':
