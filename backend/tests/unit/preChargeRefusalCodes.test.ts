@@ -84,8 +84,9 @@ it.each([
   ['ORG_CONTROLS_UNVERIFIABLE', [ORG]],
   ['BUDGET_UNVERIFIABLE', [COST]],
 ])('%s: produced ONLY by %j (a new producer must be traced before it can stay in the set)', (code, producers) => {
-  // The module itself and the derived StateUnreadableCode type name the codes without producing them.
-  expect(filesMatching(new RegExp(`'${code}'`), [MODULE, CONTRACTS])).toEqual(producers);
+  // The module itself, the derived StateUnreadableCode type and the owned client copies (ALLOWED_COPIES, below)
+  // name the codes without producing them - a copy is a consumer, so 04's literal landing first stays green here.
+  expect(filesMatching(new RegExp(`'${code}'`), [MODULE, CONTRACTS, ...Object.keys(ALLOWED_COPIES)])).toEqual(producers);
 });
 
 it('the producers\' entry points are called ONLY by the known callers', () => {
@@ -107,6 +108,35 @@ it('POSITIVE CONTROL: the order check fails when the hold comes first, or the ch
   expect(checkPrecedesHold('a(); callCreditReservation({}); preflightCheck(o, c);', 'preflightCheck(')).toBe(false);
   expect(checkPrecedesHold('callCreditReservation({});', 'preflightCheck(')).toBe(false);
   expect(checkPrecedesHold('preflightCheck(o, c); callCreditReservation({});', 'preflightCheck(')).toBe(true);
+});
+
+// NO LOCAL COPIES (7c / 04, 2026-11-19): two agreeing lists diverge the first time the set changes - and it already
+// has (CREDIT_STATE_UNREADABLE excluded on evidence). A non-test file that lists ALL THREE codes is a copy.
+// ALLOWED_COPIES is a ledger of owned exceptions, not a whitelist: an entry whose file no longer lists the codes
+// fails, so the exception cannot outlive its reason.
+const ALLOWED_COPIES: Record<string, string> = {
+  // 04 owns: their billed branches land with this literal; the follow-up (due the day fix/reads-blocking-routes is an
+  // ancestor of origin/main) imports PRE_CHARGE_REFUSAL_CODES instead and REMOVES this entry.
+  'lib/billing/billedResponse.ts': '04 import follow-up (KNOWN_UNVERIFIABLE_CODES)',
+};
+const listsAllThree = (src: string) => PRE_CHARGE_REFUSAL_CODES.every((c) => src.includes(`'${c}'`));
+
+it('no other source file keeps its own copy of the set (only the module, plus owned ledger entries)', () => {
+  const copies = FILES.filter((f) => f !== MODULE && listsAllThree(read(f)));
+  expect(copies.filter((f) => !(f in ALLOWED_COPIES))).toEqual([]);
+});
+
+it('every ledger entry is still a real copy - remove it once its file imports the module instead', () => {
+  for (const f of Object.keys(ALLOWED_COPIES)) {
+    if (!FILES.includes(f)) continue; // not landed on this ref yet
+    expect([f, listsAllThree(read(f))]).toEqual([f, true]);
+  }
+});
+
+it('POSITIVE CONTROL: the copy detector sees a literal list and the module, and ignores a single-code producer', () => {
+  expect(listsAllThree("['DAILY_LIMIT_UNVERIFIABLE', 'BUDGET_UNVERIFIABLE', 'ORG_CONTROLS_UNVERIFIABLE']")).toBe(true);
+  expect(listsAllThree(read(MODULE))).toBe(true);
+  expect(listsAllThree(read(COST))).toBe(false);
 });
 
 // Type-level pin (tsc; ts-jest is transpile-only): StateUnreadableCode keeps EXACTLY its three members - derived from
