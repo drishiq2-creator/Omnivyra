@@ -37,6 +37,7 @@ import { SESClient, SendEmailCommand } from "npm:@aws-sdk/client-ses@3.658.1";
 import { SESv2Client, SendEmailCommand as SendEmailV2Command } from "npm:@aws-sdk/client-sesv2@3.658.1";
 import { authorizeServiceCaller } from "./auth.ts";
 import { escapeHtml, escapeHtmlBlock, safeHref } from "./escape.ts";
+import { teamInviteCopy } from "./teamInvite.ts";
 import {
   listUnsubscribeHeaders,
   UNSUBSCRIBE_LINK_LABEL,
@@ -46,7 +47,14 @@ import {
 } from "./unsubscribe.ts";
 
 type Template =
-  | { type: "team_invite"; recipientEmail: string; inviteUrl: string }
+  | {
+      type: "team_invite";
+      recipientEmail: string;
+      inviteUrl: string;
+      /** Absent in the pre-ruling payload shape: the copy falls back (./teamInvite.ts). */
+      companyName?: string | null;
+      platformName?: string | null;
+    }
   | {
       type: "company_referral";
       recipientEmail: string;
@@ -155,17 +163,16 @@ function mailtoLink(address: string): string {
 
 function render(t: Template): Envelope {
   switch (t.type) {
-    case "team_invite":
+    case "team_invite": {
+      // Owner ruling 2026-11-19: names the company and the platform FROM THE PAYLOAD; a payload without
+      // them (the pre-ruling shape) falls back to "an <platform> workspace" - see ./teamInvite.ts.
+      const copy = teamInviteCopy({ companyName: t.companyName, platformName: t.platformName });
       return {
         to: t.recipientEmail,
-        subject: "You have been invited to Omnivyra",
-        html: actionLayout(
-          "You have been invited",
-          "Use the invitation link below to accept access to your organization account.",
-          "Accept invitation",
-          t.inviteUrl,
-        ),
+        subject: copy.subject,
+        html: actionLayout(copy.heading, copy.bodyHtml, "Accept invitation", t.inviteUrl),
       };
+    }
 
     case "company_referral": {
       const who = t.admin?.name?.trim() || t.admin?.email || null;

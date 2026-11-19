@@ -23,6 +23,7 @@
 import { createCipheriv, createDecipheriv, randomBytes, createHash } from 'crypto';
 import { supabase } from '../db/supabaseClient';
 import { logger } from './logger';
+import { PLATFORM_DISPLAY_NAME } from './platformDisplayName';
 
 export type InviteTemplateKey =
   | 'team_invite_magic_link'
@@ -338,6 +339,10 @@ export function buildSendEnvelopeFromClaim(claimed: {
         type: edgeType,
         recipientEmail: claimed.recipient_email,
         inviteUrl: String(work.inviteUrl ?? ''),
+        // Owner ruling 2026-11-19: the invite names the company it is for, and the platform, both from
+        // the payload (the template falls back to "an <platform> workspace" without a company name).
+        companyName: typeof work.companyName === 'string' ? work.companyName : null,
+        platformName: PLATFORM_DISPLAY_NAME,
       },
     };
   }

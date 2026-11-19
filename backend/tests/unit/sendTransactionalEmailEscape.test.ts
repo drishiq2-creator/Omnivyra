@@ -196,7 +196,8 @@ describe('index.ts wiring — every caller value goes through the helpers', () =
   });
 
   it('keeps the template markup and wording intact', () => {
-    expect(indexSrc).toContain('subject: "You have been invited to Omnivyra"');
+    // team_invite copy moved to ./teamInvite.ts (owner ruling 2026-11-19; pinned in teamInviteBranding.test.ts).
+    expect(indexSrc).toContain('subject: copy.subject,');
     expect(indexSrc).toContain('`Your sign-in details:<br/>`');
     expect(indexSrc).toContain('<code style="background:#f1f4f8;padding:4px 8px;border-radius:4px">');
     expect(indexSrc).toContain('subject: `Low credits — ${t.consumedPercent}% consumed`');

@@ -106,11 +106,14 @@
  */
 import { supabase } from '../db/supabaseClient';
 import { logger } from './logger';
+import { PLATFORM_DISPLAY_NAME } from './platformDisplayName';
 
 type InvitePayload = {
   type: 'team_invite';
   recipientEmail: string;
   inviteUrl: string;
+  companyName: string | null;
+  platformName: string;
 };
 
 type InboundSignupNoticePayload = {
@@ -176,9 +179,11 @@ export async function sendInvite(
   email: string,
   inviteLink: string,
   idempotencyKey?: string,
+  companyName: string | null = null,
 ): Promise<void> {
+  // Owner ruling 2026-11-19: the invite names its company and the platform, both from the payload.
   await invokeEdgeFunction(
-    { type: 'team_invite', recipientEmail: email, inviteUrl: inviteLink },
+    { type: 'team_invite', recipientEmail: email, inviteUrl: inviteLink, companyName, platformName: PLATFORM_DISPLAY_NAME },
     { idempotencyKey },
   );
 }

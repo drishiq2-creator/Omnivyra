@@ -206,10 +206,17 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     // Send the invite via SES through the email_jobs queue. Idempotency
     // key bound to (user, company) so back-to-back reinvite requests
     // collapse to a single email instead of spamming the recipient.
+    // Owner ruling 2026-11-19: the invite names the company it is for (null -> the template's fallback).
+    const { data: inviteCompany } = await supabaseAdmin
+      .from('companies')
+      .select('name')
+      .eq('id', companyId)
+      .maybeSingle();
     await sendInvite(
       normalizedEmail,
       inviteUrl,
       `reinvite:${companyId}:${userId}`,
+      (inviteCompany as { name?: string | null } | null)?.name ?? null,
     );
 
     return res.status(200).json({ success: true });

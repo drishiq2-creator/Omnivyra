@@ -212,7 +212,9 @@ describe('041-A-O — every pre-existing template is unchanged', () => {
   // interpolation or a single character of an existing template changes — which is
   // the regression that matters, since this function serves seven live emails.
   it.each([
-    ['team_invite', 'ea92f06ac61db535'],
+    // Re-pinned by the owner's invitation-branding ruling (2026-11-19): the branch now takes its copy from
+    // ./teamInvite.ts (company + platform from the payload; pinned in teamInviteBranding.test.ts).
+    ['team_invite', 'ef6934c25e0fa6b9'],
     ['team_invite_credentials', 'd63eb8130039aeaf'],
     ['company_referral', '285fcc44dfd92949'],
     ['inbound_signup_notice', '337e1747e81bdcfd'],
@@ -245,7 +247,10 @@ describe('041-A-O — every pre-existing template is unchanged', () => {
     // caught on its own.
     const helpers = indexSrc.slice(0, indexSrc.indexOf('function render(t: Template)'));
     expect(crypto.createHash('sha256').update(helpers).digest('hex').slice(0, 16))
-      .toBe('2ddc9b5d7373092b');
+      // Re-pinned 2026-11-19 (invitation branding): only the teamInvite.ts import and the team_invite
+      // Template variant (+companyName?, +platformName?) changed in this region; the three helpers below
+      // are still pinned one by one, unchanged.
+      .toBe('a7a29b36bf21cc7f');
   });
 
   it.each([
