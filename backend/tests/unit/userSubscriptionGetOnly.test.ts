@@ -4,6 +4,8 @@
  * before auth, membership or plan resolution. If a write method is ever added here, this suite fails and the route
  * must take requireNormalizedRoleIn: BILLING_WRITE_ROLES like the other billing writes.
  */
+// A module, not a global script: its top-level names must not collide with other test files in the backend-tests typecheck.
+export {};
 const mockCalls: string[] = [];
 jest.mock('../../services/supabaseAuthService', () => ({
   getSupabaseUserFromRequest: jest.fn(async () => { mockCalls.push('auth'); return { user: { id: 'u-1' }, error: null }; }),
