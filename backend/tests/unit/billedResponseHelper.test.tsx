@@ -7,7 +7,7 @@
 import React from 'react';
 import '@testing-library/jest-dom';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
-import { classifyBilledResponse, billedOutcomeText, TOP_UP_HREF, KNOWN_UNVERIFIABLE_CODES, UNVERIFIABLE_MESSAGE, SETTLEMENT_PENDING_MESSAGE, UNCERTAIN_MESSAGE, RECLAIM_MESSAGE, REPLAY_UNAVAILABLE_MESSAGE } from '../../../lib/billing/billedResponse';
+import { classifyBilledResponse, billedOutcomeText, TOP_UP_HREF, KNOWN_UNVERIFIABLE_CODES, UNVERIFIABLE_MESSAGE, UNVERIFIABLE_MESSAGE_NO_CLAIM, SETTLEMENT_PENDING_MESSAGE, UNCERTAIN_MESSAGE, RECLAIM_MESSAGE, REPLAY_UNAVAILABLE_MESSAGE } from '../../../lib/billing/billedResponse';
 import { createBilledActionKeyGate } from '../../../lib/idempotency';
 
 describe('classifyBilledResponse: keyed on status + code only', () => {
@@ -49,13 +49,27 @@ describe('classifyBilledResponse: keyed on status + code only', () => {
     expect([...KNOWN_UNVERIFIABLE_CODES].sort()).toEqual(['BUDGET_UNVERIFIABLE', 'DAILY_LIMIT_UNVERIFIABLE', 'ORG_CONTROLS_UNVERIFIABLE']);
   });
 
-  it.each([...KNOWN_UNVERIFIABLE_CODES, 'SOME_FUTURE_UNVERIFIABLE'])(
-    '503 %s: plain retry, nothing charged, never top-up, never the code',
+  it.each([...KNOWN_UNVERIFIABLE_CODES])(
+    '503 %s (known, pre-charge on the server): plain retry, nothing charged, never top-up, never the code',
     (code) => {
       const out = classifyBilledResponse(503, { error: 'internal detail', code }, 'fallback');
       expect(out).toEqual({ kind: 'retry', message: UNVERIFIABLE_MESSAGE });
       const text = billedOutcomeText(out);
       expect(text).toContain('Nothing was charged');
+      expect(text).not.toMatch(/UNVERIFIABLE|Top up|internal detail/);
+    },
+  );
+
+  // b3 ruling 2026-11-19: the UI may not promise "nothing was charged" for a code whose producer it has
+  // never seen. Still a plain retry (no top-up, no code), but no charge claim.
+  it.each(['SOME_FUTURE_UNVERIFIABLE', 'X_UNVERIFIABLE'])(
+    '503 %s (unknown): plain retry WITHOUT a charge claim',
+    (code) => {
+      const out = classifyBilledResponse(503, { error: 'internal detail', code }, 'fallback');
+      expect(out).toEqual({ kind: 'retry', message: UNVERIFIABLE_MESSAGE_NO_CLAIM });
+      const text = billedOutcomeText(out);
+      expect(text).not.toMatch(/charged/i);
+      expect(text).toMatch(/try again/i);
       expect(text).not.toMatch(/UNVERIFIABLE|Top up|internal detail/);
     },
   );
