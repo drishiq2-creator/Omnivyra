@@ -21,7 +21,9 @@ jest.mock('../../db/supabaseClient', () => ({
     },
   },
 }));
-jest.mock('../../services/contentArchitectService', () => ({ resolveCompanyAccess: async () => ({ ok: true }) }));
+// The caller is a COMPANY_ADMIN: run / automation are also behind the console role gate (CI-326, consoleAccess.ts),
+// which this suite does not test - an admin passes it so only the automation flag decides here.
+jest.mock('../../services/contentArchitectService', () => ({ resolveCompanyAccess: async () => ({ userId: 'u1', role: 'COMPANY_ADMIN' }) }));
 jest.mock('../../queue/jobQueue', () => ({ jobQueue: {} }));
 jest.mock('../../middleware/queueBackpressure', () => ({ safeEnqueue: async () => { effects.push('enqueue'); return true; } }));
 jest.mock('../../services/marketPulseJobProcessor', () => ({ processMarketPulseJobV1: async () => { effects.push('process'); } }));
