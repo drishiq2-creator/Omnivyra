@@ -2,7 +2,8 @@
  * Routes for dead-lettered CMS publishes: GET /api/blogs/publishing-issues and
  * POST /api/blogs/publishing-jobs/[jobId]/retry. Retry is gated like publishing itself (company
  * access + COMPANY_ADMIN / SUPER_ADMIN); the refusals map to 404 / 409 with their code; an unreadable
- * queue is a 500, never an empty list.
+ * queue or job is 503 + Retry-After with its own code (b3, 2026-11-19), never an empty list or NOT_FOUND;
+ * any other failure stays a 500.
  */
 const gates = { access: true, role: true, roleCalls: [] as unknown[] };
 const mockSvc = { list: jest.fn(), requeue: jest.fn() };
@@ -27,12 +28,13 @@ jest.mock('../../services/publishingJobService', () => ({
   requeueDeadLetteredPublishingJob: (...a: unknown[]) => mockSvc.requeue(...a),
 }));
 
+import { PublishingStateUnreadableError } from '../../services/publishingStateUnreadable';
 import issuesRoute from '../../../pages/api/blogs/publishing-issues';
 import retryRoute from '../../../pages/api/blogs/publishing-jobs/[jobId]/retry';
 
 async function call(handler: unknown, req: Record<string, unknown>) {
-  const res: any = { statusCode: 0, body: undefined };
-  res.setHeader = () => res;
+  const res: any = { statusCode: 0, body: undefined, headers: {} as Record<string, string> };
+  res.setHeader = (k: string, v: string) => { res.headers[k] = v; return res; };
   res.status = (c: number) => { res.statusCode = c; return res; };
   res.json = (p: unknown) => { res.body = p; return res; };
   await (handler as any)({ headers: {}, query: {}, body: {}, ...req }, res);
@@ -47,13 +49,37 @@ beforeEach(() => {
 });
 afterEach(() => jest.restoreAllMocks());
 
-it('GET issues: 200 with the list; an unreadable queue is 500, not []', async () => {
+it('GET issues: 200 with the list; an UNREADABLE queue is 503 + Retry-After PUBLISHING_ISSUES_UNREADABLE, not []', async () => {
   mockSvc.list.mockResolvedValue([{ job_id: 'j1' }]);
   expect((await call(issuesRoute, { method: 'GET', query: { company_id: 'co-a' } })).body).toEqual({ issues: [{ job_id: 'j1' }] });
-  mockSvc.list.mockRejectedValue(new Error('Publishing jobs unreadable'));
+  mockSvc.list.mockRejectedValue(new PublishingStateUnreadableError('Publishing jobs', 'socket hang up'));
+  const r = await call(issuesRoute, { method: 'GET', query: { company_id: 'co-a' } });
+  expect(r.statusCode).toBe(503);
+  expect(r.headers['Retry-After']).toBe('5');
+  expect(r.body).toEqual({ code: 'PUBLISHING_ISSUES_UNREADABLE', error: expect.stringMatching(/doesn't mean there are none/) });
+});
+
+it('CONTROL: GET issues - a failure that is NOT a read stays a 500 (not dressed up as retryable)', async () => {
+  mockSvc.list.mockRejectedValue(new TypeError('x is not a function'));
   const r = await call(issuesRoute, { method: 'GET', query: { company_id: 'co-a' } });
   expect(r.statusCode).toBe(500);
+  expect(r.headers['Retry-After']).toBeUndefined();
   expect(r.body).not.toHaveProperty('issues');
+});
+
+it('retry: the job is UNREADABLE -> 503 + Retry-After PUBLISHING_JOB_UNREADABLE, retried:false - never 404 NOT_FOUND', async () => {
+  mockSvc.requeue.mockRejectedValue(new PublishingStateUnreadableError('Publishing job', 'socket hang up'));
+  const r = await retry();
+  expect(r.statusCode).toBe(503);
+  expect(r.headers['Retry-After']).toBe('5');
+  expect(r.body).toEqual({ retried: false, code: 'PUBLISHING_JOB_UNREADABLE', error: expect.stringMatching(/nothing was retried/) });
+});
+
+it('CONTROL: retry - a failure that is NOT a read (e.g. the re-queue write) stays a 500', async () => {
+  mockSvc.requeue.mockRejectedValue(new Error('Publishing job not re-queued: x'));
+  const r = await retry();
+  expect(r.statusCode).toBe(500);
+  expect(r.headers['Retry-After']).toBeUndefined();
 });
 
 it('retry: gated on the admin roles; denied -> 403 and the service is never called', async () => {

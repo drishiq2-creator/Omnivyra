@@ -6,6 +6,7 @@ import type { Blog } from './blogService';
 import { captureQueueMetrics, recordWorkerHeartbeat } from './queueOperationsService';
 import { runWorkerSnapshotShadowHook } from './workerSnapshotShadowHook';
 import { recordAuditEvent } from './auditEventService';
+import { PublishingStateUnreadableError, readPublishingState } from './publishingStateUnreadable';
 import { randomUUID } from 'crypto';
 
 export type PublishingJobStatus = 'queued' | 'processing' | 'published' | 'failed' | 'retrying' | 'cancelled' | 'dead_letter' | 'scheduled';
@@ -478,12 +479,12 @@ export interface PublishingIssue {
  * repopulate the queue (05). Reads THROW on error: an unreadable queue is never "no issues".
  */
 export async function listPublishingIssues(companyId: string): Promise<PublishingIssue[]> {
-  const { data: jobs, error } = await ownedDbTable('publishing_jobs')
+  const { data: jobs, error } = await readPublishingState('Publishing jobs', ownedDbTable('publishing_jobs')
     .select('id, blog_id, provider, job_type, status, dead_letter_at, last_error, failure_category, created_at')
     .eq('company_id', companyId)
     .order('created_at', { ascending: false })
-    .limit(500);
-  if (error) throw new Error(`Publishing jobs unreadable: ${error.message}`);
+    .limit(500));
+  if (error) throw new PublishingStateUnreadableError('Publishing jobs', error.message);
   const latestPerBlog = new Map<string, any>();
   for (const j of (jobs ?? []) as any[]) {
     const key = String(j.blog_id ?? `job:${j.id}`);
@@ -492,11 +493,11 @@ export async function listPublishingIssues(companyId: string): Promise<Publishin
   const stuck = [...latestPerBlog.values()].filter((j) => j.status === 'dead_letter' && j.dead_letter_at);
   if (stuck.length === 0) return [];
 
-  const { data: attempts, error: attemptsError } = await ownedDbTable('publishing_attempts')
+  const { data: attempts, error: attemptsError } = await readPublishingState('Publishing attempts', ownedDbTable('publishing_attempts')
     .select('job_id, attempt_number, status, error_message, started_at, finished_at')
     .in('job_id', stuck.map((j) => j.id))
-    .order('attempt_number', { ascending: false });
-  if (attemptsError) throw new Error(`Publishing attempts unreadable: ${attemptsError.message}`);
+    .order('attempt_number', { ascending: false }));
+  if (attemptsError) throw new PublishingStateUnreadableError('Publishing attempts', attemptsError.message);
   const lastAttempt = new Map<string, any>();
   for (const a of (attempts ?? []) as any[]) if (!lastAttempt.has(a.job_id)) lastAttempt.set(a.job_id, a);
 
@@ -531,12 +532,13 @@ export async function requeueDeadLetteredPublishingJob(input: {
   actorUserId: string | null;
   confirmOutcomeUnknown?: boolean;
 }): Promise<RequeueResult> {
-  const { data: job, error } = await ownedDbTable('publishing_jobs')
+  // A failed read (error object OR rejection) is its own retryable state, never NOT_FOUND (b3).
+  const { data: job, error } = await readPublishingState('Publishing job', ownedDbTable('publishing_jobs')
     .select('id, company_id, status, dead_letter_at, failure_category, last_error, attempt_count, max_attempts')
     .eq('id', input.jobId)
     .eq('company_id', input.companyId)
-    .maybeSingle();
-  if (error) throw new Error(`Publishing job unreadable: ${error.message}`);
+    .maybeSingle());
+  if (error) throw new PublishingStateUnreadableError('Publishing job', error.message);
   if (!job) return { ok: false, code: 'NOT_FOUND', message: 'Publishing job not found.' };
   const j = job as any;
   if (j.status !== 'dead_letter' || !j.dead_letter_at) {

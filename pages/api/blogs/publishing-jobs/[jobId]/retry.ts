@@ -11,6 +11,7 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 import { enforceCompanyAccess } from '../../../../../backend/services/userContextService';
 import { enforceRole, Role } from '../../../../../backend/services/rbacService';
 import { requeueDeadLetteredPublishingJob } from '../../../../../backend/services/publishingJobService';
+import { PublishingStateUnreadableError } from '../../../../../backend/services/publishingStateUnreadable';
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
@@ -36,6 +37,15 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     return res.status(refused.code === 'NOT_FOUND' ? 404 : 409).json({ retried: false, code: refused.code, error: refused.message });
   } catch (err) {
     console.error('[blogs/publishing-jobs/retry] failed', err instanceof Error ? err.message : err);
+    // The job could not be READ: nothing was retried, and it is not "not found" (b3 standing rule).
+    if (err instanceof PublishingStateUnreadableError) {
+      res.setHeader('Retry-After', '5');
+      return res.status(503).json({
+        retried: false,
+        code: 'PUBLISHING_JOB_UNREADABLE',
+        error: "We couldn't check this publishing job just now, so nothing was retried. Please try again.",
+      });
+    }
     return res.status(500).json({ retried: false, error: 'Could not retry the publish. Please try again.' });
   }
 }
