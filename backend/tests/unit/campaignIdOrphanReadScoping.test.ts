@@ -125,6 +125,31 @@ describe('GET engagement/campaign-signals - signals scoped to the authorized com
     expect(r.status).toBe(200);
     expect(r.body.signals.map((s: { id: string }) => s.id)).toEqual(['sig-a']);
   });
+
+  // S2 seam (2026-11-19): the campaign_versions scope read is keyed on the company the gate AUTHORIZED (the trimmed
+  // value enforceCompanyAccess received, through tenantTable), not on the raw query string. Before, a padded
+  // companyId passed the gate (which trims) but the scope read used the untrimmed value, matched no version, and the
+  // company's OWN campaign answered an empty list.
+  it('(c) the scope read uses the authorized company: padded companyId -> own campaign still answers its signals', async () => {
+    seed({ campaign_activity_engagement_signals: SIGNALS });
+    const r = await invoke(campaignSignals, { method: 'GET', as: 'A', query: { companyId: ` ${CO_A} `, campaignId: CAMPAIGN_A } });
+    expect(r.status).toBe(200);
+    expect(r.body.signals.map((s: { id: string }) => s.id)).toEqual(['sig-a']);
+    const scopeReads = calls().filter((c) => c.table === 'campaign_versions' && c.op === 'select' && 'campaign_id' in (c.filters ?? {}) && c.filters.campaign_id === CAMPAIGN_A);
+    expect(scopeReads.length).toBeGreaterThan(0);
+    for (const c of scopeReads) expect(c.filters.company_id).toBe(CO_A);
+  });
+
+  it('(c2) the no-campaign scope read uses the authorized company too (padded companyId -> own signals, every version read on A)', async () => {
+    seed({ campaign_activity_engagement_signals: SIGNALS });
+    const r = await invoke(campaignSignals, { method: 'GET', as: 'A', query: { companyId: ` ${CO_A} ` } });
+    expect(r.status).toBe(200);
+    expect(r.body.signals.map((s: { id: string }) => s.id)).toEqual(['sig-a']);
+    expect(leaksB(r.body)).toBe(false);
+    const versionReads = calls().filter((c) => c.table === 'campaign_versions' && c.op === 'select' && !('campaign_id' in (c.filters ?? {})));
+    expect(versionReads.length).toBeGreaterThan(0);
+    for (const c of versionReads) expect(c.filters.company_id).toBe(CO_A);
+  });
 });
 
 // ──────────────────────────── recommendations/analytics ──

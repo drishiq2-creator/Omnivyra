@@ -17,7 +17,7 @@
  * (missing campaigns admitted, foreign ones still refused); the gate's own 404 is pinned in routeAuth001CampaignBinding.
  */
 import {
-  seed, invoke, rows, completedWrites, resolveUpsertConflicts, leaksB,
+  seed, invoke, rows, calls, completedWrites, resolveUpsertConflicts, leaksB,
   CAMPAIGN_A, CO_A, CO_B, CANARY_B,
 } from '../helpers/routeAuthHarness';
 
@@ -26,9 +26,19 @@ jest.mock('../../db/supabaseClient', () => jest.requireActual('../helpers/routeA
 jest.mock('../../db/writeOwner', () => jest.requireActual('../helpers/routeAuthHarness').writeOwnerModule());
 jest.mock('../../services/supabaseAuthService', () => jest.requireActual('../helpers/routeAuthHarness').authModule());
 // GATE-404: the real gate, with the creation-flow opt-in, so a missing campaign reaches the scoping under test.
+// mockBodyCompanyAfterGate (S2 seam, 2026-11-19): when set, req.body.companyId is REPLACED after the gate returns, so
+// a route that re-reads the body for its tenant (instead of using the value the gate authorized) is caught.
+let mockBodyCompanyAfterGate: string | null = null;
 jest.mock('../../services/userContextService', () => {
   const real = jest.requireActual('../../services/userContextService');
-  return { ...real, enforceCompanyAccess: (input: Record<string, unknown>) => real.enforceCompanyAccess({ ...input, allowMissingCampaign: true }) };
+  return {
+    ...real,
+    enforceCompanyAccess: async (input: Record<string, any>) => {
+      const out = await real.enforceCompanyAccess({ ...input, allowMissingCampaign: true });
+      if (mockBodyCompanyAfterGate !== null && input.req?.body) input.req.body.companyId = mockBodyCompanyAfterGate;
+      return out;
+    },
+  };
 });
 jest.mock('../../security/IdentityResolver', () => jest.requireActual('../helpers/routeAuthHarness').identityModule());
 
@@ -129,6 +139,54 @@ describe('POST campaigns/planner/apply-opportunity - campaign_week_plan scoped t
     const writes = completedWrites(['campaign_week_plan']);
     expect(writes.length).toBeGreaterThan(0);
     for (const w of writes) expect(w.filters.campaign_id).toBe(CAMPAIGN_A);
+  });
+});
+
+// ──────────────────────────── apply-opportunity: tenant = the AUTHORIZED company ──
+describe('POST campaigns/planner/apply-opportunity - the tenant is the company the gate authorized, never a re-read body', () => {
+  const OPP_A = {
+    id: 'opp-a', organization_id: CO_A, opportunity_type: 'trend', title: 'Opp A', description: 'd', signal_count: 1,
+    confidence_score: 0.5, topic_keywords: ['kw'], related_campaign_id: null, status: 'new',
+  };
+  const OPP_B = {
+    id: 'opp-b', organization_id: CO_B, opportunity_type: 'trend', title: `Opp B ${CANARY_B}`, description: 'd', signal_count: 1,
+    confidence_score: 0.5, topic_keywords: ['kw'], related_campaign_id: null, status: 'new',
+  };
+  const A_DRAFT = {
+    id: 9102, campaign_id: CAMPAIGN_A, status: 'draft', updated_at: '2026-03-01',
+    weeks: [{ week_number: 1, topics_to_cover: ['A existing'] }],
+  };
+  const seedWorld = () => seed({ campaign_week_plan: [A_DRAFT], opportunity_radar: [OPP_A, OPP_B] });
+  afterEach(() => { mockBodyCompanyAfterGate = null; });
+
+  it("(a) body companyId differs from the authorized one after the gate -> B's opportunity stays unreachable, nothing scoped to B", async () => {
+    seedWorld();
+    mockBodyCompanyAfterGate = CO_B;
+    const r = await invoke(applyOpportunity, {
+      method: 'POST', as: 'A', body: { companyId: CO_A, campaignId: CAMPAIGN_A, opportunityId: 'opp-b' },
+    });
+    expect(r.status).toBe(404);
+    expect(leaksB(r.body)).toBe(false);
+    expect(completedWrites(['opportunity_radar'])).toEqual([]);
+    expect(rows('opportunity_radar').find((o) => o.id === 'opp-b')?.status).toBe('new');
+    // Every opportunity_radar statement is pinned to A; none names B.
+    const oppCalls = calls().filter((c) => c.table === 'opportunity_radar');
+    expect(oppCalls.length).toBeGreaterThan(0);
+    for (const c of oppCalls) expect(c.filters.organization_id).toBe(CO_A);
+  });
+
+  it("(b) positive control under the same substitution: A's own opportunity on A's campaign -> 200, written under A", async () => {
+    seedWorld();
+    mockBodyCompanyAfterGate = CO_B;
+    const r = await invoke(applyOpportunity, {
+      method: 'POST', as: 'A', body: { companyId: CO_A, campaignId: CAMPAIGN_A, opportunityId: 'opp-a' },
+    });
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({ success: true, campaignId: CAMPAIGN_A });
+    expect(rows('opportunity_radar').find((o) => o.id === 'opp-a')?.status).toBe('applied_to_campaign');
+    const oppWrites = completedWrites(['opportunity_radar']);
+    expect(oppWrites).toHaveLength(1);
+    expect(oppWrites[0].filters.organization_id).toBe(CO_A);
   });
 });
 

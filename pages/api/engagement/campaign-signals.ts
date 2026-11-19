@@ -9,6 +9,7 @@ import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeF
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { enforceCompanyAccess } from '../../../backend/services/userContextService';
 import { supabase } from '../../../backend/db/supabaseClient';
+import { tenantTable, tenantContextFor } from '../../../backend/db/tenantTable';
 
 const SIGNAL_TYPES = ['comment', 'reply', 'mention', 'quote', 'discussion', 'buyer_intent_signal'];
 const PLATFORMS = ['linkedin', 'twitter', 'x', 'discord', 'slack', 'reddit', 'github'];
@@ -40,6 +41,9 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       requireCampaignId: false,
     });
     if (!access) return;
+    // S2 tenant seam: campaign_versions is read through tenantTable under the company the gate just AUTHORIZED (the
+    // trimmed id it received), never the raw query string. A non-uuid id throws TENANT_CONTEXT_MISSING -> 500 below.
+    const versions = tenantTable('campaign_versions', tenantContextFor(access, companyId.trim()));
 
     let query = supabase
       .from('campaign_activity_engagement_signals')
@@ -53,10 +57,8 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       // campaign survive, so campaign_id alone could return another company's orphaned signals. Scope it the way the
       // no-campaign branch below does: only a campaign the company's own campaign_versions name is read; any other
       // id answers the empty list (no existence oracle).
-      const { data: owned, error: ownedError } = await supabase
-        .from('campaign_versions')
+      const { data: owned, error: ownedError } = await versions
         .select('campaign_id')
-        .eq('company_id', companyId)
         .eq('campaign_id', campaignId)
         .limit(1)
         .maybeSingle();
@@ -86,12 +88,10 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
 
     // S2-55: also when only an activityId is given - activity_id alone is not scoped to any company either.
     if (!campaignId) {
-      const { data: versions } = await supabase
-        .from('campaign_versions')
+      const { data: ownVersions } = await versions
         .select('campaign_id')
-        .eq('company_id', companyId)
         .limit(500);
-      const campaignIds = (versions ?? []).map((v: { campaign_id: string }) => v.campaign_id).filter(Boolean);
+      const campaignIds = (ownVersions ?? []).map((v: { campaign_id: string }) => v.campaign_id).filter(Boolean);
       if (campaignIds.length > 0) {
         query = query.in('campaign_id', campaignIds);
       } else {
