@@ -1,6 +1,7 @@
 import { validateCampaignHealth } from '../../services/campaignHealthService';
 import { detectTrendDrift } from '../../services/trendDriftService';
 import * as campaignOptimizationService from '../../services/campaignOptimizationService';
+import { tenantContextFor } from '../../db/tenantTable';
 import * as campaignVersionStore from '../../db/campaignVersionStore';
 import * as companyProfileService from '../../services/companyProfileService';
 
@@ -188,6 +189,8 @@ describe('Campaign week optimization', () => {
   it('optimizes a week and stores history', async () => {
     const result = await campaignOptimizationService.optimizeCampaignWeek({
       companyId: 'comp-1',
+      // S2 (7c): optimizeCampaignWeek REQUIRES the authorized tenant (the asset list it reads is company-scoped).
+      tenant: tenantContextFor({ userId: 'user-1' }, '00000000-0000-4000-8000-0000000000c1'),
       campaignId: 'camp-1',
       weekNumber: 1,
       reason: 'Improve engagement',

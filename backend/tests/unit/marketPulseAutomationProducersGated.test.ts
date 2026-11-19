@@ -110,6 +110,7 @@ describe('closed set over the two Market Pulse tables (05: scan the TABLE, not a
   // client writes: 20261026000000_close_anon_rls_exposure enables RLS with NO policy and REVOKEs ALL from
   // anon/authenticated on this table. The LIVE production state (privileges, policies, prosrc) is a 83 read, not this test.
   const REVIEWED: Record<string, string> = {
+    'backend/db/tenantTables.ts': 'GENERATED tenant-table registry (S2 seam, 89 2026-11-19): classifies market_pulse_jobs_v1 for the seam; no read, write or enqueue',
     'backend/queue/jobQueue.ts': 'queue typing only',
     'backend/services/marketPulse/executorContext.ts': 'doc comment only',
     'backend/services/marketPulseJobProcessor.ts': 'processes an existing job (no enrolment, no new run)',
