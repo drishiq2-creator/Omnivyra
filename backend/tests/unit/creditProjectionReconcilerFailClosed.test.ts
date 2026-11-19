@@ -15,13 +15,25 @@ let mockWalletReadError: { message: string } | null = null;
 const mockUpserts: any[] = [];
 let mockPageCall = 0;
 let mockAfterPage: ((page: number) => void) | null = null;
+let mockCountCalls = 0;
+let mockCountFails = false;
 jest.mock('../../db/supabaseClient', () => ({
   supabase: {
     from: (table: string) => {
       let ordered = false;
       let after: string | null = null;
       const b: any = {};
-      for (const op of ['select', 'eq']) b[op] = () => b;
+      b.eq = () => b;
+      // head-count mode (the snapshot guard): `await from(t).select('id', { count: 'exact', head: true }).eq(...)`
+      b.select = (_c: string, opts?: { head?: boolean }) => {
+        if (opts?.head) {
+          b.then = (resolve: (v: unknown) => void) => {
+            mockCountCalls += 1;
+            resolve(mockCountFails ? { count: null, error: { message: 'timeout' } } : { count: mockLedger.length, error: null });
+          };
+        }
+        return b;
+      };
       b.order = (col: string) => { if (col === 'id') ordered = true; return b; };
       b.gt = (_c: string, v: string) => { after = v; return b; };
       b.limit = (n: number) => {
@@ -57,7 +69,7 @@ const grants = (n: number) => Array.from({ length: n }, (_, i) => ({
   id: `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`,
   execution_phase: 'grant', free_delta: i + 1, paid_delta: 0, incentive_delta: 0, idempotency_key: `g-${i}`,
 }));
-beforeEach(() => { mockLedger = []; mockWallet = null; mockWalletReadError = null; mockUpserts.length = 0; mockPageCall = 0; mockAfterPage = null; });
+beforeEach(() => { mockLedger = []; mockWallet = null; mockWalletReadError = null; mockUpserts.length = 0; mockPageCall = 0; mockAfterPage = null; mockCountCalls = 0; mockCountFails = false; });
 
 it('a transient wallet READ ERROR in the guard aborts: outcome failed, NOTHING written', async () => {
   mockLedger = grants(5);
@@ -83,14 +95,49 @@ it('paging over >1000 ledger rows sums EXACTLY (deterministic ORDER BY a unique 
   expect(mockUpserts[0].payload.lifetime_purchased).toBe(expected);
 });
 
-it('a ledger row INSERTED during the scan below the cursor is not counted twice (keyset; OFFSET would duplicate)', async () => {
+// b3 2026-11-19 replaces "a ledger row INSERTED during the scan below the cursor is not counted twice (keyset)": keyset
+// never double-counts, but it also never SEES that row - the rebuild was a stale balance. With the snapshot guard a
+// ledger that moved during the scan is not written at all (see the describe below); keyset still guarantees exactness
+// over a STABLE ledger (the >1000-row case above).
+it('a ledger row INSERTED during the scan below the cursor -> the rebuild is aborted (no stale or double-counted balance)', async () => {
   mockLedger = grants(2500);
-  // after page 1, a new row lands with an id BELOW the cursor (random uuids do this): an OFFSET page 2 would shift
-  // back by one and re-read a page-1 row; keyset (id > last) never revisits.
   mockAfterPage = (page) => {
     if (page === 1) mockLedger.push({ id: '00000000-0000-4000-8000-000000000000a', execution_phase: 'grant', free_delta: 0, paid_delta: 0, incentive_delta: 0, idempotency_key: 'late' });
   };
   const r = await reconcileOrgCreditProjection(ORG);
-  expect(r.outcome).toBe('rebuilt');
-  expect(mockUpserts[0].payload.free_balance).toBe((2500 * 2501) / 2);
+  expect(r.outcome).toBe('failed');
+  expect(mockUpserts).toEqual([]);
+});
+
+// b3 2026-11-19 (BLOCKING follow-up): optimistic-concurrency SNAPSHOT guard - the ledger must not move during the scan.
+describe('snapshot guard: a ledger that changes during the rebuild scan is never written', () => {
+  it('a row INSERTED mid-scan (below the keyset cursor) -> ABORT, nothing written', async () => {
+    mockLedger = grants(2500);
+    // after the first page, a new row lands with an id BELOW the cursor - the keyset scan never sees it
+    mockAfterPage = (page) => { if (page === 1) mockLedger.push({ id: '00000000-0000-4000-8000-000000000000a', execution_phase: 'grant', free_delta: 7, paid_delta: 0, incentive_delta: 0, idempotency_key: 'late' }); };
+    const r = await reconcileOrgCreditProjection(ORG);
+    expect(r.outcome).toBe('failed');
+    expect(mockUpserts).toEqual([]);
+  });
+  it('a row inserted ABOVE the cursor mid-scan (scanned, but the count moved) -> ABORT too', async () => {
+    mockLedger = grants(1500);
+    mockAfterPage = (page) => { if (page === 1) mockLedger.push({ id: 'ffffffff-0000-4000-8000-000000000001', execution_phase: 'grant', free_delta: 7, paid_delta: 0, incentive_delta: 0, idempotency_key: 'late2' }); };
+    const r = await reconcileOrgCreditProjection(ORG);
+    expect(r.outcome).toBe('failed');
+    expect(mockUpserts).toEqual([]);
+  });
+  it('control: a STABLE ledger is rebuilt (count read before AND after the scan)', async () => {
+    mockLedger = grants(2500);
+    const r = await reconcileOrgCreditProjection(ORG);
+    expect(r.outcome).toBe('rebuilt');
+    expect(mockCountCalls).toBe(2);
+    expect(mockUpserts).toHaveLength(1);
+  });
+  it('the count cannot be read -> failed, nothing written (never rebuilt blind)', async () => {
+    mockLedger = grants(5);
+    mockCountFails = true;
+    const r = await reconcileOrgCreditProjection(ORG);
+    expect(r.outcome).toBe('failed');
+    expect(mockUpserts).toEqual([]);
+  });
 });
