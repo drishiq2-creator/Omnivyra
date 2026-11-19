@@ -24,13 +24,25 @@ type Status = 'idle' | 'recording' | 'transcribing';
 const AUDIO_BITS_PER_SECOND = 32_000;
 export const MAX_RECORDING_MS = 5 * 60 * 1000;
 
+/**
+ * Transcription is a SPEND path (the provider bills per audio minute). When the client cannot know whether
+ * the spend happened, it must not invite a retry (b3 / 7c, 2026-11-20): a 5xx with no `code`, or a lost
+ * connection, gets this text. A refusal the route names with a `code` (the AI guard, which refuses
+ * BEFORE the provider is called) keeps its own text.
+ */
+export const TRANSCRIPTION_UNCERTAIN_MESSAGE =
+  'We’re not sure that went through. Check your message before recording again.';
+
 /** A readable message for a failed transcription response. */
-export function transcriptionErrorMessage(status: number, serverError?: string | null): string {
+export function transcriptionErrorMessage(status: number, serverError?: string | null, code?: string | null): string {
   if (status === 413) return 'That recording was too long to send. Keep voice notes under 5 minutes, or split them.';
   if (status === 401) return 'Your session expired — sign in again to use voice.';
   if (status === 429) return serverError || 'Too many voice notes in a short time. Wait a moment and try again.';
+  // A 5xx without a code is the route's catch-all, which can follow the paid provider call; its own
+  // "please try again" text is not shown.
+  if (status >= 500 && !code) return TRANSCRIPTION_UNCERTAIN_MESSAGE;
   if (serverError) return serverError;
-  return status >= 500 ? 'Transcription failed — please try again.' : `Transcription failed (${status}).`;
+  return status >= 500 ? TRANSCRIPTION_UNCERTAIN_MESSAGE : `Transcription failed (${status}).`;
 }
 
 /** Pick a MediaRecorder mime type supported by this browser (cross-browser). */
@@ -93,13 +105,25 @@ export default function ChatVoiceButton({
         reader.onerror = () => reject(new Error('read failed'));
         reader.readAsDataURL(blob);
       });
-      const res = await fetch('/api/voice/transcribe', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ audioFile: dataUrl, provider: 'whisper', context: contextRef.current }),
-      });
+      let res: Response;
+      try {
+        res = await fetch('/api/voice/transcribe', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ audioFile: dataUrl, provider: 'whisper', context: contextRef.current }),
+        });
+      } catch {
+        // Lost connection: the audio may have reached the route and been transcribed (and billed).
+        throw new Error(TRANSCRIPTION_UNCERTAIN_MESSAGE);
+      }
       const json = await res.json().catch(() => ({}));
-      if (!res.ok || !json?.success) throw new Error(transcriptionErrorMessage(res.status, typeof json?.error === 'string' ? json.error : null));
+      if (!res.ok || !json?.success) {
+        throw new Error(transcriptionErrorMessage(
+          res.status,
+          typeof json?.error === 'string' ? json.error : null,
+          typeof json?.code === 'string' ? json.code : null,
+        ));
+      }
       const text = String(json.transcription || '').trim();
       if (text) onTranscriptionRef.current(text);
       else setError('No speech detected.');

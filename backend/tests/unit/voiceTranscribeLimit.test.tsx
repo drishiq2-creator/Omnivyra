@@ -12,7 +12,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import React from 'react';
 import { act, fireEvent, render, screen } from '@testing-library/react';
-import ChatVoiceButton, { MAX_RECORDING_MS, transcriptionErrorMessage } from '../../../components/ChatVoiceButton';
+import ChatVoiceButton, { MAX_RECORDING_MS, transcriptionErrorMessage, TRANSCRIPTION_UNCERTAIN_MESSAGE } from '../../../components/ChatVoiceButton';
 
 const ROUTE = fs.readFileSync(path.join(__dirname, '../../../pages/api/voice/transcribe.ts'), 'utf8');
 
@@ -31,7 +31,21 @@ describe('voice transcription fits and explains itself', () => {
     expect(transcriptionErrorMessage(429, 'Rate limit: retry in 20s')).toBe('Rate limit: retry in 20s');
     expect(transcriptionErrorMessage(429)).toMatch(/Too many voice notes/);
     expect(transcriptionErrorMessage(401)).toMatch(/sign in again/);
-    expect(transcriptionErrorMessage(500)).toBe('Transcription failed — please try again.');
+    // 2026-11-20 (b3/7c): transcription is a SPEND path; a 5xx without a code is an unknown outcome, so it
+    // no longer says "please try again" (was: 'Transcription failed — please try again.').
+    expect(transcriptionErrorMessage(500)).toBe(TRANSCRIPTION_UNCERTAIN_MESSAGE);
+  });
+
+  it('a 5xx WITHOUT a code never invites a retry, even when the server text does', () => {
+    // the route's catch-all 500 body (it can follow the paid provider call)
+    const t = transcriptionErrorMessage(500, 'Transcription failed — please try again.', null);
+    expect(t).toBe(TRANSCRIPTION_UNCERTAIN_MESSAGE);
+    expect(t).not.toMatch(/try again/i);
+  });
+
+  it('control: a refusal the route names with a code (the AI guard, before the provider) keeps its own text', () => {
+    expect(transcriptionErrorMessage(503, 'AI request protection unavailable. Please retry.', 'AI_GUARD_UNAVAILABLE'))
+      .toBe('AI request protection unavailable. Please retry.');
   });
 
   it('records at the speech bitrate, shows a timer, and stops itself at the cap', async () => {
@@ -62,5 +76,52 @@ describe('voice transcription fits and explains itself', () => {
     await act(async () => { jest.advanceTimersByTime(MAX_RECORDING_MS); });
     expect(stop).toHaveBeenCalledTimes(1);
     jest.useRealTimers();
+  });
+});
+
+describe('transcription outcome the client cannot know (rendered)', () => {
+  function installRecorder() {
+    class FakeRecorder {
+      static isTypeSupported = () => true;
+      state = 'inactive';
+      mimeType = 'audio/webm';
+      ondataavailable: ((e: { data: Blob }) => void) | null = null;
+      onstop: (() => void) | null = null;
+      start() { this.state = 'recording'; }
+      stop() {
+        this.state = 'inactive';
+        this.ondataavailable?.({ data: new Blob(['abc'], { type: 'audio/webm' }) });
+        this.onstop?.();
+      }
+    }
+    (global as any).MediaRecorder = FakeRecorder;
+    Object.defineProperty(window, 'isSecureContext', { value: true, configurable: true });
+    Object.defineProperty(navigator, 'mediaDevices', {
+      value: { getUserMedia: async () => ({ getTracks: () => [] }) }, configurable: true,
+    });
+  }
+  async function recordAndSend(fetchImpl: jest.Mock) {
+    (global as any).fetch = fetchImpl;
+    installRecorder();
+    render(<ChatVoiceButton onTranscription={jest.fn()} />);
+    await act(async () => { fireEvent.click(screen.getByRole('button')); }); // start
+    await act(async () => { fireEvent.click(screen.getByRole('button')); }); // stop -> transcribe
+  }
+
+  it('lost connection → the uncertain text, not the browser error and not a retry invitation', async () => {
+    await recordAndSend(jest.fn(async () => { throw new TypeError('Failed to fetch'); }));
+    expect(await screen.findByText(TRANSCRIPTION_UNCERTAIN_MESSAGE)).toBeTruthy();
+    expect(screen.queryByText(/Failed to fetch/)).toBeNull();
+  });
+
+  it("server 500 without a code → the uncertain text, not the server's \"please try again\"", async () => {
+    await recordAndSend(jest.fn(async () => ({ ok: false, status: 500, json: async () => ({ error: 'Transcription failed — please try again.' }) })));
+    expect(await screen.findByText(TRANSCRIPTION_UNCERTAIN_MESSAGE)).toBeTruthy();
+    expect(screen.queryByText(/please try again/i)).toBeNull();
+  });
+
+  it('control: a coded guard refusal shows its own text', async () => {
+    await recordAndSend(jest.fn(async () => ({ ok: false, status: 503, json: async () => ({ error: 'AI request protection unavailable. Please retry.', code: 'AI_GUARD_UNAVAILABLE' }) })));
+    expect(await screen.findByText('AI request protection unavailable. Please retry.')).toBeTruthy();
   });
 });
