@@ -21,6 +21,7 @@
  * 5. Fallback: Deterministic content if AI fails
  */
 
+import { billedQueueJobId } from '../../services/billing/billedRequestRecovery';
 import { Job } from 'bullmq';
 import {
   unifiedEngine,
@@ -174,7 +175,7 @@ export async function processContentGenerationJob(job: Job): Promise<any> {
     const wrapped = await withQueueBilling(
       {
         queueName:      'content-generation',
-        jobId:          String(job.id ?? `inline-${Date.now()}`),
+        jobId:          billedQueueJobId(job.id),
         payload:        { company_id, content_type, bulk_mode, ts: job.data?.run_token ?? null },
         organizationId: String(company_id),
         userId:         String(user_id ?? company_id),

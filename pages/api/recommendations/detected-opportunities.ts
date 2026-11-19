@@ -7,10 +7,11 @@ import { getCanonicalProfile as getProfile } from '@/backend/services/context/ca
 import { supabase } from '../../../backend/db/supabaseClient';
 import { Role } from '../../../backend/services/rbacService';
 import { withRBAC } from '../../../backend/middleware/withRBAC';
+import { runWithSettlementSurface } from '../../../backend/services/billing/settlementPendingSurface';
 import { generateRecommendation } from '../../../backend/services/aiGateway';
 import { createHash } from 'crypto';
 import { wirePhase2Route } from '../../../backend/services/billing/phase2RouteWiring';
-import { PaymentRequiredError } from '../../../backend/services/billing/phase2EnforcementGate';
+import { billedRouteHttpError } from '../../../backend/services/billing/billedRouteHttpError';
 import {
   countActive,
   upsertOpportunities,
@@ -436,15 +437,16 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
 
     return res.status(200).json({ opportunities: opportunitiesFromRows });
   } catch (error) {
-    if (error instanceof PaymentRequiredError) {
-      return res.status(402).json({ error: error.message, code: error.code });
-    }
+    { const billedErr = billedRouteHttpError(error); if (billedErr) return res.status(billedErr.status).json(billedErr.body); }
     console.error('Error loading detected opportunities:', error);
     return res.status(500).json({ error: 'Failed to load detected opportunities' });
   }
 }
 
-export default withRBAC(handler, [
+// b3 2026-11-18: this route is not built by createApiRoute, so it opens the settlementPending surface itself.
+const surfacedHandler = (req: NextApiRequest, res: NextApiResponse) => runWithSettlementSurface(res, () => handler(req, res));
+
+export default withRBAC(surfacedHandler, [
   Role.COMPANY_ADMIN,
   Role.CONTENT_CREATOR,
   Role.CONTENT_MANAGER,

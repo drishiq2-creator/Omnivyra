@@ -26,6 +26,13 @@ import { isUuid } from '@/lib/shared/uuid';
 import { checkRateLimit } from '@/lib/auth/rateLimit';
 import { resolveMonetizationFeature } from '@/shared/monetization/featureRegistry';
 
+import { createHash } from 'crypto';
+import { KEY_REQUIRED_SURFACE } from '@/backend/services/billing/keyRequiredRoutes';
+import { billedRouteHttpError } from '@/backend/services/billing/billedRouteHttpError';
+import {
+  BilledResultUnpersistedError, BilledRouteKeyRequiredError, BilledRouteRequestEndedError,
+  clientIdempotencyKey, persistBilledResultOrThrow, refuseIfInFlight, replayOrRefund,
+} from '@/backend/services/billing/billedRequestRecovery';
 import { type WorkspaceAction, type ImprovementType, type ContentWriteTarget, MonetizedWorkflowError, runReservedFixedWorkflow, asObject, persistMasterToDb, persistVariantsToDb, FAILED_VARIANT_PREFIXES } from './contentRouteModel';
 
 /** An 8-4-4-4-12 hex group inside a longer string — a mangled row id, never a transient key. */
@@ -626,6 +633,22 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         return res.status(429).json({ error: 'Too many requests' });
       }
 
+      // ── b3 rulings 2026-11-18 (BLOCKING-launch, billed today): billed-request recovery ──
+      // The identity is the activity + the client's Idempotency-Key (REQUIRED; never synthesised): a retry replays, a
+      // deliberate regenerate (a new click = a new key) is a new run and a new charge. The master is persisted INSIDE the
+      // charge; a same-key request while the first is in flight is 409; a durably unreadable replay is refunded.
+      const gmClientKey = clientIdempotencyKey(req.headers['idempotency-key']);
+      if (!gmClientKey) throw new BilledRouteKeyRequiredError(KEY_REQUIRED_SURFACE.generateMaster);
+      const gmIdentity = `${activityDbId}:k:${createHash('sha256').update(gmClientKey).digest('hex').slice(0, 24)}`;
+      const gmScope = 'activity-workspace:generate_master';
+      const gmIdemKey = makeIdempotencyKey(user.id, 'content_generation', gmIdentity);
+      const gmReplay = await replayOrRefund({
+        surface: KEY_REQUIRED_SURFACE.generateMaster, scope: gmScope, orgId: resolvedOrgId, key: gmIdentity, performedBy: user.id,
+        confirmKeys: [`${gmIdemKey}:confirm`, `${gmIdemKey}:entry:confirm`, `${gmIdemKey}:exposure:confirm`], referenceId: activityDbId,
+      });
+      if (gmReplay) return res.status(200).json({ success: true, master_content: gmReplay.value, replayed: true });
+      await refuseIfInFlight({ surface: KEY_REQUIRED_SURFACE.generateMaster, baseKey: gmIdemKey });
+
       const PROVIDER = 'openai';
       // Model tiering by content category: long-format (article / white_paper /
       // newsletter / short_story → category 'article') needs the stronger model
@@ -657,7 +680,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         action:         'content_generation' as const,
         referenceType:  'master_content',
         referenceId:    activityDbId,
-        idempotencyKey: makeIdempotencyKey(user.id, 'content_generation', activityDbId),
+        idempotencyKey: gmIdemKey,
         note:           'Master content generation',
         llmPricing: {
           provider:        PROVIDER,
@@ -671,6 +694,12 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
           const strict = await generateMasterContentStrict({ ...item, company_id: resolvedOrgId }, {
             provider: PROVIDER,
             model:    MODEL,
+          });
+          // PERSIST INSIDE the charge (b3/7c): the row write (strict - a failure throws) and the result store, read
+          // back. Any failure throws -> the engine releases; the master is returned free (caught below).
+          await persistBilledResultOrThrow({
+            scope: gmScope, orgId: resolvedOrgId, key: gmIdentity, value: strict.master,
+            durableWrite: () => persistMasterToDb(writeTarget, strict.master, { strict: true }),
           });
           return {
             result:   strict.master,
@@ -700,9 +729,18 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         throw admErr;
       }
       const ecMode = await getCreditEconomyExecutionMode({ organizationId: resolvedOrgId, surface: 'route.activity-workspace-content' });
-      const result = ecMode === 'enforce'
-        ? await executeWithEntryConsumption<MasterContentPayload>(masterContentBilling)
-        : await executeWithCredits<MasterContentPayload>(masterContentBilling);
+      let result;
+      try {
+        result = ecMode === 'enforce'
+          ? await executeWithEntryConsumption<MasterContentPayload>(masterContentBilling)
+          : await executeWithCredits<MasterContentPayload>(masterContentBilling);
+      } catch (gmErr) {
+        // Delivered in this response but not durably stored: released, NOT charged.
+        if (gmErr instanceof BilledResultUnpersistedError) {
+          return res.status(200).json({ success: true, master_content: gmErr.result });
+        }
+        throw gmErr;
+      }
 
       if (result.status === 'insufficient_credits') {
         return res.status(402).json({
@@ -720,13 +758,13 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       if (result.status === 'no_credit_account') {
         return res.status(402).json({ error: 'No credit account for org' });
       }
+      if (result.status === 'already_released') throw new BilledRouteRequestEndedError(KEY_REQUIRED_SURFACE.generateMaster);
       if (result.status !== 'executed') {
         return res.status(500).json({ error: 'Failed to generate master content' });
       }
 
-      const master = result.result;
-      await persistMasterToDb(writeTarget, master);
-      return res.status(200).json({ success: true, master_content: master });
+      // The master was persisted inside the charge (above).
+      return res.status(200).json({ success: true, master_content: result.result });
     }
 
     if (action === 'refine_variant') {
@@ -750,7 +788,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         return res.status(400).json({ error: 'companyId required for credit reservation on refine_variant' });
       }
       const { isRefineVariantBillingEnabled, runBilledAiCompletion } = await import('@/backend/services/billing');
-      const activityDbIdForBilling = String((req.body as any)?.activity?.id || `refine-${platform}-${Date.now()}`).trim();
+      // b3 BLOCKING-launch: no Date.now() fallback. On the BILLED path the identity is the client's Idempotency-Key
+      // (required - recovery below); this reference only scopes it.
+      const activityDbIdForBilling = String((req.body as any)?.activity?.id || `refine-${platform}`).trim();
       const refineBilling = await isRefineVariantBillingEnabled({ organizationId: companyId });
 
       if (!refineBilling.enabled) {
@@ -807,7 +847,30 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         });
       }
 
+      const masterForRefine = asObject((dailyExecutionItemRaw as any)?.master_content);
       const billed = await runBilledAiCompletion({
+        // b3/7c: the refined text is post-processed and PERSISTED (variant write, strict; then the result store, read
+        // back) INSIDE the charge; a same-key retry replays it; a lost result is refunded by the system.
+        recovery: {
+          surface: KEY_REQUIRED_SURFACE.refineVariant,
+          scope: 'activity-workspace:refine_variant',
+          postProcess: async (text: string) => {
+            const raw = String(text || '').trim();
+            if (!raw) throw new Error('AI refinement returned empty output');
+            const out = await processContent({ content: raw, platform, card_type: 'repurpose_card', enforce_char_limit: true });
+            return out.content || raw;
+          },
+          durableWrite: async (value: unknown) => {
+            await persistVariantsToDb(writeTarget, [{
+              platform,
+              content_type: contentType,
+              generated_content: String(value),
+              generation_status: 'generated',
+              refinement_status: 'in_progress',
+              refinement_finalized: false,
+            }], masterForRefine, { strict: true });
+          },
+        },
         module:        'http:activity_workspace_refine_variant',
         userId:        user.id,
         orgId:         companyId,
@@ -857,30 +920,16 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         },
       });
 
-      let refined = String(billed.text || '').trim();
+      // The refined text was post-processed and persisted inside the charge (or replayed, or returned free when it
+      // could not be persisted - billed.unbilled).
+      const refined = String(billed.value ?? '').trim();
       if (!refined) {
         return res.status(500).json({ error: 'AI refinement returned empty output' });
       }
-      const refinedOutput = await processContent({
-        content: refined,
-        platform,
-        card_type: 'repurpose_card',
-        enforce_char_limit: true,
-      });
-      refined = refinedOutput.content || refined;
-
-      const activityDbId = String((req.body as any)?.activity?.id || '').trim();
-      await persistVariantsToDb(writeTarget, [{
-        platform,
-        content_type: contentType,
-        generated_content: refined,
-        generation_status: 'generated',
-        refinement_status: 'in_progress',
-        refinement_finalized: false,
-      }], asObject((dailyExecutionItemRaw as any)?.master_content));
       return res.status(200).json({
         success: true,
         refined_content: refined,
+        ...(billed.replayed ? { replayed: true } : {}),
       });
     }
 
@@ -895,13 +944,17 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       ? (String(creatorAsset.description ?? '').trim() || String(creatorAsset.transcript ?? '').trim() || String(creatorAsset.theme ?? '').trim() || String(item.topic ?? item.title ?? '').trim())
       : '';
 
+    let variantsReplayed = false;
     const generatedVariantResult = await runReservedFixedWorkflow({
       userId: user.id,
       companyId,
       action: 'content_basic',
       referenceType: 'activity_platform_variants',
-      referenceId: activityDbId || String(item.execution_id || Date.now()),
+      // b3 BLOCKING-launch: no Date.now() fallback - the request identity is the client's Idempotency-Key (required,
+      // recovery below); the reference only scopes it.
+      referenceId: activityDbId || String(item.execution_id || 'workspace'),
       note: 'Generated platform variants',
+      recovery: { surface: KEY_REQUIRED_SURFACE.generateVariants, scope: 'activity-workspace:generate_variants', idempotencyKeyHeader: req.headers['idempotency-key'], onReplay: () => { variantsReplayed = true; } },
       multiplier: Math.max(1, activePlatformTargets.length || schedules.length || 1),
       executor: async () => {
         // Closure Pass — Phase 4. Enrich item with governance before
@@ -910,7 +963,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         let reservedItemWithMaster = governedItem;
         if (!(governedItem as any).master_content && !creatorMasterText) {
           const generatedMaster = await generateMasterContentFromIntent(governedItem as any);
-          await persistMasterToDb(writeTarget, generatedMaster);
+          await persistMasterToDb(writeTarget, generatedMaster, { strict: true });   // a failed write releases the charge
           reservedItemWithMaster = { ...governedItem, master_content: generatedMaster };
         } else if (creatorMasterText) {
           reservedItemWithMaster = {
@@ -937,7 +990,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         await persistVariantsToDb(
           writeTarget,
           reservedSuccessfulVariants as Array<Record<string, unknown>>,
-          ((reservedItemWithMaster as any).master_content ?? null) as Record<string, unknown> | null
+          ((reservedItemWithMaster as any).master_content ?? null) as Record<string, unknown> | null,
+          { strict: true },   // a failed write releases the charge (b3)
         );
 
         return {
@@ -951,6 +1005,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       success: true,
       platform_variants: generatedVariantResult.platform_variants,
       master_content: generatedVariantResult.master_content,
+      ...(variantsReplayed ? { replayed: true } : {}),
     });
 
     // If no master yet: auto-generate it now (first repurpose button press on any platform).
@@ -1010,6 +1065,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     if (error instanceof MonetizedWorkflowError) {
       return res.status(error.statusCode).json(error.payload);
     }
+    // b3 2026-11-18: the standard billed shapes (key required, replay unavailable, result unavailable + refund, ended).
+    { const billedErr = billedRouteHttpError(error); if (billedErr) return res.status(billedErr.status).json(billedErr.body); }
     if ((error as Error & { code?: string })?.code === 'VARIANT_GENERATION_FAILED') {
       return res.status(500).json({
         error: 'VARIANT_GENERATION_FAILED',

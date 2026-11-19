@@ -169,6 +169,8 @@ const LIFECYCLE_SWEEP_INTERVAL_MS = 6 * 60 * 60 * 1000; // W6-6: retention sweep
 const BUYER_INTENT_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
 const OPPORTUNITY_SLOTS_INTERVAL_MS = 24 * 60 * 60 * 1000; // once per day
 const GOVERNANCE_AUDIT_INTERVAL_MS = 24 * 60 * 60 * 1000; // once per day
+// c6 2026-11-18 (b3): owed refunds are paid by the system, not by a user retry (billing-owed-refund-complete).
+const OWED_REFUND_COMPLETE_INTERVAL_MS = 5 * 60 * 1000;
 const AUTO_OPTIMIZATION_INTERVAL_MS = 24 * 60 * 60 * 1000; // once per day
 // CSA-002 — daily Customer Readiness snapshot (activates readiness history).
 const READINESS_SNAPSHOT_INTERVAL_MS = 24 * 60 * 60 * 1000; // once per day
@@ -328,6 +330,7 @@ async function shouldRunPublishCycle(): Promise<boolean> {
 
 let lastOpportunitySlotsRun = 0;
 let lastGovernanceAuditRun = 0;
+let lastOwedRefundCompleteRun = 0;
 let lastAutoOptimizationRun = 0;
 let lastReadinessSnapshotRun = 0; // CSA-002 — daily readiness snapshot
 let lastHealthSnapshotRun = 0;    // CSA-003 — daily health snapshot
@@ -1103,6 +1106,19 @@ async function runSchedulerCycleBody(opts: { includePublishSafetyNet?: boolean }
       }
     } catch (error: unknown) {
       console.error('❌ Opportunity slots scheduler error:', formatCaughtError(error));
+    }
+  }
+
+  // c6 2026-11-18 (b3): pay OWED refunds (grant-only; never releases a hold - not behind the 053 hold-release gate).
+  // ALWAYS_RUN (intentExecutionService). Bounded: 50 rows, a 60s budget, a timeout per grant.
+  if (shouldRunCronJob("billingOwedRefundComplete", OWED_REFUND_COMPLETE_INTERVAL_MS, lastOwedRefundCompleteRun)) {
+    lastOwedRefundCompleteRun = Date.now();
+    try {
+      const { completeOwedRefunds } = await import('../services/billing/owedRefunds');
+      const r = await completeOwedRefunds({ limit: 50, budgetMs: 60_000, grantTimeoutMs: 15_000 });
+      if (r.processed > 0) console.log(`[billing-owed-refund-complete] processed=${r.processed} granted=${r.granted} failed=${r.failed}`);
+    } catch (error: unknown) {
+      console.error('[billing-owed-refund-complete] error:', formatCaughtError(error));
     }
   }
 

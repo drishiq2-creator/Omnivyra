@@ -1,3 +1,4 @@
+import { billedQueueJobId } from '../../services/billing/billedRequestRecovery';
 import { ownedDbTable } from '../../db/writeOwner';
 /**
  * BOLT Content Job Processor
@@ -361,7 +362,7 @@ export async function processBoltContentJob(job: Job): Promise<void> {
   const wrapped = await withQueueBilling(
     {
       queueName:      'bolt-content',
-      jobId:          String(job.id ?? d.bolt_job_id ?? `inline-${Date.now()}`),
+      jobId:          billedQueueJobId(job.id ?? d.bolt_job_id),
       payload:        { bolt_job_id: d.bolt_job_id, run_id: d.run_id, content_type: d.content_type },
       organizationId: orgId,
       userId:         String(d.campaign?.user_id ?? orgId),
@@ -641,6 +642,7 @@ async function processBoltContentJobInner(job: Job): Promise<void> {
   const masterValid = Boolean(masterContent) && !isPlaceholder(masterContent);
   let scheduled = 0;
   let skipped   = 0;
+  let insertFailed = 0;   // c6 2026-11-18: writes that FAILED (vs items skipped for having nothing to write)
   const scheduledPostIds: string[] = [];
 
   // Fetch daily_content_plans rows for date/time/repurpose info
@@ -740,6 +742,7 @@ async function processBoltContentJobInner(job: Job): Promise<void> {
     if (insertError) {
       console.warn('[bolt-job] INSERT failed', { platform: canonicalPlatform, topic, error: insertError.message });
       skipped++;
+      insertFailed++;
       continue;
     }
 
@@ -893,6 +896,11 @@ async function processBoltContentJobInner(job: Job): Promise<void> {
   });
 
   // ── 7. Update run progress counters ───────────────────────────────────
+  // c6 2026-11-18 (b3, the "ignored write" group + owner rule): partly delivered work is charged, but when EVERY write
+  // failed nothing was delivered - throw inside the billed executor so the charge releases (the job then retries).
+  if (scheduled === 0 && insertFailed > 0) {
+    throw new Error(`[bolt-job] no content persisted (${insertFailed} write(s) failed) - charge released`);
+  }
   await updateRunProgress(run_id, scheduled, skipped);
 
   void job.updateProgress(100);

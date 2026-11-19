@@ -16,6 +16,7 @@
  * - Feedback tracks visual engagement metrics (hook passthrough, completion, shares)
  */
 
+import { billedQueueJobId } from '../../services/billing/billedRequestRecovery';
 import { fanOutAssetVisualVerdict } from '../../services/creator/fanOutVisualVerdict';
 import { Job } from 'bullmq';
 import { unifiedEngine } from '../../services/unifiedContentGenerationEngine';
@@ -141,7 +142,7 @@ export async function processCreatorContentJob(job: Job): Promise<any> {
     const wrapped = await withQueueBilling(
       {
         queueName:      'creator-content',
-        jobId:          String(job.id ?? `inline-${Date.now()}`),
+        jobId:          billedQueueJobId(job.id),
         payload:        { company_id, content_type, topic, audience },
         organizationId: String(company_id),
         userId:         String(user_id ?? company_id),

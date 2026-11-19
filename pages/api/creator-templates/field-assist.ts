@@ -73,6 +73,10 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   const llm: AssistLlm = async (messages) => {
     const { runBilledAiCompletion } = await import('../../../backend/services/billing/runBilledAiCompletion');
     const result = await runBilledAiCompletion({
+      // c6 2026-11-18 (b3 + 7c invariant): the response IS the work product - it is stored INSIDE the charge (read
+      // back), a same request replays it, a durably unreadable replay is refunded. Identity: the client's key when
+      // sent, else the request's content hash (stable; never a clock/random value).
+      recovery: { surface: 'creator-templates.field-assist', scope: 'creator-templates:field-assist', requireClientKey: false },
       module: 'http:creator_field_assist',
       userId: user.userId as string,
       orgId: companyId,
@@ -95,6 +99,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
         action: 'content_rewrite',
         referenceId: `${request.templateId}:${request.action}:${request.targets.map((t) => `${t.scope}${t.index ?? ''}${t.fieldKey}`).join(',')}`,
         requestBody: req.body,
+        requestHeaderIdempotency: typeof req.headers['idempotency-key'] === 'string' && (req.headers['idempotency-key'] as string).trim().length >= 8 ? (req.headers['idempotency-key'] as string).trim() : undefined,
       },
       completion: {
         model: 'gpt-4o-mini',
@@ -130,6 +135,9 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       ...(invalidTargets.length > 0 ? { skipped_targets: invalidTargets } : {}),
     });
   } catch (error) {
+    // c6 2026-11-18: the standard billed shapes (replay unavailable / result unavailable + refund / in progress / ended).
+    { const { billedRouteHttpError } = await import('../../../backend/services/billing/billedRouteHttpError');
+      const billedErr = billedRouteHttpError(error); if (billedErr) return res.status(billedErr.status).json(billedErr.body); }
     return res.status(500).json({ error: error instanceof Error ? error.message : 'field assist failed' });
   }
 }

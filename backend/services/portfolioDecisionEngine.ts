@@ -11,6 +11,7 @@ import { ownedDbTable } from '../db/writeOwner';
  * Persists decisions to `portfolio_decision_log`.
  */
 
+import { logger } from './logger';
 import { supabase } from '../db/supabaseClient';
 import { aggregateCampaignPerformance } from './performanceFeedbackService';
 import { evaluateCampaignDecision } from './campaignDecisionEngine';
@@ -164,8 +165,11 @@ export async function evaluatePortfolioDecision(companyId: string): Promise<Port
   }
 
   // ── Persist decision ──────────────────────────────────────────────────────
+  // c6 2026-11-18 (b3, the "ignored write" group): the charge is for a RECORDED decision. The insert reports failure as
+  // { error } (it does not throw), which was ignored; a failed save is now NOT charged, loudly.
+  let persisted = false;
   try {
-    await ownedDbTable('portfolio_decision_log').insert({
+    const { error: logErr } = await ownedDbTable('portfolio_decision_log').insert({
       company_id:        companyId,
       campaign_ids:      portfolioItems.map(c => c.campaign_id),
       budget_allocations: budgetAllocations,
@@ -173,7 +177,11 @@ export async function evaluatePortfolioDecision(companyId: string): Promise<Port
       reasoning,
       created_at:        new Date().toISOString(),
     });
-  } catch (_) { /* non-blocking */ }
+    if (logErr) throw new Error(logErr.message);
+    persisted = true;
+  } catch (err) {
+    logger.error('portfolio_decision_unpersisted_not_charged', { companyId, message: (err as Error)?.message });
+  }
 
   await logDecision({
     company_id:    companyId,
@@ -187,7 +195,7 @@ export async function evaluatePortfolioDecision(companyId: string): Promise<Port
     },
   });
 
-  await deductCredits(companyId, 'portfolio_decision', { note: `Portfolio rebalancing: ${rebalanceActions.length} actions` });
+  if (persisted) await deductCredits(companyId, 'portfolio_decision', { note: `Portfolio rebalancing: ${rebalanceActions.length} actions` });
 
   return {
     company_id:         companyId,
