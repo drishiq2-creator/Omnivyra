@@ -5,9 +5,12 @@
  *   { error: 'insufficient_credits' | 'no_credit_account' | 'pricing_unavailable',
  *     message, required?, available?, perRegion? }.
  *   The user sees the plain `message` (never the raw code) and a link to top up.
- * - A run that stops part-way ends as completed_with_warnings. Per-region outcomes carry
- *   a `code` (key on it, never on message text): INSUFFICIENT_CREDITS, CHARGED_NO_OUTPUT,
- *   ALREADY_RELEASED, or none (any other, uncharged failure).
+ * - A run that stops part-way ends as completed_with_warnings; the banner says so in general terms.
+ *   (2026-11-19, b3: the per-region list and its codes INSUFFICIENT_CREDITS / CHARGED_NO_OUTPUT /
+ *   ALREADY_RELEASED were removed as dormant. Their only producer was the superseded C75 line
+ *   (97d74d08b, run.region_issues); the canonical Market Pulse billing charges a region only after its
+ *   results are saved and exposes no per-region outcome, so nothing could ever fill the list. If the
+ *   server later exposes per-region outcomes, map them from THAT producer's vocabulary.)
  *
  * The top-up target is /company/billing, the same page the credit-alert and
  * consumption-warning emails link to (creditAlertService.ts, creditConsumptionWarningService.ts).
@@ -53,25 +56,6 @@ export function parseRunStartError(status: number, body: unknown): RunStartError
   return { kind: 'error', message: outcome.kind === 'ok' ? 'Failed to start Market Pulse run' : outcome.message };
 }
 
-export type RegionIssue = { region: string; code?: string | null; charged?: boolean; message?: string | null };
-
-/** User-facing text per region outcome code (copy from 55). */
-export function describeRegionIssue(issue: RegionIssue): { text: string; showTopUp: boolean } {
-  switch (issue.code) {
-    case 'INSUFFICIENT_CREDITS':
-      return { text: 'Not run: not enough credits.', showTopUp: true };
-    case 'CHARGED_NO_OUTPUT':
-      return {
-        text: 'This region was charged but its results weren’t saved. We’ve flagged it for a refund or re-run; no action is needed.',
-        showTopUp: false,
-      };
-    case 'ALREADY_RELEASED':
-      return { text: 'Not re-run: this region failed earlier and wasn’t charged. Start a new scan to try again.', showTopUp: false };
-    default:
-      return { text: 'This region couldn’t be analysed this time. It wasn’t charged.', showTopUp: false };
-  }
-}
-
 function TopUpLink() {
   return (
     <Link href={TOP_UP_HREF} className="font-semibold text-indigo-700 underline">
@@ -103,35 +87,13 @@ export function MarketPulseCreditNotice({ notice }: { notice: CreditNotice | nul
 }
 
 /** Banner for a run that stopped part-way (status completed_with_warnings). */
-export function MarketPulseRunWarnings({
-  status,
-  regionIssues,
-}: {
-  status: string | null | undefined;
-  regionIssues?: RegionIssue[] | null;
-}) {
+export function MarketPulseRunWarnings({ status }: { status: string | null | undefined }) {
   if (String(status ?? '').toLowerCase() !== 'completed_with_warnings') return null;
-  const issues = regionIssues ?? [];
-  const anyTopUp = issues.some((i) => describeRegionIssue(i).showTopUp);
   return (
     <div role="status" className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
       <p className="font-medium">
         This scan finished with warnings: some regions didn’t complete. Results below cover the regions that did.
       </p>
-      {issues.length > 0 && (
-        <ul className="mt-2 space-y-1">
-          {issues.map((issue) => (
-            <li key={issue.region}>
-              <span className="font-semibold">{issue.region}:</span> {describeRegionIssue(issue).text}
-            </li>
-          ))}
-        </ul>
-      )}
-      {anyTopUp && (
-        <p className="mt-2">
-          <TopUpLink />
-        </p>
-      )}
     </div>
   );
 }
