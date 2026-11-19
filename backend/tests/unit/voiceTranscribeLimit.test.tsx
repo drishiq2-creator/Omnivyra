@@ -60,6 +60,27 @@ describe('voice transcription fits and explains itself', () => {
     expect(coded5xx).toEqual(['AI_GUARD_UNAVAILABLE']); // non-empty: the pattern matches the real line
     const ui = read('components/ChatVoiceButton.tsx');
     for (const code of coded5xx) expect(ui).toContain(`'${code}'`);
+
+    // Coverage (7c): EVERY literal 5xx site must be either a parsed coded one or carry no `code` at all, so a
+    // coded 5xx in a shape the regex above cannot read (variable payload, other quotes) fails here instead of
+    // passing silently. The protection itself is the UI's inverted default; this pin forces the decision.
+    const sites = [...route.matchAll(/status\(5\d\d\)\.json\(([\s\S]*?)\);/g)].map((m) => m[1]);
+    expect(sites.length).toBeGreaterThanOrEqual(2); // the guard-catch 503 and the catch-all 500
+    const withCode = sites.filter((body) => /\bcode\b/.test(body) || !/^\s*\{/.test(body));
+    expect(withCode.length).toBe(coded5xx.length);
+  });
+
+  it("premise at the source: every AiGuardError is constructed with a status below 500 (so the route's dynamic err.status is never a 5xx)", () => {
+    const read = (p: string) => require('fs').readFileSync(require('path').join(process.cwd(), p), 'utf8') as string;
+    const guard = read('backend/services/ai/aiRequestGuard.ts');
+    const starts = [...guard.matchAll(/new AiGuardError\(/g)].map((m) => m.index as number);
+    const statuses = starts.map((at) => {
+      const m = guard.slice(at, at + 500).match(/,\s*(\d{3})\s*[,)]/); // the literal status argument
+      return m ? Number(m[1]) : NaN;
+    });
+    expect(starts.length).toBeGreaterThanOrEqual(8); // non-vacuous: today 5 x 413 + 3 x 429
+    expect(statuses.filter((s) => Number.isNaN(s))).toEqual([]); // every site has a readable literal status
+    expect(statuses.filter((s) => s >= 500)).toEqual([]);
   });
 
   it('records at the speech bitrate, shows a timer, and stops itself at the cap', async () => {
