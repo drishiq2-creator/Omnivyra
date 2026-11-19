@@ -3,8 +3,8 @@ import { NextApiRequest, NextApiResponse } from 'next';
 import { resolveUserContext } from '../../../../backend/services/userContextService';
 import { isSuperAdmin } from '../../../../backend/services/rbacService';
 import { supabase } from '../../../../backend/db/supabaseClient';
-import { tenantChildTable, tenantContextFor } from '../../../../backend/db/tenantTable';
-import { reportTenantFanout } from '../../../../backend/db/seamDenial';
+import { tenantChildTable, tenantContextFor, TenantSeamError } from '../../../../backend/db/tenantTable';
+import { reportTenantFanout, seamDenial } from '../../../../backend/db/seamDenial';
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'GET') {
@@ -53,7 +53,9 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       String(job.id),
     );
   } catch (err) {
-    // A seam fan-out (availability limit) is still raised as the alertable server signal (7c, 2026-11-19).
+    // A RETRYABLE seam read failure (TENANT_PARENT_UNREADABLE) is a 503 + Retry-After, never a 404 that says the
+    // job does not exist; every other seam refusal is the uniform 404, and a fan-out stays alertable (7c, 2026-11-19).
+    if (err instanceof TenantSeamError) return seamDenial(res, err, 404, { error: 'Job not found' });
     reportTenantFanout(err);
     return res.status(404).json({ error: 'Job not found' });
   }
