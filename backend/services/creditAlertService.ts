@@ -242,12 +242,14 @@ async function sendAlertEmail(orgId: string, alertType: AlertType, balance: numb
 }
 
 /** Record the alert (the dedup row). Returns false when it could not be written - the caller must then NOT send. */
-async function recordAlert(orgId: string, alertType: AlertType, balance: number): Promise<boolean> {
+/** Returns the row's notified_at when written (truthy), null when not - callers use it as the dedup handle. */
+async function recordAlert(orgId: string, alertType: AlertType, balance: number): Promise<string | null> {
+  const notifiedAt = new Date().toISOString();
   const { error } = await ownedDbTable('credit_alert_log').insert({
     organization_id: orgId,
     alert_type:      alertType,
     balance_at_alert: balance,
-    notified_at:     new Date().toISOString(),
+    notified_at:     notifiedAt,
   });
   if (error) {
     // b3 2026-11-20: "not sent" is fail-SAFE but must not be SILENT. An alertable event + counter; a CHECK violation
@@ -257,15 +259,17 @@ async function recordAlert(orgId: string, alertType: AlertType, balance: number)
     logger.error(code === '23514' ? 'credit_alert_suppressed_check_violation' : 'credit_alert_dedup_write_failed', {
       orgId, alertType, code: code ?? null, message: error.message,
     });
-    return false;
+    return null;
   }
-  return true;
+  return notifiedAt;
 }
 
 /** Send an in-app notification for a credit alert. */
-async function sendAlert(orgId: string, alertType: AlertType, message: string): Promise<void> {
+async function sendAlert(orgId: string, alertType: AlertType, message: string): Promise<boolean> {
+  // Returns whether the notice was written (7c 2026-11-20). The insert's { error } is READ: supabase reports a failed
+  // write as { error } without throwing, so the old try/catch counted a failed notice as delivered.
   try {
-    await ownedDbTable('notifications').insert({
+    const { error } = await ownedDbTable('notifications').insert({
       organization_id: orgId,
       type:            'credit_alert',
       category:        alertType,
@@ -273,9 +277,15 @@ async function sendAlert(orgId: string, alertType: AlertType, message: string): 
       read:            false,
       created_at:      new Date().toISOString(),
     });
+    if (error) {
+      console.warn(`[creditAlert] Notification insert failed for org ${orgId} / ${alertType}`, error.message);
+      return false;
+    }
+    return true;
   } catch {
     // Non-fatal — notifications table may not exist yet
     console.warn(`[creditAlert] Notification insert failed for org ${orgId} / ${alertType}`);
+    return false;
   }
 }
 
@@ -325,10 +335,10 @@ async function resolveCompanyName(orgId: string): Promise<string | null> {
 }
 
 /** Best-effort runway email to the company admin - never blocks or throws. */
-async function sendRunwayEmail(orgId: string, days: number, balance: number): Promise<void> {
+async function sendRunwayEmail(orgId: string, days: number, balance: number): Promise<boolean> {
   try {
     const recipient = await resolveAdminEmail(orgId);
-    if (!recipient) return;
+    if (!recipient) return false;
     const { sendCreditRunwayAlert } = await import('./emailService');
     await sendCreditRunwayAlert(
       {
@@ -340,16 +350,25 @@ async function sendRunwayEmail(orgId: string, days: number, balance: number): Pr
       },
       `credit_runway:${orgId}:${new Date().toISOString().slice(0, 10)}`,
     );
+    return true;
   } catch (err) {
     console.warn(`[creditAlert] runway email failed for org ${orgId}`, (err as Error)?.message);
+    return false;
   }
 }
 
 /**
- * Evaluate the runway rung for one org. Returns 'warned' | 'cleared' | 'none' | 'unreadable'.
+ * Evaluate the runway rung for one org. Returns 'warned' | 'cleared' | 'none' | 'unreadable' | 'unrecorded' | 'undelivered'.
+ *   'unrecorded'  - breached and armed, but the dedup row could not be written (e.g. the alert_type migration is not
+ *                   applied): NOT sent. Counted by the sweep so the inert state is a number, not a silent zero (7c F1).
+ *   'undelivered' - BOTH channels failed after the row was written: the row is deleted so the next ordinary
+ *                   evaluation warns again (7c F2: the 72h window equals the 3-day horizon, and this rung has no
+ *                   successor). One attempt per evaluation - never a retry loop, never a duplicate when either
+ *                   channel reached the recipient.
  * `balance` is passed in when the caller already read it (checkCreditAlerts); otherwise it is read here.
  */
-export async function evaluateRunwayWarning(orgId: string, knownBalance?: number | null): Promise<'warned' | 'cleared' | 'none' | 'unreadable'> {
+export type RunwayOutcome = 'warned' | 'cleared' | 'none' | 'unreadable' | 'unrecorded' | 'undelivered';
+export async function evaluateRunwayWarning(orgId: string, knownBalance?: number | null): Promise<RunwayOutcome> {
   const balance = knownBalance ?? await getBalance(orgId);
   if (balance === null || balance === undefined) return 'unreadable';
   let burn7: number;
@@ -369,11 +388,20 @@ export async function evaluateRunwayWarning(orgId: string, knownBalance?: number
     return 'none';
   }
   if (!state.armed) return 'none';
-  if (!(await recordAlert(orgId, 'runway_3d', balance))) return 'none';   // dedup row first: unrecorded = not sent
+  const notifiedAt = await recordAlert(orgId, 'runway_3d', balance);   // dedup row first: unrecorded = not sent
+  if (!notifiedAt) return 'unrecorded';
   const shown = Math.max(1, Math.ceil(days as number));
-  await sendAlert(orgId, 'runway_3d',
+  const inApp = await sendAlert(orgId, 'runway_3d',
     `At your current usage, your credits will run out in about ${shown} day${shown === 1 ? '' : 's'}. Top up to keep things running.`);
-  await sendRunwayEmail(orgId, days as number, balance);
+  const emailed = await sendRunwayEmail(orgId, days as number, balance);
+  if (!inApp && !emailed) {
+    // Nobody heard it: release the dedup row so the next evaluation warns (compensating delete, not a retry).
+    const { error: delErr } = await ownedDbTable('credit_alert_log').delete()
+      .eq('organization_id', orgId).eq('alert_type', 'runway_3d').eq('notified_at', notifiedAt);
+    if (delErr) logger.error('credit_runway_undelivered_row_kept', { orgId, message: delErr.message });
+    else logger.warn('credit_runway_undelivered', { orgId });
+    return 'undelivered';
+  }
   return 'warned';
 }
 
@@ -382,7 +410,7 @@ export async function evaluateRunwayWarning(orgId: string, knownBalance?: number
  * so scheduled-only spenders (no interactive post-confirm path) are warned too. A failed org read aborts the sweep
  * loudly (never "nobody to warn").
  */
-export async function runCreditRunwaySweep(): Promise<{ evaluated: number; warned: number }> {
+export async function runCreditRunwaySweep(): Promise<{ evaluated: number; warned: number; unrecorded: number; undelivered: number }> {
   const since = new Date(Date.now() - 7 * 24 * 3600_000).toISOString();
   const { data, error } = await ownedDbTable('credit_transactions')
     .select('organization_id')
@@ -392,11 +420,14 @@ export async function runCreditRunwaySweep(): Promise<{ evaluated: number; warne
   if (error) throw new Error(`[creditAlert] runway sweep org read failed: ${error.message}`);
   const orgs = Array.from(new Set(((data ?? []) as Array<{ organization_id?: string | null }>)
     .map((r) => r.organization_id).filter((id): id is string => typeof id === 'string' && id.length > 0)));
-  let warned = 0;
+  let warned = 0; let unrecorded = 0; let undelivered = 0;
   for (const orgId of orgs) {
-    if ((await evaluateRunwayWarning(orgId)) === 'warned') warned += 1;
+    const o = await evaluateRunwayWarning(orgId);
+    if (o === 'warned') warned += 1;
+    else if (o === 'unrecorded') unrecorded += 1;
+    else if (o === 'undelivered') undelivered += 1;
   }
-  return { evaluated: orgs.length, warned };
+  return { evaluated: orgs.length, warned, unrecorded, undelivered };
 }
 
 // ── Main API ──────────────────────────────────────────────────────────────────

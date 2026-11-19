@@ -10,6 +10,7 @@ const db: { balance: Row | null; balanceErr: boolean; tx: Row[]; txErr: boolean;
 const mockRunwayEmail = jest.fn(async () => undefined);
 const mockLogError = jest.fn();
 let insertErr: { code?: string; message: string } | null = null;
+let notifErr = false;
 
 function chain(table: string): any {
   const f: Record<string, any> = {};
@@ -20,8 +21,17 @@ function chain(table: string): any {
   q.gte = () => q; q.order = () => q; q.limit = () => q;
   q.insert = async (row: Row) => {
     if (table === 'credit_alert_log') { if (insertErr) return { error: insertErr }; db.log.push({ ...row }); }
-    if (table === 'notifications') db.notifications.push({ ...row });
+    if (table === 'notifications') { if (notifErr) return { error: { message: 'notifications down' } }; db.notifications.push({ ...row }); }
     return { error: null };
+  };
+  q.delete = () => {
+    const d: any = { _f: {} as Record<string, unknown> };
+    d.eq = (c: string, v: unknown) => { d._f[c] = v; return d; };
+    d.then = (ok: (v: unknown) => unknown) => {
+      if (table === 'credit_alert_log') db.log = db.log.filter((r) => !Object.entries(d._f).every(([k, v]) => r[k] === v));
+      return Promise.resolve({ error: null }).then(ok);
+    };
+    return d;
   };
   q.maybeSingle = async () => {
     if (table === 'organization_credits') return db.balanceErr ? { data: null, error: { message: 'down' } } : { data: db.balance, error: null };
@@ -62,7 +72,7 @@ const setBalance = (n: number) => { db.balance = { free_balance: n, paid_balance
 
 beforeEach(() => {
   db.balance = null; db.balanceErr = false; db.tx = []; db.txErr = false; db.log = []; db.logErr = false; db.notifications = [];
-  mockRunwayEmail.mockClear(); mockLogError.mockClear(); insertErr = null;
+  mockRunwayEmail.mockClear(); mockLogError.mockClear(); insertErr = null; notifErr = false;
 });
 
 test('runwayDays: balance / (burn7 / 7); no burn or no balance -> null', () => {
@@ -136,7 +146,7 @@ test('a confirm_partial-ONLY burn counts (a confirm-only reader would see 0 burn
 test('the daily sweep evaluates a scheduled-only spender (no interactive path) and warns it', async () => {
   setBalance(150); db.tx = burn(60, 'confirm_partial', ORG);
   const r = await runCreditRunwaySweep();
-  expect(r).toEqual({ evaluated: 1, warned: 1 });
+  expect(r).toEqual({ evaluated: 1, warned: 1, unrecorded: 0, undelivered: 0 });
 });
 
 test.each([
@@ -162,8 +172,31 @@ test.each([
 ])('b3: %s -> NOT sent, but an alertable event is logged (never silent)', async (_n, err, event) => {
   setBalance(150); db.tx = burn(60);
   insertErr = err;
-  expect(await evaluateRunwayWarning(ORG)).toBe('none');
+  expect(await evaluateRunwayWarning(ORG)).toBe('unrecorded');
   expect(db.notifications).toEqual([]);
   expect(mockRunwayEmail).not.toHaveBeenCalled();
   expect(mockLogError).toHaveBeenCalledWith(event, expect.objectContaining({ orgId: ORG, alertType: 'runway_3d', code: err.code }));
+});
+
+test('7c F1: the sweep COUNTS orgs it could not warn because the dedup row failed (the inert state is a number)', async () => {
+  setBalance(150); db.tx = burn(60, 'confirm');
+  insertErr = { code: '23514', message: 'violates check constraint' };
+  expect(await runCreditRunwaySweep()).toEqual({ evaluated: 1, warned: 0, unrecorded: 1, undelivered: 0 });
+});
+
+test('7c F2: BOTH channels fail -> undelivered, the dedup row is DELETED, and the next evaluation warns', async () => {
+  setBalance(150); db.tx = burn(60);
+  notifErr = true; mockRunwayEmail.mockImplementationOnce(async () => { throw new Error('edge fn down'); });
+  expect(await evaluateRunwayWarning(ORG)).toBe('undelivered');
+  expect(db.log.filter((r) => r.alert_type === 'runway_3d')).toEqual([]);
+  notifErr = false;
+  expect(await evaluateRunwayWarning(ORG)).toBe('warned');
+});
+
+test('7c F2 control: only ONE channel fails -> warned, the row is KEPT (no duplicate on the next run)', async () => {
+  setBalance(150); db.tx = burn(60);
+  mockRunwayEmail.mockImplementationOnce(async () => { throw new Error('edge fn down'); });
+  expect(await evaluateRunwayWarning(ORG)).toBe('warned');
+  expect(db.log.filter((r) => r.alert_type === 'runway_3d')).toHaveLength(1);
+  expect(await evaluateRunwayWarning(ORG)).toBe('none');
 });

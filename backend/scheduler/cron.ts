@@ -1128,7 +1128,9 @@ async function runSchedulerCycleBody(opts: { includePublishSafetyNet?: boolean }
     try {
       const { runCreditRunwaySweep } = await import('../services/creditAlertService');
       const r = await runCreditRunwaySweep();
-      console.log(`✅ Credit runway sweep: ${r.evaluated} org(s) evaluated, ${r.warned} warned`);
+      // unrecorded > 0 = breached orgs NOT warned because the dedup row could not be written (e.g. the alert_type
+      // migration is missing) - the release condition made visible.
+      console.log(`✅ Credit runway sweep: ${r.evaluated} org(s) evaluated, ${r.warned} warned, ${r.unrecorded} unrecorded, ${r.undelivered} undelivered`);
     } catch (error: unknown) {
       console.error('❌ Credit runway sweep error:', formatCaughtError(error));
     }
