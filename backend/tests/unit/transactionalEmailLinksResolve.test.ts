@@ -3,6 +3,11 @@
  * join your Omnivyra company" email linked to /settings/team, which had no page, so every admin who clicked
  * it got a 404. Producer: supabase/functions/send-transactional-email/index.ts. Consumer: pages/ + the
  * redirects in next.config.js.
+ *
+ * KNOWN LIMIT (do not over-trust a green run): only links written as a template literal `${<base>}/path`
+ * are read, (1) inside the email function via getAppUrl(), and (2) in server code when assigned to
+ * ctaUrl / inviteUrl / loginUrl / dashboardUrl / inviteLink with `:` or `=`. A link built by a helper call,
+ * by string concatenation, or under another name is INVISIBLE here.
  */
 import fs from 'fs';
 import path from 'path';

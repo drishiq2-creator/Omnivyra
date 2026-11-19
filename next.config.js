@@ -138,10 +138,13 @@ const nextConfig = {
     // The "Someone tried to join your Omnivyra company" email (supabase/functions/send-transactional-email)
     // links to /settings/team, which has no page; the team page is /team-management. Redirect so every
     // email already sent lands on the team page (2026-11-20). Next.js keeps the query string.
+    // REMOVE ONLY when no email sent before the template fix can still be clicked (not when the template is
+    // fixed: the email-link test keeps passing via this redirect, so nothing will prompt removal).
     { source: '/settings/team', destination: '/team-management', permanent: false },
     // Team Management "Reinvite" (pages/api/company/users/reinvite.ts) emailed /accept-invite?token=..., which
     // has no page; the accept page is /auth/accept-invite and reads the SAME invitations table / sha256 token
     // hash. Redirect (query kept) so already-sent re-invites work (2026-11-20).
+    // REMOVE ONLY when every invite minted before reinvite.ts is fixed has expired (not when it is fixed).
     { source: '/accept-invite', destination: '/auth/accept-invite', permanent: false },
   ],
   webpack: (config, { isServer, dev }) => {
