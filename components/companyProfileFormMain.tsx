@@ -26,6 +26,8 @@ import { useCompanyProfileFormController } from './companyProfileFormController'
 import CompanyProfileFormSectionsA from './CompanyProfileFormSectionsA';
 import CompanyProfileFormSectionsB from './CompanyProfileFormSectionsB';
 import CompanyProfileFormSectionsC from './CompanyProfileFormSectionsC';
+import { WizardStepper, WizardStepNav, StepEditedNotice } from './company/profileWizard/WizardStepper';
+import { editedFieldsForStep } from './company/profileWizard/wizardSteps';
 
 export default function CompanyProfileForm({ d }: { d: ProfileState }) {
   const f = useCompanyProfileFormController(d);
@@ -101,6 +103,7 @@ export default function CompanyProfileForm({ d }: { d: ProfileState }) {
     updateGuidedCompetitor, updateIntelligenceContext, updateOtherSocial, uploadBrandAsset, user,
     userGuidance, userRole,
   } = f;
+  const { wizardStep, setWizardStep, showStep } = f;
   return (
     <>
       <div className="mx-auto mt-6 max-w-5xl rounded-3xl border border-slate-200 bg-white p-6 shadow-sm md:p-8">
@@ -118,6 +121,7 @@ export default function CompanyProfileForm({ d }: { d: ProfileState }) {
             </div>
           </div>
 
+          {showStep('review') && (<>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
             <StatCard
               label="Profile confidence"
@@ -146,7 +150,9 @@ export default function CompanyProfileForm({ d }: { d: ProfileState }) {
               value={isEditing ? 'Editing' : 'Viewing saved profile'}
             />
           </div>
+          </>)}
 
+          {!showOnboardingContinuation && (<>
           <div className="grid grid-cols-1 gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-3 text-sm md:grid-cols-4">
             {[
               ['1', 'Source intake', 'Website, social accounts, public proof'],
@@ -161,6 +167,7 @@ export default function CompanyProfileForm({ d }: { d: ProfileState }) {
               </div>
             ))}
           </div>
+          </>)}
         </div>
 
         {errorMessage && (
@@ -179,6 +186,7 @@ export default function CompanyProfileForm({ d }: { d: ProfileState }) {
           </div>
         )}
 
+        {showStep('review') && (<>
         {latestRefinement && (
           <div className="mb-6 rounded-2xl border border-indigo-200 bg-indigo-50/60 p-5 text-sm text-indigo-900 space-y-4">
             <div className="space-y-1">
@@ -242,16 +250,21 @@ export default function CompanyProfileForm({ d }: { d: ProfileState }) {
               )}
           </div>
         )}
+        </>)}
 
         {isLoading || isOnboardingResolving ? (
           <div className="text-sm text-gray-500">Loading profile...</div>
         ) : (
           <div className="space-y-6">
+            {/* UI step 6: the wizard step bar appears once the profile exists. */}
+            {showOnboardingContinuation && <WizardStepper current={wizardStep} onSelect={setWizardStep} />}
+            {showOnboardingContinuation && <StepEditedNotice fields={editedFieldsForStep(wizardStep, activeProfile)} />}
             <CompanyProfileFormSectionsA f={f} />
             {showOnboardingContinuation ? (
               <>
                 <CompanyProfileFormSectionsB f={f} />
                 <CompanyProfileFormSectionsC f={f} />
+                <WizardStepNav current={wizardStep} onSelect={setWizardStep} onSave={isEditing ? () => saveProfile() : undefined} saving={isSaving} />
               </>
             ) : (
               <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 text-sm text-slate-600">
@@ -259,7 +272,7 @@ export default function CompanyProfileForm({ d }: { d: ProfileState }) {
               </div>
             )}
 
-            {showOnboardingContinuation && discoveredSocialProfiles.length > 0 && (
+            {showOnboardingContinuation && showStep('sources') && discoveredSocialProfiles.length > 0 && (
               <div className="rounded-lg border border-gray-200 p-4">
                 <div className="text-sm font-semibold text-gray-800 mb-2">Discovered Social Profiles</div>
                 <ul className="text-xs text-gray-600 space-y-1">

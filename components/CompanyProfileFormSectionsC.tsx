@@ -3,7 +3,6 @@
 import React from 'react';
 import Link from 'next/link';
 import ChatVoiceButton from '../components/ChatVoiceButton';
-import AIGenerationProgress from '../components/AIGenerationProgress';
 import CompanyStrategyProfileCard from '../components/company/CompanyStrategyProfileCard';
 import type { useCompanyProfileState } from '../hooks/useCompanyProfileState';
 import type {
@@ -22,6 +21,10 @@ import { isValidCanonicalWebsite } from '../utils/companyProfileValidation';
 import { type ProfileState, type BrandAssetField, type InlineQuestionFieldKey, normalizeQuestionFieldKey, questionMatchesInlineField, questionMatchesAnyInlineField, formatBusinessClassificationLabel, BRAND_ASSET_SPECS, BRAND_ASSET_ACCEPT, SOCIAL_ACCOUNT_FIELDS, formatFileSize, prepareTransparentBrandAsset, StatCard, SectionCard, GuidedChatPanel } from './companyProfileFormSupportA';
 import { StatusChip, SavedHint, IntelligenceContextSections } from './companyProfileFormSupportB';
 import { useCompanyProfileFormController } from './companyProfileFormController';
+import { MirrorStatusList } from './company/profileWizard/MirrorStatusList';
+import { growthPrioritiesView } from '../utils/profileMarketPulseMirror';
+import { splitToList as splitGrowth } from '../pages/company-profile.types';
+import MarketingIntelligenceProgress from './company/MarketingIntelligenceProgress';
 
 export default function CompanyProfileFormSectionsC({ f }: { f: ReturnType<typeof useCompanyProfileFormController> }) {
   const {
@@ -96,8 +99,11 @@ export default function CompanyProfileFormSectionsC({ f }: { f: ReturnType<typeo
     updateGuidedCompetitor, updateIntelligenceContext, updateOtherSocial, uploadBrandAsset, user,
     userGuidance, userRole,
   } = f;
+  const { showStep, showAnyStep, wizardStepTitle } = f;
+  const growthView = growthPrioritiesView(activeProfile.growth_priorities, marketPulseSettings.growth_priorities);
   return (
     <>
+            {showStep('advanced') && (<>
             <CompanyStrategyProfileCard
               companyId={companyId || activeProfile.company_id}
               profile={activeProfile}
@@ -108,12 +114,15 @@ export default function CompanyProfileFormSectionsC({ f }: { f: ReturnType<typeo
               onSuccess={setSuccessMessage}
               onError={setErrorMessage}
             />
+            </>)}
 
+            {showAnyStep(['offering', 'audience', 'goals']) && (<>
             <div className="rounded-2xl border border-slate-200 bg-slate-50/70 p-5">
-              <h3 className="text-base font-semibold text-gray-900 mb-2">Commercial Strategy</h3>
+              <h3 className="text-base font-semibold text-gray-900 mb-2">{wizardStepTitle ? `${wizardStepTitle}: commercial details` : 'Commercial Strategy'}</h3>
               <p className="text-sm text-gray-600 mb-4">
                 Define your target customer and commercial model. These fields are locked from AI overwrite once you save.
               </p>
+              {showStep('audience') && (<>
               <div className="flex flex-wrap gap-2 mb-4">
                 <button
                   type="button"
@@ -123,6 +132,8 @@ export default function CompanyProfileFormSectionsC({ f }: { f: ReturnType<typeo
                   Define Target Customer
                 </button>
               </div>
+              </>)}
+              {showStep('goals') && (<>
               <div className="mb-6">
                 <h4 className="text-sm font-semibold text-gray-800 mb-2">Campaign Purpose & Strategic Intent</h4>
                 {activeProfile.campaign_purpose_intent ? (
@@ -169,7 +180,9 @@ export default function CompanyProfileFormSectionsC({ f }: { f: ReturnType<typeo
                   ].filter(Boolean).join(', ')} />
                 )}
               </div>
+              </>)}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {showStep('audience') && (<>
                 <div>
                   <label className="text-sm font-medium text-gray-700">Target customer segment</label>
                   <input
@@ -180,6 +193,8 @@ export default function CompanyProfileFormSectionsC({ f }: { f: ReturnType<typeo
                   />
                   {!isEditing && <SavedHint value={activeProfile.target_customer_segment} />}
                 </div>
+                </>)}
+                {showStep('audience') && (<>
                 <div>
                   <label className="text-sm font-medium text-gray-700">Ideal customer profile</label>
                   <textarea
@@ -191,6 +206,8 @@ export default function CompanyProfileFormSectionsC({ f }: { f: ReturnType<typeo
                   />
                   {!isEditing && <SavedHint value={activeProfile.ideal_customer_profile} />}
                 </div>
+                </>)}
+                {showStep('offering') && (<>
                 <div>
                   <label className="text-sm font-medium text-gray-700">Pricing model</label>
                   <input
@@ -201,6 +218,8 @@ export default function CompanyProfileFormSectionsC({ f }: { f: ReturnType<typeo
                   />
                   {!isEditing && <SavedHint value={activeProfile.pricing_model} />}
                 </div>
+                </>)}
+                {showStep('audience') && (<>
                 <div>
                   <label className="text-sm font-medium text-gray-700">Sales motion</label>
                   <input
@@ -211,6 +230,8 @@ export default function CompanyProfileFormSectionsC({ f }: { f: ReturnType<typeo
                   />
                   {!isEditing && <SavedHint value={activeProfile.sales_motion} />}
                 </div>
+                </>)}
+                {showStep('audience') && (<>
                 <div>
                   <label className="text-sm font-medium text-gray-700">Avg deal size</label>
                   <input
@@ -221,6 +242,8 @@ export default function CompanyProfileFormSectionsC({ f }: { f: ReturnType<typeo
                   />
                   {!isEditing && <SavedHint value={activeProfile.avg_deal_size} />}
                 </div>
+                </>)}
+                {showStep('audience') && (<>
                 <div>
                   <label className="text-sm font-medium text-gray-700">Sales cycle</label>
                   <input
@@ -231,6 +254,8 @@ export default function CompanyProfileFormSectionsC({ f }: { f: ReturnType<typeo
                   />
                   {!isEditing && <SavedHint value={activeProfile.sales_cycle} />}
                 </div>
+                </>)}
+                {showStep('goals') && (<>
                 <div className="md:col-span-2">
                   <label className="text-sm font-medium text-gray-700">Key metrics</label>
                   <input
@@ -241,6 +266,25 @@ export default function CompanyProfileFormSectionsC({ f }: { f: ReturnType<typeo
                   />
                   {!isEditing && <SavedHint value={activeProfile.key_metrics} />}
                 </div>
+                </>)}
+                {showStep('goals') && (<>
+                <div className="md:col-span-2">
+                  {/* 6.4c (S6): the one Growth priorities input. The text column stays canonical
+                      (a string); saving mirrors it into market_pulse.growth_priorities. */}
+                  <label className="text-sm font-medium text-gray-700">Growth priorities</label>
+                  <textarea
+                    value={activeProfile.growth_priorities || ''}
+                    onChange={(e) => handleChange('growth_priorities', e.target.value)}
+                    placeholder="e.g. EU expansion, partnerships, hiring"
+                    rows={2}
+                    className="mt-1 w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                  />
+                  {growthView.marketPulseOnly.length > 0 && (
+                    <p className="mt-1 text-xs text-gray-600">Also in Market Pulse: {growthView.marketPulseOnly.join(', ')}</p>
+                  )}
+                  <MirrorStatusList items={splitGrowth(activeProfile.growth_priorities || '')} existingMarketPulse={marketPulseSettings.growth_priorities} />
+                </div>
+                </>)}
               </div>
               {activeProfile.last_edited_by === 'user' && (
                 <p className="text-xs text-gray-500 mt-2">
@@ -248,7 +292,9 @@ export default function CompanyProfileFormSectionsC({ f }: { f: ReturnType<typeo
                 </p>
               )}
             </div>
+            </>)}
 
+            {showStep('advanced') && (<>
             {(canViewStrategicSections || isCompanyAdmin) && (
               <IntelligenceContextSections
                 context={intelligenceContext}
@@ -268,7 +314,9 @@ export default function CompanyProfileFormSectionsC({ f }: { f: ReturnType<typeo
                 onRequestEdit={() => setIsEditing(true)}
               />
             )}
+            </>)}
 
+            {showStep('advanced') && (<>
             {canViewStrategicSections && (
             <SectionCard
               title="Market Pulse Defaults"
@@ -335,23 +383,25 @@ export default function CompanyProfileFormSectionsC({ f }: { f: ReturnType<typeo
                 </div>
                 <div>
                   <label className="text-sm font-medium text-gray-700">Core offerings</label>
+                  {/* 6.4c (S3): mirrored from "What you offer"; edit it on the Offering step. */}
                   <textarea
                     value={joinList(marketPulseSettings.core_offerings)}
-                    onChange={(e) => handleMarketPulseSettingArrayChange('core_offerings', e.target.value)}
-                    placeholder="Comma-separated: recruitment services, visa support"
+                    readOnly
                     rows={2}
-                    className="mt-1 w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                    className="mt-1 w-full border border-gray-300 rounded-lg bg-gray-50 px-3 py-2 text-sm text-gray-700"
                   />
+                  <p className="mt-1 text-xs text-gray-500">Mirrored from "What you offer". Edit it on the Offering step.</p>
                 </div>
                 <div>
                   <label className="text-sm font-medium text-gray-700">Growth priorities</label>
+                  {/* 6.4c (S6): mirrored from Growth priorities; edit it on the Goals step. */}
                   <textarea
                     value={joinList(marketPulseSettings.growth_priorities)}
-                    onChange={(e) => handleMarketPulseSettingArrayChange('growth_priorities', e.target.value)}
-                    placeholder="Comma-separated: expansion, partnerships, demand growth"
+                    readOnly
                     rows={2}
-                    className="mt-1 w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                    className="mt-1 w-full border border-gray-300 rounded-lg bg-gray-50 px-3 py-2 text-sm text-gray-700"
                   />
+                  <p className="mt-1 text-xs text-gray-500">Mirrored from Growth priorities. Edit it on the Goals step.</p>
                 </div>
                 <div>
                   <label className="text-sm font-medium text-gray-700">Partnership priorities</label>
@@ -416,7 +466,9 @@ export default function CompanyProfileFormSectionsC({ f }: { f: ReturnType<typeo
               </div>
             </SectionCard>
             )}
+            </>)}
 
+            {showStep('voice') && (<>
             {canViewStrategicSections && (
             <div className="rounded-2xl border border-slate-200 bg-slate-50/70 p-5">
               <h3 className="text-base font-semibold text-gray-900 mb-2">Marketing Intelligence</h3>
@@ -443,11 +495,8 @@ export default function CompanyProfileFormSectionsC({ f }: { f: ReturnType<typeo
               </div>
               {marketingIntelligenceLoading && (
                 <div className="mb-4">
-                  <AIGenerationProgress
-                    isActive={true}
-                    message="Generating marketing intelligence…"
-                    expectedSeconds={50}
-                  />
+                  {/* UI step 6.6: real steps (StepTracker) instead of a timer bar. */}
+                  <MarketingIntelligenceProgress />
                 </div>
               )}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -571,19 +620,15 @@ export default function CompanyProfileFormSectionsC({ f }: { f: ReturnType<typeo
                   ) : null}
                 </div>
                 <div className="md:col-span-2">
-                  <label className="text-sm font-medium text-gray-700">Growth priorities</label>
-                  <textarea
-                    value={activeProfile.growth_priorities || ''}
-                    onChange={(e) => handleChange('growth_priorities', e.target.value)}
-                    placeholder="Marketing/growth priorities"
-                    rows={2}
-                    className="mt-1 w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
-                  />
+                  {/* 6.4c (S6): Growth priorities is asked once, on the Goals step. */}
+                  <p className="text-xs text-gray-500">Growth priorities are set on the Goals step.</p>
                 </div>
               </div>
             </div>
             )}
+            </>)}
 
+            {showStep('goals') && (<>
             {canViewStrategicSections && (
             <SectionCard
               title="Intelligence Operating Target"
@@ -660,7 +705,9 @@ export default function CompanyProfileFormSectionsC({ f }: { f: ReturnType<typeo
               </div>
             </SectionCard>
             )}
+            </>)}
 
+            {showStep('problem') && (<>
             {canViewStrategicSections && (
             <div className="rounded-2xl border border-slate-200 bg-slate-50/70 p-5">
               <h3 className="text-base font-semibold text-gray-900 mb-2">Problem & Transformation</h3>
@@ -787,6 +834,7 @@ export default function CompanyProfileFormSectionsC({ f }: { f: ReturnType<typeo
               </div>
             </div>
             )}
+            </>)}
     </>
   );
 }
