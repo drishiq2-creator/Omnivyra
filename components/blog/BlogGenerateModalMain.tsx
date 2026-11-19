@@ -14,6 +14,10 @@ import type { ManagedContentType } from '../../lib/content/contentTemplateRegist
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 import { stepProgress, type IndustryAngle, type Props, type Step, type GenerationKind, type QualityGateReport, INTENT_OPTIONS, ANGLE_META, ANGLE_TRACKER_STEPS, FULL_TRACKER_STEPS } from './BlogGenerateModalModel';
+import { blogGenerateKeys, blogKeyScope, blogRefusalText, keepBlogKey } from '../../lib/blog/blogGenerateKey';
+
+/** Blog drafts are billed by c6's route, which requires an Idempotency-Key (see lib/blog/blogGenerateKey). */
+const BILLED_BLOG_ENDPOINT = '/api/blogs/generate';
 
 
 // ── Component ─────────────────────────────────────────────────────────────────
@@ -309,14 +313,20 @@ export default function BlogGenerateModal({
     setGenerationProgress(5);
     setStep('generating');
 
+    // Blogs only: one key per click, kept only while the outcome is unknown (lib/blog/blogGenerateKey).
+    const billed = apiEndpoint === BILLED_BLOG_ENDPOINT;
+    const scope = blogKeyScope(companyId, topic, selectedAngle.type, selectedAngle.title);
+    const op = billed ? blogGenerateKeys.begin(scope) : null;
+    let keepKey = true; // until a response says otherwise
     try {
       const res  = await fetch(apiEndpoint, {
         method:  'POST',
         credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...(op ? op.headers : {}) },
         body:    JSON.stringify(buildBody({ mode: 'full', selected_angle: selectedAngle })),
       });
       const data = await res.json();
+      keepKey = keepBlogKey(res.status, data);
       if (!res.ok) {
         const report = data.thought_leadership_quality && typeof data.thought_leadership_quality === 'object'
           ? data.thought_leadership_quality as QualityGateReport
@@ -324,7 +334,7 @@ export default function BlogGenerateModal({
         setQualityReport(report);
         setError(report?.failures?.length
           ? `Quality gate blocked this draft: ${report.failures.join('; ')}`
-          : data.error || 'Generation failed.');
+          : (billed ? blogRefusalText(data) : null) || data.error || 'Generation failed.');
         setGenerationProgress(100);
         setStep('angles');
         return;
@@ -349,6 +359,8 @@ export default function BlogGenerateModal({
       setOpeningEditor(false);
       setError('Network error. Please try again.');
       setStep('angles');
+    } finally {
+      if (op && !keepKey) blogGenerateKeys.end(scope);
     }
   }
 
