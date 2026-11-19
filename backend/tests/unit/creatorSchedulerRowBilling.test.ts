@@ -3,11 +3,14 @@
  * engine faked: one charge per row generation, the charged output is stashed on the row at once and reused by every
  * later attempt and run (never re-run, never re-charged), the stash never reaches the prompt, a billing refusal is
  * classified by its typed flag and not retried in-run, and the not-enforced path is unchanged.
+ * c6 2026-11-20 (persist before settle): the stash write and the output validation run INSIDE the charge - a failed
+ * write or a rejected output releases the hold (nothing charged); a pre-change charge with no stash is refunded.
  */
 const ledger = new Map<string, 'settled' | 'released'>();
 let charges = 0;
 const mockEngine = {
   makeIdempotencyKey: jest.fn((u: string, a: string, r: string) => `${u}|${a}|${r}`),
+  getReservationKeys: jest.fn((k: string) => ({ confirmKey: `${k}:confirm` })),
   executeWithEntryConsumption: jest.fn(async (opts: any) => {
     const st = ledger.get(opts.idempotencyKey);
     if (st === 'settled') return { status: 'already_settled' };
@@ -23,13 +26,23 @@ jest.mock('../../services/creditExecutionService', () => mockEngine);
 let mockMode = 'enforce';
 jest.mock('../../services/billing/creditEconomyActivation', () => ({ getCreditEconomyExecutionMode: jest.fn(async () => mockMode) }));
 jest.mock('../../services/billing/billingAuditEmitter', () => ({ emitAnomaly: jest.fn() }));
+const mockRefunds: any[] = [];
+jest.mock('../../services/billing/owedRefunds', () => ({
+  readOriginalCharge: jest.fn(async (k: string) => ({ confirmTxnId: `txn:${k}`, free: 0, paid: 5, incentive: 0 })),
+  refundOriginalCharge: jest.fn(async (a: any) => { mockRefunds.push(a); return { status: 'granted', credits: 5 }; }),
+}));
 jest.mock('../../services/logger', () => ({ logger: { warn: jest.fn(), info: jest.fn(), error: jest.fn() } }));
 
 // row writes: every update to daily_content_plans is recorded
 const mockWrites: Array<{ table: string; values: any; id: unknown }> = [];
+let mockStashWriteErrors = 0;   // the next N stash writes return { error } (a postgrest failure does not throw)
 jest.mock('../../db/writeOwner', () => ({
   ownedDbTable: (table: string) => ({
-    update: (values: any) => ({ eq: async (_c: string, id: unknown) => { mockWrites.push({ table, values, id }); return { data: null, error: null }; } }),
+    update: (values: any) => ({ eq: async (_c: string, id: unknown) => {
+      const isStash = typeof values.content === 'string' && values.content.includes('"billed_generation"') && !('status' in values);
+      if (isStash && mockStashWriteErrors > 0) { mockStashWriteErrors--; return { data: null, error: { message: 'db down' } }; }
+      mockWrites.push({ table, values, id }); return { data: null, error: null };
+    } }),
   }),
 }));
 jest.mock('../../db/supabaseClient', () => ({ supabase: {} }));
@@ -47,8 +60,9 @@ jest.mock('../../services/executionEngines', () => ({
     },
   }),
 }));
+let mockInvalidOutputs = 0;   // the next N generated outputs fail validation
 jest.mock('../../services/creatorExecutionContracts', () => ({
-  validateCreatorExecutionOutput: () => ({ ok: true, issues: [] }),
+  validateCreatorExecutionOutput: () => (mockInvalidOutputs > 0 ? (mockInvalidOutputs--, { ok: false, issues: ['bad'] }) : { ok: true, issues: [] }),
   validateCreatorSchedulingContract: () => ({ ok: true, issues: [] }),
 }));
 jest.mock('../../services/creatorAssetValidationService', () => ({ validateAssetReadiness: async () => ({ ready: true }) }));
@@ -99,6 +113,7 @@ beforeEach(() => {
   ledger.clear(); charges = 0; mockMode = 'enforce'; mockWrites.length = 0;
   mockEngineCalls.generate.length = 0; mockEngineCalls.schedule = 0; mockScheduleFailures = 0;
   mockEngine.executeWithEntryConsumption.mockClear();
+  mockStashWriteErrors = 0; mockInvalidOutputs = 0; mockRefunds.length = 0;
 });
 
 it('enforced: scheduling keeps failing - the row is generated and charged ONCE, the stash is written at once and kept', async () => {
@@ -147,11 +162,33 @@ it('a retryable billing refusal is NOT retried in-run and is persisted as transi
   expect(final.failure_reason).toContain('INSUFFICIENT_CREDITS');
 });
 
-it('a permanent billing refusal (charged, no stash) is persisted as permanent and never regenerates', async () => {
+it('a pre-change charge with no stash is REFUNDED in full and the row is generated on the next slot - never charged-no-output', async () => {
   ledger.set('org-1|content_generation|creator_row:c-1:row-1:v3', 'settled');
-  await run(rowWith({}));
-  expect(mockEngineCalls.generate).toHaveLength(0);
-  expect(mockWrites.filter((w) => w.table === 'daily_content_plans').at(-1)!.values.failure_type).toBe('permanent');
+  const out = await run(rowWith({}));
+  expect(mockRefunds).toEqual([expect.objectContaining({ reason: 'creator_row_output_missing', referenceId: 'creator_row:c-1:row-1:v3' })]);
+  expect(mockEngineCalls.generate).toHaveLength(1);
+  expect(out.scheduled_count).toBe(1);
+  expect(mockEngine.executeWithEntryConsumption.mock.calls.at(-1)![0].referenceId).toBe('creator_row:c-1:row-1:v3:r1');
+});
+
+it('a stash write that returns { error } RELEASES the hold: nothing charged for that attempt, the retry is charged once', async () => {
+  mockStashWriteErrors = 1;
+  const out = await run(rowWith({}));
+  expect(ledger.get('org-1|content_generation|creator_row:c-1:row-1:v3')).toBe('released');
+  expect(charges).toBe(1);                                    // only the retry's (stashed) generation
+  expect(out.scheduled_count).toBe(1);
+  expect(rowContents()[0].billed_generation).toMatchObject({ reference_id: 'creator_row:c-1:row-1:v3:r1' });
+});
+
+it('an output that fails validation RELEASES the hold (our failure is free): nothing charged, nothing stashed', async () => {
+  mockInvalidOutputs = 1;
+  const out = await run(rowWith({}));
+  expect(ledger.get('org-1|content_generation|creator_row:c-1:row-1:v3')).toBe('released');
+  expect(mockEngineCalls.generate).toHaveLength(1);
+  expect(charges).toBe(0);
+  expect(out.scheduled_count).toBe(0);
+  for (const c of rowContents()) expect(c).not.toHaveProperty('billed_generation');
+  expect(mockWrites.filter((w) => w.table === 'daily_content_plans').at(-1)!.values.failure_reason).toContain('failed validation');
 });
 
 it('NOT enforced: today\'s path - generation per attempt, no engine call, no stash written', async () => {

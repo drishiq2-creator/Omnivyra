@@ -28,7 +28,7 @@ import { PipelineErrorCode } from '../../lib/shared/pipelineErrorCodes';
 import type { CanonicalCreatorOutput, CreatorScheduleResult } from './executionEngines/types';
 import { ownedDbTable } from '../db/writeOwner';
 import { logger } from './logger';
-import { generateCreatorRowBilled, CreatorRowBillingRefusedError, STASH_KEY as CREATOR_ROW_STASH_KEY, type CreatorRowStash } from './billing/creatorRowGenerationBilling';
+import { generateCreatorRowBilled, CreatorRowBillingRefusedError, CreatorRowStashWriteError, STASH_KEY as CREATOR_ROW_STASH_KEY, type CreatorRowStash } from './billing/creatorRowGenerationBilling';
 import {
   makeScheduledPostIdempotencyKey,
   isIdempotencyCollision,
@@ -491,8 +491,20 @@ export async function processCreatorStructuredSchedule(input: {
               { details: { plan_version: planVersion, current_plan_version: planVersionAtGenerate } }
             );
           }
+          // A generation that fails validation is OUR failure: it must throw INSIDE the billed unit (before the stash
+          // write and the confirm) so the hold is released - never a charge for output we then reject (c6 2026-11-20).
+          const assertGeneratedValid = (out: unknown) => {
+            const generatedValidation = validateCreatorExecutionOutput(out as any);
+            if (!generatedValidation.ok) {
+              throw new BoltError(
+                BOLT_ERROR_CODES.SCHEDULING_CREATOR_OUTPUT_INVALID,
+                `Generated creator output failed validation: ${generatedValidation.issues.join('; ')}`,
+                { details: { issues: generatedValidation.issues } }
+              );
+            }
+          };
           // C75: the row's AI generation is ONE billed unit (dark unless enforced; see creatorRowGenerationBilling).
-          const generateRow = () => (engine as any).generateFromIntent({
+          const generateRow = async () => { const out = await (engine as any).generateFromIntent({
             campaignId,
             companyId,
             userId,
@@ -513,32 +525,25 @@ export async function processCreatorStructuredSchedule(input: {
                 : parsed.creator_asset && typeof parsed.creator_asset === 'object'
                   ? parsed.creator_asset as Record<string, unknown>
                   : null,
-          });
+          }); assertGeneratedValid(out); return out; };
           const billedGeneration = await generateCreatorRowBilled({
             companyId, userId, campaignId, rowId: String(row.id), planVersion,
             stash: creatorRowStash, generate: generateRow,
+            // PERSIST BEFORE SETTLE (c6 2026-11-20): runs INSIDE the charge, before the confirm. A failed write THROWS,
+            // so the hold is released (nothing charged) - never a charge for output that was not saved.
+            persistStash: async (stash: CreatorRowStash) => {
+              const { error: stashErr } = await ownedDbTable('daily_content_plans')
+                .update({ content: JSON.stringify({ ...parsed, [CREATOR_ROW_STASH_KEY]: stash }), updated_at: new Date().toISOString() })
+                .eq('id', row.id);
+              if (stashErr) {
+                logger.error('creator_row_stash_write_failed', { campaignId, dailyPlanId: row.id, planVersion, message: stashErr.message });
+                throw new CreatorRowStashWriteError(`creator row stash write failed: ${stashErr.message}`);
+              }
+              creatorRowStash = stash;
+            },
           });
           const generated = billedGeneration.output;
-          if (billedGeneration.billed && !billedGeneration.reused) {
-            // Persist the charged output NOW (not at the end of the loop): a crash or failed schedule after this point
-            // must find it, or the next attempt would be a charged-no-output refusal.
-            creatorRowStash = billedGeneration.stash;
-            const { error: stashErr } = await ownedDbTable('daily_content_plans')
-              .update({ content: JSON.stringify({ ...parsed, [CREATOR_ROW_STASH_KEY]: billedGeneration.stash }), updated_at: new Date().toISOString() })
-              .eq('id', row.id);
-            if (stashErr) {
-              logger.error('creator_row_stash_write_failed', { campaignId, dailyPlanId: row.id, planVersion, message: stashErr.message });
-            }
-          }
-
-          const generatedValidation = validateCreatorExecutionOutput(generated);
-          if (!generatedValidation.ok) {
-            throw new BoltError(
-              BOLT_ERROR_CODES.SCHEDULING_CREATOR_OUTPUT_INVALID,
-              `Generated creator output failed validation: ${generatedValidation.issues.join('; ')}`,
-              { details: { issues: generatedValidation.issues } }
-            );
-          }
+          if (billedGeneration.reused) assertGeneratedValid(generated); // a fresh output was validated inside the unit
           await logCreatorExecutionAudit({
             campaignId,
             companyId,
@@ -701,7 +706,9 @@ export async function processCreatorStructuredSchedule(input: {
               ? 'permanent'
               : billingRefusal
                 ? (billingRefusal.retryable ? 'transient' : 'permanent')
-                : classifyCreatorFailure(lastError);
+                : attemptError instanceof CreatorRowStashWriteError
+                  ? 'transient'   // a database failure; nothing was charged - retry on the next slot
+                  : classifyCreatorFailure(lastError);
           failureType = failureType === 'stale' ? 'stale' : classifiedFailure;
           await logCreatorExecutionAudit({
             campaignId,

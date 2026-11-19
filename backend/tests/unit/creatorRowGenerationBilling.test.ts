@@ -6,6 +6,7 @@ const ledger = new Map<string, 'settled' | 'released'>();
 let charges = 0;
 const mockEngine = {
   makeIdempotencyKey: jest.fn((u: string, a: string, r: string) => `${u}|${a}|${r}`),
+  getReservationKeys: jest.fn((k: string) => ({ confirmKey: `${k}:confirm` })),
   executeWithEntryConsumption: jest.fn(async (opts: any) => {
     const st = ledger.get(opts.idempotencyKey);
     if (st === 'settled') return { status: 'already_settled' };
@@ -22,6 +23,18 @@ let mockMode = 'enforce';
 jest.mock('../../services/billing/creditEconomyActivation', () => ({ getCreditEconomyExecutionMode: jest.fn(async () => mockMode) }));
 const mockAnomalies: any[] = [];
 jest.mock('../../services/billing/billingAuditEmitter', () => ({ emitAnomaly: (a: unknown) => { mockAnomalies.push(a); } }));
+// c6 2026-11-20 (persist before settle): a settled slot without a stash is REFUNDED in full, never an anomaly.
+const mockCharges = new Map<string, { confirmTxnId: string; free: number; paid: number; incentive: number }>();
+let mockChargeReadError: Error | null = null;
+let mockRefundStatus: 'granted' | 'owed' | 'unrecorded' | 'protected' = 'granted';
+const mockRefunds: any[] = [];
+jest.mock('../../services/billing/owedRefunds', () => ({
+  readOriginalCharge: jest.fn(async (confirmKey: string) => {
+    if (mockChargeReadError) throw mockChargeReadError;
+    return mockCharges.get(confirmKey) ?? null;
+  }),
+  refundOriginalCharge: jest.fn(async (a: any) => { mockRefunds.push(a); return { status: mockRefundStatus, credits: 5 }; }),
+}));
 jest.mock('../../services/logger', () => ({ logger: { warn: jest.fn(), info: jest.fn(), error: jest.fn() } }));
 
 import {
@@ -31,15 +44,26 @@ import {
 import { classifyCreatorFailure } from '../../services/structuredPlanSchedulerModel';
 import { RECLAIM_CASES, EXHAUSTED_CASE, RECLAIM_CAP } from '../helpers/reclaimSemanticsCases';
 
-const BASE = { companyId: 'org-1', userId: 'u-1', campaignId: 'c-1', rowId: 'row-1', planVersion: 3, stash: undefined as unknown };
+const stashWrites: any[] = [];
+let stashWriteFails = false;
+const persistStash = jest.fn(async (st: any) => {
+  if (stashWriteFails) throw new Error('creator row stash write failed: db down');
+  stashWrites.push(st);
+});
+const BASE = { companyId: 'org-1', userId: 'u-1', campaignId: 'c-1', rowId: 'row-1', planVersion: 3, stash: undefined as unknown, persistStash };
 const keyFor = (slot: number) => {
   const id = creatorRowIdentity('c-1', 'row-1', 3);
   return `org-1|${CREATOR_ROW_ACTION}|${slot === 0 ? id : `${id}:r${slot}`}`;
+};
+const chargeAt = (slot: number) => {
+  mockCharges.set(`${keyFor(slot)}:confirm`, { confirmTxnId: `txn-${slot}`, free: 0, paid: 5, incentive: 0 });
 };
 
 beforeEach(() => {
   ledger.clear(); charges = 0; mockAnomalies.length = 0; mockMode = 'enforce';
   mockEngine.executeWithEntryConsumption.mockClear();
+  mockCharges.clear(); mockChargeReadError = null; mockRefundStatus = 'granted'; mockRefunds.length = 0;
+  stashWrites.length = 0; stashWriteFails = false; persistStash.mockClear();
 });
 
 describe('not enforced: today\'s path', () => {
@@ -59,10 +83,14 @@ describe('not enforced: today\'s path', () => {
 });
 
 describe('enforced', () => {
-  it('a fresh row is ONE token-metered unit: content_generation, hold scaled by the unit\'s calls, stash returned', async () => {
+  it('a fresh row is ONE token-metered unit: content_generation, hold scaled by the unit\'s calls, stash persisted INSIDE the charge', async () => {
     const generate = jest.fn(async () => ({ out: 'A' }));
+    let chargedBeforePersist: number | null = null;
+    persistStash.mockImplementationOnce(async (st: any) => { chargedBeforePersist = charges; stashWrites.push(st); });
     const r = await generateCreatorRowBilled({ ...BASE, generate });
-    expect(r).toEqual({ billed: true, reused: false, output: { out: 'A' }, stash: { plan_version: 3, reference_id: creatorRowIdentity('c-1', 'row-1', 3), output: { out: 'A' } } });
+    expect(r).toEqual({ billed: true, reused: false, output: { out: 'A' } });
+    expect(stashWrites).toEqual([{ plan_version: 3, reference_id: creatorRowIdentity('c-1', 'row-1', 3), output: { out: 'A' } }]);
+    expect(chargedBeforePersist).toBe(0);   // persisted BEFORE the confirm
     const opts = mockEngine.executeWithEntryConsumption.mock.calls[0][0];
     expect(opts).toMatchObject({
       orgId: 'org-1', userId: 'u-1', action: 'content_generation', referenceType: 'creator_daily_plan_row',
@@ -87,14 +115,71 @@ describe('enforced', () => {
     expect(charges).toBe(1);
   });
 
-  it('settled with NO stash: never re-run, critical charged_no_output anomaly, permanent typed refusal', async () => {
+  it('a stash write that fails RELEASES the hold: nothing charged, the error surfaces, the retry uses the next slot', async () => {
+    stashWriteFails = true;
+    const generate = jest.fn(async () => ({ out: 'W' }));
+    await expect(generateCreatorRowBilled({ ...BASE, generate })).rejects.toThrow('stash write failed');
+    expect(charges).toBe(0);
+    expect(ledger.get(keyFor(0))).toBe('released');
+    stashWriteFails = false;
+    const r = await generateCreatorRowBilled({ ...BASE, generate });
+    expect(r).toEqual({ billed: true, reused: false, output: { out: 'W' } });
+    expect(mockEngine.executeWithEntryConsumption.mock.calls.at(-1)![0].referenceId).toBe('creator_row:c-1:row-1:v3:r1');
+    expect(charges).toBe(1);
+    expect(mockAnomalies).toEqual([]);
+  });
+
+  it('settled with NO stash (a pre-change charge): refunded IN FULL, then generated on the next slot - no anomaly', async () => {
+    ledger.set(keyFor(0), 'settled'); chargeAt(0);
+    const generate = jest.fn(async () => ({ out: 'G' }));
+    const r = await generateCreatorRowBilled({ ...BASE, generate });
+    expect(mockRefunds).toEqual([expect.objectContaining({
+      orgId: 'org-1', charge: { confirmTxnId: 'txn-0', free: 0, paid: 5, incentive: 0 },
+      reason: 'creator_row_output_missing', grantKeyPrefix: 'creator_row_refund', referenceId: 'creator_row:c-1:row-1:v3',
+    })]);
+    expect(r).toEqual({ billed: true, reused: false, output: { out: 'G' } });
+    expect(mockEngine.executeWithEntryConsumption.mock.calls.at(-1)![0].referenceId).toBe('creator_row:c-1:row-1:v3:r1');
+    expect(generate).toHaveBeenCalledTimes(1);
+    expect(mockAnomalies).toEqual([]);
+  });
+
+  it('settled with no confirm row for the key: nothing to refund, next slot', async () => {
     ledger.set(keyFor(0), 'settled');
+    const generate = jest.fn(async () => ({ out: 'N0' }));
+    const r = await generateCreatorRowBilled({ ...BASE, generate });
+    expect(mockRefunds).toEqual([]);
+    expect(r.output).toEqual({ out: 'N0' });
+  });
+
+  it('the original charge cannot be read: retryable CHARGE_UNVERIFIABLE, nothing generated, no refund', async () => {
+    ledger.set(keyFor(0), 'settled'); chargeAt(0);
+    mockChargeReadError = new Error('original charge read failed: timeout');
     const generate = jest.fn();
     const err = await generateCreatorRowBilled({ ...BASE, generate }).catch((e) => e);
     expect(err).toBeInstanceOf(CreatorRowBillingRefusedError);
-    expect(err).toMatchObject({ code: 'CHARGED_NO_OUTPUT', retryable: false });
+    expect(err).toMatchObject({ code: 'CHARGE_UNVERIFIABLE', retryable: true });
     expect(generate).not.toHaveBeenCalled();
-    expect(mockAnomalies).toEqual([expect.objectContaining({ kind: 'charged_no_output', severity: 'critical', organizationId: 'org-1' })]);
+    expect(mockRefunds).toEqual([]);
+  });
+
+  it.each([
+    ['unrecorded', 'REFUND_PENDING', true],
+    ['protected', 'REFUND_NEEDS_REVIEW', false],
+  ] as const)('refund %s -> %s (retryable %s), nothing generated', async (status, code, retryable) => {
+    ledger.set(keyFor(0), 'settled'); chargeAt(0);
+    mockRefundStatus = status;
+    const generate = jest.fn();
+    const err = await generateCreatorRowBilled({ ...BASE, generate }).catch((e) => e);
+    expect(err).toMatchObject({ code, retryable });
+    expect(generate).not.toHaveBeenCalled();
+  });
+
+  it('an owed refund (recorded, grant pending) still proceeds to the next slot', async () => {
+    ledger.set(keyFor(0), 'settled'); chargeAt(0);
+    mockRefundStatus = 'owed';
+    const generate = jest.fn(async () => ({ out: 'O' }));
+    const r = await generateCreatorRowBilled({ ...BASE, generate });
+    expect(r.output).toEqual({ out: 'O' });
   });
 
   it('a failed generation releases its slot; the retry runs in the next slot and is charged once', async () => {
@@ -138,12 +223,17 @@ describe('the shared reclaim semantics table', () => {
   it('the cap equals the shared table', () => { expect(MAX_CREATOR_ROW_RECLAIM_ATTEMPTS).toBe(RECLAIM_CAP); });
   for (const c of [...RECLAIM_CASES, EXHAUSTED_CASE]) {
     it(c.name, async () => {
-      c.slots.forEach((st, i) => { if (st) ledger.set(keyFor(i), st); });
+      c.slots.forEach((st, i) => { if (st) { ledger.set(keyFor(i), st); if (st === 'settled') chargeAt(i); } });
       const generate = jest.fn(async () => ({ out: 'T' }));
       const out = await generateCreatorRowBilled({ ...BASE, generate }).then(() => 'ran', (e) => e);
       if (c.expect === 'processed') {
-        expect(out).toMatchObject({ code: 'CHARGED_NO_OUTPUT' });
-        expect(generate).not.toHaveBeenCalled();
+        // Surface-specific (c6 2026-11-20): a charged slot is never re-run or re-charged; with no stash on the row its
+        // charge is refunded in full and the row is generated on the NEXT slot.
+        const settled = c.slots.lastIndexOf('settled');
+        expect(mockRefunds).toEqual([expect.objectContaining({ charge: expect.objectContaining({ confirmTxnId: `txn-${settled}` }) })]);
+        expect(out).toBe('ran');
+        expect(generate).toHaveBeenCalledTimes(1);
+        expect(mockEngine.executeWithEntryConsumption.mock.calls.at(-1)![0].referenceId).toMatch(new RegExp(`:r${settled + 1}$`));
       } else if (c.expect === 'exhausted') {
         expect(out).toMatchObject({ code: 'RECLAIM_CAP_EXHAUSTED', retryable: false });
         expect(generate).not.toHaveBeenCalled();

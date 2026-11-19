@@ -10,12 +10,19 @@
  *
  * Identity: one per campaign / row / plan version (a new plan version is new content and a new charge). A failed
  * attempt RELEASES its exposure, so the same identity answers already_released and the next slot `:r<n>` is used
- * (the shared reclaim semantics). already_settled means this row's generation was ALREADY CHARGED: it is never
- * re-run for free. The charged output is stashed on the row immediately after the charge (STASH_KEY) and reused by
- * any later attempt or run; a settled identity with no stash is a charged-no-output event (critical anomaly, a
- * permanent typed refusal - an operator decides, the customer is not charged twice).
+ * (the shared reclaim semantics).
+ *
+ * PERSIST BEFORE SETTLE (c6 2026-11-20 re-land; b3 rule): the charged output is written to the row (STASH_KEY, via the
+ * caller's persistStash, which THROWS on a failed write) INSIDE the executor - before the engine confirms. A failed
+ * stash write throws inside the charge, so the hold is RELEASED (our failure is free) and the next slot is used. Any
+ * later attempt or run reuses the stash: never re-run, never re-charged.
+ * already_settled with no usable stash can then only be a charge taken BEFORE this change: the original charge is
+ * REFUNDED in full (owedRefunds, idempotent per original confirm) and the row is generated on the next slot - charged
+ * once for output that exists. If the refund cannot even be recorded the row is refused retryably, promising nothing.
+ * (The former "charged-no-output -> critical anomaly, operator decides" path is gone.)
  */
-import { executeWithEntryConsumption, makeIdempotencyKey } from '../creditExecutionService';
+import { executeWithEntryConsumption, getReservationKeys, makeIdempotencyKey } from '../creditExecutionService';
+import { readOriginalCharge, refundOriginalCharge } from './owedRefunds';
 import { getCreditEconomyExecutionMode } from './creditEconomyActivation';
 import { emitAnomaly } from './billingAuditEmitter';
 import { logger } from '../logger';
@@ -33,7 +40,18 @@ export const CREATOR_ROW_UNIT_CALLS = 4;
 
 export type CreatorRowBillingCode =
   | 'INSUFFICIENT_CREDITS' | 'NO_CREDIT_ACCOUNT' | 'ORG_CONTROL_BLOCKED' | 'NOT_A_MEMBER'
-  | 'CHARGED_NO_OUTPUT' | 'RECLAIM_CAP_EXHAUSTED';
+  | 'RECLAIM_CAP_EXHAUSTED' | 'CHARGE_UNVERIFIABLE' | 'REFUND_PENDING' | 'REFUND_NEEDS_REVIEW';
+
+/**
+ * The row's stash write did not land. Thrown by the caller's persistStash INSIDE the charge (the hold is released, so
+ * nothing is charged); a database failure, so the attempt is TRANSIENT - the retry generates on the next slot.
+ */
+export class CreatorRowStashWriteError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'CreatorRowStashWriteError';
+  }
+}
 
 /** A billing refusal for one row. `retryable`: a later run can succeed without operator action. */
 export class CreatorRowBillingRefusedError extends Error {
@@ -69,7 +87,7 @@ export function readCreatorRowStash(raw: unknown, planVersion: number): CreatorR
 
 export type CreatorRowGenerationResult<T> =
   | { billed: false; reused: false; output: T }                        // not enforced: today's path
-  | { billed: true; reused: false; output: T; stash: CreatorRowStash } // charged now - caller persists the stash
+  | { billed: true; reused: false; output: T }                         // charged now - the stash was persisted INSIDE the charge
   | { billed: true; reused: true; output: T };                         // already charged - reused, no AI, no charge
 
 export async function generateCreatorRowBilled<T extends object>(args: {
@@ -82,6 +100,11 @@ export async function generateCreatorRowBilled<T extends object>(args: {
   /** the row's STASH_KEY value (or an in-run stash), if any */
   stash: unknown;
   generate: () => Promise<T>;
+  /**
+   * Writes the stash to the row. MUST THROW when the write did not land (read the update's { error }): it runs INSIDE
+   * the charge, before the confirm, so a throw releases the hold instead of charging for output that was not saved.
+   */
+  persistStash: (stash: CreatorRowStash) => Promise<void>;
 }): Promise<CreatorRowGenerationResult<T>> {
   const mode = await getCreditEconomyExecutionMode({ organizationId: args.companyId, surface: CREATOR_ROW_SURFACE });
   if (mode !== 'enforce') return { billed: false, reused: false, output: await args.generate() };
@@ -113,25 +136,46 @@ export async function generateCreatorRowBilled<T extends object>(args: {
         maxOutputTokens: 2000 * CREATOR_ROW_UNIT_CALLS,
       },
       collectViaCollector: true,
-      executor:            args.generate,
+      // Generate, then PERSIST the stash, both inside the charge: the engine confirms only after both succeeded.
+      executor: async () => {
+        const out = await args.generate();
+        await args.persistStash({ plan_version: args.planVersion, reference_id: referenceId, output: out as unknown as Record<string, unknown> });
+        return out;
+      },
     });
     switch (r.status) {
       case 'executed':
-        return {
-          billed: true, reused: false, output: r.result as T,
-          stash: { plan_version: args.planVersion, reference_id: referenceId, output: r.result as unknown as Record<string, unknown> },
-        };
+        return { billed: true, reused: false, output: r.result as T };
       case 'already_released':
         continue; // that attempt failed uncharged - next slot
-      case 'already_settled':
-        logger.error('creator_row_charged_no_output', { ...ctx, referenceId });
-        emitAnomaly({
-          kind: 'charged_no_output', severity: 'critical', organizationId: companyId,
-          message: 'creator row generation was charged but its output is not on the row - not re-run, not re-charged',
-          metadata: { ...ctx, reference_id: referenceId, surface: CREATOR_ROW_SURFACE },
-        });
-        throw new CreatorRowBillingRefusedError('CHARGED_NO_OUTPUT', false,
-          `creator row billing refused: CHARGED_NO_OUTPUT (${referenceId} was charged; its output was not stashed)`);
+      case 'already_settled': {
+        // Charged, but its output is not on the row: only possible for a charge taken BEFORE persist-inside-the-charge.
+        // Refund it in full (our failure is free), then generate on the next slot.
+        const confirmKey = getReservationKeys(makeIdempotencyKey(companyId, CREATOR_ROW_ACTION, referenceId)).confirmKey;
+        let charge: Awaited<ReturnType<typeof readOriginalCharge>>;
+        try {
+          charge = await readOriginalCharge(confirmKey);
+        } catch (err) {
+          throw new CreatorRowBillingRefusedError('CHARGE_UNVERIFIABLE', true,
+            `creator row billing refused: the earlier charge for ${referenceId} could not be read (${(err as Error)?.message}) - retry`);
+        }
+        if (charge) {
+          const out = await refundOriginalCharge({
+            orgId: companyId, performedBy: String(args.userId ?? companyId), charge,
+            reason: 'creator_row_output_missing', grantKeyPrefix: 'creator_row_refund', referenceId,
+          });
+          if (out.status === 'unrecorded') {
+            throw new CreatorRowBillingRefusedError('REFUND_PENDING', true,
+              `creator row billing refused: the refund for ${referenceId} could not be recorded yet - retry`);
+          }
+          if (out.status === 'protected') {
+            throw new CreatorRowBillingRefusedError('REFUND_NEEDS_REVIEW', false,
+              `creator row billing refused: ${referenceId} needs a reviewed refund (protected organisation)`);
+          }
+          logger.warn('creator_row_output_missing_refunded', { ...ctx, referenceId, refund: out.status });
+        }
+        continue; // refunded (or nothing was taken): generate on the next slot
+      }
       case 'insufficient_credits':
         throw new CreatorRowBillingRefusedError('INSUFFICIENT_CREDITS', true,
           `creator row billing refused: INSUFFICIENT_CREDITS (required ${(r as any).required}, available ${(r as any).available})`);
