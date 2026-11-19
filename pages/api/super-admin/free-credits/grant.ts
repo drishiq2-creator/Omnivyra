@@ -156,7 +156,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
 
     if (roleReadErr) {
       roleEnsured = false;
-      roleWarning = 'credits granted; company-admin membership NOT ensured (membership read failed) - retry the role step';
+      roleWarning = 'credits granted; company-admin membership NOT ensured (membership read failed)';
       console.error('[free-credits/grant] role read failed - membership not changed:', organizationId, roleReadErr.message);
     } else if (!existingRole) {
       const { error: roleInsertErr } = await sb.from('user_company_roles').insert({
@@ -167,7 +167,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       });
       if (roleInsertErr) {
         roleEnsured = false;
-        roleWarning = 'credits granted; company-admin membership NOT created - retry the role step';
+        roleWarning = 'credits granted; company-admin membership NOT created';
         console.error('[free-credits/grant] role insert failed:', organizationId, roleInsertErr.message);
       }
     }

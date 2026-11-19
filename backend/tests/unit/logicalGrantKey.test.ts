@@ -53,3 +53,10 @@ describe('the page uses it (source pins)', () => {
     expect(s.indexOf('grantKey.current.settle()')).toBeGreaterThan(warn);
   });
 });
+
+test("7c rule: the server's partial-success warnings describe STATE only - the retry instruction is the client's", () => {
+  const api = fs.readFileSync(path.join(process.cwd(), 'pages/api/super-admin/free-credits/grant.ts'), 'utf8');
+  const warnings = [...api.matchAll(/roleWarning = '([^']*)'/g)].map((m) => m[1]);
+  expect(warnings.length).toBeGreaterThanOrEqual(2);          // non-vacuous: both partial-success warnings are found
+  for (const w of warnings) expect([w, /retry|re-?send|resubmit|submit again/i.test(w)]).toEqual([w, false]);
+});
