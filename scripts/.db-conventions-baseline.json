@@ -1,5 +1,5 @@
 {
-  "selectStarTotal": 1067,
+  "selectStarTotal": 1062,
   "countExactTotal": 198,
   "files": [
     {
@@ -304,11 +304,6 @@
     },
     {
       "file": "backend/services/analyticsIntegrationServiceProviders.ts",
-      "stars": 5,
-      "exacts": 0
-    },
-    {
-      "file": "backend/services/campaignExecutionCheckpointService.ts",
       "stars": 5,
       "exacts": 0
     },
