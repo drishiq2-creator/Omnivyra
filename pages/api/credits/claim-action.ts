@@ -1,5 +1,5 @@
 import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeFactory';
-import { pickOperationalMembership } from '../../../backend/services/rbacPrimitives';
+import { operationalCompanyIds, pickOperationalMembership } from '../../../backend/services/rbacPrimitives';
 
 /**
  * POST /api/credits/claim-action
@@ -76,6 +76,56 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   const credits = CREDIT_REWARDS[category];
 
   try {
+    /*
+     * Get org to apply credit transaction.
+     *
+     * MEMBERSHIP-DERIVATION-SWEEP-001 - the status filter is load-bearing.
+     * This lookup chooses which organisation's ledger RECEIVES the grant.
+     * user_company_roles carries non-active rows by design: inviting writes
+     * status='invited' with no acceptance and no session revocation, and
+     * deactivation writes status='inactive'. Without this predicate a user
+     * holding only a revoked or never-accepted membership had credits written
+     * into that organisation's ledger, and with several rows the unordered
+     * limit(1) could prefer a stale one over a live one.
+     *
+     * c6 2026-11-19 (7c BLOCKING, money): resolved BEFORE the one-time claim row is written. The claim is a
+     * UNIQUE(user_id, category) token; writing it first and then finding no org (or failing to READ the org) used to
+     * return 200 { success } with NO credits and burn the claim forever. Each "no org" meaning now has its own
+     * answer and writes nothing: a read failure (membership or company status) is a retryable 503, a genuine absence
+     * of an operational company is a 409 - never a silent success.
+     */
+    const { data: membershipCandidates, error: membershipErr } = await serviceSb
+      .from('user_company_roles')
+      .select('company_id')
+      .eq('user_id', user.id)
+      .eq('status', 'active');
+    if (membershipErr) {
+      logger.error('credits_claim_action_membership_read_failed', { userId: user.id, category, message: membershipErr.message });
+      res.setHeader('Retry-After', '5');
+      return res.status(503).json({ error: 'membership_unavailable', retryable: true });
+    }
+    const candidates = (membershipCandidates ?? []) as Array<{ company_id?: string | null }>;
+    // e1 2026-11-12 (BLOCKING safety): never derive an INACTIVE / suspended company. operationalCompanyIds separates
+    // "the status read failed" (null) from "none is operational" (empty set) - pickOperationalMembership alone cannot.
+    const operational = await operationalCompanyIds(candidates.map((c) => c.company_id));
+    if (operational === null) {
+      logger.error('credits_claim_action_company_status_read_failed', { userId: user.id, category });
+      res.setHeader('Retry-After', '5');
+      return res.status(503).json({ error: 'company_status_unavailable', retryable: true });
+    }
+    const membership = operational.size > 0
+      ? await pickOperationalMembership(candidates, { userId: user.id })
+      : null;
+    const orgId = (membership as any)?.company_id ?? null;
+    if (!orgId) {
+      if (operational.size > 0) {
+        // The status was readable a moment ago but the pick's own read failed: still a read failure, retryable.
+        res.setHeader('Retry-After', '5');
+        return res.status(503).json({ error: 'company_status_unavailable', retryable: true });
+      }
+      return res.status(409).json({ error: 'no_active_organization', message: 'Join or create an organisation before claiming credits.' });
+    }
+
     // Insert claim — UNIQUE(user_id, category) will reject duplicates
     const { error: claimErr } = await serviceSb.from('free_credit_claims').insert({
       user_id:         user.id,
@@ -90,47 +140,23 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       throw claimErr;
     }
 
-    /*
-     * Get org to apply credit transaction.
-     *
-     * MEMBERSHIP-DERIVATION-SWEEP-001 — the status filter is load-bearing.
-     * This lookup chooses which organisation's ledger RECEIVES the grant.
-     * user_company_roles carries non-active rows by design: inviting writes
-     * status='invited' with no acceptance and no session revocation, and
-     * deactivation writes status='inactive'. Without this predicate a user
-     * holding only a revoked or never-accepted membership had credits written
-     * into that organisation's ledger, and with several rows the unordered
-     * limit(1) could prefer a stale one over a live one.
-     */
-    const { data: membershipCandidates } = await serviceSb
-      .from('user_company_roles')
-      .select('company_id')
-      .eq('user_id', user.id)
-      .eq('status', 'active');
-    // e1 2026-11-12 (BLOCKING safety): never derive an INACTIVE / suspended company - pick the first
-    // membership whose company is operational (fail closed on a status read error).
-    const membership = await pickOperationalMembership(membershipCandidates as Array<{ company_id?: string | null }> | null, { userId: user.id });
-
-    const orgId = (membership as any)?.company_id ?? null;
-    if (orgId) {
-      try {
-        await createCredit({
-          orgId,
-          amount:         credits,
-          category:       'paid', // approved policy: earn / promo / referral → PAID (never expire, consumed after FREE, subscription-locked). No new INCENTIVE allocations.
-          referenceType:  'free_credits_earn',
-          referenceId:    `${user.id}:${category}`,
-          note:           `Free credits — ${category.replace(/_/g, ' ')}`,
-          performedBy:    user.id,
-          idempotencyKey: makeIdempotencyKey(user.id, `earn:${category}`, orgId),
-        });
-      } catch (creditErr: any) {
-        logger.error('credits_claim_action_grant_failed', { userId: user.id, orgId, category, message: creditErr.message });
-        // Roll back the claim so the user can retry
-        await serviceSb.from('free_credit_claims').delete()
-          .eq('user_id', user.id).eq('category', category);
-        return res.status(500).json({ error: 'Credit grant failed. Please try again.' });
-      }
+    try {
+      await createCredit({
+        orgId,
+        amount:         credits,
+        category:       'paid', // approved policy: earn / promo / referral → PAID (never expire, consumed after FREE, subscription-locked). No new INCENTIVE allocations.
+        referenceType:  'free_credits_earn',
+        referenceId:    `${user.id}:${category}`,
+        note:           `Free credits — ${category.replace(/_/g, ' ')}`,
+        performedBy:    user.id,
+        idempotencyKey: makeIdempotencyKey(user.id, `earn:${category}`, orgId),
+      });
+    } catch (creditErr: any) {
+      logger.error('credits_claim_action_grant_failed', { userId: user.id, orgId, category, message: creditErr.message });
+      // Roll back the claim so the user can retry
+      await serviceSb.from('free_credit_claims').delete()
+        .eq('user_id', user.id).eq('category', category);
+      return res.status(500).json({ error: 'Credit grant failed. Please try again.' });
     }
 
     return res.status(200).json({ success: true, category, credits });
