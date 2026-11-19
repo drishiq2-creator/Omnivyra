@@ -135,6 +135,10 @@ const nextConfig = {
     // preserves query params (e.g. ?ref=, ?email=) across these redirects.
     { source: '/signup', destination: '/create-account', permanent: true },
     { source: '/register', destination: '/create-account', permanent: true },
+    // The "Someone tried to join your Omnivyra company" email (supabase/functions/send-transactional-email)
+    // links to /settings/team, which has no page; the team page is /team-management. Redirect so every
+    // email already sent lands on the team page (2026-11-20). Next.js keeps the query string.
+    { source: '/settings/team', destination: '/team-management', permanent: false },
   ],
   webpack: (config, { isServer, dev }) => {
     if (dev) {
