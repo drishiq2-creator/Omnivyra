@@ -75,6 +75,8 @@ describe('voice transcription fits and explains itself', () => {
     const guard = read('backend/services/ai/aiRequestGuard.ts');
     const starts = [...guard.matchAll(/new AiGuardError\(/g)].map((m) => m.index as number);
     const statuses = starts.map((at) => {
+      // Known limit (7c): a site whose own status is NOT a literal could pick up a neighbour's digits inside
+      // this 500-char window instead of yielding NaN. The >= 500 filter still catches any 5xx; don't over-trust.
       const m = guard.slice(at, at + 500).match(/,\s*(\d{3})\s*[,)]/); // the literal status argument
       return m ? Number(m[1]) : NaN;
     });
