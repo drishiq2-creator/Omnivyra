@@ -70,7 +70,7 @@ import {
   claimScheduledPostForPublish,
   releaseScheduledPostPublishClaim,
 } from '../../services/publishNowService';
-import { resolvePublishingOrganization } from '../../services/creator/publishingOrganizationResolver';
+import { resolvePublishingOrganization, PublishingOrgReadError } from '../../services/creator/publishingOrganizationResolver';
 import { logPipelineEvent } from '../../../lib/shared/observability';
 import { categorizeError } from '../../services/errorRecoveryService';
 import { recordPostAnalytics } from '../../services/analyticsService';
@@ -115,7 +115,21 @@ export async function processPublishJob(job: Job<PublishJobData>): Promise<void>
   // canonical owning tenant — we never trust caller-supplied org ids.
   // Canonical organization identity (the single resolver) — social_accounts.company_id
   // is the owning tenant; never a caller-supplied id, never userId-as-companyId.
-  const resolvedOrgId: string | null = await resolvePublishingOrganization({ socialAccountId: social_account_id });
+  //
+  // A FAILED org read throws PublishingOrgReadError. It used to answer null, and a null tenantId makes
+  // runJob SKIP the tenant check (platform-wide job), so the post published without the deleted /
+  // inactive / suspended-organization guard. null now means only "this account truly has no org".
+  // An unreadable org fails THIS delivery without publishing; BullMQ retries it within the queue's
+  // existing bounded attempts. The throw happens before runJob, so the handler's failure marking never
+  // runs: the queue_job row is marked failed here (never over a cancellation) with its retry state, and
+  // on the FINAL attempt the post is marked failed too, so an org that stays unreadable ends visibly.
+  let resolvedOrgId: string | null;
+  try {
+    resolvedOrgId = await resolvePublishingOrganization({ socialAccountId: social_account_id });
+  } catch (orgError) {
+    await recordUnreadableOrganization(orgError, { jobId: jobId as string, job, scheduled_post_id, social_account_id });
+    throw orgError;
+  }
 
   const outcome = await runJob(
     {
@@ -218,6 +232,62 @@ export async function processPublishJob(job: Job<PublishJobData>): Promise<void>
   } catch (deliveryError) {
     await recordRetryStateForFailedDelivery(jobId as string, job);
     throw deliveryError;
+  }
+}
+
+/**
+ * Failure bookkeeping for a delivery whose publishing organization could not
+ * be READ (PublishingOrgReadError, raised before runJob). Nothing was published.
+ *
+ *   - queue_jobs: 'failed' with PUBLISHING_ORG_READ_FAILED (updateQueueJobStatus
+ *     never overwrites a cancellation), then the retry state BullMQ will act on
+ *     (awaiting_retry, or exhausted on the final attempt).
+ *   - scheduled_posts: on the FINAL attempt only, 'failed' with the same code,
+ *     and only while the post is still 'scheduled' — a post published or
+ *     claimed by another path meanwhile is never overwritten.
+ *
+ * Best-effort: every write is logged on failure and never replaces the
+ * delivery's own error, which the caller re-throws.
+ */
+async function recordUnreadableOrganization(
+  orgError: unknown,
+  ctx: {
+    jobId: string;
+    job: Pick<Job<PublishJobData>, 'attemptsMade' | 'opts'>;
+    scheduled_post_id: string;
+    social_account_id: string;
+  },
+): Promise<void> {
+  const code = orgError instanceof PublishingOrgReadError ? orgError.code : 'PUBLISHING_ORG_READ_FAILED';
+  const message = orgError instanceof Error ? orgError.message : String(orgError);
+  const isFinalAttempt = ((ctx.job.attemptsMade ?? 0) + 1) >= (ctx.job.opts?.attempts ?? 1);
+  try {
+    await updateQueueJobStatus(ctx.jobId, 'failed', { error_message: message, error_code: code });
+    await createQueueJobLog(ctx.jobId, 'error', `Publish not attempted: ${message}`, {
+      scheduled_post_id: ctx.scheduled_post_id,
+      social_account_id: ctx.social_account_id,
+      final_attempt: isFinalAttempt,
+    });
+  } catch (markError) {
+    console.error('[publishProcessor] could not mark the queue job failed after an org-read failure', {
+      jobId: ctx.jobId, message: markError instanceof Error ? markError.message : String(markError),
+    });
+  }
+  await recordRetryStateForFailedDelivery(ctx.jobId, ctx.job);
+  if (isFinalAttempt) {
+    try {
+      await updateScheduledPostOnFailure(
+        ctx.scheduled_post_id,
+        'Publishing stopped: the owner of this post\'s connected account could not be confirmed. Please retry the post.',
+        'scheduled',
+        code,
+      );
+    } catch (markError) {
+      console.error('[publishProcessor] could not mark the post failed after the final org-read failure', {
+        scheduled_post_id: ctx.scheduled_post_id,
+        message: markError instanceof Error ? markError.message : String(markError),
+      });
+    }
   }
 }
 
