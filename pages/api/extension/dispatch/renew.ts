@@ -108,16 +108,28 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     if (!updated) {
       // Diagnose WITHOUT widening authority: this read is org-scoped and is
       // used only to return an actionable code. It never renews anything.
-      const { data: row, error: diagError } = await supabase
-        .from('community_ai_actions')
-        .select('id, status, dispatch_lease_id, dispatch_lease_holder_id, dispatch_lease_expires_at')
-        .eq('id', commandId)
-        .eq('organization_id', session.orgId)
-        .maybeSingle();
       // A failed diagnosis read is not COMMAND_NOT_FOUND: the extension would drop a live command.
-      if (diagError) {
-        console.error('[extension/dispatch/renew] diagnosis read failed:', diagError.message);
-        return res.status(500).json({ success: false, error: 'RENEWAL_STATE_UNREADABLE' });
+      // Both failure forms (an error object and a thrown rejection) answer the same explicit, retryable
+      // state - 503 + Retry-After, RENEWAL_STATE_UNREADABLE - never a business state (b3 standing rule).
+      // The extension keys on the body's `error` and !ok, not the status number, so 500 -> 503 is inert there.
+      let row: Record<string, unknown> | null = null;
+      let diagFailure: string | null = null;
+      try {
+        const { data, error: diagError } = await supabase
+          .from('community_ai_actions')
+          .select('id, status, dispatch_lease_id, dispatch_lease_holder_id, dispatch_lease_expires_at')
+          .eq('id', commandId)
+          .eq('organization_id', session.orgId)
+          .maybeSingle();
+        if (diagError) diagFailure = diagError.message;
+        else row = (data as Record<string, unknown> | null) ?? null;
+      } catch (readErr) {
+        diagFailure = (readErr as Error)?.message ?? 'diagnosis read threw';
+      }
+      if (diagFailure !== null) {
+        console.error('[extension/dispatch/renew] diagnosis read failed:', diagFailure);
+        res.setHeader('Retry-After', '5');
+        return res.status(503).json({ success: false, error: 'RENEWAL_STATE_UNREADABLE' });
       }
 
       if (!row) {
