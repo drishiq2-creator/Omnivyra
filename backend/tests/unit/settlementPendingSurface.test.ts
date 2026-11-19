@@ -153,3 +153,13 @@ describe('the res.json wrapper is removed when the handler settles', () => {
     expect(res.json).toBe(original);
   });
 });
+
+test('7c: a bare thenable (then, no finally) does not throw inside the wrapper, and still restores', async () => {
+  const { runWithSettlementSurface } = require('../../services/billing/settlementPendingSurface');
+  const res: any = { statusCode: 200, json: jest.fn() };
+  const original = res.json;
+  const bare = { then: (ok: (v: number) => unknown, _err?: unknown) => Promise.resolve(7).then(ok) };
+  const v = await runWithSettlementSurface(res, () => bare);
+  expect(v).toBe(7);
+  expect(res.json).toBe(original);
+});
