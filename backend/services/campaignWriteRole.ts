@@ -11,7 +11,8 @@
  * Decision on the RAW membership role (normalizeRole folds VIEWER and CONTENT_ENGAGER into VIEW_ONLY, so the raw
  * value is what tells an Engager from a Viewer). Writes = POST / PUT / PATCH / DELETE (a POST that only previews or
  * chats with AI is still a write here - ruling: view-only means view only). Unknown role -> forbidden (fail closed).
- * Platform super-admins and the content_architect principal bypass, as they do in enforceRole.
+ * Platform super-admins bypass, as they do in enforceRole. The legacy fake principal gets NO pass: it needs a real
+ * write role like anyone else (owner: the content-architect privilege path is removed pre-launch; b3/7c 2026-11-20).
  */
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { ownedDbTable } from '../db/writeOwner';
@@ -98,7 +99,6 @@ export async function enforceCampaignWriteRole(input: {
   engagerException?: EngagerCampaignWriteException | null;
 }): Promise<boolean> {
   if (!isCampaignWriteMethod(input.req.method)) return true;
-  if (input.userId === 'content_architect') return true;
   const rawRole = await getActiveRawCompanyRole(input.userId, input.companyId);
   let decision = campaignWriteDecision({ method: input.req.method, rawRole, bypass: false, engagerException: input.engagerException });
   if (decision === 'forbid') {

@@ -32,7 +32,7 @@ jest.mock('../../services/CampaignPrePlanningService', () => ({ runPrePlanning: 
 
 /* eslint-disable @typescript-eslint/no-var-requires */
 const H = require('../helpers/routeAuthHarness');
-const { campaignWriteDecision, asRawMembershipRole } = require('../../services/campaignWriteRole');
+const { campaignWriteDecision, asRawMembershipRole, enforceCampaignWriteRole } = require('../../services/campaignWriteRole');
 const { requireCampaignAccess } = require('../../services/campaignAccessService');
 /* eslint-enable @typescript-eslint/no-var-requires */
 
@@ -78,6 +78,23 @@ describe('campaignWriteDecision (pure)', () => {
     expect(d('POST', 'CONTENT_ENGAGER', 'voice_notes')).toBe('allow');
     expect(d('POST', 'VIEWER', 'campaign_messages')).toBe('forbid');
     expect(d('POST', 'VIEW_ONLY', 'voice_notes')).toBe('forbid');
+  });
+});
+
+describe("enforceCampaignWriteRole: the legacy 'content_architect' principal gets NO write pass (b3/7c 2026-11-20)", () => {
+  const gate = async (method: string, userId: string) => {
+    const out: any = { status: undefined, body: undefined };
+    const res: any = { status: (c: number) => { out.status = c; return res; }, json: (b: unknown) => { out.body = b; return res; }, setHeader: () => res };
+    const allowed = await enforceCampaignWriteRole({ req: { method } as any, res, companyId: CO_A, userId });
+    return { allowed, ...out };
+  };
+  it("a 'content_architect' userId with no role row is refused a write (403 ROLE_FORBIDDEN)", async () => {
+    expect(await gate('POST', 'content_architect')).toMatchObject({ allowed: false, status: 403, body: ROLE_FORBIDDEN });
+    expect(await gate('DELETE', 'content_architect')).toMatchObject({ allowed: false, status: 403 });
+  });
+  it('CONTROLS: a read is not gated; the real admin USER_A writes', async () => {
+    expect(await gate('GET', 'content_architect')).toMatchObject({ allowed: true, status: undefined });
+    expect(await gate('POST', USER_A)).toMatchObject({ allowed: true, status: undefined });
   });
 });
 
