@@ -11,7 +11,6 @@ import { render, screen } from '@testing-library/react';
 import {
   TOP_UP_HREF,
   parseRunStartError,
-  describeRegionIssue,
   MarketPulseCreditNotice,
   MarketPulseRunWarnings,
   type CreditNotice,
@@ -45,26 +44,6 @@ describe('parseRunStartError', () => {
   });
 });
 
-describe('describeRegionIssue keys on code (55 copy)', () => {
-  it('INSUFFICIENT_CREDITS offers top-up', () => {
-    expect(describeRegionIssue({ region: 'EU', code: 'INSUFFICIENT_CREDITS', message: 'completed and charged: US' }))
-      .toEqual({ text: 'Not run: not enough credits.', showTopUp: true });
-  });
-  it('CHARGED_NO_OUTPUT reassures, no top-up, no support ask', () => {
-    const d = describeRegionIssue({ region: 'US', code: 'CHARGED_NO_OUTPUT', charged: true });
-    expect(d.showTopUp).toBe(false);
-    expect(d.text).toMatch(/flagged it for a refund or re-run; no action is needed/);
-    expect(d.text).not.toMatch(/contact support/i);
-  });
-  it('ALREADY_RELEASED explains a new scan is needed', () => {
-    expect(describeRegionIssue({ region: 'IN', code: 'ALREADY_RELEASED' }).text).toMatch(/Start a new scan/);
-  });
-  it('no code → generic, uncharged, and the message text is NOT used to decide', () => {
-    const d = describeRegionIssue({ region: 'BR', message: 'insufficient_credits: looks like credits but has no code' });
-    expect(d).toEqual({ text: 'This region couldn’t be analysed this time. It wasn’t charged.', showTopUp: false });
-  });
-});
-
 describe('rendering', () => {
   it('credit notice shows the message, numbers and the top-up link to /company/billing', () => {
     const notice: CreditNotice = { kind: 'credits', code: 'insufficient_credits', message: 'Not enough credits.', required: 120, available: 40 };
@@ -81,25 +60,35 @@ describe('rendering', () => {
     expect(screen.queryByRole('link', { name: 'Top up credits' })).not.toBeInTheDocument();
   });
 
-  it('run warnings: only for completed_with_warnings, lists regions by code, top-up only when credits ran out', () => {
-    const { rerender } = render(<MarketPulseRunWarnings status="completed" regionIssues={[]} />);
+  it('run warnings: only for completed_with_warnings', () => {
+    const { rerender } = render(<MarketPulseRunWarnings status="completed" />);
     expect(screen.queryByRole('status')).not.toBeInTheDocument();
-    rerender(
-      <MarketPulseRunWarnings
-        status="completed_with_warnings"
-        regionIssues={[{ region: 'EU', code: 'INSUFFICIENT_CREDITS' }, { region: 'US', code: 'CHARGED_NO_OUTPUT', charged: true }]}
-      />,
-    );
-    expect(screen.getByRole('status')).toHaveTextContent('EU: Not run: not enough credits.');
-    expect(screen.getByRole('status')).toHaveTextContent(/US: This region was charged/);
-    expect(screen.getByRole('link', { name: 'Top up credits' })).toHaveAttribute('href', '/company/billing');
-    rerender(<MarketPulseRunWarnings status="completed_with_warnings" regionIssues={[{ region: 'US', code: 'CHARGED_NO_OUTPUT' }]} />);
+    rerender(<MarketPulseRunWarnings status="COMPLETED_WITH_WARNINGS" />);
+    expect(screen.getByRole('status')).toHaveTextContent(/some regions didn’t complete/);
+  });
+
+  // b3 2026-11-19: the per-region list was dormant (no producer of run.region_issues on main or the
+  // canonical MP billing) and CHARGED_NO_OUTPUT is unreachable there. Nothing may claim a per-region
+  // charge outcome, refund or "wasn't charged" that no code produces.
+  it('the banner makes no per-region charge, refund or top-up claim', () => {
+    render(<MarketPulseRunWarnings status="completed_with_warnings" />);
+    const status = screen.getByRole('status');
+    expect(status).not.toHaveTextContent(/charged|refund|flagged|no action is needed/i);
     expect(screen.queryByRole('link', { name: 'Top up credits' })).not.toBeInTheDocument();
   });
 
-  it('run warnings without per-region detail still explains the partial result', () => {
-    render(<MarketPulseRunWarnings status="completed_with_warnings" />);
-    expect(screen.getByRole('status')).toHaveTextContent(/some regions didn’t complete/);
+  it('the removed region codes appear nowhere in the UI source', () => {
+    const read = (p: string) => require('fs').readFileSync(require('path').join(process.cwd(), p), 'utf8') as string;
+    const files = [
+      'components/recommendations/tabs/MarketPulseCreditNotices.tsx',
+      'components/recommendations/tabs/MarketPulseTabV2Main.tsx',
+      'components/recommendations/tabs/MarketPulseTabV2Model.tsx',
+    ];
+    for (const f of files) {
+      const src = read(f).replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, ''); // comments may narrate the removal
+      expect(src.length).toBeGreaterThan(200); // non-vacuous: the file was read
+      expect({ f, hit: /CHARGED_NO_OUTPUT|ALREADY_RELEASED|region_issues|describeRegionIssue/.test(src) }).toEqual({ f, hit: false });
+    }
   });
 });
 

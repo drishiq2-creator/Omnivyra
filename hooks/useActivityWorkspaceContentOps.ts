@@ -1,7 +1,8 @@
 import { executeMasterContentPipeline } from '@/lib/planning/executeMasterContentPipeline';
-import { apiFetch } from '@/lib/apiFetch';
+import { postGenerateVariants, postGenerateMaster, shouldFallbackAfter, UnconfirmedOutcomeError } from '@/lib/activity-workspace/postGenerateVariants';
 import type { ScheduleItem } from '../types/activityWorkspace';
 import { asObject, type WorkspacePayload } from '@/lib/activity-workspace/shared';
+import { buildActivityRequestPayload } from '@/lib/activity-workspace/activityRequestPayload';
 
 type NotifyFn = (type: 'success' | 'error' | 'info', message: string) => void;
 
@@ -26,16 +27,18 @@ type Params = {
   findVariantForSchedule: (item: ScheduleItem) => Record<string, unknown> | null;
 };
 
-function buildActivityRequestPayload(payload: WorkspacePayload | null, schedules: ScheduleItem[]) {
-  const primary = schedules[0];
-  return {
-    id: payload?.activityId || primary?.id || `workspace-${Date.now()}`,
-    platform: primary?.platform || 'linkedin',
-    contentType: primary?.contentType || 'post',
-    topic: payload?.topic || payload?.title || '',
-    title: payload?.title || payload?.topic || '',
-    description: payload?.description || '',
-  };
+
+/**
+ * c6's generate_master rule: the activity must resolve to a campaign-backed daily_content_plans row
+ * (its id or execution_id); otherwise it is refused (400/404) BEFORE billing, with a message the user
+ * can't act on from this screen. So the UI asks only when it has a campaign + activity (7c).
+ */
+export const MASTER_NEEDS_SAVED_ACTIVITY = 'Save this activity to a campaign first to generate its master content.';
+
+export function hasCampaignBackedActivity(payload: WorkspacePayload | null): boolean {
+  const campaignId = String(payload?.campaignId ?? '').trim();
+  const executionId = String(payload?.activityId ?? (payload?.dailyExecutionItem as any)?.execution_id ?? '').trim();
+  return Boolean(campaignId && executionId);
 }
 
 export function useActivityWorkspaceContentOps({
@@ -59,24 +62,20 @@ export function useActivityWorkspaceContentOps({
   findVariantForSchedule,
 }: Params) {
   const handleGenerateMasterContent = async () => {
+    if (!hasCampaignBackedActivity(payload)) {
+      notify('info', MASTER_NEEDS_SAVED_ACTIVITY);
+      return;
+    }
     try {
       setIsGeneratingMaster(true);
-      const response = await apiFetch('/api/activity-workspace/content', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'generate_master',
-          activity: buildActivityRequestPayload(payload, schedules),
-          schedules,
-          dailyExecutionItem: payload?.dailyExecutionItem || null,
-          companyId: selectedCompanyId || payload?.companyId || null,
-          campaignId: payload?.campaignId || queryCampaignId || null,
-        }),
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(String(data?.message || data?.error || 'Failed to generate master content'));
-      }
+      // Billed + keyed (c6 @723d40de3): kept on an unknown outcome so a retry replays.
+      const data = await postGenerateMaster({
+        activity: buildActivityRequestPayload(payload, schedules),
+        schedules,
+        dailyExecutionItem: payload?.dailyExecutionItem || null,
+        companyId: selectedCompanyId || payload?.companyId || null,
+        campaignId: payload?.campaignId || queryCampaignId || null,
+      }, 'Failed to generate master content');
       const masterFromResponse =
         asObject(data?.master_content) ||
         asObject(data?.masterContent) ||
@@ -99,7 +98,8 @@ export function useActivityWorkspaceContentOps({
       notify('success', 'Master content generated.');
     } catch (error) {
       console.error('Master generation failed:', error);
-      notify('error', `Failed to generate master content: ${String((error as any)?.message || error)}`);
+      if (error instanceof UnconfirmedOutcomeError) notify('info', error.message);
+      else notify('error', `Failed to generate master content: ${String((error as any)?.message || error)}`);
     } finally {
       setIsGeneratingMaster(false);
     }
@@ -171,7 +171,8 @@ export function useActivityWorkspaceContentOps({
       notify('success', 'Platform variants generated.');
     } catch (error) {
       console.error('Generate variants failed:', error);
-      notify('error', `Failed to generate variants: ${String((error as any)?.message || error)}`);
+      if (error instanceof UnconfirmedOutcomeError) notify('info', error.message);
+      else notify('error', `Failed to generate variants: ${String((error as any)?.message || error)}`);
     } finally {
       setIsGeneratingVariants(false);
     }
@@ -184,23 +185,26 @@ export function useActivityWorkspaceContentOps({
 
       let activeMasterContent = masterContent || currentDaily.master_content || null;
       const masterReady = activeMasterContent && String((activeMasterContent as any)?.content || '').trim().length > 0;
-      if (!masterReady) {
+      // No campaign-backed activity: the master request could only be refused (c6), so skip it; the
+      // variants call below proceeds exactly as it does after a known master failure.
+      if (!masterReady && hasCampaignBackedActivity(payload)) {
         setIsGeneratingMaster(true);
         try {
-          const masterRes = await apiFetch('/api/activity-workspace/content', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              action: 'generate_master',
+          let masterData: any = null;
+          try {
+            masterData = await postGenerateMaster({
               activity: buildActivityRequestPayload(payload, schedules),
               schedules,
               dailyExecutionItem: payload?.dailyExecutionItem || null,
               companyId: selectedCompanyId || payload?.companyId || null,
               campaignId: payload?.campaignId || queryCampaignId || null,
-            }),
-          });
-          const masterData = await masterRes.json().catch(() => ({}));
-          if (masterRes.ok) {
+            }, 'Failed to generate master content');
+          } catch (masterError) {
+            // Unknown outcome: the master may have run and charged; do NOT go on to a second billed
+            // call (variants would generate a master again). A known failure continues as before.
+            if (!shouldFallbackAfter(masterError)) throw masterError;
+          }
+          if (masterData) {
             const newMaster = asObject(masterData?.master_content) || asObject(masterData?.masterContent) || null;
             if (newMaster) {
               activeMasterContent = newMaster;
@@ -217,11 +221,7 @@ export function useActivityWorkspaceContentOps({
         }
       }
 
-      const response = await apiFetch('/api/activity-workspace/content', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'generate_variants',
+      const data = await postGenerateVariants({
           activity: buildActivityRequestPayload(payload, schedules),
           schedules: [schedule],
           dailyExecutionItem: {
@@ -231,12 +231,7 @@ export function useActivityWorkspaceContentOps({
           },
           companyId: selectedCompanyId || payload?.companyId || null,
           campaignId: payload?.campaignId || queryCampaignId || null,
-        }),
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(String(data?.message || data?.error || 'Failed to repurpose content'));
-      }
+      }, 'Failed to repurpose content');
 
       const returnedMaster = asObject(data?.master_content);
       if (returnedMaster && !activeMasterContent) {
@@ -274,7 +269,9 @@ export function useActivityWorkspaceContentOps({
       notify('success', `Repurposed content generated for ${schedule.platform}.`);
     } catch (error) {
       console.error('Repurpose generation failed:', error);
-      notify('error', `Failed to repurpose content: ${String((error as any)?.message || error)}`);
+      // Lost-response class: an unknown outcome claims nothing and never says "failed".
+      if (error instanceof UnconfirmedOutcomeError) notify('info', error.message);
+      else notify('error', `Failed to repurpose content: ${String((error as any)?.message || error)}`);
     } finally {
       setRepurposingByScheduleId((prev) => ({ ...prev, [schedule.id]: false }));
     }
@@ -323,11 +320,7 @@ export function useActivityWorkspaceContentOps({
     }
     try {
       setIsGeneratingVariants(true);
-      const response = await apiFetch('/api/activity-workspace/content', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'generate_variants',
+      const data = await postGenerateVariants({
           activity: buildActivityRequestPayload(payload, schedules),
           schedules: schedules.length > 0 ? schedules : [{ id: 'default', platform: 'linkedin', contentType: 'post' }],
           dailyExecutionItem: {
@@ -338,12 +331,7 @@ export function useActivityWorkspaceContentOps({
           },
           companyId: selectedCompanyId || payload?.companyId || null,
           campaignId: payload?.campaignId || queryCampaignId || null,
-        }),
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(String(data?.message || data?.error || 'Failed to generate promotion content'));
-      }
+      }, 'Failed to generate promotion content');
       const incoming = Array.isArray(data.platform_variants) ? data.platform_variants : [];
       const mergedByKey = new Map<string, Record<string, unknown>>();
       for (const variant of platformVariants) {
@@ -370,7 +358,8 @@ export function useActivityWorkspaceContentOps({
       notify('success', 'Promotion content generated.');
     } catch (error) {
       console.error('Generate creator promotion failed:', error);
-      notify('error', `Failed to generate: ${String((error as any)?.message || error)}`);
+      if (error instanceof UnconfirmedOutcomeError) notify('info', error.message);
+      else notify('error', `Failed to generate: ${String((error as any)?.message || error)}`);
     } finally {
       setIsGeneratingVariants(false);
     }

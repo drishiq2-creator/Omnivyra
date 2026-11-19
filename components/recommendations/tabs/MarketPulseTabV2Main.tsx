@@ -50,7 +50,7 @@ export default function MarketPulseTabV2(props: OpportunityTabProps) {
 
       {errorMessage && <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-800">{errorMessage}</div>}
       <MarketPulseCreditNotice notice={creditNotice} />
-      {runResult && <MarketPulseRunWarnings status={runResult.run.status} regionIssues={runResult.run.region_issues} />}
+      {runResult && <MarketPulseRunWarnings status={runResult.run.status} />}
 
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_320px]">
         <div className="space-y-6">
