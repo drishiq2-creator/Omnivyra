@@ -106,7 +106,9 @@ describe('structural pin: no wirePhase2Route caller can drop settlementPending',
     .filter((f) => /\bwirePhase2Route\s*\(/.test(strip(fs.readFileSync(f, 'utf8'))));
 
   test('the caller set is non-empty (a scan over nothing passes vacuously)', () => {
-    expect(callers.length).toBeGreaterThanOrEqual(21);
+    // 20 since the blog stack (c6 2026-11-19): /api/admin/blog/generate bills a FIXED 40 through blogBilling, no longer
+    // through wirePhase2Route. Non-vacuity floor only - the per-caller assertions below are the property.
+    expect(callers.length).toBeGreaterThanOrEqual(20);
   });
   test('every caller is an API route that opens the surface (createApiRoute or runWithSettlementSurface)', () => {
     const bad = callers.filter((f) => {
