@@ -101,7 +101,8 @@ describe('SEC91-D1 resolveTrustedClientIp', () => {
 describe.each([
   ['ai/gpt-chat', () => gptChat, { message: 'hello', apiKey: 'sk-caller-own', stream: false }],
   ['ai/claude-chat (byok)', () => claudeChat, { message: 'hello', apiKey: 'sk-ant-caller-own', credentialMode: 'byok', stream: false }],
-  ['voice/transcribe', () => transcribe, { audioFile: 'data:audio/webm;base64,AAAAAAAA', provider: 'whisper' }],
+  // F1 (2026-11-13): transcribe requires a company (no company -> 400 COMPANY_REQUIRED before any guard/spend).
+  ['voice/transcribe', () => transcribe, { audioFile: 'data:audio/webm;base64,AAAAAAAA', provider: 'whisper', companyId: CO_A }],
 ] as const)('SEC91-D1 %s guard identity', (_name, h, body) => {
   it('guard receives the authenticated userId and the edge-trusted IP, not the spoofed XFF hop', async () => {
     process.env.VERCEL = '1';
@@ -208,7 +209,7 @@ describe('SEC91-D9 provider requests carry an AbortSignal', () => {
     expect(signalOf(0)).toBeInstanceOf(AbortSignal);
   });
   it('voice/transcribe (Whisper)', async () => {
-    await invoke(transcribe, { method: 'POST', as: 'A', body: { audioFile: 'data:audio/webm;base64,AAAA', provider: 'whisper' } });
+    await invoke(transcribe, { method: 'POST', as: 'A', body: { audioFile: 'data:audio/webm;base64,AAAA', provider: 'whisper', companyId: CO_A } });
     expect(providerCalls()[0]).toContain('/audio/transcriptions');
     expect(signalOf(0)).toBeInstanceOf(AbortSignal);
   });
@@ -222,7 +223,7 @@ describe('SEC91-D9 provider requests carry an AbortSignal', () => {
     }) as never);
     jest.useFakeTimers();
     try {
-      const p = invoke(transcribe, { method: 'POST', as: 'A', body: { audioFile: 'data:audio/webm;base64,AAAA', provider: 'assemblyai' } });
+      const p = invoke(transcribe, { method: 'POST', as: 'A', body: { audioFile: 'data:audio/webm;base64,AAAA', provider: 'assemblyai', companyId: CO_A } });
       await jest.advanceTimersByTimeAsync(2_000);
       const r = await p;
       expect(r.status).toBe(200);
