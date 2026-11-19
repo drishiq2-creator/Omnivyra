@@ -63,8 +63,8 @@ async function pageAll(): Promise<any[]> {
   }
 
   const REASONS: CompanyIdentityDriftReason[] = [
-    'MISSING_ADMIN_EMAIL_DOMAIN', 'MISSING_WEBSITE_DOMAIN', 'MISSING_WEBSITE',
-    'DOMAIN_MISMATCH', 'INVALID_WEBSITE_DOMAIN', 'INVALID_WEBSITE_FORMAT',
+    'MISSING_WEBSITE_DOMAIN', 'MISSING_WEBSITE', 'INVALID_WEBSITE_DOMAIN',
+    'INVALID_WEBSITE_FORMAT', 'WEBSITE_DOMAIN_NOT_NORMALIZED', 'WEBSITE_DOMAIN_MISMATCH',
   ];
   const stamp = new Date().toISOString();
   let md = `# COMPANY_IDENTITY_DRIFT_SUMMARY\n\nTelemetry-only nightly audit. READ-ONLY — no writes. Generated ${stamp}.\n\n`;

@@ -2,15 +2,20 @@
  * companyIdentityDriftService.ts
  *
  * TELEMETRY-ONLY integrity monitor for company identity drift. Detects when
- * admin_email_domain / website_domain / website become inconsistent (over time,
- * via imports, manual edits, migrations, or bugs).
+ * website / website_domain become inconsistent (over time, via imports, manual
+ * edits, migrations, or bugs).
  *
  * This NEVER blocks, NEVER auto-corrects, NEVER mutates data. It only detects
  * and emits a structured COMPANY_IDENTITY_DRIFT_WARNING telemetry event.
  *
- * Canonical identity rule: normalizeCompanyDomain(admin_email_domain) ===
- * normalizeCompanyDomain(website_domain). Normalization reuses the SINGLE
- * source of truth — lib/shared/domain/companyDomain.normalizeCompanyDomain.
+ * Canonical identity rule (owner ruling 2026-11-19): a company's identity is its
+ * WEBSITE domain. Drift = a violation of the companyIdentityWriter invariants only:
+ *   - website IS NULL <=> website_domain IS NULL (a company may have neither);
+ *   - website_domain is the normalised registrable root, and it is the root of website.
+ * admin_email_domain is NOT part of the identity: several companies may share one, a
+ * free-mail company has none, and admin root != website root is legal - never drift.
+ * Normalization reuses the SINGLE source of truth —
+ * lib/shared/domain/companyDomain.normalizeCompanyDomain.
  */
 
 import { normalizeCompanyDomain } from '../../lib/shared/domain/companyDomain';
@@ -26,12 +31,12 @@ export type CompanyIdentityInput = {
 };
 
 export type CompanyIdentityDriftReason =
-  | 'MISSING_ADMIN_EMAIL_DOMAIN'
-  | 'MISSING_WEBSITE_DOMAIN'
-  | 'MISSING_WEBSITE'
-  | 'DOMAIN_MISMATCH'
-  | 'INVALID_WEBSITE_DOMAIN'
-  | 'INVALID_WEBSITE_FORMAT';
+  | 'MISSING_WEBSITE_DOMAIN'          // website set, website_domain missing (Invariant B)
+  | 'MISSING_WEBSITE'                 // website_domain set, website missing or a UUID placeholder (Invariant A)
+  | 'INVALID_WEBSITE_DOMAIN'          // website_domain set but not a parseable domain
+  | 'INVALID_WEBSITE_FORMAT'          // website set but no domain can be extracted
+  | 'WEBSITE_DOMAIN_NOT_NORMALIZED'   // website_domain is not its own registrable root (Invariant C)
+  | 'WEBSITE_DOMAIN_MISMATCH';        // website_domain is not the root of website
 
 export type CompanyIdentityDriftResult = {
   hasDrift: boolean;
@@ -61,21 +66,28 @@ export function checkCompanyIdentityDrift(company: CompanyIdentityInput): Compan
 
   const reasons: CompanyIdentityDriftReason[] = [];
 
-  if (!adminEmailDomain) reasons.push('MISSING_ADMIN_EMAIL_DOMAIN');
-  if (!websiteDomain) reasons.push('MISSING_WEBSITE_DOMAIN');
-  if (!website || isUuid(website)) reasons.push('MISSING_WEBSITE');
+  // A UUID in website is a legacy placeholder, never a website.
+  const realWebsite = website && !isUuid(website) ? website : null;
+  if (website && !realWebsite) reasons.push('MISSING_WEBSITE');
 
-  const normAdmin = adminEmailDomain ? normalizeCompanyDomain(adminEmailDomain) : '';
+  // Invariants A/B: website and website_domain are both set or both null.
+  if (realWebsite && !websiteDomain) reasons.push('MISSING_WEBSITE_DOMAIN');
+  if (websiteDomain && !website) reasons.push('MISSING_WEBSITE');
+
   const normWebsiteDomain = websiteDomain ? normalizeCompanyDomain(websiteDomain) : '';
+  const normWebsite = realWebsite ? normalizeCompanyDomain(realWebsite) : '';
 
-  // website_domain present but not a parseable domain.
+  // website_domain present but not a parseable domain; or parseable but not stored as its root (Invariant C).
   if (websiteDomain && normWebsiteDomain === '') reasons.push('INVALID_WEBSITE_DOMAIN');
+  if (websiteDomain && normWebsiteDomain !== '' && normWebsiteDomain !== websiteDomain.toLowerCase()) {
+    reasons.push('WEBSITE_DOMAIN_NOT_NORMALIZED');
+  }
 
   // website present (and not a UUID placeholder) but no domain can be extracted.
-  if (website && !isUuid(website) && normalizeCompanyDomain(website) === '') reasons.push('INVALID_WEBSITE_FORMAT');
+  if (realWebsite && normWebsite === '') reasons.push('INVALID_WEBSITE_FORMAT');
 
-  // Canonical rule: admin email domain must equal website domain when both exist.
-  if (normAdmin && normWebsiteDomain && normAdmin !== normWebsiteDomain) reasons.push('DOMAIN_MISMATCH');
+  // website_domain must be the root of website. (admin_email_domain is never compared.)
+  if (normWebsite && normWebsiteDomain && normWebsite !== normWebsiteDomain) reasons.push('WEBSITE_DOMAIN_MISMATCH');
 
   return {
     hasDrift: reasons.length > 0,
