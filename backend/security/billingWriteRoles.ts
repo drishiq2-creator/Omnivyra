@@ -1,4 +1,8 @@
 /**
+ * The set is DEFINED in shared/auth/billingAdminRoles.ts (BILLING_ADMIN_ROLES) - the one source the UI also reads
+ * (04/89 2026-11-19). It is re-exported here under the name the billing routes use; do not put a literal list here
+ * (billingAdminRolesPin.test.ts fails on one).
+ *
  * OWNER RULING (2026-11-13, via e9): billing WRITES are company admins only - buying credits, starting a subscription,
  * changing the billing profile or the billing context (country / currency). Platform super admins keep their bypass
  * (requireTenantAccess's platform rule, unchanged).
@@ -19,4 +23,6 @@
  * ALREADY made; refusing them to a non-admin member would strand money that has left the customer. They stay
  * membership-level (any active member of the paying org).
  */
-export const BILLING_WRITE_ROLES: readonly string[] = Object.freeze(['COMPANY_ADMIN', 'SUPER_ADMIN']);
+import { BILLING_ADMIN_ROLES } from '../../shared/auth/billingAdminRoles';
+
+export const BILLING_WRITE_ROLES: readonly string[] = BILLING_ADMIN_ROLES;

@@ -29,6 +29,7 @@
  */
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { enforceRole, Role } from '../rbacService';
+import { CONTENT_AUTHORING_ROLES } from '../../../shared/auth/contentAuthoringRoles';
 
 /**
  * POLICY - AI spend follows authoring (owner ruling "Viewers trigger no AI"; written down 2026-11-13 after 55, 6f and
@@ -39,14 +40,12 @@ import { enforceRole, Role } from '../rbacService';
  * Revisit if a role is ever introduced that may read and SPEND but not author (an analyst / reviewer archetype): then
  * spend needs its own role set, and the spend-only POSTs gated here (first: company blog brief-suggestions) move to it.
  */
-/** Content authoring roles — rbacService PERMISSIONS.CREATE_CAMPAIGN. */
-export const CONTENT_WRITE_ROLES: readonly Role[] = Object.freeze([
-  Role.COMPANY_ADMIN,
-  Role.CONTENT_CREATOR,
-  Role.CONTENT_REVIEWER,
-  Role.CONTENT_PUBLISHER,
-  Role.SUPER_ADMIN,
-]);
+/**
+ * Content authoring roles — rbacService PERMISSIONS.CREATE_CAMPAIGN. DEFINED in shared/auth/contentAuthoringRoles.ts
+ * (CONTENT_AUTHORING_ROLES), the one source the UI also reads (04/89 2026-11-19); do not put a literal list here
+ * (contentAuthoringRolesPin.test.ts fails on one).
+ */
+export const CONTENT_WRITE_ROLES: readonly Role[] = CONTENT_AUTHORING_ROLES;
 
 /**
  * Refuse read-only roles. Returns true when the caller may write; otherwise the
