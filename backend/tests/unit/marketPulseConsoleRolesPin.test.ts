@@ -30,8 +30,9 @@ const CORPUS: Array<string | null | undefined> = [
 ];
 
 describe('Market Pulse console roles: one source, consumed by the server gate', () => {
-  it('the ruling (owner 2026-11-13): company admins, super admins and the platform CONTENT_ARCHITECT session', () => {
-    expect([...MARKET_PULSE_CONSOLE_ROLE_NAMES]).toEqual(['SUPER_ADMIN', 'COMPANY_ADMIN', 'CONTENT_ARCHITECT']);
+  it('the ruling (owner 2026-11-13; CA excluded 2026-11-19): company admins and super admins ONLY', () => {
+    expect([...MARKET_PULSE_CONSOLE_ROLE_NAMES]).toEqual(['SUPER_ADMIN', 'COMPANY_ADMIN']);
+    expect(MARKET_PULSE_CONSOLE_ROLE_NAMES).not.toContain('CONTENT_ARCHITECT');
   });
 
   it('the server set and predicate ARE the module set and predicate', () => {
@@ -51,10 +52,10 @@ describe('Market Pulse console roles: one source, consumed by the server gate', 
     for (const r of CORPUS) expect([r, serverAdmits(r)]).toEqual([r, canUseMarketPulseConsole(r)]);
   });
 
-  it.each([...ADMIN_SPELLINGS, 'SUPER_ADMIN', 'CONTENT_ARCHITECT'])('%j -> true', (r) => {
+  it.each([...ADMIN_SPELLINGS, 'SUPER_ADMIN'])('%j -> true', (r) => {
     expect(canUseMarketPulseConsole(r)).toBe(true);
   });
-  it.each(['VIEW_ONLY', 'VIEWER', 'CONTENT_CREATOR', 'CONTENT_MANAGER', 'CONTENT_REVIEWER', 'CAMPAIGN_ARCHITECT', 'garbage', '', null])('%j -> false', (r) => {
+  it.each(['CONTENT_ARCHITECT', 'content_architect', 'content architect', 'VIEW_ONLY', 'VIEWER', 'CONTENT_CREATOR', 'CONTENT_MANAGER', 'CONTENT_REVIEWER', 'CAMPAIGN_ARCHITECT', 'garbage', '', null])('%j -> false', (r) => {
     expect(canUseMarketPulseConsole(r as string | null)).toBe(false);
   });
 });

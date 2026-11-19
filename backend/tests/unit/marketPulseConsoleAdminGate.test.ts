@@ -5,7 +5,7 @@
  * GETs of watchlist, collaboration, personalization); their company-wide writes (POST) and findings/[id]/shown are
  * console-gated (89/7c 2026-11-19). The console routes - start / cancel scans, run
  * detail, history, automation, finding actions, and the legacy V1 job routes - answer 403 MARKET_PULSE_ADMIN_REQUIRED
- * to anyone but COMPANY_ADMIN / SUPER_ADMIN (and the platform CONTENT_ARCHITECT session). The UI button shows only
+ * to anyone but COMPANY_ADMIN / SUPER_ADMIN (CONTENT_ARCHITECT is refused too, 2026-11-19). The UI button shows only
  * for CompanyContext.isAdmin (same role set), so no button opens a page that 403s.
  *
  * Membership itself (resolveCompanyAccess / enforceCompanyAccess) is faked to grant a chosen role; downstream data
@@ -70,6 +70,10 @@ describe('console routes: members are refused by the server', () => {
   for (const [path, method] of CONSOLE) {
     it(`${method} ${path}: MEMBER -> 403 MARKET_PULSE_ADMIN_REQUIRED`, async () => {
       role = 'CONTENT_CREATOR';
+      expect(gated(await call(path, method))).toBe(true);
+    });
+    it(`${method} ${path}: the CONTENT_ARCHITECT session -> 403 (support staff never run Market Pulse, 2026-11-19)`, async () => {
+      role = 'CONTENT_ARCHITECT';
       expect(gated(await call(path, method))).toBe(true);
     });
     it(`${method} ${path}: COMPANY_ADMIN and SUPER_ADMIN pass the gate`, async () => {

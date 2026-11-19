@@ -11,22 +11,24 @@
  * gate consumes it.
  *
  * Owner ruling 2026-11-13: the scan console (start / cancel scans, run detail, history, automation, finding actions,
- * company-wide Executive-room writes) is company-admin only. CONTENT_ARCHITECT is the platform-internal session that
- * resolveCompanyAccess admits with that synthetic role; it is not a stored company role (normalizeRoleName returns
- * null for it), so the predicate also accepts the upper-cased raw name.
+ * company-wide Executive-room writes) is company-admin only.
+ *
+ * CONTENT_ARCHITECT is deliberately NOT allowed (b3 on the owner's ruling, 2026-11-19). On today's main it is the
+ * legacy synthetic every-company principal; under the ruling the new CA is Omnivyra support staff who edit a company
+ * PROFILE on an open help request and never run Market Pulse. So the console refuses it whether or not the CA
+ * removal lands first. A name the normaliser does not know (such as the synthetic CONTENT_ARCHITECT) is never admitted.
  */
 import { normalizeRoleName } from './roleNormalization';
 
-/** Role names that may use the console (normalised company roles + the synthetic CONTENT_ARCHITECT session). */
-export const MARKET_PULSE_CONSOLE_ROLE_NAMES: readonly string[] = Object.freeze(['SUPER_ADMIN', 'COMPANY_ADMIN', 'CONTENT_ARCHITECT']);
+/** Role names that may use the console: normalised company admins and super admins only. */
+export const MARKET_PULSE_CONSOLE_ROLE_NAMES: readonly string[] = Object.freeze(['SUPER_ADMIN', 'COMPANY_ADMIN']);
 
 /**
- * True when `role` may use the console. A stored company role is normalised the way the server normalises it
- * ('ADMIN' / 'company admin' -> COMPANY_ADMIN); a name the normaliser does not know (the synthetic CONTENT_ARCHITECT)
- * is compared upper-cased with whitespace as '_'.
+ * True when `role` may use the console. The role is normalised the way the server normalises it
+ * ('ADMIN' / 'company admin' -> COMPANY_ADMIN); a role the normaliser does not recognise is refused.
  */
 export function canUseMarketPulseConsole(role: string | null | undefined): boolean {
   if (typeof role !== 'string') return false;
-  const name = normalizeRoleName(role) ?? role.trim().toUpperCase().replace(/\s+/g, '_');
-  return MARKET_PULSE_CONSOLE_ROLE_NAMES.includes(name);
+  const name = normalizeRoleName(role);
+  return name !== null && MARKET_PULSE_CONSOLE_ROLE_NAMES.includes(name);
 }

@@ -7,8 +7,8 @@
  * gate that makes that real (hiding a button is not access control). Scans spend money (LLM + data providers), so
  * starting one is an admin decision.
  *
- * Allowed: SUPER_ADMIN, COMPANY_ADMIN, and the platform-internal CONTENT_ARCHITECT session that resolveCompanyAccess
- * already recognises. Everything else (members, invited, viewers) gets 403 MARKET_PULSE_ADMIN_REQUIRED.
+ * Allowed: SUPER_ADMIN and COMPANY_ADMIN only. Everything else (members, invited, viewers, and the CONTENT_ARCHITECT
+ * session: support staff never run Market Pulse, b3/owner 2026-11-19) gets 403 MARKET_PULSE_ADMIN_REQUIRED.
  */
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { resolveCompanyAccess } from '../contentArchitectService';
