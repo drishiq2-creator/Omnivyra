@@ -18,7 +18,8 @@ export {};
 jest.mock('../../../lib/platform/routeFactory', () => ({ createApiRoute: (h: unknown) => h }));
 
 const mockPublishNow = jest.fn();
-const mockUpdatePostPublishStatus = jest.fn(async (_p: Record<string, unknown>) => undefined);
+// Answers as the real one does: whether a row moved.
+const mockUpdatePostPublishStatus = jest.fn(async (_p: Record<string, unknown>) => true);
 
 type Row = Record<string, unknown>;
 let duePosts: Row[] = [];
@@ -58,8 +59,17 @@ jest.mock('../../db/scheduledPostsStore', () => ({
   updatePostPublishStatus: (...a: unknown[]) => (mockUpdatePostPublishStatus as any)(...a),
 }));
 jest.mock('../../services/publishNowService', () => ({ publishNow: (...a: unknown[]) => mockPublishNow(...a) }));
+// Main resolves a post's account through resolvePostSocialAccount (campaign company, NOT the user's account in any
+// company). Its own suites prove it; this suite is about the D8 status writes around it, so it is controlled here.
+type MockResolution = { ok: boolean; socialAccountId: string | null; companyId: string | null; code: string | null; message: string | null; retryable: boolean };
+let mockResolution: MockResolution;
+const RESOLVE_NONE: MockResolution = { ok: false, socialAccountId: null, companyId: null, code: 'NO_ACCOUNT', message: 'No connected account', retryable: false };
+jest.mock('../../services/postSocialAccountResolver', () => ({ resolvePostSocialAccount: async () => mockResolution }));
+let mockRunJobThrows: Error | null = null;
 jest.mock('../../services/jobRunner', () => ({
-  runJob: async (_spec: unknown, fn: () => Promise<unknown>) => ({ status: 'succeeded', result: await fn() }),
+  runJob: async (_spec: unknown, fn: () => Promise<unknown>) => (mockRunJobThrows
+    ? { status: 'failed', error: mockRunJobThrows }
+    : { status: 'succeeded', result: await fn() }),
 }));
 
 import processScheduledPosts from '../../../pages/api/cron/process-scheduled-posts';
@@ -83,10 +93,12 @@ const due = (id: string): Row => ({
 const ORIGINAL_SECRET = process.env.CRON_SECRET;
 beforeEach(() => {
   jest.clearAllMocks();
+  mockResolution = { ...RESOLVE_NONE };
   process.env.CRON_SECRET = 'cron-test-secret';
   duePosts = [];
   stuckPosts = [];
   postUpdates = [];
+  mockRunJobThrows = null;
   jest.spyOn(console, 'log').mockImplementation(() => {});
 });
 afterAll(() => {
@@ -166,4 +178,48 @@ describe('Closure-003 — the sweep is a compare-and-set on the exact code it re
     expect(postUpdates[1].payload.error_code).toBe('PUBLISH_OUTCOME_UNCERTAIN');
     expect(postUpdates[1].filters).toEqual(expect.arrayContaining([['is', 'error_code', null]]));
   });
+});
+
+describe('CLASS-2 D8 - every cron status write names the status it expects (never a blind flip of a live claim)', () => {
+  it('no connected account: failed only if still `scheduled`; the account patch likewise', async () => {
+    duePosts = [{ ...due('sp-1'), social_account_id: null }];
+    const res = mockRes();
+    await processScheduledPosts(cronReq(), res);
+    expect(mockUpdatePostPublishStatus).toHaveBeenCalledWith(expect.objectContaining({ post_id: 'sp-1', status: 'FAILED', expectedFromStatus: 'scheduled' }));
+  });
+
+  it('a resolved account is patched only onto a still-`scheduled` post', async () => {
+    duePosts = [{ ...due('sp-1'), social_account_id: null }];
+    mockResolution = { ok: true, socialAccountId: 'acct-9', companyId: 'org-1', code: null, message: null, retryable: false };
+    mockPublishNow.mockResolvedValue({ status: 'PUBLISHED', external_post_id: 'e', timestamp: 't' });
+    await processScheduledPosts(cronReq(), mockRes());
+    const patch = postUpdates.find((u) => u.payload.social_account_id === 'acct-9')!;
+    expect(patch.filters).toEqual(expect.arrayContaining([['eq', 'id', 'sp-1'], ['eq', 'status', 'scheduled']]));
+  });
+
+  it('publishNow threw (the run failed): failed only if the post was given back as `scheduled`', async () => {
+    duePosts = [due('sp-1')];
+    mockRunJobThrows = new Error('boom');
+    await processScheduledPosts(cronReq(), mockRes());
+    expect(mockUpdatePostPublishStatus).toHaveBeenCalledWith(expect.objectContaining({ post_id: 'sp-1', status: 'FAILED', expectedFromStatus: 'scheduled' }));
+  });
+
+  it('the result mirror lands only on the status publishNow itself wrote (failed / published)', async () => {
+    duePosts = [due('sp-1'), due('sp-2')];
+    mockPublishNow
+      .mockResolvedValueOnce({ status: 'FAILED', message: 'token expired', timestamp: 't' })
+      .mockResolvedValueOnce({ status: 'PUBLISHED', external_post_id: 'ext-2', timestamp: 't' });
+    await processScheduledPosts(cronReq(), mockRes());
+    expect(mockUpdatePostPublishStatus).toHaveBeenCalledWith(expect.objectContaining({ post_id: 'sp-1', expectedFromStatus: 'failed' }));
+    expect(mockUpdatePostPublishStatus).toHaveBeenCalledWith(expect.objectContaining({ post_id: 'sp-2', expectedFromStatus: 'published' }));
+  });
+});
+
+it('CLASS-2 D8: a status write that moved nothing (another execution owns the post) is LOGGED, not silently counted as handled', async () => {
+  duePosts = [due('sp-1')];
+  mockPublishNow.mockResolvedValue({ status: 'FAILED', message: 'token expired', timestamp: 't' });
+  mockUpdatePostPublishStatus.mockResolvedValueOnce(false);
+  const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+  await processScheduledPosts(cronReq(), mockRes());
+  expect(warn).toHaveBeenCalledWith(expect.stringContaining('status not written'), expect.objectContaining({ post_id: 'sp-1', expected: 'failed' }));
 });
