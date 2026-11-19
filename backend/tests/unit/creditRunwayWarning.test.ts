@@ -8,6 +8,8 @@ type Row = Record<string, any>;
 const db: { balance: Row | null; balanceErr: boolean; tx: Row[]; txErr: boolean; log: Row[]; logErr: boolean; notifications: Row[] } =
   { balance: null, balanceErr: false, tx: [], txErr: false, log: [], logErr: false, notifications: [] };
 const mockRunwayEmail = jest.fn(async () => undefined);
+const mockLogError = jest.fn();
+let insertErr: { code?: string; message: string } | null = null;
 
 function chain(table: string): any {
   const f: Record<string, any> = {};
@@ -17,7 +19,7 @@ function chain(table: string): any {
   q.in = (c: string, v: unknown[]) => { f[`${c}__in`] = v; return q; };
   q.gte = () => q; q.order = () => q; q.limit = () => q;
   q.insert = async (row: Row) => {
-    if (table === 'credit_alert_log') db.log.push({ ...row });
+    if (table === 'credit_alert_log') { if (insertErr) return { error: insertErr }; db.log.push({ ...row }); }
     if (table === 'notifications') db.notifications.push({ ...row });
     return { error: null };
   };
@@ -47,6 +49,7 @@ function chain(table: string): any {
 }
 jest.mock('../../db/writeOwner', () => ({ ownedDbTable: (t: string) => chain(t) }));
 jest.mock('../../db/supabaseClient', () => ({ supabase: { from: (t: string) => chain(t) } }));
+jest.mock('../../services/logger', () => ({ logger: { info: jest.fn(), warn: jest.fn(), error: (...a: unknown[]) => mockLogError(...a) } }));
 jest.mock('../../services/emailService', () => ({ sendCreditRunwayAlert: (...a: unknown[]) => mockRunwayEmail(...(a as [])), sendCreditAlert: jest.fn() }));
 
 import { evaluateRunwayWarning, runCreditRunwaySweep, runwayDays } from '../../services/creditAlertService';
@@ -59,7 +62,7 @@ const setBalance = (n: number) => { db.balance = { free_balance: n, paid_balance
 
 beforeEach(() => {
   db.balance = null; db.balanceErr = false; db.tx = []; db.txErr = false; db.log = []; db.logErr = false; db.notifications = [];
-  mockRunwayEmail.mockClear();
+  mockRunwayEmail.mockClear(); mockLogError.mockClear(); insertErr = null;
 });
 
 test('runwayDays: balance / (burn7 / 7); no burn or no balance -> null', () => {
@@ -151,4 +154,16 @@ test.each([
 test('the sweep fails LOUDLY when it cannot read which orgs spent (never "nobody to warn")', async () => {
   db.txErr = true;
   await expect(runCreditRunwaySweep()).rejects.toThrow(/runway sweep org read failed/);
+});
+
+test.each([
+  ['a CHECK violation (the widening migration is missing)', { code: '23514', message: 'violates check constraint' }, 'credit_alert_suppressed_check_violation'],
+  ['any other dedup write failure', { code: '08006', message: 'connection lost' }, 'credit_alert_dedup_write_failed'],
+])('b3: %s -> NOT sent, but an alertable event is logged (never silent)', async (_n, err, event) => {
+  setBalance(150); db.tx = burn(60);
+  insertErr = err;
+  expect(await evaluateRunwayWarning(ORG)).toBe('none');
+  expect(db.notifications).toEqual([]);
+  expect(mockRunwayEmail).not.toHaveBeenCalled();
+  expect(mockLogError).toHaveBeenCalledWith(event, expect.objectContaining({ orgId: ORG, alertType: 'runway_3d', code: err.code }));
 });

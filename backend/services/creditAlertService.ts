@@ -20,6 +20,8 @@ import { ownedDbTable } from '../db/writeOwner';
 
 import { supabase } from '../db/supabaseClient';
 import { CONFIRM_PHASES } from '../../shared/billing/creditPhaseVocabulary';
+import { incrCounter } from './billing/billingMetrics';
+import { logger } from './logger';
 
 export type AlertType =
   // Absolute low-balance ladder (owner policy 2026-07-10): <100 / <50 / <20.
@@ -248,7 +250,13 @@ async function recordAlert(orgId: string, alertType: AlertType, balance: number)
     notified_at:     new Date().toISOString(),
   });
   if (error) {
-    console.warn(`[creditAlert] alert log write failed for org ${orgId} / ${alertType} - not sent`, error.message);
+    // b3 2026-11-20: "not sent" is fail-SAFE but must not be SILENT. An alertable event + counter; a CHECK violation
+    // (23514) is its own event - the signature of a missing credit_alert_log alert_type widening migration.
+    const code = (error as { code?: string }).code;
+    incrCounter('credit_alert_dedup_write_failed_total');
+    logger.error(code === '23514' ? 'credit_alert_suppressed_check_violation' : 'credit_alert_dedup_write_failed', {
+      orgId, alertType, code: code ?? null, message: error.message,
+    });
     return false;
   }
   return true;

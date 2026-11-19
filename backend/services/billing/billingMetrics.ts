@@ -63,6 +63,8 @@ const counters: Record<string, number> = {
   phase2_shadow_would_block_total:      0,
   // Phase 3.1 — black-hole cost-capture failure (was logs-only).
   black_hole_cost_capture_failed_total: 0,
+  // c6 2026-11-20 - a credit alert's dedup row could not be written, so the alert was NOT sent (fail-safe, alertable).
+  credit_alert_dedup_write_failed_total: 0,
   // Task 5H — pre-HOLD 80% executable-balance safety gate blocked an execution.
   credit_safety_gate_blocked_total:     0,
   // Phase 8D — launch-time admission control (read-only; dark by default).
