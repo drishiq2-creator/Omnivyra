@@ -56,7 +56,9 @@ export type KeyOutcome = { lost: true } | { lost?: false; status: number; body: 
 /** Keep the key? `replays` = the route answers a repeated key from its stored result. */
 export function keepKey(outcome: KeyOutcome, rule: { replays: boolean }): boolean {
   if (!rule.replays) return false;
-  if (outcome.lost) return true;
+  // Narrow with `in`, not on `lost`: the repo compiles with strict: false, where the optional
+  // `lost?: false` does not discriminate the union (CI-630 TS2339 on status/body).
+  if (!('status' in outcome)) return true; // { lost: true }: the only member without a status
   return isUnknownOutcome(outcome.status, outcome.body);
 }
 
