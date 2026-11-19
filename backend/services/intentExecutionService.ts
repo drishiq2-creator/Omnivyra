@@ -157,6 +157,7 @@ const ALWAYS_RUN_JOBS = new Set([
   'engagementSignalArchive',
   'confidenceCalibration',
   'governanceAudit',      // compliance — run even on inactive orgs
+  'creditRunwaySweep',    // money: 3-day runway warning - must reach scheduled-only spenders (owner promise)
   'performanceAggregation', // lightweight daily aggregate
   // Infrastructure recovery, NOT feature work. `staleExecutionSweep` is the
   // only mechanism that transitions a BOLT execution out of `running` when its

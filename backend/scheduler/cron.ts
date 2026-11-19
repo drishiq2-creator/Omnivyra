@@ -169,6 +169,7 @@ const LIFECYCLE_SWEEP_INTERVAL_MS = 6 * 60 * 60 * 1000; // W6-6: retention sweep
 const BUYER_INTENT_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
 const OPPORTUNITY_SLOTS_INTERVAL_MS = 24 * 60 * 60 * 1000; // once per day
 const GOVERNANCE_AUDIT_INTERVAL_MS = 24 * 60 * 60 * 1000; // once per day
+const CREDIT_RUNWAY_SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1000; // once per day - 3-day runway warning (owner promise)
 const AUTO_OPTIMIZATION_INTERVAL_MS = 24 * 60 * 60 * 1000; // once per day
 // CSA-002 — daily Customer Readiness snapshot (activates readiness history).
 const READINESS_SNAPSHOT_INTERVAL_MS = 24 * 60 * 60 * 1000; // once per day
@@ -328,6 +329,7 @@ async function shouldRunPublishCycle(): Promise<boolean> {
 
 let lastOpportunitySlotsRun = 0;
 let lastGovernanceAuditRun = 0;
+let lastCreditRunwaySweepRun = 0;
 let lastAutoOptimizationRun = 0;
 let lastReadinessSnapshotRun = 0; // CSA-002 — daily readiness snapshot
 let lastHealthSnapshotRun = 0;    // CSA-003 — daily health snapshot
@@ -573,6 +575,7 @@ async function startCron(opts: { hostOwnsShutdown?: boolean } = {}) {
   if (Object.keys(saved).length > 0) {
     lastOpportunitySlotsRun             = saved.opportunitySlots            ?? 0;
     lastGovernanceAuditRun              = saved.governanceAudit             ?? 0;
+    lastCreditRunwaySweepRun            = saved.creditRunwaySweep           ?? 0;
     lastAutoOptimizationRun             = saved.autoOptimization            ?? 0;
     lastEngagementPollingEnqueue        = saved.engagementPolling           ?? 0;
     lastIntelligencePollingEnqueue      = saved.intelligencePolling         ?? 0;
@@ -1041,6 +1044,7 @@ async function runSchedulerCycleBody(opts: { includePublishSafetyNet?: boolean }
   const _snap = {
     opportunitySlots:             lastOpportunitySlotsRun,
     governanceAudit:              lastGovernanceAuditRun,
+    creditRunwaySweep:            lastCreditRunwaySweepRun,
     autoOptimization:             lastAutoOptimizationRun,
     engagementPolling:            lastEngagementPollingEnqueue,
     intelligencePolling:          lastIntelligencePollingEnqueue,
@@ -1114,6 +1118,19 @@ async function runSchedulerCycleBody(opts: { includePublishSafetyNet?: boolean }
       console.log('✅ Governance audit completed');
     } catch (error: unknown) {
       console.error('❌ Governance audit error:', formatCaughtError(error));
+    }
+  }
+
+  // 3-day runway warning sweep, once per day (owner promise 2026-11-14; c6 2026-11-20). ALWAYS_RUN: it must evaluate
+  // scheduled-only spenders, whose consumption has no interactive post-confirm alert path.
+  if (shouldRunCronJob("creditRunwaySweep", CREDIT_RUNWAY_SWEEP_INTERVAL_MS, lastCreditRunwaySweepRun)) {
+    lastCreditRunwaySweepRun = Date.now();
+    try {
+      const { runCreditRunwaySweep } = await import('../services/creditAlertService');
+      const r = await runCreditRunwaySweep();
+      console.log(`✅ Credit runway sweep: ${r.evaluated} org(s) evaluated, ${r.warned} warned`);
+    } catch (error: unknown) {
+      console.error('❌ Credit runway sweep error:', formatCaughtError(error));
     }
   }
 
@@ -1786,6 +1803,7 @@ async function runSchedulerCycleBody(opts: { includePublishSafetyNet?: boolean }
   const _after: Record<string, number> = {
     opportunitySlots:             lastOpportunitySlotsRun,
     governanceAudit:              lastGovernanceAuditRun,
+    creditRunwaySweep:            lastCreditRunwaySweepRun,
     autoOptimization:             lastAutoOptimizationRun,
     engagementPolling:            lastEngagementPollingEnqueue,
     intelligencePolling:          lastIntelligencePollingEnqueue,
@@ -1823,6 +1841,7 @@ async function runSchedulerCycleBody(opts: { includePublishSafetyNet?: boolean }
   void cronGuard.save({
     opportunitySlots:             lastOpportunitySlotsRun,
     governanceAudit:              lastGovernanceAuditRun,
+    creditRunwaySweep:            lastCreditRunwaySweepRun,
     autoOptimization:             lastAutoOptimizationRun,
     engagementPolling:            lastEngagementPollingEnqueue,
     intelligencePolling:          lastIntelligencePollingEnqueue,

@@ -155,13 +155,23 @@ type CreditAlertPayload = {
   ctaUrl: string;
 };
 
+type CreditRunwayPayload = {
+  type: 'credit_runway';
+  recipientEmail: string;
+  companyName: string | null;
+  runwayDays: number;
+  remainingCredits: number;
+  ctaUrl: string;
+};
+
 type EmailPayload =
   | InvitePayload
   | CompanyReferralPayload
   | InboundSignupNoticePayload
   | InviteCredentialsPayload
   | ActivationOutreachPayload
-  | CreditAlertPayload;
+  | CreditAlertPayload
+  | CreditRunwayPayload;
 
 async function invokeEdgeFunction(payload: EmailPayload, context: { idempotencyKey?: string }): Promise<void> {
   const { error } = await supabase.functions.invoke('send-transactional-email', {
@@ -292,6 +302,34 @@ export async function sendActivationOutreach(
       recipientEmail: opts.recipientEmail,
       companyName: opts.companyName,
       missingMilestones: opts.missingMilestones,
+      ctaUrl: opts.ctaUrl,
+    },
+    { idempotencyKey },
+  );
+}
+
+/**
+ * credit_runway — 3-day runway warning (owner promise 2026-11-14): "at your current usage your credits will run out in
+ * about N days". Rendered by the Edge Function ('credit_runway'). Best-effort. Governed callers resolve the recipient
+ * from the company admin; do not pass arbitrary emails.
+ */
+export async function sendCreditRunwayAlert(
+  opts: {
+    recipientEmail: string;
+    companyName: string | null;
+    runwayDays: number;
+    remainingCredits: number;
+    ctaUrl: string;
+  },
+  idempotencyKey?: string,
+): Promise<void> {
+  await invokeEdgeFunction(
+    {
+      type: 'credit_runway',
+      recipientEmail: opts.recipientEmail,
+      companyName: opts.companyName,
+      runwayDays: opts.runwayDays,
+      remainingCredits: opts.remainingCredits,
       ctaUrl: opts.ctaUrl,
     },
     { idempotencyKey },

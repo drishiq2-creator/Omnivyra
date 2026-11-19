@@ -31,7 +31,10 @@ export type AlertType =
   | 'low_20pct' | 'low_10pct'
   | 'depleted' | 'auto_topup'
   // Consumption-based warnings (approved policy) — deduped per billing cycle.
-  | 'consumed_80' | 'consumed_90' | 'consumed_95' | 'forecast_insufficient_85';
+  | 'consumed_80' | 'consumed_90' | 'consumed_95' | 'forecast_insufficient_85'
+  // 3-day runway warning (owner promise 2026-11-14; c6 2026-11-20). runway_3d_cleared is the RE-ARM marker: written
+  // when a later evaluation finds the condition gone (e.g. after a top-up), so the next breach warns again.
+  | 'runway_3d' | 'runway_3d_cleared';
 
 const CONSUMED_ALERT_BY_THRESHOLD: Record<number, AlertType> = { 80: 'consumed_80', 90: 'consumed_90', 95: 'consumed_95' };
 
@@ -268,6 +271,126 @@ async function sendAlert(orgId: string, alertType: AlertType, message: string): 
   }
 }
 
+// ── 3-day runway warning (owner promise 2026-11-14; c6 2026-11-20) ───────────
+/**
+ * "When a company's credits are forecast to run out within 3 days, ask them to buy credits" (in-app + email).
+ *   runway_days = balance (free + paid + incentive) / (burn7 / 7), burn7 = the trailing 7-day SETTLED consumption
+ *   (confirm + confirm_partial: getWeeklyConsumption, the shared vocabulary). Fires when balance > 0 AND burn7 > 0 AND
+ *   runway_days <= RUNWAY_WARN_DAYS.
+ * Dedup / re-arm: at most once per RUNWAY_DEDUP_HOURS; a later evaluation that finds the condition GONE (a top-up)
+ * writes runway_3d_cleared, so the next breach warns again even inside the window.
+ * A read failure (balance, consumption, the alert log) sends NOTHING and logs - never a false "you're fine", never a
+ * duplicate.
+ */
+export const RUNWAY_WARN_DAYS = 3;
+const RUNWAY_DEDUP_HOURS = 72;
+
+export function runwayDays(balance: number, burn7: number): number | null {
+  if (!(balance > 0) || !(burn7 > 0)) return null;
+  return balance / (burn7 / 7);
+}
+
+/** The latest runway_3d / runway_3d_cleared row: 'armed' = may warn; null = unreadable (do not warn). */
+async function runwayArmState(orgId: string): Promise<{ armed: boolean; lastWasWarning: boolean } | null> {
+  const { data, error } = await ownedDbTable('credit_alert_log')
+    .select('alert_type, notified_at')
+    .eq('organization_id', orgId)
+    .in('alert_type', ['runway_3d', 'runway_3d_cleared'])
+    .order('notified_at', { ascending: false })
+    .limit(1);
+  if (error) {
+    console.warn(`[creditAlert] runway state read failed for org ${orgId} - no runway warning this run`, error.message);
+    return null;
+  }
+  const last = ((data ?? []) as Array<{ alert_type: string; notified_at: string }>)[0];
+  if (!last) return { armed: true, lastWasWarning: false };
+  if (last.alert_type === 'runway_3d_cleared') return { armed: true, lastWasWarning: false };
+  const ageMs = Date.now() - Date.parse(last.notified_at);
+  return { armed: Number.isFinite(ageMs) && ageMs >= RUNWAY_DEDUP_HOURS * 3600_000, lastWasWarning: true };
+}
+
+async function resolveCompanyName(orgId: string): Promise<string | null> {
+  const { data, error } = await ownedDbTable('companies').select('name').eq('id', orgId).maybeSingle();
+  if (error) return null;
+  const name = (data as { name?: string | null } | null)?.name;
+  return typeof name === 'string' && name.trim() ? name.trim() : null;
+}
+
+/** Best-effort runway email to the company admin - never blocks or throws. */
+async function sendRunwayEmail(orgId: string, days: number, balance: number): Promise<void> {
+  try {
+    const recipient = await resolveAdminEmail(orgId);
+    if (!recipient) return;
+    const { sendCreditRunwayAlert } = await import('./emailService');
+    await sendCreditRunwayAlert(
+      {
+        recipientEmail: recipient,
+        companyName: await resolveCompanyName(orgId),
+        runwayDays: Math.max(1, Math.ceil(days)),
+        remainingCredits: Math.max(0, Math.round(balance)),
+        ctaUrl: `${process.env.NEXT_PUBLIC_APP_URL || 'https://www.omnivyra.com'}/company/billing`,
+      },
+      `credit_runway:${orgId}:${new Date().toISOString().slice(0, 10)}`,
+    );
+  } catch (err) {
+    console.warn(`[creditAlert] runway email failed for org ${orgId}`, (err as Error)?.message);
+  }
+}
+
+/**
+ * Evaluate the runway rung for one org. Returns 'warned' | 'cleared' | 'none' | 'unreadable'.
+ * `balance` is passed in when the caller already read it (checkCreditAlerts); otherwise it is read here.
+ */
+export async function evaluateRunwayWarning(orgId: string, knownBalance?: number | null): Promise<'warned' | 'cleared' | 'none' | 'unreadable'> {
+  const balance = knownBalance ?? await getBalance(orgId);
+  if (balance === null || balance === undefined) return 'unreadable';
+  let burn7: number;
+  try {
+    burn7 = await getWeeklyConsumption(orgId);
+  } catch (err) {
+    console.warn(`[creditAlert] runway consumption read failed for org ${orgId} - no runway warning this run`, (err as Error)?.message);
+    return 'unreadable';
+  }
+  const days = runwayDays(balance, burn7);
+  const breached = days !== null && days <= RUNWAY_WARN_DAYS;
+  const state = await runwayArmState(orgId);
+  if (state === null) return 'unreadable';
+  if (!breached) {
+    // Re-arm: the condition is gone since the last warning (top-up, lower burn) -> the next breach warns again.
+    if (state.lastWasWarning && (await recordAlert(orgId, 'runway_3d_cleared', balance))) return 'cleared';
+    return 'none';
+  }
+  if (!state.armed) return 'none';
+  if (!(await recordAlert(orgId, 'runway_3d', balance))) return 'none';   // dedup row first: unrecorded = not sent
+  const shown = Math.max(1, Math.ceil(days as number));
+  await sendAlert(orgId, 'runway_3d',
+    `At your current usage, your credits will run out in about ${shown} day${shown === 1 ? '' : 's'}. Top up to keep things running.`);
+  await sendRunwayEmail(orgId, days as number, balance);
+  return 'warned';
+}
+
+/**
+ * Daily sweep (ALWAYS_RUN_JOBS 'creditRunwaySweep'): evaluates every org that SETTLED consumption in the past 7 days,
+ * so scheduled-only spenders (no interactive post-confirm path) are warned too. A failed org read aborts the sweep
+ * loudly (never "nobody to warn").
+ */
+export async function runCreditRunwaySweep(): Promise<{ evaluated: number; warned: number }> {
+  const since = new Date(Date.now() - 7 * 24 * 3600_000).toISOString();
+  const { data, error } = await ownedDbTable('credit_transactions')
+    .select('organization_id')
+    .in('execution_phase', [...CONFIRM_PHASES])
+    .gte('created_at', since)
+    .limit(10000);
+  if (error) throw new Error(`[creditAlert] runway sweep org read failed: ${error.message}`);
+  const orgs = Array.from(new Set(((data ?? []) as Array<{ organization_id?: string | null }>)
+    .map((r) => r.organization_id).filter((id): id is string => typeof id === 'string' && id.length > 0)));
+  let warned = 0;
+  for (const orgId of orgs) {
+    if ((await evaluateRunwayWarning(orgId)) === 'warned') warned += 1;
+  }
+  return { evaluated: orgs.length, warned };
+}
+
 // ── Main API ──────────────────────────────────────────────────────────────────
 
 /**
@@ -334,6 +457,13 @@ export async function checkCreditAlerts(
     } catch (err) {
       console.warn(`[creditAlert] velocity check failed for org ${orgId}`, (err as Error)?.message);
     }
+  }
+
+  // ── 3-day runway warning (owner promise; independent of the ladder) ───────
+  try {
+    if ((await evaluateRunwayWarning(orgId, balance)) === 'warned') fired.push('runway_3d');
+  } catch (err) {
+    console.warn(`[creditAlert] runway check failed for org ${orgId}`, (err as Error)?.message);
   }
 
   return { balance, alerts_fired: fired, alerts_suppressed: suppressed };

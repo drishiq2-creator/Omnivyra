@@ -92,6 +92,15 @@ type Template =
       projectedRequiredCredits: number;
       ctaUrl: string;
     }
+  | {
+      // c6 2026-11-20: 3-day runway warning (owner promise 2026-11-14).
+      type: "credit_runway";
+      recipientEmail: string;
+      companyName: string | null;
+      runwayDays: number;
+      remainingCredits: number;
+      ctaUrl: string;
+    }
   // PI-041-A-O — the first PASS-THROUGH template, and deliberately unlike the
   // seven above it.
   //
@@ -284,6 +293,20 @@ function render(t: Template): Envelope {
         to: t.recipientEmail,
         subject: `Low credits — ${t.consumedPercent}% consumed`,
         html: actionLayout("Your credits are running low", body, "Review credits", t.ctaUrl),
+      };
+    }
+    case "credit_runway": {
+      const days = Math.max(1, Math.round(Number(t.runwayDays) || 1));
+      const dayWord = days === 1 ? "day" : "days";
+      const co = t.companyName ? ` for <strong>${escapeHtml(t.companyName)}</strong>` : "";
+      const body =
+        `At your current usage, your credits${co} will run out in about <strong>${escapeHtml(days)} ${dayWord}</strong>.<br/><br/>` +
+        `Remaining: <strong>${escapeHtml(t.remainingCredits.toLocaleString())}</strong> credits.<br/><br/>` +
+        `Top up to keep things running without interruption.`;
+      return {
+        to: t.recipientEmail,
+        subject: `Your credits will run out in about ${days} ${dayWord}`,
+        html: actionLayout("Your credits are running out", body, "Top up credits", t.ctaUrl),
       };
     }
     // PI-041-A-O — PASS-THROUGH. The subject is sent exactly as the Email Engine
@@ -496,6 +519,7 @@ Deno.serve(async (req) => {
     "domain_verification_reminder",
     "activation_outreach",
     "credit_alert",
+    "credit_runway",
     // PI-041-A-O — the pass-through outreach message. Added here AND to the
     // Template union above; the two must stay in sync or an unknown type reaches
     // `render()` and returns undefined.
