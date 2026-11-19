@@ -26,21 +26,27 @@ export const MAX_RECORDING_MS = 5 * 60 * 1000;
 
 /**
  * Transcription is a SPEND path (the provider bills per audio minute). When the client cannot know whether
- * the spend happened, it must not invite a retry (b3 / 7c, 2026-11-20): a 5xx with no `code`, or a lost
- * connection, gets this text. A refusal the route names with a `code` (the AI guard, which refuses
- * BEFORE the provider is called) keeps its own text.
+ * the spend happened, it must not invite a retry (b3 / 7c, 2026-11-20): any 5xx not known to precede the
+ * provider call, or a lost connection, gets this text.
  */
 export const TRANSCRIPTION_UNCERTAIN_MESSAGE =
   'We’re not sure that went through. Check your message before recording again.';
+
+/**
+ * The ONLY 5xx the transcribe route emits BEFORE the paid provider call (its guard's catch,
+ * pages/api/voice/transcribe.ts). Every AiGuardError is 413 or 429 (aiRequestGuard.ts). An allowlist, so a
+ * coded 5xx added later (possibly after the provider call) defaults to the uncertain text (7c).
+ */
+const PRE_SPEND_5XX_CODES: ReadonlySet<string> = new Set(['AI_GUARD_UNAVAILABLE']);
 
 /** A readable message for a failed transcription response. */
 export function transcriptionErrorMessage(status: number, serverError?: string | null, code?: string | null): string {
   if (status === 413) return 'That recording was too long to send. Keep voice notes under 5 minutes, or split them.';
   if (status === 401) return 'Your session expired — sign in again to use voice.';
   if (status === 429) return serverError || 'Too many voice notes in a short time. Wait a moment and try again.';
-  // A 5xx without a code is the route's catch-all, which can follow the paid provider call; its own
-  // "please try again" text is not shown.
-  if (status >= 500 && !code) return TRANSCRIPTION_UNCERTAIN_MESSAGE;
+  // A 5xx not known to precede the spend (incl. the route's coded-less catch-all, whose own text says
+  // "please try again") is an unknown outcome.
+  if (status >= 500 && !(code && PRE_SPEND_5XX_CODES.has(code))) return TRANSCRIPTION_UNCERTAIN_MESSAGE;
   if (serverError) return serverError;
   return status >= 500 ? TRANSCRIPTION_UNCERTAIN_MESSAGE : `Transcription failed (${status}).`;
 }

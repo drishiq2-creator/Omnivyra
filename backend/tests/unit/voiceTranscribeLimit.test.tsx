@@ -48,6 +48,20 @@ describe('voice transcription fits and explains itself', () => {
       .toBe('AI request protection unavailable. Please retry.');
   });
 
+  it('an UNKNOWN coded 5xx (e.g. a future one after the provider call) is treated as uncertain, not trusted (7c)', () => {
+    expect(transcriptionErrorMessage(500, 'Transcription failed, please try again', 'WHISPER_FAILED')).toBe(TRANSCRIPTION_UNCERTAIN_MESSAGE);
+  });
+
+  it('the pre-spend allowlist matches the route: the only coded 5xx it emits is AI_GUARD_UNAVAILABLE', () => {
+    // Positive control on the producer: every coded 5xx literal in the route must be allowlisted in the UI.
+    const read = (p: string) => require('fs').readFileSync(require('path').join(process.cwd(), p), 'utf8') as string;
+    const route = read('pages/api/voice/transcribe.ts');
+    const coded5xx = [...route.matchAll(/status\(5\d\d\)\.json\(\{[^}]*code:\s*'([A-Z_]+)'/g)].map((m) => m[1]);
+    expect(coded5xx).toEqual(['AI_GUARD_UNAVAILABLE']); // non-empty: the pattern matches the real line
+    const ui = read('components/ChatVoiceButton.tsx');
+    for (const code of coded5xx) expect(ui).toContain(`'${code}'`);
+  });
+
   it('records at the speech bitrate, shows a timer, and stops itself at the cap', async () => {
     jest.useFakeTimers();
     const stop = jest.fn();
