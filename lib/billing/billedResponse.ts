@@ -56,7 +56,14 @@ export const KNOWN_UNVERIFIABLE_CODES: readonly string[] = Object.freeze([
   'ORG_CONTROLS_UNVERIFIABLE',
 ]);
 const isUnverifiableCode = (code: string) => /^[A-Z][A-Z0-9_]*_UNVERIFIABLE$/.test(code);
+/** For the KNOWN codes only: each is a pre-charge refusal on the server (B2 org-control preflight,
+ *  B3 budget evaluation), so "Nothing was charged" is traceable to a mechanism. */
 export const UNVERIFIABLE_MESSAGE = 'We couldn’t check your spending limits just now. Nothing was charged. Please try again in a moment.';
+/** For an UNKNOWN *_UNVERIFIABLE code: still a plain retry, but no charge claim, because the UI cannot
+ *  know where a code that doesn't exist yet is raised (b3 ruling 2026-11-19: a protection claim must
+ *  trace to a mechanism). Add a new code to KNOWN_UNVERIFIABLE_CODES once its producer is shown to refuse
+ *  before any reservation. */
+export const UNVERIFIABLE_MESSAGE_NO_CLAIM = 'We couldn’t check your spending limits just now. Please try again in a moment.';
 
 const CREDIT_FALLBACK: Record<string, string> = {
   insufficient_credits: 'You don’t have enough credits for this.',
@@ -130,7 +137,7 @@ export function classifyBilledResponse(status: number, body: unknown, fallback: 
     }
   }
   if (isUnverifiableCode(code)) {
-    return { kind: 'retry', message: UNVERIFIABLE_MESSAGE };
+    return { kind: 'retry', message: KNOWN_UNVERIFIABLE_CODES.includes(code) ? UNVERIFIABLE_MESSAGE : UNVERIFIABLE_MESSAGE_NO_CLAIM };
   }
   const creditKey = [code, errorField].map((c) => c.toLowerCase()).find((c) => CREDIT_CODES.has(c));
   if (status === 402 || creditKey) {
