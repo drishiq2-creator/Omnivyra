@@ -28,10 +28,13 @@ describe('040 - provider_invoice_imports exclusion constraint', () => {
     const { rows } = await db.query(
       `SELECT conname, contype, convalidated, pg_get_constraintdef(oid) AS def FROM pg_constraint
         WHERE conrelid = 'public.provider_invoice_imports'::regclass AND conname = ANY($1) ORDER BY conname`, [[NO_OVERLAP, NONEMPTY]]);
-    expect(rows).toEqual([
-      { conname: NONEMPTY, contype: 'c', convalidated: true, def: "CHECK (((provider = 'stripe'::text) OR (period_end > period_start)))" },
+    // Sorted HERE by plain codepoint order, so the case never depends on the database collation's ordering of
+    // `conname` (CI-613: the expected array listed NONEMPTY first, but 'no_overlap' < 'period_nonempty').
+    const got = [...rows].sort((a, b) => (a.conname < b.conname ? -1 : a.conname > b.conname ? 1 : 0));
+    expect(got).toEqual([
       { conname: NO_OVERLAP, contype: 'x', convalidated: true,
         def: "EXCLUDE USING gist (provider WITH =, tstzrange(period_start, period_end, '[)'::text) WITH &&) WHERE ((provider <> 'stripe'::text))" },
+      { conname: NONEMPTY, contype: 'c', convalidated: true, def: "CHECK (((provider = 'stripe'::text) OR (period_end > period_start)))" },
     ]);
     // the column-read index stays (the GiST index is on an expression); the draft unique index is gone
     const idx = await db.query(`SELECT to_regclass('public.idx_pii_period') IS NOT NULL AS kept, to_regclass('public.provider_invoice_imports_one_per_period_uidx') IS NULL AS draft_gone`);
