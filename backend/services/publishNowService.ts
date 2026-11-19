@@ -538,8 +538,15 @@ export async function refreshScheduledPostMediaFromRefs(input: {
       campaignId: (post.campaign_id as string | null) ?? null,
       scheduledPostId: input.scheduledPostId,
     });
+    // 7c (CI-181 review): this refresh is FAIL-OPEN, and that is correct ONLY because the resolver is NOT the tenant
+    // gate on this path - /api/social/publish authorizes the caller, and the cron path takes its tenant from the joined
+    // social_accounts. If the resolver is ever made the tenant gate here, an unreadable or absent org must fail CLOSED,
+    // as it does in publishProcessor. And never resolve media under an empty-string company: a '' tenant key is a
+    // silent cross-tenant join waiting for a careless .eq(). With no organization there is nothing to refresh, so the
+    // post keeps the media snapshot it already has.
+    if (!organizationId) return;
     const { mediaUrls, resolvedCount } = await resolvePublishMedia({
-      companyId: organizationId ?? '',
+      companyId: organizationId,
       userId: input.userId,
       platform: String(post.platform ?? ''),
       creatorAttachments: post.creator_attachment_metadata,
