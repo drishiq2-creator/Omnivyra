@@ -78,7 +78,8 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   // Write-role gate (e1 2026-11-13, 55's write-role scan): this POST writes no row but SPENDS the company's credits on
   // AI, so it takes the write role under the "AI spend follows authoring" policy (contentWriteAuthz.ts). Revisit if a
   // read-and-spend-but-not-author role is ever introduced - this is the first route that would move.
-  if (req.method !== 'GET' && !(await enforceContentWriteRole({ req, res, companyId: company_id }))) return;
+  // Unconditional: only POST reaches this line (405 above), so a method test here is a TS2367 no-overlap error.
+  if (!(await enforceContentWriteRole({ req, res, companyId: company_id }))) return;
 
   try {
     const profile = await getProfile(company_id, { autoRefine: false, languageRefine: false });
