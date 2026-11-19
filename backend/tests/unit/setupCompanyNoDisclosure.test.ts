@@ -374,7 +374,7 @@ describe('controls (unchanged behaviour)', () => {
     world({}, 'someone@gmail.com');
     const r = await setup('someone@gmail.com', { companyName: VICTIM_NAME });
     expect(r.status).toBe(403);
-    expect(r.body).toEqual({ code: 'INVITE_REQUIRED', error: expect.any(String) });
+    expect(r.body).toEqual({ code: 'INVITE_REQUIRED', error: expect.any(String), next: 'access_request' });
     expect(mockSent).toEqual([]);
   });
 
@@ -585,6 +585,7 @@ describe('7c merge precondition: soft-deleted companies (deleted_at) are out of 
     expect([r.status, r.body]).toEqual([409, {
       code: 'COMPANY_DOMAIN_UNAVAILABLE',
       error: 'This domain cannot be used to create a workspace right now. Please contact support.',
+      next: 'access_request',
     }]);
     expect(JSON.stringify(r.body)).not.toMatch(/admin_email_domain|website_domain|dead\.test|duplicate|unique|constraint|idx_|23505/i);
   });
@@ -757,7 +758,7 @@ describe('owner ruling 2026-11-19: identity is the WEBSITE domain; a shared ADMI
     mockPinnedWebsite = '';
     const r = await setup('founder@nosite.test', { companyName: 'No Site Co' });
     await settle();
-    expect([r.status, r.body]).toEqual([409, { code: 'COMPANY_DOMAIN_UNAVAILABLE', error: expect.any(String) }]);
+    expect([r.status, r.body]).toEqual([409, { code: 'COMPANY_DOMAIN_UNAVAILABLE', error: expect.any(String), next: 'access_request' }]);
     expect(createdCompanies()).toEqual([]);
     expect(rolesOf(REQ)).toEqual([]);
   });

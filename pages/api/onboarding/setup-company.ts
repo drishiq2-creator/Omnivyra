@@ -41,6 +41,7 @@ import {
 } from '../../../backend/services/validatedWebsiteService';
 import { monitorCompanyIdentityDrift } from '../../../backend/services/companyIdentityDriftService';
 import { createCompanyIdentity } from '../../../backend/services/companyIdentityWriter';
+import { ACCESS_REQUEST_NEXT, findApprovedAccessRequestCompany } from '../../../backend/services/approvedAccessRequestService';
 import { saveDomainRecord } from '../../../backend/services/domainRecordService';
 import { buildDiscoveredProvenance } from '../../../backend/services/companyProfile/enrichmentProvenance';
 import { bootstrapCompanyProfile } from '../../../backend/services/companyBootstrapService';
@@ -65,7 +66,8 @@ type Result =
   // admins. The requester learns NOTHING about the company (no id, name, admin, count) - only this
   // neutral notice, identical whatever happens to the admin email afterwards.
   | { companyExists: true; joinRequested: true; message: string }
-  | { code: string; error: string; limit?: number; current?: number | null }
+  // `next: 'access_request'` (vetted path): the refusal sends the person to POST /api/access-request.
+  | { code: string; error: string; limit?: number; current?: number | null; next?: typeof ACCESS_REQUEST_NEXT }
   | { error: string };
 
 // Website-resolution helpers now live in backend/services/validatedWebsiteService.ts
@@ -221,6 +223,63 @@ async function handler(req: NextApiRequest, res: NextApiResponse<Result>) {
 
   if (!companyName.trim()) return res.status(400).json({ error: 'companyName is required' });
 
+  // ── Vetted path (owner ruling 2026-11-19): an APPROVED access request binds, for ANY email ──
+  // A Super Admin approved this person's access request and opened its company (organization_id). The
+  // approval is matched on the VERIFIED session email only (the verification gate above; nothing typed),
+  // and it is decided BEFORE any domain matching: a corporate requester approved for company B is bound
+  // to B, never sent a join request to whichever company holds their email domain. A failed read refuses
+  // (never "no approval", which would fall through to that domain matching).
+  const approval = await findApprovedAccessRequestCompany(user.email);
+  if (!approval.ok) {
+    return res.status(503).json({ error: 'Could not resolve your company. Please try again.' });
+  }
+
+  /**
+   * Attach the user to the approved request's company - the existing Path B semantics, not widened:
+   * COMPANY_ADMIN, active, join_source 'invited' (approved via access request = effectively invited);
+   * an existing membership of that company is left exactly as it is. Read / insert failures refuse.
+   */
+  const bindApprovedAccessRequest = async (orgId: string) => {
+    const now = new Date().toISOString();
+    // Idempotent: only insert if not already a member
+    const { data: existingRole, error: roleReadErr } = await supabase
+      .from('user_company_roles')
+      .select('id')
+      .eq('user_id', user.id)
+      .eq('company_id', orgId)
+      .maybeSingle();
+    if (roleReadErr) {
+      return res.status(503).json({ error: 'Could not resolve your company. Please try again.' });
+    }
+
+    if (!existingRole) {
+      const { error: roleInsertErr } = await supabase.from('user_company_roles').insert({
+        user_id:     user.id,
+        company_id:  orgId,
+        role:        'COMPANY_ADMIN',
+        status:      'active',
+        join_source: 'invited',           // approved via access request = effectively invited
+        accepted_at: now,
+        created_at:  now,
+        updated_at:  now,
+      });
+      // 23505: a concurrent request of the same user inserted the same membership first.
+      if (roleInsertErr && roleInsertErr.code !== '23505') {
+        console.error('[setup-company] approved access request: membership insert failed', { code: roleInsertErr.code });
+        return res.status(500).json({ error: 'Something went wrong. Please try again.' });
+      }
+    }
+
+    // users.role / users.company_id deprecated — only stamp active_company_id
+    // and onboarding_state. Canonical role lives in user_company_roles.
+    await supabase
+      .from('users')
+      .update({ active_company_id: orgId, onboarding_state: 'company_complete', updated_at: now })
+      .eq('id', user.id);
+
+    return res.status(200).json({ companyId: orgId });
+  };
+
   // ── Public-email routing (invite / approved access only) ──────────────────
   // No legitimacy validation here — see Phase 8 note at the imports. We classify
   // public-email purely to route invited / approved-access users to their join
@@ -236,22 +295,12 @@ async function handler(req: NextApiRequest, res: NextApiResponse<Result>) {
         .limit(1)
         .maybeSingle();
 
-      // ── Path B: approved access request ─────────────────────────────────
-      const { data: accessRequest } = user.email
-        ? await supabase
-            .from('access_requests')
-            .select('id, organization_id')
-            .eq('email', user.email.toLowerCase())
-            .eq('status', 'approved')
-            .not('organization_id', 'is', null)
-            .limit(1)
-            .maybeSingle()
-        : { data: null };
-
-      if (!invite && !accessRequest) {
+      // ── Path B: approved access request (read above, for every email) ───
+      if (!invite && !approval.organizationId) {
         return res.status(403).json({
           code:  'INVITE_REQUIRED',
           error: 'You can only join via an organization invite',
+          next:  ACCESS_REQUEST_NEXT,
         });
       }
 
@@ -300,37 +349,13 @@ async function handler(req: NextApiRequest, res: NextApiResponse<Result>) {
       }
 
       // Approved access request: attach user to the pre-created company as COMPANY_ADMIN
-      const orgId = accessRequest!.organization_id as string;
+      return bindApprovedAccessRequest(approval.organizationId as string);
+    }
 
-      // Idempotent: only insert if not already a member
-      const { data: existingRole } = await supabase
-        .from('user_company_roles')
-        .select('id')
-        .eq('user_id', user.id)
-        .eq('company_id', orgId)
-        .maybeSingle();
-
-      if (!existingRole) {
-        await supabase.from('user_company_roles').insert({
-          user_id:     user.id,
-          company_id:  orgId,
-          role:        'COMPANY_ADMIN',
-          status:      'active',
-          join_source: 'invited',           // approved via access request = effectively invited
-          accepted_at: now,
-          created_at:  now,
-          updated_at:  now,
-        });
-      }
-
-      // users.role / users.company_id deprecated — only stamp active_company_id
-      // and onboarding_state. Canonical role lives in user_company_roles.
-      await supabase
-        .from('users')
-        .update({ active_company_id: orgId, onboarding_state: 'company_complete', updated_at: now })
-        .eq('id', user.id);
-
-      return res.status(200).json({ companyId: orgId });
+    // A CORPORATE email with an approved access request (e.g. a@shared.test approved for the company at
+    // beta.test): bound to THAT company, before the domain matching below.
+    if (approval.organizationId) {
+      return bindApprovedAccessRequest(approval.organizationId);
     }
   }
 
@@ -469,6 +494,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse<Result>) {
       return res.status(409).json({
         code:  'COMPANY_DOMAIN_UNAVAILABLE',
         error: 'This domain cannot be used to create a workspace right now. Please contact support.',
+        next:  ACCESS_REQUEST_NEXT,
       });
     }
 
@@ -564,6 +590,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse<Result>) {
         return res.status(409).json({
           code:  'COMPANY_DOMAIN_UNAVAILABLE',
           error: 'This domain cannot be used to create a workspace right now. Please contact support.',
+          next:  ACCESS_REQUEST_NEXT,
         });
       }
     }

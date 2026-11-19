@@ -27,10 +27,6 @@ const WRITERS: Record<string, { premise: RegExp[]; why: string }> = {
     premise: [/website_domain:\s*websiteDomain,/, /const websiteDomain = domainList\[0\] \? \(normalizeCompanyDomain\(domainList\[0\]\) \|\| null\) : null;/],
     why: 'super-admin create; stores the normalised root of the first domain',
   },
-  'pages/api/admin/access-requests/approve.ts': {
-    premise: [/admin_email_domain:\s*null,/],
-    why: 'approved per-email, never claims a domain slot (literal null)',
-  },
 };
 
 /** Writes to `companies` whose payload is a VARIABLE (file:op), keyed by file with the expected count. */
@@ -44,6 +40,17 @@ const VARIABLE_WRITERS: Record<string, { count: number; premise: RegExp[]; why: 
     count: 1,
     premise: [/insertCompany: async \(record\) =>/, /websiteDomain:\s*founderRoot,/, /adminEmailDomain: founderRoot,/, /const founderRoot = publicEmailDomain \? '' : normalizeCompanyDomain\(emailDomain\);/],
     why: 'founder path (owner ruling 2026-11-19): the insertCompany callback handed to companyIdentityWriter inserts the record the writer built; website_domain = admin_email_domain = the normalised email root',
+  },
+  'pages/api/admin/access-requests/approve.ts': {
+    count: 1,
+    premise: [
+      /insertCompany: async \(record\) =>/,
+      /newCompany = await createCompanyIdentity\(/,
+      /websiteDomain:\s*website,/,
+      /const adminEmailDomain = freeMail \? null : emailRoot;/,
+      /const emailRoot = normalizeCompanyDomain\(String\(request\.email \?\? ''\)\);/,
+    ],
+    why: 'vetted path (owner ruling 2026-11-19): the insertCompany callback handed to companyIdentityWriter inserts the record the writer built; website_domain = the writer-normalised root of the approved website; admin_email_domain = the normalised corporate email root, or null for free mail',
   },
   'pages/api/onboarding/setup-company.ts': {
     count: 1,
@@ -104,7 +111,8 @@ describe('companies domain columns: every writer stores the normalised root', ()
 
   it('every inline writer is listed, and the list has no stale entries', () => {
     const found = files.filter((f) => inlineDomainWrites(fs.readFileSync(f, 'utf8')) > 0).map(rel).sort();
-    expect(found.length).toBeGreaterThanOrEqual(2); // create-company + approve (complete.ts now goes through the writer)
+    expect(found.length).toBeGreaterThanOrEqual(1); // create-company (complete.ts and approve.ts now go through the writer)
+    expect(found).toContain('pages/api/admin/create-company.ts'); // non-vacuous: the scanner still sees the inline writer
     const listedInline = Object.keys(WRITERS).filter((k) => k !== 'backend/services/companyIdentityWriter.ts').sort();
     expect({ unlisted: found.filter((f) => !WRITERS[f]), stale: listedInline.filter((k) => !found.includes(k)) })
       .toEqual({ unlisted: [], stale: [] });

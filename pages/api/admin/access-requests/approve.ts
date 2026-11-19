@@ -3,13 +3,21 @@ import { createApiRoute as __createApiRoute } from '../../../../lib/platform/rou
 /**
  * POST /api/admin/access-requests/approve
  *
- * Super-admin only. Approves an influencer/public-email access request.
+ * Super-admin only. Approves an access request (the vetted path, owner ruling 2026-11-19: free mail,
+ * or a corporate email whose domain is not the company website's).
  *
  * On approval (Option A):
- *  1. Creates a company for the approved user (name = request.name or brand)
- *     admin_email_domain = NULL (public domain — no domain claim)
+ *  1. Creates a company for the approved user through companyIdentityWriter
+ *     (name = brandName, else request.company_name, else request.name):
+ *     website + website_domain = the request's website (normalised; the root decides uniqueness),
+ *     admin_email_domain = the corporate email root, or NULL for free mail (no domain claim).
+ *     A website domain a LIVE company already holds -> 409 COMPANY_WEBSITE_TAKEN, nothing written
+ *     (also on a concurrent 23505); an unusable website -> 422 COMPANY_WEBSITE_INVALID;
+ *     a public-suffix website -> 409 COMPANY_WEBSITE_AMBIGUOUS; a failed check -> 503.
  *  2. Stores the new company's ID in access_requests.organization_id
  *  3. Marks the request as 'approved'
+ * The approved requester who later onboards with that VERIFIED email is bound to this company
+ * (setup-company / onboarding/complete), whatever their email domain.
  *
  * Credits: NOT auto-granted. Admin can issue credits manually via
  *   POST /api/super-admin/purchases/complete or manual_credit_grants.
@@ -27,6 +35,14 @@ import { supabase } from '@/backend/db/supabaseClient';
 import { requireCapability } from '../../../../backend/security/requireCapability';
 import { requireAdminRateLimit } from '../../../../backend/services/requestAccessService';
 import { IDENTITY_ADMIN_ASSIGN } from '../../../../shared/contracts/security';
+import { createCompanyIdentity, CompanyIdentityInvariantError } from '../../../../backend/services/companyIdentityWriter';
+import {
+  extractDomain,
+  findCompaniesByWebsiteDomain,
+  isFreeEmailDomain,
+  normalizePublicWebsite,
+} from '../../../../backend/services/companyMatchService';
+import { normalizeCompanyDomain } from '../../../../lib/shared/domain/companyDomain';
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
@@ -66,7 +82,9 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   }
 
   const now     = new Date().toISOString();
-  const company = brandName?.trim() || request.name?.trim() || request.email.split('@')[0];
+  // The company's name: the Super Admin's override, else the company name the requester gave
+  // (/api/access-request company_name), else the legacy single name field.
+  const company = brandName?.trim() || request.company_name?.trim() || request.name?.trim() || request.email.split('@')[0];
 
   // ── Guard: one organization per email ─────────────────────────────────────
   // Another request for this email may already have been approved (duplicate
@@ -104,23 +122,71 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   }
 
   // ── 1. Create company for the approved user ────────────────────────────────
-  // admin_email_domain = NULL — public email domain cannot claim a domain slot.
-  // The user is approved per-email, not per-domain.
-  const { data: newCompany, error: companyErr } = await supabase
-    .from('companies')
-    .insert({
-      name:               company,
-      website:            request.website_url ?? null,
-      admin_email_domain: null,
-      status:             'active',
-      created_at:         now,
-      updated_at:         now,
-    })
-    .select('id')
-    .single();
+  // Through the canonical identity writer (companyIdentityWriter.createCompanyIdentity), so the identity
+  // invariants A/B/D hold: website and website_domain are written together, both normalised.
+  //  - website / website_domain: the website the Super Admin approved (the request's website_url),
+  //    normalised (normalizePublicWebsite) and reduced to its registrable root by the writer. None ->
+  //    both NULL (a free-mail requester may have no website).
+  //  - admin_email_domain: the normalised root of a CORPORATE requester's email (several companies may
+  //    share one - owner ruling 2026-11-19); NULL for free mail, as before (no domain claim).
+  // One LIVE company per website domain: a website domain a live company already holds is refused
+  // (409 COMPANY_WEBSITE_TAKEN) before anything is written; a concurrent create that wins
+  // idx_companies_website_domain_unique (23505) is refused the same way.
+  const rawWebsite = typeof request.website_url === 'string' && request.website_url.trim() ? request.website_url.trim() : null;
+  const website = rawWebsite ? normalizePublicWebsite(rawWebsite) : null;
+  if (rawWebsite && !website) {
+    return res.status(422).json({ code: 'COMPANY_WEBSITE_INVALID', error: 'The requested website is not a valid public company website.' });
+  }
+  const emailHost = extractDomain(String(request.email ?? '')) ?? '';
+  const emailRoot = normalizeCompanyDomain(String(request.email ?? ''));
+  const freeMail = !emailHost || isFreeEmailDomain(emailHost) || !emailRoot || isFreeEmailDomain(emailRoot);
+  const adminEmailDomain = freeMail ? null : emailRoot;
 
-  if (companyErr) {
-    console.error('[access-requests/approve] company creation failed:', companyErr.message);
+  if (website) {
+    const held = await findCompaniesByWebsiteDomain(website);
+    if (!held.ok) {
+      return res.status(503).json({ error: 'Could not check the website. Please try again.' });
+    }
+    if (held.ambiguous) {
+      return res.status(409).json({ code: 'COMPANY_WEBSITE_AMBIGUOUS', error: 'This website cannot identify a single company. Choose another website.' });
+    }
+    if (held.companies.length > 0) {
+      return res.status(409).json({ code: 'COMPANY_WEBSITE_TAKEN', error: 'A company with this website already exists.' });
+    }
+  }
+
+  let newCompany: { id: string };
+  try {
+    newCompany = await createCompanyIdentity(
+      {
+        name:             company,
+        website,
+        websiteDomain:    website,
+        adminEmailDomain,
+        status:           'active',
+        created_at:       now,
+        updated_at:       now,
+      },
+      {
+        insertCompany: async (record) => {
+          const { data, error } = await supabase.from('companies').insert(record).select('id').single();
+          if (error || !data) {
+            const e = new Error(error?.message ?? 'company insert failed') as Error & { code?: string };
+            e.code = error?.code;
+            throw e;
+          }
+          return { id: (data as { id: string }).id };
+        },
+      },
+    );
+  } catch (companyErr) {
+    if ((companyErr as { code?: string })?.code === '23505') {
+      return res.status(409).json({ code: 'COMPANY_WEBSITE_TAKEN', error: 'A company with this website already exists.' });
+    }
+    if (companyErr instanceof CompanyIdentityInvariantError) {
+      return res.status(422).json({ code: 'COMPANY_WEBSITE_INVALID', error: 'The requested website is not a valid public company website.' });
+    }
+    console.error('[access-requests/approve] company creation failed:', (companyErr as Error)?.message);
     return res.status(500).json({ error: 'Failed to create company for approved user' });
   }
 

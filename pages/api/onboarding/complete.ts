@@ -37,7 +37,8 @@ import {
 import { checkRateLimit, ONBOARDING_COMPLETE_LIMIT, ONBOARDING_UID_LIMIT } from '../../../lib/auth/rateLimit';
 import { getTrustedClientIp } from '../../../lib/security/clientIp';
 import { notifyAdminAndProspectOfClaimedDomain } from '../../../backend/services/claimedDomainNotifyService';
-import { isFreeEmailDomain, findCompaniesByVerifiedEmailDomain } from '../../../backend/services/companyMatchService';
+import { isFreeEmailDomain, findCompaniesByVerifiedEmailDomain, extractDomain } from '../../../backend/services/companyMatchService';
+import { ACCESS_REQUEST_NEXT, findApprovedAccessRequestCompany } from '../../../backend/services/approvedAccessRequestService';
 import { normalizeCompanyDomain } from '../../../lib/shared/domain/companyDomain';
 import { createCompanyIdentity } from '../../../backend/services/companyIdentityWriter';
 import { keepAliveAfterResponse } from '../../../lib/runtime/keepAlive';
@@ -172,6 +173,24 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     const expiryDays     = (creditConfig as { expiry_days?: number } | null)?.expiry_days ?? INITIAL_FREE_CREDIT_EXPIRY_DAYS_DEFAULT;
     const expiryAt       = new Date(Date.now() + expiryDays * 86400 * 1000).toISOString();
 
+    // ── 1b. Vetted path (owner ruling 2026-11-19): an APPROVED access request, for ANY email ──
+    // Matched on the VERIFIED session email only (authEmail, behind the verification gate above). A Super
+    // Admin vetted this person and opened their company (organization_id): the answer is THAT company,
+    // decided before eligibility and before any domain matching - a corporate requester approved for
+    // company B is never sent a join request to the company holding their email domain. Free mail keeps
+    // its existing order below (a team invite first, then the approval). A failed read refuses (503): it
+    // is never "no approval", which would fall through to the domain matching.
+    const approval = await findApprovedAccessRequestCompany(authEmail);
+    if (!approval.ok) {
+      console.error('[onboarding/complete] approved access request lookup failed');
+      return res.status(503).json({ error: 'Could not resolve your company. Please try again.' });
+    }
+    const approvedAnswer = (orgId: string) => res.status(200).json({ success: true, inviteOnly: true, companyId: orgId });
+    const authEmailHost = extractDomain(authEmail) ?? '';
+    if (approval.organizationId && authEmailHost && !isFreeEmailDomain(authEmailHost)) {
+      return approvedAnswer(approval.organizationId);
+    }
+
     // ── 2. Domain eligibility ───────────────────────────────────────────────
     if (authEmail) {
       const eligibility = await checkDomainEligibility(authEmail, userId);
@@ -189,23 +208,14 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
           .limit(1)
           .maybeSingle();
 
-        const { data: accessRequest } = await supabase
-          .from('access_requests')
-          .select('id, organization_id')
-          .eq('email', authEmail.toLowerCase())
-          .eq('status', 'approved')
-          .not('organization_id', 'is', null)
-          .limit(1)
-          .maybeSingle();
-
-        if (!invite && !accessRequest) {
-          return res.status(403).json({ code: 'INVITE_REQUIRED', error: 'You can only join via an organization invite' });
+        if (!invite && !approval.organizationId) {
+          return res.status(403).json({ code: 'INVITE_REQUIRED', error: 'You can only join via an organization invite', next: ACCESS_REQUEST_NEXT });
         }
 
         return res.status(200).json({
           success:    true,
           inviteOnly: true,
-          companyId:  (invite as any)?.company_id ?? (accessRequest as any)?.organization_id,
+          companyId:  (invite as any)?.company_id ?? approval.organizationId,
         });
       }
     }
@@ -253,18 +263,24 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       domainCompanyName = domainLookup.companies[0]?.company_name ?? null;
     }
 
-    if (domainCompanyId) {
+    /**
+     * An existing company reached by the verified email domain (the step-3 lookup, or the winner of a
+     * founder INSERT race): the user is bound ONLY through a membership they already hold; otherwise a
+     * join request goes to its admin. Returns true when it has answered (join request / read failure).
+     */
+    const bindExistingOrRequestJoin = async (existingId: string, existingName: string | null): Promise<boolean> => {
       const { data: priorMembership, error: membershipErr } = await supabase
         .from('user_company_roles')
         .select('id')
         .eq('user_id', userId)
-        .eq('company_id', domainCompanyId)
+        .eq('company_id', existingId)
         .in('status', ['active', 'invited'])
         .limit(1)
         .maybeSingle();
       if (membershipErr) {
         console.error('[onboarding/complete] membership lookup failed:', membershipErr.message);
-        return res.status(503).json({ error: 'Could not resolve your company. Please try again.' });
+        res.status(503).json({ error: 'Could not resolve your company. Please try again.' });
+        return true;
       }
       if (!priorMembership) {
         // JOIN REQUEST (owner ruling 2b, option C): no access is granted. The company's active admin
@@ -279,22 +295,26 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
           joinRequested: true,
           error: "Your organization already uses Omnivyra. Your request to join was sent to your organization's administrator.",
         });
-        const joinCompanyId = domainCompanyId;
         const work = notifyAdminAndProspectOfClaimedDomain(supabase, {
           prospectUserId: userId,
           prospectEmail:  authEmail.toLowerCase(),
           emailDomain,
-          companyId:      joinCompanyId,
-          companyName:    domainCompanyName,
+          companyId:      existingId,
+          companyName:    existingName,
           nowIso:         new Date().toISOString(),
         }).then(
           (notice) => { console.info('[onboarding/complete] join request admin notice', { adminNotice: notice?.adminNotice ?? 'failed' }); },
           () => { console.info('[onboarding/complete] join request admin notice', { adminNotice: 'failed' }); },
         );
         void keepAliveAfterResponse(work);
-        return;
+        return true;
       }
-      companyId = domainCompanyId;
+      companyId = existingId;
+      return false;
+    };
+
+    if (domainCompanyId) {
+      if (await bindExistingOrRequestJoin(domainCompanyId, domainCompanyName)) return;
     } else {
       // FOUNDER (owner ruling 2026-11-19): a company's identity is its WEBSITE domain, and self-signup
       // requires the email's registrable domain to BE the website's - so the founder's company is created
@@ -304,12 +324,14 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       // above concluded - no placeholder website, no company.
       const founderRoot = publicEmailDomain ? '' : normalizeCompanyDomain(emailDomain);
       if (!founderRoot) {
-        return res.status(403).json({ code: 'INVITE_REQUIRED', error: 'You can only join via an organization invite' });
+        // Free mail the eligibility classifier did not call PUBLIC_EMAIL: an approval still binds it.
+        if (approval.organizationId) return approvedAnswer(approval.organizationId);
+        return res.status(403).json({ code: 'INVITE_REQUIRED', error: 'You can only join via an organization invite', next: ACCESS_REQUEST_NEXT });
       }
       const website = `https://${emailDomain}`;
       // Through the canonical identity writer: website <-> website_domain are written together, both
-      // domains normalised (Invariants A-D). The injected insert keeps the PostgREST error visible.
-      let newCompanyId: string;
+      // domains normalised (Invariants A-D). The injected insert keeps the PostgREST error (and its code) visible.
+      let newCompanyId: string | null = null;
       try {
         ({ id: newCompanyId } = await createCompanyIdentity(
           {
@@ -323,26 +345,59 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
           {
             insertCompany: async (record) => {
               const { data, error } = await supabase.from('companies').insert(record).select('id').single();
-              if (error || !data) throw new Error(error?.message ?? 'company insert failed');
+              if (error || !data) {
+                const e = new Error(error?.message ?? 'company insert failed') as Error & { code?: string };
+                e.code = error?.code;
+                throw e;
+              }
               return { id: (data as { id: string }).id };
             },
           },
         ));
       } catch (createError) {
-        console.error('[onboarding/complete] company creation failed:', (createError as Error)?.message);
-        return res.status(500).json({ error: 'Could not create company' });
+        // G5 - a concurrent founder of the same website domain won idx_companies_website_domain_unique
+        // (23505): handled like setup-company's race path, never a generic 500. The winner is re-resolved
+        // through the same website-only verified-domain lookup -> a join request to it (or, for a member
+        // of it, that company); several -> 409 ambiguous; none live -> 409 COMPANY_DOMAIN_UNAVAILABLE.
+        if ((createError as { code?: string })?.code === '23505') {
+          const raceLookup = await findCompaniesByVerifiedEmailDomain(authEmail);
+          if (!raceLookup.ok) {
+            console.error('[onboarding/complete] company domain lookup failed after a lost race');
+            return res.status(503).json({ error: 'Could not resolve your company. Please try again.' });
+          }
+          if (raceLookup.ambiguous || raceLookup.companies.length > 1) {
+            console.error('[onboarding/complete] ambiguous company domain after race', { count: raceLookup.companies.length });
+            return res.status(409).json({ code: 'COMPANY_DOMAIN_AMBIGUOUS', error: 'Your company could not be resolved. Please contact support.' });
+          }
+          const raceWinner = raceLookup.companies[0];
+          if (!raceWinner) {
+            // 23505 with NO live company on the domain (a soft-deleted row still holds it in the index).
+            console.error('[onboarding/complete] domain held by no live company (deleted?)');
+            return res.status(409).json({
+              code:  'COMPANY_DOMAIN_UNAVAILABLE',
+              error: 'This domain cannot be used to create a workspace right now. Please contact support.',
+              next:  ACCESS_REQUEST_NEXT,
+            });
+          }
+          if (await bindExistingOrRequestJoin(raceWinner.company_id, raceWinner.company_name)) return;
+        } else {
+          console.error('[onboarding/complete] company creation failed:', (createError as Error)?.message);
+          return res.status(500).json({ error: 'Could not create company' });
+        }
       }
-      companyId = newCompanyId;
-      createdThisRequest = true;
+      if (newCompanyId) {
+        companyId = newCompanyId;
+        createdThisRequest = true;
 
-      await supabase.from('company_profiles').upsert({
-        company_id:  companyId,
-        name:        finalCompanyName,
-        website_url: website,
-        industry:    industry || null,
-        created_at:  new Date().toISOString(),
-        updated_at:  new Date().toISOString(),
-      }, { onConflict: 'company_id', ignoreDuplicates: true });
+        await supabase.from('company_profiles').upsert({
+          company_id:  companyId,
+          name:        finalCompanyName,
+          website_url: website,
+          industry:    industry || null,
+          created_at:  new Date().toISOString(),
+          updated_at:  new Date().toISOString(),
+        }, { onConflict: 'company_id', ignoreDuplicates: true });
+      }
     }
 
     // ── 4. Upsert free_credit_profiles ─────────────────────────────────────
