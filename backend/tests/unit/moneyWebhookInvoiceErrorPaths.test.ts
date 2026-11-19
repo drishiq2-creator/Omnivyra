@@ -154,7 +154,7 @@ describe('webhooks/payments/[provider]', () => {
   // provider_unpaid on a success webhook is capture lag and fails SAFE (05 BLOCKING, f431b4882).
   it('control: an explicitly terminal fulfilment refusal keeps the 200 + logged block', async () => {
     mockScript['credit_purchases:select'] = () => ({ data: { id: 'p1', status: 'pending', fulfillment_status: 'pending' }, error: null });
-    mockFulfillResult = { ok: false, code: 'UNKNOWN', detail: 'provider_amount_differs' };
+    mockFulfillResult = { ok: false, code: 'AMOUNT_MISMATCH', detail: 'provider_amount_differs' };   // the pairing paymentFinancialValidator emits
     const res = mockRes();
     await providerWebhook(rawReq(CAPTURED, { query: { provider: 'razorpay' } }), res);
     expect(res.statusCode).toBe(200);
