@@ -42,15 +42,18 @@ async function upsertCampaignResourceProjectionImpl(campaignId: string, blueprin
     platform_allocation: w.platform_allocation ?? {},
   }));
   if (rows.length === 0) return;
-  // tenant === null is the legacy unscoped path (upsertCampaignResourceProjectionUnscoped only): its handle WRITES
-  // (the .upsert below), keyed on campaign_id alone - recorded debt, see the allow-list entry for the reason.
-  const projection: any = tenant
-    ? await tenantChildTable('campaign_resource_projection', tenant, campaignId)
+  // Both paths are written as VISIBLE calls on purpose (7c/89 2026-11-19): a shared `any` handle hid this write from
+  // check-route-auth and check-tenant-seam alike; an analyser that cannot see a write is worse than a reviewed exemption.
+  let error: { message: string } | null;
+  if (tenant) {
+    const projection = await tenantChildTable('campaign_resource_projection', tenant, campaignId);
+    ({ error } = await projection.upsert(rows, { onConflict: 'campaign_id,week_number' }));
+  } else {
+    // tenant === null is the legacy unscoped path (upsertCampaignResourceProjectionUnscoped only): keyed on
+    // campaign_id alone - recorded debt; see the crossTenantAllowList entry for the reason and exit condition.
     // cross-tenant: campaign-plan-store-legacy-unscoped-projection
-    : supabase.from('campaign_resource_projection');
-  const { error } = await projection.upsert(rows, {
-    onConflict: 'campaign_id,week_number',
-  });
+    ({ error } = await supabase.from('campaign_resource_projection').upsert(rows, { onConflict: 'campaign_id,week_number' }));
+  }
   if (error) {
     console.warn('campaign_resource_projection upsert failed:', error.message);
   }
