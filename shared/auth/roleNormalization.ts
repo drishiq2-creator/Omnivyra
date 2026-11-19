@@ -1,6 +1,8 @@
 /**
- * THE role-name normaliser for code that must not import server modules (UI, shared predicates). Dependency-free:
- * no supabase, next, env or server imports, so client bundles can use it.
+ * THE role-name normaliser for code that must not import server modules (UI, shared role predicates).
+ *
+ * DEPENDENCY-FREE: no imports at all - safe from BOTH client and server bundles. sharedAuthRoleModules.test.ts fails if
+ * an import is added.
  *
  * It MIRRORS backend/services/rbacPrimitives.ts normalizeRole, which the server gates compare against (getUserRole,
  * TenantGuard requireNormalizedRoleIn). rbacPrimitives cannot be imported here because it imports the supabase
