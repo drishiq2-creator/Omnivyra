@@ -48,22 +48,21 @@ const isSettlementPendingBody = (b: Record<string, unknown>) =>
 
 const CREDIT_CODES = new Set(['insufficient_credits', 'no_credit_account', 'pricing_unavailable']);
 
-/** The *_UNVERIFIABLE refusals known today (pinned by the helper test). The helper matches the
- *  SUFFIX, so a new one needs no UI change; add it here so the list stays honest. */
+/** The PRE-CHARGE *_UNVERIFIABLE refusals (pinned by the helper test; c6 confirmed 2026-11-19 that each
+ *  is raised before any hold/reserve: DAILY_LIMIT_ / ORG_CONTROLS_ in orgControlService.preflightCheck,
+ *  BUDGET_ in evaluateCost, an endpoint that reserves nothing). Only these may say "Nothing was charged".
+ *  Planned (c6): the server exports this closed set and the UI derives it from that export. */
 export const KNOWN_UNVERIFIABLE_CODES: readonly string[] = Object.freeze([
   'DAILY_LIMIT_UNVERIFIABLE',
   'BUDGET_UNVERIFIABLE',
   'ORG_CONTROLS_UNVERIFIABLE',
 ]);
 const isUnverifiableCode = (code: string) => /^[A-Z][A-Z0-9_]*_UNVERIFIABLE$/.test(code);
-/** For the KNOWN codes only: each is a pre-charge refusal on the server (B2 org-control preflight,
- *  B3 budget evaluation), so "Nothing was charged" is traceable to a mechanism. */
 export const UNVERIFIABLE_MESSAGE = 'We couldn’t check your spending limits just now. Nothing was charged. Please try again in a moment.';
-/** For an UNKNOWN *_UNVERIFIABLE code: still a plain retry, but no charge claim, because the UI cannot
- *  know where a code that doesn't exist yet is raised (b3 ruling 2026-11-19: a protection claim must
- *  trace to a mechanism). Add a new code to KNOWN_UNVERIFIABLE_CODES once its producer is shown to refuse
- *  before any reservation. */
-export const UNVERIFIABLE_MESSAGE_NO_CLAIM = 'We couldn’t check your spending limits just now. Please try again in a moment.';
+/* Any OTHER *_UNVERIFIABLE code is an UNKNOWN outcome, not a plain retry: the suffix is not a billing
+   vocabulary, and some producers raise it AFTER the effect (c6: super-admin/free-credits/grant.ts returns
+   ROLE_UNVERIFIABLE after credits were granted). So it gets UNCERTAIN_MESSAGE ("check before trying
+   again"), matching billedKeyLifetime, which already keeps the key for it (5xx without billing facts). */
 
 const CREDIT_FALLBACK: Record<string, string> = {
   insufficient_credits: 'You don’t have enough credits for this.',
@@ -137,7 +136,9 @@ export function classifyBilledResponse(status: number, body: unknown, fallback: 
     }
   }
   if (isUnverifiableCode(code)) {
-    return { kind: 'retry', message: KNOWN_UNVERIFIABLE_CODES.includes(code) ? UNVERIFIABLE_MESSAGE : UNVERIFIABLE_MESSAGE_NO_CLAIM };
+    return KNOWN_UNVERIFIABLE_CODES.includes(code)
+      ? { kind: 'retry', message: UNVERIFIABLE_MESSAGE }
+      : { kind: 'uncertain', message: UNCERTAIN_MESSAGE };
   }
   const creditKey = [code, errorField].map((c) => c.toLowerCase()).find((c) => CREDIT_CODES.has(c));
   if (status === 402 || creditKey) {

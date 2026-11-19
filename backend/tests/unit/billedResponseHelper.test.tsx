@@ -7,7 +7,7 @@
 import React from 'react';
 import '@testing-library/jest-dom';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
-import { classifyBilledResponse, billedOutcomeText, TOP_UP_HREF, KNOWN_UNVERIFIABLE_CODES, UNVERIFIABLE_MESSAGE, UNVERIFIABLE_MESSAGE_NO_CLAIM, SETTLEMENT_PENDING_MESSAGE, UNCERTAIN_MESSAGE, RECLAIM_MESSAGE, REPLAY_UNAVAILABLE_MESSAGE } from '../../../lib/billing/billedResponse';
+import { classifyBilledResponse, billedOutcomeText, TOP_UP_HREF, KNOWN_UNVERIFIABLE_CODES, UNVERIFIABLE_MESSAGE, SETTLEMENT_PENDING_MESSAGE, UNCERTAIN_MESSAGE, RECLAIM_MESSAGE, REPLAY_UNAVAILABLE_MESSAGE } from '../../../lib/billing/billedResponse';
 import { createBilledActionKeyGate } from '../../../lib/idempotency';
 
 describe('classifyBilledResponse: keyed on status + code only', () => {
@@ -60,19 +60,25 @@ describe('classifyBilledResponse: keyed on status + code only', () => {
     },
   );
 
-  // b3 ruling 2026-11-19: the UI may not promise "nothing was charged" for a code whose producer it has
-  // never seen. Still a plain retry (no top-up, no code), but no charge claim.
-  it.each(['SOME_FUTURE_UNVERIFIABLE', 'X_UNVERIFIABLE'])(
-    '503 %s (unknown): plain retry WITHOUT a charge claim',
+  // b3 ruling + c6 (2026-11-19): the *_UNVERIFIABLE suffix is NOT a billing vocabulary, and some producers
+  // raise it AFTER the effect (super-admin/free-credits/grant.ts: ROLE_UNVERIFIABLE after credits were
+  // granted). So an unlisted code is an UNKNOWN outcome: no charge claim, and "check before trying again",
+  // never a plain retry. ROLE_ / ADMIN_STATE_ are real producers' codes, not inventions.
+  it.each(['ROLE_UNVERIFIABLE', 'ADMIN_STATE_UNVERIFIABLE', 'SOME_FUTURE_UNVERIFIABLE'])(
+    '503 %s (not a known pre-charge code): uncertain, no charge claim, no plain retry',
     (code) => {
       const out = classifyBilledResponse(503, { error: 'internal detail', code }, 'fallback');
-      expect(out).toEqual({ kind: 'retry', message: UNVERIFIABLE_MESSAGE_NO_CLAIM });
+      expect(out).toEqual({ kind: 'uncertain', message: UNCERTAIN_MESSAGE });
       const text = billedOutcomeText(out);
       expect(text).not.toMatch(/charged/i);
-      expect(text).toMatch(/try again/i);
+      expect(text).toMatch(/check/i);
       expect(text).not.toMatch(/UNVERIFIABLE|Top up|internal detail/);
     },
   );
+
+  it('control: a known pre-charge code is a plain retry, not uncertain', () => {
+    expect(classifyBilledResponse(503, { error: 'x', code: 'BUDGET_UNVERIFIABLE' }, 'fallback').kind).toBe('retry');
+  });
 
   it('the suffix rule needs an exact code shape (not just any string containing it)', () => {
     expect(classifyBilledResponse(503, { error: 'x', code: 'unverifiable' }, 'fallback').kind).toBe('uncertain');
