@@ -159,6 +159,23 @@ describe('unscoped store callers are a frozen, reviewed allowlist (S2-55 7c)', (
     expect(tally(found)).toEqual(allowRows(ALLOWLIST));
   });
 
+  it('the cross-tenant allow-list entry for the legacy projection exists IFF its premise still holds (checkable exit, 7c)', () => {
+    // Premise of crossTenantAllowList 'campaign-plan-store-legacy-unscoped-projection': the Unscoped projection
+    // variant still HAS callers (the three tenant-less writers). When a tenant is threaded through them and the
+    // callers go, this fails until the entry, the null branch and its marker are deleted - an exemption that cannot
+    // outlive its reason.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { CROSS_TENANT_IDS } = require('../../db/crossTenantAllowList');
+    const projectionCalls = Object.values(found).reduce((n, byFn) => n + (byFn.upsertCampaignResourceProjectionUnscoped ?? 0), 0);
+    const store = fs.readFileSync(path.join(ROOT, 'backend/db/campaignPlanStore.ts'), 'utf8');
+    const state = {
+      entry: CROSS_TENANT_IDS.has('campaign-plan-store-legacy-unscoped-projection'),
+      marker: store.includes('cross-tenant: campaign-plan-store-legacy-unscoped-projection'),
+      callers: projectionCalls > 0,
+    };
+    expect([state.entry === state.callers, state.marker === state.callers, state]).toEqual([true, true, state]);
+  });
+
   it('found call count == allowlist call count, and > 0', () => {
     const foundCount = Object.values(found).reduce((n, byFn) => n + Object.values(byFn).reduce((a, b) => a + b, 0), 0);
     const allowCount = Object.values(ALLOWLIST).reduce((n, es) => n + es.reduce((a, e) => a + e.calls, 0), 0);
