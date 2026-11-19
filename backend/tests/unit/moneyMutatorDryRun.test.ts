@@ -82,7 +82,17 @@ jest.mock('../../repositories/creditExecutionRepository', () => ({
 import { reconcileDurableMonetizationReservations } from '../../services/monetizationReservationReconciliationService';
 import { reapOrphanHolds } from '../../services/creditOrphanHoldReaper';
 
-beforeEach(() => { mockFail = {}; mockFailWhen = null; mockWrites.length = 0; mockSettlements.length = 0; mockRpc.length = 0; mockOps.length = 0; });
+import { HoldReleaseDisabledError } from '../../services/billing/holdReleaseGate';
+
+// CI-179 re-land onto main (c6 2026-11-20, named rewrite): main's hold-release gate (e9 2026-11-13, default OFF until
+// 20270217000053) refuses every REAL run. The real-run tests below exercise the mutators' behaviour ONCE the gate is
+// enabled, so the gate is switched on per test and restored; the gate-OFF contract is pinned at the end of this file.
+const savedGate = process.env.CREDIT_HOLD_REAP_ENABLED;
+beforeEach(() => {
+  mockFail = {}; mockFailWhen = null; mockWrites.length = 0; mockSettlements.length = 0; mockRpc.length = 0; mockOps.length = 0;
+  process.env.CREDIT_HOLD_REAP_ENABLED = 'true';
+});
+afterEach(() => { if (savedGate === undefined) delete process.env.CREDIT_HOLD_REAP_ENABLED; else process.env.CREDIT_HOLD_REAP_ENABLED = savedGate; });
 
 describe('monetization reservation reconciler', () => {
   it('dryRun: every decision computed and returned - and NOTHING written', async () => {
@@ -204,5 +214,35 @@ describe('orphan hold reaper - preflight unavailable (05, 2026-11-12)', () => {
       spy.mockRestore();
       HOLDS.splice(0, HOLDS.length, ...realHolds);
     }
+  });
+});
+
+describe('hold-release gate OFF (the default): the report-only dry run still runs; a real run is refused', () => {
+  beforeEach(() => { delete process.env.CREDIT_HOLD_REAP_ENABLED; });
+
+  it('reconciler: dryRun computes every decision and writes NOTHING with the gate off', async () => {
+    const r = await reconcileDurableMonetizationReservations({ dryRun: true });
+    expect(r.dryRun).toBe(true);
+    expect(r).toMatchObject({ confirmed: 1, released: 1, quarantined: 2 });
+    expect(mockSettlements).toEqual([]);
+    expect(mockWrites).toEqual([]);
+    expect(mockOps).toEqual([]);
+  });
+
+  it('reaper: dryRun runs with the gate off, no RPC, no settlement', async () => {
+    const r = await reapOrphanHolds({ dryRun: true });
+    expect(r.dryRun).toBe(true);
+    expect(mockRpc).toEqual([]);
+    expect(mockSettlements).toEqual([]);
+  });
+
+  it.each([
+    ['reconciler', () => reconcileDurableMonetizationReservations({})],
+    ['reaper', () => reapOrphanHolds({})],
+  ])('%s: a REAL run with the gate off throws HoldReleaseDisabledError and writes nothing', async (_n, runReal) => {
+    await expect(runReal()).rejects.toBeInstanceOf(HoldReleaseDisabledError);
+    expect(mockSettlements).toEqual([]);
+    expect(mockWrites).toEqual([]);
+    expect(mockRpc).toEqual([]);
   });
 });
