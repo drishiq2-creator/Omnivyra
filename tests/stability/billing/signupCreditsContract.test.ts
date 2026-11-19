@@ -56,8 +56,9 @@ describe('stability/billing signup -> credits contract', () => {
     const setup = readRepoFile('pages/api/onboarding/setup-company.ts');
     const matcher = readRepoFile('backend/services/companyMatchService.ts');
 
-    // CI-231/309 (2026-11-19): the lookup is the requester's VERIFIED email domain only (website_domain,
-    // then admin_email_domain, by registrable domain), and the "already in system" answer is a neutral
+    // CI-231/309 (2026-11-19): the lookup is the requester's VERIFIED email domain only, matched against
+    // companies.website_domain by registrable domain (owner ruling 2026-11-19: identity = website domain;
+    // admin_email_domain is shared, never matched), and the "already in system" answer is a neutral
     // join-request notice - it never carries the matched company's id/name or its admin.
     expectContainsAll(setup, [
       'findCompaniesByVerifiedEmailDomain(user.email)',
@@ -65,9 +66,10 @@ describe('stability/billing signup -> credits contract', () => {
       "'COMPANY_DOMAIN_AMBIGUOUS'",
     ]);
     expectContainsAll(matcher, [
-      "for (const column of ['website_domain', 'admin_email_domain'] as const)",
+      ".ilike('website_domain', pattern)",
       'normalizeCompanyDomain(verifiedEmail)',
     ]);
+    expect(matcher.includes("ilike('admin_email_domain'") || matcher.includes("'admin_email_domain'] as const")).toBe(false);
     for (const leak of ['matchedCompanyId', 'matchedCompanyName:', 'adminName']) {
       expect([leak, setup.includes(leak)]).toEqual([leak, false]);
     }
