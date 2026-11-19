@@ -48,10 +48,9 @@ describe('every fixed site reads its error and refuses BEFORE acting (structural
     ['pages/api/onboarding/setup-company.ts', 'existingRowsErr', /if \(existingRowsErr\) \{\s*res\.setHeader\('Retry-After', '5'\);\s*return res\.status\(503\)/],
     ['pages/api/company/users.ts', 'adminCountErr', /if \(adminCountErr\) \{\s*res\.setHeader\('Retry-After', '5'\);\s*return res\.status\(503\)/],
     ['pages/api/company/users.ts', 'anotherAdminErr', /if \(anotherAdminErr\) \{\s*res\.setHeader\('Retry-After', '5'\);\s*return res\.status\(503\)/],
-    // grant.ts: NO Retry-After (c6, 2026-11-19). Credits are already granted at this point and, before c6's money
-    // SHIP, every request mints a new grant row and key - an automatic retry would GRANT AGAIN. SHIP replaces this
-    // block (role read failure -> 200 roleEnsured:false); SHIP merges first and its block wins the rebase.
-    ['pages/api/super-admin/free-credits/grant.ts', 'existingRoleErr', /if \(existingRoleErr\) \{\s*return res\.status\(503\)/],
+    // grant.ts: credits are granted BEFORE this read, so its failure is a partial success (200 roleEnsured:false),
+    // never a 503 - a retry minted a new grant and key and GRANTED AGAIN before c6's money SHIP (c6, 2026-11-19).
+    ['pages/api/super-admin/free-credits/grant.ts', 'existingRoleErr', /if \(existingRoleErr\) \{\s*roleEnsured = false;/],
     ['pages/api/super-admin/free-credits/requests.ts', 'existingRoleErr', /if \(existingRoleErr\) \{\s*res\.setHeader\('Retry-After', '5'\);\s*return res\.status\(503\)/],
     ['pages/api/team/accept-invite.ts', 'existingRoleErr', /if \(existingRoleErr\) \{\s*res\.setHeader\('Retry-After', '5'\);\s*return res\.status\(503\)/],
     ['pages/api/super-admin/companies.ts', 'previousActiveErr', /if \(previousActiveErr\) \{\s*res\.setHeader\('Retry-After', '5'\);\s*return res\.status\(503\)/],
@@ -68,6 +67,22 @@ describe('every fixed site reads its error and refuses BEFORE acting (structural
     expect(at).toBeGreaterThan(0);                              // and refuses on it
     expect(s.indexOf(`error: ${errVar}`)).toBeLessThan(at);     // after the read, before anything else uses it
   });
+  it('grant.ts never refuses AFTER the credit is granted: no 503 / retryable anywhere past createCredit', () => {
+    const s = src('pages/api/super-admin/free-credits/grant.ts');
+    const after = s.slice(s.indexOf('createCredit('));
+    expect(s.indexOf('createCredit(')).toBeGreaterThan(0);
+    expect(after).not.toMatch(/status\(503\)/);
+    expect(after).not.toMatch(/retryable:\s*true/);
+  });
+
+  // 7c: the 'thrown form' at these sites is covered by postgrest-js turning a fetch rejection into { error }
+  // (2.105.3 dist/index.cjs:293) - but only while nobody calls .throwOnError(). Pin that absence.
+  it('none of the fixed sites opts into .throwOnError() (the error-object path covers a network failure only without it)', () => {
+    const files = [...new Set(SITES.map(([rel]) => rel))];
+    expect(files.length).toBeGreaterThanOrEqual(10);
+    for (const rel of files) expect([rel, /\.throwOnError\(/.test(src(rel))]).toEqual([rel, false]);
+  });
+
   it('POSITIVE CONTROL: a { data }-only read does not satisfy the pin', () => {
     const old = "const { count: activeOrgCount } = await supabase.from('user_company_roles').select('id');\nif ((activeOrgCount ?? 0) >= maxOrgs) {}";
     expect(new RegExp('error:\\s*orgCountErr\\b').test(old)).toBe(false);

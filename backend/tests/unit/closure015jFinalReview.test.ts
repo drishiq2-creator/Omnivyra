@@ -503,6 +503,37 @@ describe('R-5 / R-6 — onboarding and free credits no longer demote SUPER_ADMIN
     expect(mem('u-newcomer')).toMatchObject({ role: 'COMPANY_ADMIN', status: 'active' });
   });
 
+  // Reads contract + c6 (2026-11-19): credits are granted BEFORE the role step, so a role failure is a PARTIAL
+  // SUCCESS - 200 roleEnsured:false with a warning - never a 503 that invites a retry (a retry granted again).
+  it('the membership READ fails: 200, credited ONCE, roleEnsured:false, membership untouched, no retry instruction', async () => {
+    world();
+    mockFail.add('user_company_roles:select:id, role');
+    const r = await grant({ userId: 'u-newcomer' });
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({ success: true, roleEnsured: false, warning: expect.stringMatching(/NOT ensured/) });
+    expect(r.body.warning).toMatch(/Do not re-send this grant/);
+    expect(r.headers['retry-after']).toBeUndefined();
+    expect(mockCreateCredit).toHaveBeenCalledTimes(1);
+    expect(mem('u-newcomer')).toBeUndefined();
+    expect(membershipWrites()).toHaveLength(0);
+  });
+
+  it('the membership INSERT fails: 200, credited ONCE, roleEnsured:false with a warning (was reported as plain success)', async () => {
+    world();
+    mockFail.add('user_company_roles:insert');
+    const r = await grant({ userId: 'u-newcomer' });
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({ success: true, roleEnsured: false, warning: expect.stringMatching(/NOT created/) });
+    expect(mockCreateCredit).toHaveBeenCalledTimes(1);
+  });
+
+  it('CONTROL: the role step works -> roleEnsured:true and no warning', async () => {
+    world();
+    const r = await grant({ userId: 'u-newcomer' });
+    expect(r.body).toMatchObject({ success: true, roleEnsured: true });
+    expect(r.body).not.toHaveProperty('warning');
+  });
+
   it('R-6 / R-5 source: no SUPER_ADMIN → COMPANY_ADMIN demotion remains in grant, requests or onboarding', () => {
     const root = path.resolve(__dirname, '../../..');
     const demote = /\.update\(\s*\{\s*role:\s*'COMPANY_ADMIN'[\s\S]{0,200}?\.eq\('role',\s*'SUPER_ADMIN'\)/;

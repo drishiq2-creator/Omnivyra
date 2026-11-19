@@ -102,6 +102,12 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   }
 
   // ── 3. If a specific user is tagged, ensure they are COMPANY_ADMIN ─────────
+  // Credits are ALREADY granted at this point, so a failure here is a PARTIAL SUCCESS - never a refusal. A 503
+  // invited a whole-request retry, and every request mints a new grant row and key: the retry GRANTED AGAIN (c6,
+  // 2026-11-19). A failed membership read is still never "no membership" (reads contract): the role is not
+  // touched, and the response says so. Same shape as c6's money SHIP, whose block replaces this one at rebase.
+  let roleEnsured = true;
+  let roleWarning: string | undefined;
   if (userId) {
     const { data: existingRole, error: existingRoleErr } = await sb
       .from('user_company_roles')
@@ -109,18 +115,23 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       .eq('user_id', userId)
       .eq('company_id', organizationId)
       .maybeSingle();
-    // Reads contract (e9 BLOCKING): a FAILED read is not "absent" - refuse retryably instead of acting on a guess. (credits are granted above; the role step is refused, not guessed)
-    if (existingRoleErr) {
-      return res.status(503).json({ error: 'Credits granted, but the user role could not be verified - retry the role step.', code: 'ROLE_UNVERIFIABLE', retryable: true });
-    }
 
-    if (!existingRole) {
-      await sb.from('user_company_roles').insert({
+    if (existingRoleErr) {
+      roleEnsured = false;
+      roleWarning = 'Credits granted. Company-admin membership NOT ensured (the membership could not be read). Assign the role from team settings or contact support. Do not re-send this grant: it would grant the credits again.';
+      console.error('[free-credits/grant] role read failed - membership not changed:', organizationId, existingRoleErr.message);
+    } else if (!existingRole) {
+      const { error: roleInsertErr } = await sb.from('user_company_roles').insert({
         user_id:    userId,
         company_id: organizationId,
         role:       'COMPANY_ADMIN',
         status:     'active',
       });
+      if (roleInsertErr) {
+        roleEnsured = false;
+        roleWarning = 'Credits granted. Company-admin membership NOT created. Assign the role from team settings or contact support. Do not re-send this grant: it would grant the credits again.';
+        console.error('[free-credits/grant] role insert failed:', organizationId, roleInsertErr.message);
+      }
     }
     // Closure-015J (R-6): an existing SUPER_ADMIN membership is left untouched — it
     // already exceeds COMPANY_ADMIN, and platform super-admin authority changes only
@@ -130,7 +141,12 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     // likewise left as is.
   }
 
-  return res.status(200).json({ success: true, grantId: grant.id });
+  return res.status(200).json({
+    success: true,
+    grantId: grant.id,
+    ...(userId ? { roleEnsured } : {}),
+    ...(roleWarning ? { warning: roleWarning } : {}),
+  });
 }
 
 // W0-1 (Gate A): canonical route pipeline — pass-through observability + request context.
