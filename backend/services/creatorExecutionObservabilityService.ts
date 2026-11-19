@@ -6,7 +6,7 @@ export async function recordCreatorExecutionMetric(input: {
   dailyPlanId: string;
   platform?: string | null;
   assetType?: string | null;
-  metricName: 'execution_success_count' | 'execution_failure_count' | 'retry_count' | 'avg_execution_latency' | 'validation_failure_count';
+  metricName: 'execution_success_count' | 'execution_failure_count' | 'retry_count' | 'avg_execution_latency' | 'validation_failure_count' | 'output_rejected_count';
   metricValue: number;
 }): Promise<void> {
   const { error } = await ownedDbTable('creator_execution_metrics')

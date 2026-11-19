@@ -451,6 +451,7 @@ export async function processCreatorStructuredSchedule(input: {
       let finalOutput: CanonicalCreatorOutput | null = null;
       let finalScheduling: CreatorScheduleResult | null = null;
       let readinessFailure: string | null = null;
+      let outputRejections = 0;
       let failureType: 'transient' | 'permanent' | 'stale' | null = null;
 
       await assertCreatorExecutionWithinRateLimits({
@@ -493,9 +494,13 @@ export async function processCreatorStructuredSchedule(input: {
           }
           // A generation that fails validation is OUR failure: it must throw INSIDE the billed unit (before the stash
           // write and the confirm) so the hold is released - never a charge for output we then reject (c6 2026-11-20).
+          // Free in CREDITS only, NOT in provider cost: a retry re-runs generate() at real provider spend with no
+          // revenue, so a rejection stays PERMANENT (a deterministic rejection would otherwise burn every slot). Each
+          // rejection is counted (output_rejected_count) so a rising rate - stochastic vs deterministic - is visible.
           const assertGeneratedValid = (out: unknown) => {
             const generatedValidation = validateCreatorExecutionOutput(out as any);
             if (!generatedValidation.ok) {
+              outputRejections++;
               throw new BoltError(
                 BOLT_ERROR_CODES.SCHEDULING_CREATOR_OUTPUT_INVALID,
                 `Generated creator output failed validation: ${generatedValidation.issues.join('; ')}`,
@@ -837,6 +842,16 @@ export async function processCreatorStructuredSchedule(input: {
           assetType,
           metricName: 'validation_failure_count',
           metricValue: 1,
+        });
+      }
+      if (outputRejections > 0) {
+        await recordCreatorExecutionMetric({
+          campaignId,
+          dailyPlanId: row.id,
+          platform,
+          assetType,
+          metricName: 'output_rejected_count',
+          metricValue: outputRejections,
         });
       }
 

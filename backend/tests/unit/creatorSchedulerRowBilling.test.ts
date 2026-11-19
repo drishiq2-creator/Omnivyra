@@ -189,6 +189,16 @@ it('an output that fails validation RELEASES the hold (our failure is free): not
   expect(out.scheduled_count).toBe(0);
   for (const c of rowContents()) expect(c).not.toHaveProperty('billed_generation');
   expect(mockWrites.filter((w) => w.table === 'daily_content_plans').at(-1)!.values.failure_reason).toContain('failed validation');
+  // a correct silence still needs a number (7c 2026-11-20): the rejection is counted
+  const { recordCreatorExecutionMetric } = jest.requireMock('../../services/creatorExecutionObservabilityService');
+  expect(recordCreatorExecutionMetric).toHaveBeenCalledWith(expect.objectContaining({ metricName: 'output_rejected_count', metricValue: 1 }));
+});
+
+it('no rejection, no output_rejected_count row', async () => {
+  const { recordCreatorExecutionMetric } = jest.requireMock('../../services/creatorExecutionObservabilityService');
+  recordCreatorExecutionMetric.mockClear();
+  await run(rowWith({}));
+  expect(recordCreatorExecutionMetric).not.toHaveBeenCalledWith(expect.objectContaining({ metricName: 'output_rejected_count' }));
 });
 
 it('NOT enforced: today\'s path - generation per attempt, no engine call, no stash written', async () => {

@@ -169,6 +169,14 @@ export async function generateCreatorRowBilled<T extends object>(args: {
               `creator row billing refused: the refund for ${referenceId} could not be recorded yet - retry`);
           }
           if (out.status === 'protected') {
+            // The name promises a review: route it to the money surface, not only to the scheduler's failure audit
+            // (7c 2026-11-20). The org holds a real un-refunded charge for an output it never received. emitAnomaly
+            // logs it at error level with the metadata below.
+            emitAnomaly({
+              kind: 'refund_needs_review', severity: 'critical', organizationId: companyId,
+              message: 'creator row: a pre-change charge with no output could not be refunded automatically (protected organisation) - review and refund',
+              metadata: { ...ctx, surface: CREATOR_ROW_SURFACE, referenceId, confirmKey, confirmTxnId: charge.confirmTxnId },
+            });
             throw new CreatorRowBillingRefusedError('REFUND_NEEDS_REVIEW', false,
               `creator row billing refused: ${referenceId} needs a reviewed refund (protected organisation)`);
           }

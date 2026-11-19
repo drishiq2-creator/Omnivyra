@@ -174,6 +174,23 @@ describe('enforced', () => {
     expect(generate).not.toHaveBeenCalled();
   });
 
+  it('protected: the review is REQUESTED - a critical refund_needs_review anomaly naming the charge (7c 2026-11-20)', async () => {
+    ledger.set(keyFor(0), 'settled'); chargeAt(0);
+    mockRefundStatus = 'protected';
+    await generateCreatorRowBilled({ ...BASE, generate: jest.fn() }).catch(() => undefined);
+    expect(mockAnomalies).toEqual([expect.objectContaining({
+      kind: 'refund_needs_review', severity: 'critical', organizationId: 'org-1',
+      metadata: expect.objectContaining({ referenceId: 'creator_row:c-1:row-1:v3', confirmKey: `${keyFor(0)}:confirm`, confirmTxnId: 'txn-0' }),
+    })]);
+  });
+
+  it('unrecorded is retryable and NOT an anomaly (the retry re-attempts the refund)', async () => {
+    ledger.set(keyFor(0), 'settled'); chargeAt(0);
+    mockRefundStatus = 'unrecorded';
+    await generateCreatorRowBilled({ ...BASE, generate: jest.fn() }).catch(() => undefined);
+    expect(mockAnomalies).toEqual([]);
+  });
+
   it('an owed refund (recorded, grant pending) still proceeds to the next slot', async () => {
     ledger.set(keyFor(0), 'settled'); chargeAt(0);
     mockRefundStatus = 'owed';
