@@ -54,18 +54,40 @@ function productionFiles(): string[] {
 
 type Hit = { file: string; line: number; text: string };
 
-function scan(files: string[], pattern: RegExp, allowLine?: (line: string) => boolean): Hit[] {
+function scan(files: string[], pattern: RegExp, allowLine?: (line: string, lines: string[], i: number) => boolean): Hit[] {
   const hits: Hit[] = [];
   for (const file of files) {
     const lines = fs.readFileSync(path.join(ROOT, file), 'utf8').split(/\r?\n/);
     lines.forEach((text, i) => {
-      if (pattern.test(text) && !(allowLine && allowLine(text))) {
+      if (pattern.test(text) && !(allowLine && allowLine(text, lines, i))) {
         hits.push({ file, line: i + 1, text: text.trim() });
       }
     });
   }
   return hits;
 }
+
+/** True when `line` opens a Set-Cookie parts array for content_architect_session (empty value) that ends in Max-Age=0. */
+function isClearingCookieLine(line: string, lines: string[], i: number): boolean {
+  if (!/^\s*'content_architect_session=',\s*$/.test(line)) return false;
+  for (let j = i + 1; j < Math.min(lines.length, i + 12); j++) {
+    if (/\]\.join\(/.test(lines[j])) return false;   // the array closed without expiring the cookie
+    if (/^\s*'Max-Age=0',?\s*$/.test(lines[j])) return true;
+  }
+  return false;
+}
+
+describe('isClearingCookieLine (positive / negative controls)', () => {
+  const arr = (...parts: string[]) => ['  const c = [', ...parts, "  ].join('; ');"];
+  test('an expiring parts array is clearing', () => {
+    const l = arr("    'content_architect_session=',", "    'Path=/',", "    'Max-Age=0',");
+    expect(isClearingCookieLine(l[1], l, 1)).toBe(true);
+  });
+  test('the same array WITHOUT Max-Age=0 (a cookie being SET) is NOT exempt', () => {
+    const l = arr("    'content_architect_session=',", "    'Path=/',", "    'Max-Age=86400',");
+    expect(isClearingCookieLine(l[1], l, 1)).toBe(false);
+  });
+});
 
 describe('legacy Content Architect path — static guard over production code', () => {
   const files = productionFiles();
@@ -89,7 +111,10 @@ describe('legacy Content Architect path — static guard over production code', 
   it('no production file reads the content_architect_session cookie', () => {
     // The ONLY permitted occurrence is the Set-Cookie value that CLEARS a stale
     // browser cookie on super-admin login/logout (`'content_architect_session=',`).
-    const clearOnly = (line: string) => /^\s*'content_architect_session=',\s*$/.test(line);
+    // 7c 2026-11-20: the line alone cannot tell CLEARING from SETTING (an empty value is also how a cookie can be
+    // written). It is exempt only as the FIRST element of a Set-Cookie parts array that EXPIRES it: 'Max-Age=0'
+    // appears before that array's `].join(` - i.e. the cookie is being deleted, never set.
+    const clearOnly = (line: string, lines: string[], i: number) => isClearingCookieLine(line, lines, i);
     expect(scan(files, /content_architect_session/, clearOnly)).toEqual([]);
   });
 
