@@ -60,7 +60,8 @@ import {
 type Result =
   | { companyId: string; selfJoined?: boolean; matchedCompanyName?: string }
   | { companyExists: true; matchedCompanyId: string; matchedCompanyName: string; adminName: string | null }
-  | { code: string; error: string; limit?: number; current?: number | null }
+  // retryable: a read that FAILED (503 + Retry-After) - not a refusal on the facts (reads contract, 2026-11-19).
+  | { code: string; error: string; limit?: number; current?: number | null; retryable?: boolean }
   | { error: string };
 
 // Website-resolution helpers now live in backend/services/validatedWebsiteService.ts
