@@ -32,9 +32,15 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
 /** Run a route handler with settlementPending surfacing on `res`. */
 export function runWithSettlementSurface<T>(res: JsonRes, fn: () => T): T {
   const box: Box = {};
+  // CI-630 (2026-11-19): the wrapper exists only WHILE the handler runs. It used to stay on `res` forever, so any caller
+  // holding the original res.json (test doubles inspecting res.json.mock, middleware comparing identity) found a plain
+  // function afterwards - 18 unit + 22 integration suites broke. Restored when fn settles (sync or async).
+  const unwrapped = res.json;
+  let wrapper: ((body: any) => any) | null = null;
+  const restore = () => { if (wrapper && res.json === wrapper) res.json = unwrapped; };
   try {
     const original = res.json.bind(res);
-    res.json = (body: any) => {
+    wrapper = res.json = (body: any) => {
       const status = Number(res.statusCode ?? 200);
       if (box.pending && status >= 200 && status < 300) {
         if (isPlainObject(body)) {
@@ -48,7 +54,18 @@ export function runWithSettlementSurface<T>(res: JsonRes, fn: () => T): T {
   } catch {
     /* a response object we cannot wrap: the report below still counts + logs */
   }
-  return scope.run(box, fn);
+  let out: T;
+  try {
+    out = scope.run(box, fn);
+  } catch (err) {
+    restore();
+    throw err;
+  }
+  if (out && typeof (out as unknown as Promise<unknown>).then === 'function') {
+    return (out as unknown as Promise<unknown>).finally(restore) as unknown as T;
+  }
+  restore();
+  return out;
 }
 
 /** Called by the billing layer when finished work has an ambiguous settle. True when it will reach the response. */
