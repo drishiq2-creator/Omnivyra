@@ -11,6 +11,8 @@
  * Membership itself (resolveCompanyAccess / enforceCompanyAccess) is faked to grant a chosen role; downstream data
  * access is a permissive fake. Each route is asserted only on whether the console gate let the request through.
  */
+// A module, not a global script: its top-level names must not collide with other test files in the backend-tests typecheck.
+export {};
 type Row = Record<string, any>;
 const CO = 'c0a00000-0000-4000-8000-00000000000a';
 let role = 'COMPANY_ADMIN';
