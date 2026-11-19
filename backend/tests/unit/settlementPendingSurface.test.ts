@@ -107,7 +107,8 @@ describe('structural pin: no wirePhase2Route caller can drop settlementPending',
 
   test('the caller set is non-empty (a scan over nothing passes vacuously)', () => {
     // 20 since the blog stack (c6 2026-11-19): /api/admin/blog/generate bills a FIXED 40 through blogBilling, no longer
-    // through wirePhase2Route. Non-vacuity floor only - the per-caller assertions below are the property.
+    // through wirePhase2Route - its settlementPending contract (blogBilling CREDIT_SETTLE_AMBIGUOUS) is now asserted by
+    // blogFixedPriceBilling.test.ts. Non-vacuity floor only - the per-caller assertions below are the property.
     expect(callers.length).toBeGreaterThanOrEqual(20);
   });
   test('every caller is an API route that opens the surface (createApiRoute or runWithSettlementSurface)', () => {
