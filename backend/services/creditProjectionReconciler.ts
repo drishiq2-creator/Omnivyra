@@ -190,22 +190,32 @@ export function computeFromLedger(rows: LedgerRow[]): ComputedWallet {
   };
 }
 
-/** Page through the org's ledger (immutable rows; order is irrelevant to the sum). */
+/**
+ * Page through the org's ledger by KEYSET on the primary key (05 review 2026-11-13): `WHERE id > last ORDER BY id
+ * LIMIT n`. OFFSET paging was unsafe twice over: without ORDER BY a page can skip / duplicate rows (fixed by ordering),
+ * and even ordered, the id is a RANDOM uuid (gen_random_uuid), so a ledger row INSERTED during the scan can land below
+ * the cursor and shift a later OFFSET page - a row counted twice in a money rebuild. credit_transactions is
+ * append-only (20260663 immutability triggers block UPDATE / DELETE), so deletions cannot shift pages today; keyset
+ * does not depend on that either. The sum over rows is order-independent.
+ */
 async function loadLedger(organizationId: string): Promise<LedgerRow[] | null> {
   const rows: LedgerRow[] = [];
-  for (let from = 0; ; from += LEDGER_PAGE) {
-    const { data, error } = await supabase
+  let lastId: string | null = null;
+  for (;;) {
+    let q = supabase
       .from('credit_transactions')
-      .select('execution_phase, free_delta, paid_delta, incentive_delta, idempotency_key')
-      .eq('organization_id', organizationId)
-      .range(from, from + LEDGER_PAGE - 1);
+      .select('id, execution_phase, free_delta, paid_delta, incentive_delta, idempotency_key')
+      .eq('organization_id', organizationId);
+    if (lastId !== null) q = q.gt('id', lastId);
+    const { data, error } = await q.order('id', { ascending: true }).limit(LEDGER_PAGE);
     if (error) {
       diag('ledger_read_failed', { organizationId, message: error.message });
       return null;
     }
-    const batch = (data ?? []) as LedgerRow[];
+    const batch = (data ?? []) as Array<LedgerRow & { id: string }>;
     rows.push(...batch);
     if (batch.length < LEDGER_PAGE) break;
+    lastId = batch[batch.length - 1].id;
   }
   return rows;
 }
@@ -230,11 +240,18 @@ async function reconcileImpl(organizationId: string): Promise<ReconcileResult> {
   // to the caller. Re-read the row immediately before writing — if a healthy
   // row exists, the projection was never broken: skip the write entirely so
   // a live wallet is never clobbered by a rebuild.
-  const { data: existingRow } = await supabase
+  // A READ ERROR here is "unknown", never "absent" (e1 2026-11-12, BLOCKING money): the former code ignored the
+  // error, so a transient failure looked like a missing wallet and the guard let the rebuild overwrite a live one -
+  // the 2026-07-09 incident class inside the incident's own guard. Abort; write nothing.
+  const { data: existingRow, error: existingErr } = await supabase
     .from('organization_credits')
     .select('free_balance, paid_balance, incentive_balance, lifetime_purchased, lifetime_consumed')
     .eq('organization_id', organizationId)
     .maybeSingle();
+  if (existingErr) {
+    diag('reconcile_aborted_wallet_read_failed', { organizationId, message: existingErr.message });
+    return { outcome: 'failed', organizationId };
+  }
   if (existingRow && !projectionIsBroken(existingRow as Record<string, unknown>)) {
     diag('reconcile_skipped_row_healthy', { organizationId });
     return { outcome: 'skipped_healthy', organizationId };
