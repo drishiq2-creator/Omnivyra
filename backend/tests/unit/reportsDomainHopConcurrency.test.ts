@@ -16,11 +16,21 @@ resetGate();
 
 function builder(table: string) {
   let selectCols = '';
+  let batch = false;
+  // c6 2026-11-19 (CA re-land): the inactive-company gate (rbacPrimitives) reads companies' STATUS before a membership
+  // confers a role. That is an authorization lookup, not one of the four business operations, so it is answered
+  // (active) and NOT recorded in `issued` - same treatment as closure015's gate-vs-business distinction.
+  const isCompanyGate = () => table === 'companies' && /\bstatus\b/.test(selectCols);
   const label = () => (table === 'reports'
     ? (selectCols.includes('is_free') ? 'state' : 'reports')
     : table === 'companies' ? 'domain' : 'role');
 
   const settle = async () => {
+    if (isCompanyGate()) {
+      return batch
+        ? { data: [{ id: 'company-1', status: 'active', deleted_at: null }], error: null }
+        : { data: { status: 'active', deleted_at: null }, error: null };
+    }
     const key = label();
     issued.push(key);
     if (key === 'domain') await domainGate;          // hold the domain hop open
@@ -33,6 +43,7 @@ function builder(table: string) {
   const chain: Record<string, unknown> = {
     select: (c: string) => { selectCols = c; return chain; },
     eq: () => chain,
+    in: () => { batch = true; return chain; },
     limit: () => chain,
     order: () => settle(),
     maybeSingle: () => settle(),
