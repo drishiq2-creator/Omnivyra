@@ -31,6 +31,10 @@
 --      Sufficient ONLY because provider / period_start / period_end are NOT NULL (20260711:30-33, 05): the CHECK would
 --      PASS on NULL, tstzrange(NULL, NULL) is unbounded (it would overlap every row and block the provider), and a NULL
 --      provider would let the partial predicate escape the constraint. Keep those columns NOT NULL.
+--      ENFORCED, not just stated (7c, 2026-11-20): Preflight 1b refuses to apply unless all three are NOT NULL, and the
+--      realschema test re-asserts it after EVERY later migration - a preflight runs only when 040 applies, so a later
+--      DROP NOT NULL is caught by the test, not by this file. `NULL <> 'stripe'` is NULL, not true: NULL is the one
+--      value the deliberately inverted predicate cannot cover by default.
 --   3. EXCLUDE provider_invoice_imports_no_overlap USING gist (provider WITH =, tstzrange(period_start, period_end,
 --      '[)') WITH &&) WHERE (provider <> 'stripe'). Half-open: ADJACENT periods (one ends where the next starts) do not
 --      overlap and are accepted; identical and overlapping periods are refused with 23P01.
@@ -51,6 +55,23 @@ BEGIN
   END IF;
 END
 $preflight_ext$;
+
+-- Preflight 1b: the constraint's coverage rests on provider / period_start / period_end being NOT NULL (header, 2.).
+-- Refuse - naming the nullable column(s) - rather than create a constraint a NULL row would silently escape.
+DO $preflight_notnull$
+DECLARE
+  v_nullable text;
+BEGIN
+  SELECT string_agg(c.col, ', ' ORDER BY c.col) INTO v_nullable
+    FROM (VALUES ('provider'), ('period_start'), ('period_end')) AS c(col)
+    LEFT JOIN pg_attribute a
+      ON a.attrelid = 'public.provider_invoice_imports'::regclass AND a.attname = c.col AND NOT a.attisdropped
+   WHERE a.attnum IS NULL OR NOT a.attnotnull;
+  IF v_nullable IS NOT NULL THEN
+    RAISE EXCEPTION '040 preflight: provider_invoice_imports column(s) % are missing or NULLABLE - a NULL provider escapes the partial exclusion predicate (NULL <> ''stripe'' is NULL); restore NOT NULL first; nothing was changed', v_nullable;
+  END IF;
+END
+$preflight_notnull$;
 
 -- Preflight 2: existing cost-provider rows with an empty / inverted period would violate the CHECK - refuse with keys.
 DO $preflight_periods$

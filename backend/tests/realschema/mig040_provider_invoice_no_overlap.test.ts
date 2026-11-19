@@ -86,4 +86,23 @@ describe('040 - provider_invoice_imports exclusion constraint', () => {
       expect(await attempt(INSERT, row('stripe', JAN[0], JAN[0]))).toBe('ok');
     });
   });
+
+  // 7c (2026-11-20): the constraint's COVERAGE rests on these three columns being NOT NULL - `NULL <> 'stripe'` is NULL,
+  // so a NULL provider would escape the partial predicate (a silent double-charge). 040's Preflight 1b checks it only
+  // when 040 applies; this case runs after EVERY migration, so a later DROP NOT NULL fails here, loudly.
+  it('COVERAGE PREMISE: provider / period_start / period_end are NOT NULL; a NULL provider is refused (23502)', async () => {
+    const { rows } = await db.query(
+      `SELECT attname, attnotnull FROM pg_attribute
+        WHERE attrelid = 'public.provider_invoice_imports'::regclass
+          AND attname = ANY($1) AND NOT attisdropped`, [['provider', 'period_start', 'period_end']]);
+    const got = [...rows].sort((a, b) => (a.attname < b.attname ? -1 : a.attname > b.attname ? 1 : 0));
+    expect(got).toEqual([
+      { attname: 'period_end', attnotnull: true },
+      { attname: 'period_start', attnotnull: true },
+      { attname: 'provider', attnotnull: true },
+    ]);
+    await inRollback(async () => {
+      expect(await attempt(INSERT, [null, `w6-040-${++n}`, JAN[0], JAN[1]])).toBe('23502');
+    });
+  });
 });
