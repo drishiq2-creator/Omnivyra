@@ -327,8 +327,8 @@ describe('A3R — failure states', () => {
     expect(screen.getByText(/do not have permission/i)).toBeInTheDocument();
   });
 
-  it('a backend network failure (apiFetch 503) is reported as unreachable', async () => {
-    responder = () => ({ status: 503, body: null });
+  it('a backend network failure (apiFetch lost-connection 599) is reported as unreachable', async () => {
+    responder = () => ({ status: 599, body: { error: 'Network unreachable', code: 'NETWORK_UNREACHABLE' } });
     await renderPanel();
     expect(screen.getByText(/Could not reach Omnivyra/i)).toBeInTheDocument();
   });

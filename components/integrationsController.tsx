@@ -23,11 +23,32 @@ import {
 } from 'lucide-react';
 import { useCompanyContext } from '../components/CompanyContext';
 import { fetchWithAuth } from '../components/community-ai/fetchWithAuth';
+import { isNetworkFailure } from '../lib/networkFailure';
 import { emitSetupChanged } from '../lib/setup/setupEvents';
 
 import { type IntegrationType, type FocusArea, type TestResultState, type Integration, type Website, type CategoryCard, type GoogleAnalyticsStatusResponse, type GoogleSearchConsoleStatusResponse, type TrackingAssistResponse, TYPE_LABELS, IntegrationModal } from './integrationsSupportA';
 import { ConnectionCard, EmptyConnections, CategoryAction, type WorkflowStatus, WebsiteCommandCenter, CmsDiagnosticsPanel } from './integrationsSupportB';
 import { GoogleAnalyticsGridCard, GoogleSearchConsoleGridCard, GoogleAnalyticsHelperPanel, GoogleSearchConsoleHelperPanel } from './integrationsSupportC';
+
+/**
+ * How a POST /api/analytics/force-sync answer starts (or does not start) a manual sync.
+ * fetchWithAuth -> apiFetch: a lost connection is an UNKNOWN outcome (the sync may have started), so it
+ * is never shown as the server's 503 "Nothing was started" (b3, 2026-11-20).
+ */
+export async function readForceSyncStart(
+  response: Response,
+): Promise<{ kind: 'failed'; message: string } | { kind: 'no_property' } | { kind: 'started'; data: any }> {
+  if (isNetworkFailure(response)) {
+    return { kind: 'failed', message: 'We’re not sure the sync started. Check the sync status before starting another.' };
+  }
+  const data = await response.json().catch(() => ({}));
+  if (response.status === 400 && (data?.error === 'no_active_property' || data?.error === 'no_active_search_console_property')) {
+    return { kind: 'no_property' };
+  }
+  if (response.status === 503) return { kind: 'failed', message: data?.error || 'The sync queue is unavailable. Nothing was started; try again shortly.' };
+  if (!response.ok && response.status !== 202) return { kind: 'failed', message: data?.error || data?.message || 'Failed to start the sync' };
+  return { kind: 'started', data };
+}
 
 export function useIntegrationsPageController() {
   const { selectedCompanyId, userRole } = useCompanyContext();
@@ -331,12 +352,9 @@ export function useIntegrationsPageController() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ companyId, capability }),
     });
-    const data = await response.json().catch(() => ({}));
-    if (response.status === 400 && (data?.error === 'no_active_property' || data?.error === 'no_active_search_console_property')) {
-      return { kind: 'no_property' };
-    }
-    if (response.status === 503) return { kind: 'failed', message: data?.error || 'The sync queue is unavailable. Nothing was started; try again shortly.' };
-    if (!response.ok && response.status !== 202) return { kind: 'failed', message: data?.error || data?.message || 'Failed to start the sync' };
+    const start = await readForceSyncStart(response);
+    if (start.kind !== 'started') return start;
+    const data = start.data;
     if (data?.status === 'completed') return { kind: 'completed', records: typeof data.records_written === 'number' ? data.records_written : null };
 
     const POLL_TIMEOUT_MS = 120_000;

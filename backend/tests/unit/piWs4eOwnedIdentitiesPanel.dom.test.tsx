@@ -308,9 +308,9 @@ describe('WS-4E · loading, empty and unreadable are three different answers', (
   });
 
   it('a dead network is told apart from the route refusing to answer', async () => {
-    // `apiFetch` synthesises a 503 with its OWN body when fetch throws. The two
-    // are distinguished by `error`, which only the route sets.
-    routed({ registry: { status: 503, body: { error: 'Network unreachable', detail: 'Failed to fetch' } } });
+    // `apiFetch` answers a thrown fetch with its OWN status (599, never a 503). The two
+    // are distinguished by status; the route's 503 carries its own `error` code.
+    routed({ registry: { status: 599, body: { error: 'Network unreachable', code: 'NETWORK_UNREACHABLE', detail: 'Failed to fetch' } } });
     mount();
     await waitFor(() => expect(panel().getByTestId('owned-identities-error')).toBeTruthy());
     expect(panel().getByTestId('owned-identities-error').textContent)

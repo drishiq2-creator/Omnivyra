@@ -70,6 +70,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import useSWR from 'swr';
 import { AlertCircle, ShieldCheck, Trash2, RefreshCw } from 'lucide-react';
 import { apiFetch } from '@/lib/apiFetch';
+import { NETWORK_FAILURE_STATUS } from '@/lib/networkFailure';
 
 const REGISTRY = '/api/prospect-identity/owned-identities';
 const CANDIDATES = '/api/prospect-identity/owned-identity-candidates';
@@ -139,8 +140,9 @@ const readJson = async <T,>(url: string): Promise<T> => {
  *    deliberately, so the API is not a cross-tenant existence oracle; wording it
  *    as a permission problem would rebuild that oracle in the UI.
  *  · a 503 is "we could not look", never "there is nothing".
- * A dead network is also a 503 — `apiFetch` synthesises one — so the two are
- * told apart by the body's `error`, which only the routes themselves set.
+ * A dead network is apiFetch's NETWORK_FAILURE_STATUS (2026-11-20: no longer a
+ * synthetic 503), so it is told apart by status; the route's 503 codes still
+ * name what could not be read.
  */
 export function messageForOwnedIdentities(status: number, body: Record<string, unknown> | null): string {
   const code = typeof body?.error === 'string' ? body.error : null;
@@ -152,6 +154,7 @@ export function messageForOwnedIdentities(status: number, body: Record<string, u
     return 'You do not have permission to administer this company’s owned engagement identities.';
   }
   if (status === 404) return 'That entry is not available in this workspace.';
+  if (status === NETWORK_FAILURE_STATUS) return 'Could not reach Omnivyra. Check your connection and retry.';
   if (status === 503) {
     if (code === 'owned_identities_unavailable') {
       return 'The owned-identity registry could not be read. It has not been altered — only unread. Retry in a moment.';
@@ -159,7 +162,7 @@ export function messageForOwnedIdentities(status: number, body: Record<string, u
     if (code === 'owned_identity_candidates_unavailable') {
       return 'The identities observed in this workspace could not be read. They have not been altered — only unread. Retry in a moment.';
     }
-    return 'Could not reach Omnivyra. Check your connection and retry.';
+    return 'Omnivyra is temporarily unavailable. Please retry in a moment.';
   }
   if (code === 'server_owned_field') {
     const fields = Array.isArray(body?.fields) ? body.fields.filter((f) => typeof f === 'string') : [];

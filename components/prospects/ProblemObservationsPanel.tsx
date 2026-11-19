@@ -52,6 +52,7 @@ import React, { useCallback, useState } from 'react';
 import useSWR from 'swr';
 import { AlertCircle } from 'lucide-react';
 import { apiFetch } from '@/lib/apiFetch';
+import { NETWORK_FAILURE_STATUS } from '@/lib/networkFailure';
 
 /** One stored statement, exactly as the route returns it. */
 export interface ObservationView {
@@ -123,10 +124,11 @@ export function messageForObservations(status: number, body: Record<string, unkn
   if (status === 401) return 'Your session has expired. Sign in again to read recorded statements.';
   if (status === 403) return 'You do not have permission to read recorded statements for this workspace.';
   if (status === 404) return 'This prospect is not available in this workspace.';
+  if (status === NETWORK_FAILURE_STATUS) return 'Could not reach Omnivyra. Check your connection and retry.'; // apiFetch: lost connection, never a 503
   if (status === 503) {
     return code === 'problem_observations_unavailable'
       ? 'Recorded statements could not be read. They have not been altered — only unread. Retry in a moment.'
-      : 'Could not reach Omnivyra. Check your connection and retry.';
+      : 'Omnivyra is temporarily unavailable. Please retry in a moment.';
   }
   if (typeof body?.detail === 'string' && body.detail.trim() !== '') return body.detail;
   if (code) return `Recorded statements could not be read (${code}).`;

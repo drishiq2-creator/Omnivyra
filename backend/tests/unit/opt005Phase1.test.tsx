@@ -4,7 +4,7 @@
  * OPT-005 Phase 1 — SWR client, purge wiring, and hook parity.
  *
  * Covers the mandated cases: fetcher throws on every non-OK (incl. the
- * synthetic 503), retry policy (never 4xx, capped 5xx), full-cache purge on
+ * synthetic lost-connection response), retry policy (never 4xx, capped 5xx), full-cache purge on
  * principal change and on SIGNED_OUT, hook parity (error→empty, loading→
  * isValidating), and mutate() updating ALL subscribed consumers.
  */
@@ -74,16 +74,16 @@ describe('swrJsonFetcher', () => {
     expect(err.message).toBe('nope');
   });
 
-  test('synthetic 503 (apiFetch network fallback) THROWS — never cached as data', async () => {
+  test('synthetic lost-connection response (apiFetch network fallback, 599) THROWS — never cached as data', async () => {
     // Exactly the Response apiFetch synthesizes on network failure.
     mockApiFetch.mockResolvedValue(
-      jsonResponse({ error: 'Network unreachable', detail: 'Failed to fetch' }, 503)
+      jsonResponse({ error: 'Network unreachable', code: 'NETWORK_UNREACHABLE', detail: 'Failed to fetch' }, 599)
     );
     // `.catch` widens to `unknown`; the instanceof assertion below is what
     // actually proves the type, so narrow here to read `.status`/`.message`.
     const err = (await swrJsonFetcher('/api/x').catch((e: unknown) => e)) as ApiFetchError;
     expect(err).toBeInstanceOf(ApiFetchError);
-    expect(err.status).toBe(503);
+    expect(err.status).toBe(599);
   });
 });
 

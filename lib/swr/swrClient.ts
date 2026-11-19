@@ -4,10 +4,10 @@
  * One fetcher, one retry policy, one purge helper. Constraints (risk review):
  *  - The fetcher goes through apiFetch ONLY: Bearer attach, OPT-004 token
  *    memoization and credentials behavior are inherited, never reimplemented.
- *  - EVERY non-OK response throws (including apiFetch's synthetic 503) so an
+ *  - EVERY non-OK response throws (including apiFetch's synthetic lost-connection response, status 599) so an
  *    error payload can never be cached as data.
  *  - 4xx never retries (auth/authz outcomes don't change by retrying);
- *    5xx retries are capped so dev-HMR synthetic 503s cannot storm.
+ *    5xx retries are capped so dev-HMR lost-connection responses cannot storm.
  */
 
 import type { SWRConfiguration } from 'swr';
@@ -48,7 +48,7 @@ export async function swrJsonFetcher<T = unknown>(url: string): Promise<T> {
 export const MAX_5XX_RETRIES = 2;
 const RETRY_BASE_DELAY_MS = 2_000;
 
-/** Never retry 4xx; cap 5xx (and synthetic-503) retries with backoff. */
+/** Never retry 4xx; cap 5xx (incl. apiFetch's 599 lost-connection) retries with backoff. */
 export const swrOnErrorRetry: NonNullable<SWRConfiguration['onErrorRetry']> = (
   error,
   _key,

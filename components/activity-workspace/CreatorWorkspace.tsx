@@ -26,6 +26,7 @@ import {
   LayoutGrid, CheckCircle2, Clock, UploadCloud, X,
 } from 'lucide-react';
 import { apiFetch } from '@/lib/apiFetch';
+import { isNetworkFailure } from '@/lib/networkFailure';
 import SharedMediaPanel from './SharedMediaPanel';
 import ExternalVideoPanel from './ExternalVideoPanel';
 import type { useActivityWorkspace } from '@/hooks/useActivityWorkspace';
@@ -209,6 +210,12 @@ export default function CreatorWorkspace({
         `/api/activity-workspace/${encodeURIComponent(rowId)}/render-image`,
         { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' },
       );
+      // A lost connection is an UNKNOWN outcome: the render may have started (and been charged). Never
+      // report it as a governance block below (that path says nothing ran).
+      if (isNetworkFailure(res)) {
+        d.notify?.('info', 'We’re not sure the render started. Check the image before trying again.');
+        return;
+      }
       const json = await res.json();
       if (res.status === 404) { d.notify?.('info', 'Image rendering is not enabled.'); return; }
       // Step-R6: governance blocks (quota / emergency-stop / paused /

@@ -26,7 +26,7 @@ async function runLoop(attempts: Attempt[], timeoutMs: number) {
     const a = attempts[Math.min(i, attempts.length - 1)];
     issued.push(i);
     if (a.throws === 'abort') throw new AbortError();
-    if (a.throws === 'network') return { ok: false, status: 503 };   // apiFetch synthetic 503
+    if (a.throws === 'network') return { ok: false, status: 599 };   // apiFetch synthetic lost-connection (599)
     const delay = a.delayMs ?? 0;
     if (delay > timeoutMs) { await sleep(1); throw new AbortError(); } // AbortController fires first
     await sleep(1);
@@ -67,7 +67,7 @@ describe('retry conditions are unchanged', () => {
     expect(r.requestCount).toBe(3);
   });
 
-  it('E — network failure retries (apiFetch synthetic 503)', async () => {
+  it('E — network failure retries (apiFetch synthetic lost-connection, 599)', async () => {
     const r = await runLoop([{ throws: 'network' }], DEPLOYED_TIMEOUT);
     expect(r.requestCount).toBe(3);
   });

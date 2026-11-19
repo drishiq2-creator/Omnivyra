@@ -33,7 +33,7 @@ export function extractSnapshotHtml(rawHtml: string): SnapshotHtml {
 }
 
 function isRetryableStatus(status: number): boolean {
-  // apiFetch turns a thrown fetch() into a synthetic 503, so 5xx covers both.
+  // apiFetch turns a thrown fetch() into a synthetic NETWORK_FAILURE_STATUS (599), so >= 500 covers both.
   return status >= 500 || status === 408 || status === 429;
 }
 

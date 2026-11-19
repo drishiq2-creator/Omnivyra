@@ -6,15 +6,28 @@
  * Network-failure behavior: if `fetch()` throws (TypeError: Failed to fetch
  * — typical when the dev server is mid-HMR-recompile, the route bundle is
  * stale, the network is offline, or a CORS preflight fails), this wrapper
- * returns a SYNTHETIC non-ok Response with status 503 instead of letting
- * the error propagate. Callers all check `r.ok` and handle non-2xx
- * uniformly; this keeps them on the happy code path and stops the Next.js
- * dev overlay from rendering a red "Failed to fetch" runtime error every
- * time the dev server blips. Real auth/permission failures are 401/403
- * from the server itself and are unaffected.
+ * returns a SYNTHETIC non-ok Response instead of letting the error propagate.
+ * Callers all check `r.ok` and handle non-2xx uniformly; this keeps them on
+ * the happy code path and stops the Next.js dev overlay from rendering a red
+ * "Failed to fetch" runtime error every time the dev server blips.
+ *
+ * The synthetic response is NOT a 503 (b3, 2026-11-20, pre-launch blocking).
+ * A lost connection is an UNKNOWN outcome: the request may have reached the
+ * server and run. Several screens read a server 503 as "refused before
+ * anything happened" ("Nothing was started / charged / submitted"), so a
+ * synthetic 503 made those screens state a protection that did not hold.
+ * It is now status NETWORK_FAILURE_STATUS (599, never sent by our server)
+ * with code NETWORK_UNREACHABLE; detect it with isNetworkFailure(res) and
+ * show "not sure it went through", never a server-refusal message.
+ * Real auth/permission failures are 401/403 from the server itself and are
+ * unaffected.
  */
 import { getAuthToken } from '../utils/getAuthToken';
 import { getSupabaseBrowser } from './supabaseBrowser';
+import { NETWORK_FAILURE_CODE, NETWORK_FAILURE_HEADER, NETWORK_FAILURE_STATUS } from './networkFailure';
+
+// Re-exported for convenience; components should import from lib/networkFailure (see its header).
+export { NETWORK_FAILURE_CODE, NETWORK_FAILURE_STATUS, isNetworkFailure } from './networkFailure';
 
 export async function apiFetch(input: string, init: RequestInit = {}): Promise<Response> {
   let token: string | undefined;
@@ -63,20 +76,21 @@ export async function apiFetch(input: string, init: RequestInit = {}): Promise<R
     if (aborted) {
       throw err;
     }
-    // Synthesize a non-ok Response so callers' `if (r.ok)` branches handle
-    // network failures the same way they handle 5xx responses. Body shape
-    // matches the JSON-error pattern most API routes use so callers that
-    // parse `data.error` see something coherent.
+    // Synthesize a non-ok Response so callers' `if (r.ok)` branches still take
+    // their failure path. Body shape matches the JSON-error pattern most API
+    // routes use. NOT a 503 (see the header comment): status 599 + code
+    // NETWORK_UNREACHABLE + a marker header, so no caller can mistake a lost
+    // connection for a server refusal.
     const message = err instanceof Error ? err.message : String(err);
     if (typeof console !== 'undefined' && console.warn) {
-      console.warn('[apiFetch] network error → synthetic 503:', input, message);
+      console.warn('[apiFetch] network error → synthetic network-failure response:', input, message);
     }
     return new Response(
-      JSON.stringify({ error: 'Network unreachable', detail: message }),
+      JSON.stringify({ error: 'Network unreachable', code: NETWORK_FAILURE_CODE, detail: message }),
       {
-        status: 503,
-        statusText: 'Service Unavailable',
-        headers: { 'Content-Type': 'application/json' },
+        status: NETWORK_FAILURE_STATUS,
+        statusText: 'Network Unreachable',
+        headers: { 'Content-Type': 'application/json', [NETWORK_FAILURE_HEADER]: '1' },
       },
     );
   }

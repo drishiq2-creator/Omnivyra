@@ -44,7 +44,7 @@ describe('fetchSnapshotHtml', () => {
     expect(r.ok).toBe(true);
   });
 
-  it('retries a thrown fetch and a 5xx (apiFetch synthetic 503)', async () => {
+  it('retries a thrown fetch and a 5xx (apiFetch synthetic lost-connection 599)', async () => {
     const steps: Array<() => Response> = [
       () => { throw new TypeError('Failed to fetch'); },
       () => statusResponse(503),

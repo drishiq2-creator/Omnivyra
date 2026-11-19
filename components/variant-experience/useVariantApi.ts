@@ -3,8 +3,8 @@
  * control + strategy-analytics APIs.
  *
  * All hooks use `apiFetch` so the Supabase Bearer token is added
- * automatically. Failures are surfaced via `error` + the synthetic 503
- * response that `apiFetch` returns on network failure — no exception
+ * automatically. Failures are surfaced via `error` + the synthetic lost-connection
+ * response (status 599, isNetworkFailure) that `apiFetch` returns on network failure — no exception
  * bubbles into the rendering tree.
  *
  * Pure UI glue. No business logic. No backend changes.

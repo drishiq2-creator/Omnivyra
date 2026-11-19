@@ -32,6 +32,7 @@
 
 import React, { useCallback, useEffect, useState } from 'react';
 import { apiFetch } from '../../lib/apiFetch';
+import { NETWORK_FAILURE_STATUS } from '../../lib/networkFailure';
 import {
   KeyRound, ShieldCheck, ShieldAlert, Trash2, RefreshCw, AlertCircle, Lock,
 } from 'lucide-react';
@@ -71,7 +72,9 @@ const ACCEPTS_TYPED_KEY: readonly LeadSourceStatus['authMode'][] = ['api_key', '
 function messageFor(status: number, body: unknown): string {
   if (status === 401) return 'Your session has expired. Sign in again to manage lead sources.';
   if (status === 403) return 'You do not have permission to manage this company’s API connections.';
-  if (status === 503) return 'Could not reach Omnivyra. Check your connection and retry.';
+  // A lost connection is apiFetch's NETWORK_FAILURE_STATUS (never a 503); a 503 is the server.
+  if (status === NETWORK_FAILURE_STATUS) return 'Could not reach Omnivyra. Check your connection and retry.';
+  if (status === 503) return 'Omnivyra is temporarily unavailable. Please retry in a moment.';
   const reason = (body as { reason?: string; error?: string } | null)?.reason;
   if (typeof reason === 'string' && reason.trim()) return reason;
   return 'The request could not be completed. Please try again.';
