@@ -3,7 +3,8 @@
  *
  * Owner ruling 2026-11-13: /market-pulse (Executive room) is the one customer entry.
  * Admins get a "Configure / run scan" link to the V2 console; members do not.
- * The link only hides the entry; the server-side gate on the V2 routes protects them.
+ * The link only hides the entry. It is not a privilege boundary: /api/market-pulse/run checks tenancy
+ * (resolveCompanyAccess), not the admin role.
  */
 
 import React from 'react';

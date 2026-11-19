@@ -29,8 +29,11 @@ export default function MarketPulsePage() {
   const queryCompanyId = typeof router.query.companyId === 'string' ? router.query.companyId : '';
   const companyId = useMemo(() => queryCompanyId || selectedCompanyId || '', [queryCompanyId, selectedCompanyId]);
   // Owner ruling 2026-11-13: /market-pulse is the ONE customer entry. Admins configure
-  // and run scans in the V2 console; members never see the button. The server-side
-  // admin gate on the V2 routes is the real protection; this only hides the entry.
+  // and run scans in the V2 console; members never see the button. This link is an
+  // AFFORDANCE, not a privilege boundary: /api/market-pulse/run enforces TENANCY
+  // (resolveCompanyAccess) and the automation flag, but NO admin role, so any member of
+  // the company can still start a scan by URL. Whether runs should be admin-only is open
+  // (7c review 2026-11-19, routed to the V2 owner).
   // `isAdmin` reflects the role in the SELECTED company, so only offer the console when
   // the page is showing that same company (a ?companyId= override may name another one).
   const canConfigure = isAdmin && !!companyId && companyId === selectedCompanyId;
