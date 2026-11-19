@@ -272,6 +272,7 @@ describe('the queue lock refuses: an unreadable database is NOT reported as cont
       cancel: { db_cancelled: 0, queue_removed: 0, errors: ['lock_state_unreadable'] }, idempotency_key: 'k' }));
     const r = await reschedule(AT_12);
     expect(r.status).toBe(503);
+    expect(r.headers['retry-after']).toBe('5'); // b3 standing rule (2026-11-19)
     expect(r.body).toMatchObject({ code: 'QUEUE_LOCK_STATE_UNREADABLE', partial: true, recovery: 'repeat_reschedule', retryable: true });
     expect(String(r.body.error)).not.toMatch(/in progress/i);
     expect(planContent()).toHaveProperty('reschedule_incomplete');
@@ -284,6 +285,7 @@ describe('the queue lock refuses: an unreadable database is NOT reported as cont
     const r = await reschedule(AT_12);
     expect(r.status).toBe(409);
     expect(r.body).toMatchObject({ code: 'CONCURRENT_QUEUE_MUTATION' });
+    expect(r.headers['retry-after']).toBeUndefined(); // contention is a real state, not a read failure
   });
 });
 

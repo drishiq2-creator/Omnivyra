@@ -182,7 +182,8 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     const lock = await tryAcquireScheduledPostQueueLock(linkedPost.id);
     if (!lock.acquired && lock.mode === 'none') {
       // The database could not be read (CLASS-2 fail-closed): NOT a concurrent mutation, and nothing was
-      // changed - say so, instead of the contention message (7c).
+      // changed - say so, instead of the contention message (7c). Retry-After: b3 standing rule (2026-11-19).
+      res.setHeader('Retry-After', '5');
       return res.status(503).json({
         error: "We couldn't reach the database, so nothing was changed. Please try again.",
         code: 'QUEUE_LOCK_STATE_UNREADABLE',
