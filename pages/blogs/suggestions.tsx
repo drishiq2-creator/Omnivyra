@@ -6,6 +6,7 @@ import { useRouter } from 'next/router';
 import { ArrowLeft, ArrowRight, Loader2, Sparkles, Check, RefreshCw } from 'lucide-react';
 import { useCompanyContext } from '../../components/CompanyContext';
 import { fetchWithAuth } from '../../components/community-ai/fetchWithAuth';
+import { blogGenerateKeys, blogKeyScope, blogRefusalText, keepBlogKey } from '../../lib/blog/blogGenerateKey';
 import GenerationProgressTracker from '../../components/content/GenerationProgressTracker';
 import type { ContentBlock } from '../../lib/blog/blockTypes';
 
@@ -195,10 +196,14 @@ export default function BlogSuggestionsPage() {
     if (!companyId || !topic) return;
     setGenerating(true);
 
+    // One Idempotency-Key per click, kept only while the outcome is unknown (lib/blog/blogGenerateKey).
+    const scope = blogKeyScope(companyId, topic, String(words), templateName);
+    const op = blogGenerateKeys.begin(scope);
+    let keepKey = true; // until a response says otherwise
     try {
       const resp = await fetchWithAuth('/api/blogs/generate', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...op.headers },
         body: JSON.stringify({
           company_id: companyId,
           topic,
@@ -217,12 +222,13 @@ export default function BlogSuggestionsPage() {
       });
 
       const data = await resp.json().catch(() => ({}));
+      keepKey = keepBlogKey(resp.status, data);
       if (!resp.ok) {
         // The blog quality gate returns 422 with a descriptive message; the
         // long-form engine can also 500/timeout. Surface that verbatim so the
         // user (and support) sees WHY generation stopped instead of silently
         // landing back on this page with the modal gone.
-        throw new Error(data?.error || `Generation failed (status ${resp.status}). Please try again.`);
+        throw new Error(blogRefusalText(data) || data?.error || `Generation failed (status ${resp.status}). Please try again.`);
       }
       if (!data?.result) {
         throw new Error('Generation returned no draft. Please try again.');
@@ -244,6 +250,7 @@ export default function BlogSuggestionsPage() {
       // like an unexplained "bounce back" because the progress modal closes.
       if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'smooth' });
     } finally {
+      if (!keepKey) blogGenerateKeys.end(scope);
       setGenerating(false);
     }
   };
