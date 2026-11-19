@@ -18,7 +18,11 @@ function chain(table: string): any {
   for (const m of ['select', 'eq', 'in', 'order', 'limit']) q[m] = () => q;
   q.maybeSingle = async () => ({ data: null, error: null });
   q.insert = async () => { writes.push(`insert:${table}`); return { error: null }; };
-  q.delete = () => { writes.push(`delete:${table}`); return q; };
+  q.delete = () => {
+    writes.push(`delete:${table}`);
+    const d: any = { eq: () => d, then: (ok: (v: unknown) => unknown) => Promise.resolve({ error: (global as any).__rollbackFails ? { message: 'rollback boom' } : null }).then(ok) };
+    return d;
+  };
   q.then = (ok: (v: unknown) => unknown, err: (e: unknown) => unknown) => {
     if (table === 'user_company_roles') return Promise.resolve(membership).then(ok, err);
     if (table === 'companies') return (companies === 'throw' ? Promise.reject(new Error('fetch failed')) : Promise.resolve(companies)).then(ok, err);
@@ -91,4 +95,23 @@ test.each([
   expect(r.body).toMatchObject({ error: 'no_active_organization' });
   expect(writes).toEqual([]);
   expect(mockCreateCredit).not.toHaveBeenCalled();
+});
+
+describe('7c residual: grant fails AND the claim rollback fails', () => {
+  test('-> 500 CLAIM_GRANT_FAILED_UNRELEASED (support can reconcile), never "Please try again"', async () => {
+    mockCreateCredit.mockImplementationOnce(async () => { throw new Error('ledger down'); });
+    // the delete() rollback reports an error
+    (global as any).__rollbackFails = true;
+    const r = await call();
+    (global as any).__rollbackFails = false;
+    expect(r.statusCode).toBe(500);
+    expect(r.body).toMatchObject({ code: 'CLAIM_GRANT_FAILED_UNRELEASED' });
+  });
+  test('control: grant fails, rollback succeeds -> 500 "Please try again" (claim released)', async () => {
+    mockCreateCredit.mockImplementationOnce(async () => { throw new Error('ledger down'); });
+    const r = await call();
+    expect(r.statusCode).toBe(500);
+    expect(r.body).toEqual({ error: 'Credit grant failed. Please try again.' });
+    expect(writes).toEqual(['insert:free_credit_claims', 'delete:free_credit_claims']);
+  });
 });

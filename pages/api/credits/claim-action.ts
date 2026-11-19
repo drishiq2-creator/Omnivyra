@@ -153,9 +153,18 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       });
     } catch (creditErr: any) {
       logger.error('credits_claim_action_grant_failed', { userId: user.id, orgId, category, message: creditErr.message });
-      // Roll back the claim so the user can retry
-      await serviceSb.from('free_credit_claims').delete()
+      // Roll back the claim so the user can retry. 7c (2026-11-20): if the rollback ALSO fails, the one-shot claim
+      // outlives the failed grant - a retry would then hit UNIQUE and say "already claimed". Say so, with a code
+      // support can reconcile on, instead of "Please try again".
+      const { error: rollbackErr } = await serviceSb.from('free_credit_claims').delete()
         .eq('user_id', user.id).eq('category', category);
+      if (rollbackErr) {
+        logger.error('credits_claim_action_rollback_failed', { userId: user.id, orgId, category, message: rollbackErr.message });
+        return res.status(500).json({
+          error: 'Credit grant failed and your claim could not be released. Please contact support - no credits were added.',
+          code:  'CLAIM_GRANT_FAILED_UNRELEASED',
+        });
+      }
       return res.status(500).json({ error: 'Credit grant failed. Please try again.' });
     }
 
