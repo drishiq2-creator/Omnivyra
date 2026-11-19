@@ -20,7 +20,12 @@
   // stricter nor looser than what production code is held to.
   "extends": "./tsconfig.json",
   "compilerOptions": {
-    "incremental": true
+    "incremental": true,
+    // The Deno edge function's pure modules are imported by backend tests (e.g. teamInviteBranding imports
+    // supabase/functions/send-transactional-email/teamInvite.ts), and Deno REQUIRES explicit `.ts` import specifiers at
+    // runtime. Allowed here only because this project never emits (root noEmit; the script passes --noEmit). Never
+    // "fix" TS5097 by dropping the extension: that greens tsc and breaks the edge-function deploy (7c, 2026-11-19).
+    "allowImportingTsExtensions": true
   },
   // Covers the whole jest `roots: ['<rootDir>/backend']` surface, not just
   // `backend/tests/**`: three co-located suites live under
