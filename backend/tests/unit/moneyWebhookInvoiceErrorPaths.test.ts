@@ -40,7 +40,12 @@ jest.mock('../../services/logger', () => ({
   logger: { error: (e: string) => mockLogs.push(e), warn: (e: string) => mockLogs.push(e), info: () => undefined },
 }));
 jest.mock('../../db/supabaseClient', () => ({ supabase: { from: (t: string) => mockBuilder(t) } }));
-jest.mock('../../db/writeOwner', () => ({ ownedDbTable: (t: string) => mockBuilder(t) }));
+// The guarded state writer (20270217000003) is an RPC: scriptable as 'rpc:<name>', default = applied.
+jest.mock('../../db/writeOwner', () => ({
+  ownedDbTable: (t: string) => mockBuilder(t),
+  ownedDbRpc: async (name: string, args: { p_status?: string }) =>
+    (mockScript['rpc:' + name] ?? (() => ({ data: { applied: true, current: args?.p_status ?? null }, error: null })))(),
+}));
 jest.mock('../../services/purchaseService', () => ({
   recordPaymentProviderEvent: async () => { mockSinks.push('recordEvent'); return { id: 'evt-row', duplicate: false }; },
   completePurchase: async () => { mockSinks.push('completePurchase'); return { success: true, purchaseId: 'p', creditsGranted: 1 }; },
@@ -104,12 +109,21 @@ describe('stripe/webhook', () => {
     expect(mockSinks).toContain('recordEvent');
   });
 
+  // CI-178 re-land (c6 2026-11-20): the event state is written by the guarded RPC writer (markPaymentEventState),
+  // which logs payment_event_state_write_failed - the test now scripts THAT write, not the old table update.
   it('a failed event-status write is logged, not swallowed', async () => {
     mockScript['credit_purchases:select'] = () => ({ data: null, error: null });
-    mockScript['payment_provider_events:update'] = () => ({ data: null, error: { message: 'down' } });
+    mockScript['rpc:advance_payment_provider_event_state_guarded'] = () => ({ data: null, error: { message: 'down' } });
     const res = mockRes();
     await stripeWebhook(rawReq(STRIPE_EVENT, {}), res);
-    expect(mockLogs).toContain('stripe_webhook_mark_event_failed');
+    expect(mockLogs).toContain('payment_event_state_write_failed');
+  });
+
+  it('control: a state write that succeeds logs no write failure', async () => {
+    mockScript['credit_purchases:select'] = () => ({ data: null, error: null });
+    const res = mockRes();
+    await stripeWebhook(rawReq(STRIPE_EVENT, {}), res);
+    expect(mockLogs).not.toContain('payment_event_state_write_failed');
   });
 });
 
@@ -136,13 +150,26 @@ describe('webhooks/payments/[provider]', () => {
     expect(res.body).toMatchObject({ error: 'fulfillment_unavailable', retryable: true });
   });
 
-  it('control: a non-transient fulfilment refusal keeps the existing 200 + logged block', async () => {
+  // CI-178 re-land (c6 2026-11-20): only an EXPLICITLY terminal detail (TERMINAL_FULFILLMENT_DETAILS) is a 200 block;
+  // provider_unpaid on a success webhook is capture lag and fails SAFE (05 BLOCKING, f431b4882).
+  it('control: an explicitly terminal fulfilment refusal keeps the 200 + logged block', async () => {
     mockScript['credit_purchases:select'] = () => ({ data: { id: 'p1', status: 'pending', fulfillment_status: 'pending' }, error: null });
-    mockFulfillResult = { ok: false, code: 'UNKNOWN', detail: 'provider_unpaid' };
+    mockFulfillResult = { ok: false, code: 'UNKNOWN', detail: 'provider_amount_differs' };
     const res = mockRes();
     await providerWebhook(rawReq(CAPTURED, { query: { provider: 'razorpay' } }), res);
     expect(res.statusCode).toBe(200);
     expect(mockLogs).toContain('payment_webhook_fulfillment_blocked');
+  });
+
+  it('provider_unpaid on a success webhook (capture lag) fails SAFE: 500 retryable, not a terminal block', async () => {
+    mockScript['credit_purchases:select'] = () => ({ data: { id: 'p1', status: 'pending', fulfillment_status: 'pending' }, error: null });
+    mockFulfillResult = { ok: false, code: 'UNKNOWN', detail: 'provider_unpaid' };
+    const res = mockRes();
+    await providerWebhook(rawReq(CAPTURED, { query: { provider: 'razorpay' } }), res);
+    expect(res.statusCode).toBe(500);
+    expect(res.body).toMatchObject({ error: 'webhook_money_action_failed', retryable: true });
+    expect(mockLogs).toContain('payment_webhook_fulfillment_failed');
+    expect(mockLogs).not.toContain('payment_webhook_fulfillment_blocked');
   });
 
   it('control: a matched pending purchase is still fulfilled (unchanged)', async () => {
