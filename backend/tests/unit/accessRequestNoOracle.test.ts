@@ -73,6 +73,8 @@ async function submit(body: Record<string, unknown>) {
   await route({ method: 'POST', headers: {}, query: {}, body }, res);
   return { status: res.statusCode, body: res.body };
 }
+/** A complete, valid body (the CI-309 cases predate the vetted-path contract: company name required, website required for a corporate email). */
+const ok = (b: { email: string; name: string } & Record<string, unknown>) => ({ company_name: 'Fake Co', website: 'https://fake-co.test', ...b });
 const LIMITED: Rl = { allowed: false, remaining: 0, resetAt: 0, bypassed: false };
 const OUTAGE: Rl = { allowed: false, remaining: 0, resetAt: 0, bypassed: true, degradedMode: 'closed' };
 
@@ -88,13 +90,13 @@ beforeEach(() => {
 describe('no existence oracle: every accepted submission gets the identical reply', () => {
   it('new / duplicate-pending / already-approved / previously-rejected: same status, same body, nothing identifying', async () => {
     const replies: Array<{ status: number; body: unknown }> = [];
-    replies.push(await submit({ email: 'new@gmail.test', name: 'N' }));
+    replies.push(await submit(ok({ email: 'new@gmail.test', name: 'N' })));
     mockDb.access_requests.push({ id: 'req-pend', email: 'pend@gmail.test', status: 'pending' });
-    replies.push(await submit({ email: 'Pend@Gmail.test ', name: 'P' }));
+    replies.push(await submit(ok({ email: 'Pend@Gmail.test ', name: 'P' })));
     mockDb.access_requests.push({ id: 'req-appr', email: 'appr@gmail.test', status: 'approved', organization_id: 'org-1' });
-    replies.push(await submit({ email: 'appr@gmail.test', name: 'A' }));
+    replies.push(await submit(ok({ email: 'appr@gmail.test', name: 'A' })));
     mockDb.access_requests.push({ id: 'req-rej', email: 'rej@gmail.test', status: 'rejected' });
-    replies.push(await submit({ email: 'rej@gmail.test', name: 'R' }));
+    replies.push(await submit(ok({ email: 'rej@gmail.test', name: 'R' })));
     expect(replies[0].status).toBe(202);
     expect(replies[0].body).toEqual({ status: 'received', message: expect.any(String) });
     for (const r of replies.slice(1)) expect(r).toEqual(replies[0]);
@@ -103,32 +105,32 @@ describe('no existence oracle: every accepted submission gets the identical repl
   });
 
   it('a unique-violation on insert (a concurrent duplicate) is the same accepted reply, not an error', async () => {
-    const fresh = await submit({ email: 'x@gmail.test', name: 'X' });
+    const fresh = await submit(ok({ email: 'x@gmail.test', name: 'X' }));
     mockInsertCode = '23505';
-    const dup = await submit({ email: 'y@gmail.test', name: 'Y' });
+    const dup = await submit(ok({ email: 'y@gmail.test', name: 'Y' }));
     expect(dup).toEqual(fresh);
   });
 });
 
 describe('server-side idempotency stays', () => {
   it('a pending or approved request is never duplicated (no second row)', async () => {
-    await submit({ email: 'once@gmail.test', name: 'O' });
-    await submit({ email: 'ONCE@gmail.test', name: 'O' });
+    await submit(ok({ email: 'once@gmail.test', name: 'O' }));
+    await submit(ok({ email: 'ONCE@gmail.test', name: 'O' }));
     expect(mockDb.access_requests.filter((r) => r.email === 'once@gmail.test')).toHaveLength(1);
     mockDb.access_requests.push({ id: 'req-ok', email: 'ok@gmail.test', status: 'approved' });
-    await submit({ email: 'ok@gmail.test', name: 'K' });
+    await submit(ok({ email: 'ok@gmail.test', name: 'K' }));
     expect(mockWrites.filter((w) => w.email === 'ok@gmail.test')).toEqual([]);
   });
 
   it('several existing rows for one email still mean "exists" (never a duplicate because a read was ambiguous)', async () => {
     mockDb.access_requests.push({ id: 'r1', email: 'two@gmail.test', status: 'pending' }, { id: 'r2', email: 'two@gmail.test', status: 'approved' });
-    await submit({ email: 'two@gmail.test', name: 'T' });
+    await submit(ok({ email: 'two@gmail.test', name: 'T' }));
     expect(mockWrites).toEqual([]);
   });
 
   it('a failed existence read writes nothing and is not the accepted reply (fail closed)', async () => {
     mockReadFails = true;
-    const r = await submit({ email: 'z@gmail.test', name: 'Z' });
+    const r = await submit(ok({ email: 'z@gmail.test', name: 'Z' }));
     expect(r.status).toBe(503);
     expect(mockWrites).toEqual([]);
   });
@@ -136,7 +138,7 @@ describe('server-side idempotency stays', () => {
 
 describe('rate limits: per IP and per normalised email, fail-closed', () => {
   it('both limiters run, pinned onRedisFailure "closed", keyed by the trusted IP and the normalised email', async () => {
-    await submit({ email: '  Mixed@Gmail.TEST ', name: 'M' });
+    await submit(ok({ email: '  Mixed@Gmail.TEST ', name: 'M' }));
     expect(mockRlCalls.map((c) => [c.id, c.cfg.onRedisFailure])).toEqual([
       ['203.0.113.7', 'closed'],
       ['mixed@gmail.test', 'closed'],
@@ -146,14 +148,14 @@ describe('rate limits: per IP and per normalised email, fail-closed', () => {
 
   it('per-IP limit hit -> 429 constant body, nothing read or written', async () => {
     mockRlAnswer[':ip'] = LIMITED;
-    const r = await submit({ email: 'a@gmail.test', name: 'A' });
+    const r = await submit(ok({ email: 'a@gmail.test', name: 'A' }));
     expect(r).toEqual({ status: 429, body: { error: 'Too many requests. Please try again later.' } });
     expect(mockWrites).toEqual([]);
   });
 
   it('per-email limit hit -> 429 constant body, nothing written', async () => {
     mockRlAnswer[':email'] = LIMITED;
-    const r = await submit({ email: 'a@gmail.test', name: 'A' });
+    const r = await submit(ok({ email: 'a@gmail.test', name: 'A' }));
     expect(r).toEqual({ status: 429, body: { error: 'Too many requests. Please try again later.' } });
     expect(mockWrites).toEqual([]);
   });
@@ -162,9 +164,113 @@ describe('rate limits: per IP and per normalised email, fail-closed', () => {
     for (const which of [':ip', ':email']) {
       for (const k of Object.keys(mockRlAnswer)) delete mockRlAnswer[k];
       mockRlAnswer[which] = OUTAGE;
-      const r = await submit({ email: 'b@gmail.test', name: 'B' });
+      const r = await submit(ok({ email: 'b@gmail.test', name: 'B' }));
       expect([which, r]).toEqual([which, { status: 503, body: { error: 'Service temporarily unavailable. Please try again later.' } }]);
     }
+    expect(mockWrites).toEqual([]);
+  });
+});
+
+/**
+ * Vetted path (owner ruling 2026-11-19): the ONE access-request endpoint takes the contract given to UI 04
+ * (email, contact name, company name, website - required for a corporate email -, reason), validates it
+ * with field errors only, normalises the website, maps every field onto access_requests and classifies
+ * domain_status (it was hard-coded 'PUBLIC_EMAIL', even for corporate email).
+ */
+describe('vetted path: the access-request body contract', () => {
+  const full = {
+    email: '  A.Person@Shared.TEST ', name: ' A Person ', company_name: ' Beta Labs ',
+    website: 'https://www.Beta.test/about?x=1', reason: ' we were acquired ',
+  };
+
+  it('maps every field onto access_requests (website normalised, email lower-cased) and classifies a mismatched corporate email', async () => {
+    const r = await submit(full);
+    expect(r.status).toBe(202);
+    expect(mockWrites).toEqual([expect.objectContaining({
+      email: 'a.person@shared.test', domain: 'shared.test', name: 'A Person', company_name: 'Beta Labs',
+      website_url: 'https://beta.test', use_case: 'we were acquired', job_title: null,
+      domain_status: 'DOMAIN_MISMATCH', status: 'pending',
+    })]);
+  });
+
+  it('domain_status: free mail -> PUBLIC_EMAIL (website optional), matching corporate website -> CORPORATE_EMAIL', async () => {
+    await submit({ email: 'someone@gmail.com', name: 'S', company_name: 'Solo Brand' });
+    await submit({ email: 'boss@gamma.test', name: 'B', company_name: 'Gamma', website: 'gamma.test' });
+    expect(mockWrites.map((w) => [w.email, w.domain_status, w.website_url])).toEqual([
+      ['someone@gmail.com', 'PUBLIC_EMAIL', null],
+      ['boss@gamma.test', 'CORPORATE_EMAIL', 'https://gamma.test'],
+    ]);
+  });
+
+  it('400 with field errors only: required, too long, invalid - and nothing is read or written', async () => {
+    const replies = [
+      await submit({}),
+      await submit({ ...full, email: 'not-an-email' }),
+      await submit({ ...full, name: 'x'.repeat(121) }),
+      await submit({ ...full, company_name: 'x'.repeat(161) }),
+      await submit({ ...full, reason: 'x'.repeat(1001) }),
+      await submit({ ...full, website: undefined }),
+      await submit({ ...full, website: 'http://localhost:3000' }),
+      await submit({ ...full, website: `https://beta.test/${'x'.repeat(2048)}` }),
+      await submit({ ...full, email: `${'x'.repeat(250)}@a.test` }),
+    ];
+    expect(replies.map((r) => [r.status, r.body.fields])).toEqual([
+      [400, { email: 'required', name: 'required', company_name: 'required' }],
+      [400, { email: 'invalid' }],
+      [400, { name: 'too_long' }],
+      [400, { company_name: 'too_long' }],
+      [400, { reason: 'too_long' }],
+      [400, { website: 'required' }],
+      [400, { website: 'invalid' }],
+      [400, { website: 'too_long' }],
+      [400, { email: 'too_long' }],
+    ]);
+    expect(mockWrites).toEqual([]);
+    // Validation runs before the email limiter and the existence read: only the per-IP limiter was consulted.
+    expect(mockRlCalls.every((c) => String(c.cfg.keyPrefix).endsWith(':ip'))).toBe(true);
+  });
+
+  it('a 400 never depends on existence: the same invalid body is answered identically whether or not the email has a request', async () => {
+    const bad = { ...full, website: undefined };
+    const miss = await submit(bad);
+    mockDb.access_requests.push({ id: 'req-x', email: 'a.person@shared.test', status: 'approved', organization_id: 'org-x' });
+    const hit = await submit(bad);
+    expect(hit).toEqual(miss);
+  });
+
+  it('the legacy website_url key is accepted as the website', async () => {
+    await submit({ email: 'c@delta.test', name: 'C', company_name: 'Delta', website_url: 'www.delta.test' });
+    expect(mockWrites[0]).toEqual(expect.objectContaining({ website_url: 'https://delta.test', domain_status: 'CORPORATE_EMAIL' }));
+  });
+});
+
+describe('503 only ever means "nothing was written"', () => {
+  it('every 503 path writes nothing; the only failure after a write attempt is the 500', async () => {
+    const answers: Array<[string, number, number]> = [];
+    mockRlAnswer[':ip'] = OUTAGE;
+    answers.push(['ip limiter down', (await submit(ok({ email: 'q@gmail.test', name: 'Q' }))).status, mockWrites.length]);
+    delete mockRlAnswer[':ip'];
+    mockRlAnswer[':email'] = OUTAGE;
+    answers.push(['email limiter down', (await submit(ok({ email: 'q@gmail.test', name: 'Q' }))).status, mockWrites.length]);
+    delete mockRlAnswer[':email'];
+    mockReadFails = true;
+    answers.push(['existence read failed', (await submit(ok({ email: 'q@gmail.test', name: 'Q' }))).status, mockWrites.length]);
+    mockReadFails = false;
+    mockInsertCode = 'XX000';
+    answers.push(['insert failed', (await submit(ok({ email: 'q@gmail.test', name: 'Q' }))).status, mockWrites.length]);
+    expect(answers).toEqual([
+      ['ip limiter down', 503, 0],
+      ['email limiter down', 503, 0],
+      ['existence read failed', 503, 0],
+      ['insert failed', 500, 0],
+    ]);
+  });
+});
+
+describe('vetted path: a malformed body is a 400, not a crash', () => {
+  it('a body that is not JSON -> 400 with a field error, nothing written', async () => {
+    const r = await submit('{not json' as unknown as Record<string, unknown>);
+    expect([r.status, r.body]).toEqual([400, { error: 'Invalid request', fields: { body: 'invalid' } }]);
     expect(mockWrites).toEqual([]);
   });
 });

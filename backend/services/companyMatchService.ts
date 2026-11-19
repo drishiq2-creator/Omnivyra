@@ -86,6 +86,18 @@ export function validatePublicWebsite(website: string): string | null {
   return null;
 }
 
+/**
+ * The stored form of a website a person typed (access requests, and the company a Super Admin opens
+ * from one): `https://<host>`, host lower-cased with `www.` stripped - no path, query, port or
+ * credentials. null when validatePublicWebsite refuses it (so the two can never disagree).
+ */
+export function normalizePublicWebsite(website: string | null | undefined): string | null {
+  if (typeof website !== 'string' || validatePublicWebsite(website) !== null) return null;
+  const raw = website.trim();
+  const host = new URL(raw.startsWith('http') ? raw : `https://${raw}`).hostname.toLowerCase().replace(/^www\./, '');
+  return `https://${host}`;
+}
+
 /** A company reached by the requester's verified email domain. */
 export type VerifiedDomainCompany = {
   company_id: string;
@@ -143,6 +155,29 @@ export async function findCompaniesByVerifiedEmailDomain(
   // before this check can rescue it, so isFreeEmailDomain's completeness also decides whether such individuals
   // can onboard (fail closed; 7c, 2026-11-19).
   if (isFreeEmailDomain(domain)) return { ok: true, domain: null, companies: [] };
+  return findLiveCompaniesByWebsiteRoot(domain);
+}
+
+/**
+ * Vetted path (owner ruling 2026-11-19): the SAME live-company lookup keyed by a WEBSITE instead of an
+ * email - used where a Super Admin opens a company for an approved access request, to refuse a website
+ * domain a live company already holds (one live company per website domain). The website is reduced to
+ * its registrable root exactly like a stored website_domain (normalizeCompanyDomain); a website with no
+ * root, or whose root is a public suffix, is undecidable -> ambiguous (never "free"). Free-mail roots are
+ * NOT special-cased here: a website is not an email, and a company holding such a root still holds it.
+ */
+export async function findCompaniesByWebsiteDomain(
+  website: string | null | undefined,
+): Promise<VerifiedDomainLookup> {
+  const domain = normalizeCompanyDomain(website);
+  if (!domain || isPublicSuffix(domain)) {
+    return { ok: true, domain: domain || null, companies: [], ambiguous: true };
+  }
+  return findLiveCompaniesByWebsiteRoot(domain);
+}
+
+/** Live companies whose stored website_domain normalises to `domain` (already a registrable root). */
+async function findLiveCompaniesByWebsiteRoot(domain: string): Promise<VerifiedDomainLookup> {
   // `*` -> `_`: PostgREST accepts `*` as an alias of the `%` wildcard in like/ilike, so a literal `*`
   // must not reach the pattern. A domain cannot contain `*`, and `_` matches exactly one character, so
   // this only ever NARROWS the candidate set (the decision below is exact anyway).

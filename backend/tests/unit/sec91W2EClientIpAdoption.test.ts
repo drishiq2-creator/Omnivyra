@@ -208,32 +208,22 @@ describe('domain/* rate-limit keys use the trusted client IP', () => {
   });
 });
 
-describe('access/request: the per-IP access-request limiter hashes the trusted client IP', () => {
-  const ipHashFor = (ip: string) => sha(ip + 'fake-salt');
-  const reqOpts = (headers: Record<string, string>) => ({
-    headers: { ...headers, authorization: `Bearer ${harness.TOKENS.A}` },
-    body: { companyName: 'Fake Co', useCase: 'fake use case' },
-  });
-  const limiterHashes = () => harness.calls()
-    .filter((c: { table: string; filters: Record<string, unknown> }) => c.table === 'access_request_rate_limit' && c.filters.ip_hash)
-    .map((c: { filters: Record<string, unknown> }) => c.filters.ip_hash);
-
-  it('off-platform: a spoofed X-Forwarded-For does not pick the bucket (socket peer is hashed)', async () => {
-    process.env.RATE_LIMIT_SALT = 'fake-salt';
-    // The peer's bucket is full: the spoofed header must not escape it.
-    harness.seed({ access_request_rate_limit: [{ ip_hash: ipHashFor(PEER), request_count: 3, window_start: new Date().toISOString() }] });
-    const r = await call('access/request', reqOpts(spoofed));
+// The authenticated POST /api/access/request (and its hashed-IP access_request_rate_limit bucket) was
+// retired (vetted path, 2026-11-19); the ONE access-request endpoint is the public POST /api/access-request,
+// whose per-IP limiter (lib/auth/rateLimit) is keyed on the trusted client IP.
+describe('access-request: the per-IP access-request limiter is keyed on the trusted client IP', () => {
+  const body = { email: 'fake.person@example.test', name: 'Fake Person', company_name: 'Fake Co', website: 'https://example.test' };
+  it('off-platform: a spoofed X-Forwarded-For does not pick the bucket (the socket peer is the key)', async () => {
+    const r = await call('access-request', { headers: spoofed, body });
     expect(r.status).toBe(429);
-    expect(limiterHashes()).toEqual([ipHashFor(PEER)]);
-    expect(limiterHashes()).not.toContain(ipHashFor(SPOOFED));
+    expect(mockRateLimitKeys).toEqual([PEER]);
+    expect(mockRateLimitKeys).not.toContain(SPOOFED);
   });
-  it('COMPAT Vercel: the edge-set client address is hashed', async () => {
+  it('COMPAT Vercel: the edge-set client address is the key', async () => {
     process.env.VERCEL = '1';
-    process.env.RATE_LIMIT_SALT = 'fake-salt';
-    harness.seed({ access_request_rate_limit: [{ ip_hash: ipHashFor(EDGE), request_count: 3, window_start: new Date().toISOString() }] });
-    const r = await call('access/request', reqOpts(vercelEdge));
+    const r = await call('access-request', { headers: vercelEdge, body });
     expect(r.status).toBe(429);
-    expect(limiterHashes()).toEqual([ipHashFor(EDGE)]);
+    expect(mockRateLimitKeys).toEqual([EDGE]);
   });
 });
 
