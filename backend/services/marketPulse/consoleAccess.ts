@@ -12,12 +12,16 @@
  */
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { resolveCompanyAccess } from '../contentArchitectService';
+import { MARKET_PULSE_CONSOLE_ROLE_NAMES, canUseMarketPulseConsole } from '../../../shared/auth/marketPulseConsoleRoles';
 
-export const MARKET_PULSE_CONSOLE_ROLES: ReadonlySet<string> = new Set(['SUPER_ADMIN', 'COMPANY_ADMIN', 'CONTENT_ARCHITECT']);
+/**
+ * The role set and predicate are DEFINED in shared/auth/marketPulseConsoleRoles.ts - the one source the UI also reads
+ * (04/89 2026-11-19). Re-exported here under the names the routes use; do not put a literal list here
+ * (marketPulseConsoleRolesPin.test.ts fails on one).
+ */
+export const MARKET_PULSE_CONSOLE_ROLES: ReadonlySet<string> = new Set(MARKET_PULSE_CONSOLE_ROLE_NAMES);
 
-export function isMarketPulseConsoleRole(role: string | null | undefined): boolean {
-  return typeof role === 'string' && MARKET_PULSE_CONSOLE_ROLES.has(role.toUpperCase());
-}
+export const isMarketPulseConsoleRole = canUseMarketPulseConsole;
 
 /**
  * Role gate on an access ALREADY resolved by resolveCompanyAccess in the route (so the route-auth gate still sees the
