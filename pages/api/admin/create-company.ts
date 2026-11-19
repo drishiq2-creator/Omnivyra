@@ -15,6 +15,7 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 import { supabase } from '../../../backend/db/supabaseClient';
 import { requireSuperAdmin } from '../../../backend/middleware/authMiddleware';
 import { saveDomainRecord } from '../../../backend/services/domainRecordService';
+import { normalizeCompanyDomain } from '../../../lib/shared/domain/companyDomain';
 
 type SuccessResponse = { companyId: string };
 type ErrorResponse   = { error: string; code?: string; details?: string; conflicts?: string[] };
@@ -81,7 +82,11 @@ async function handler(
   }
 
   // ── 5. Create company ────────────────────────────────────────────────────
-  const websiteDomain = domainList[0] ?? null;
+  // companies.website_domain holds the REGISTRABLE root, like every other writer (companyIdentityWriter,
+  // onboarding): the live unique index (20270217000063) compares stored values, so a raw host ('mail.acme.com')
+  // here would sit beside 'acme.com' and make two live companies on one domain. The company_domains records
+  // below keep the exact hosts the admin entered.
+  const websiteDomain = domainList[0] ? (normalizeCompanyDomain(domainList[0]) || null) : null;
 
   const { data: company, error: insertErr } = await supabase
     .from('companies')
