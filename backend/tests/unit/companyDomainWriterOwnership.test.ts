@@ -23,10 +23,6 @@ const WRITERS: Record<string, { premise: RegExp[]; why: string }> = {
     premise: [/website_domain = rawDomain \? normalizeCompanyDomain\(rawDomain\)/, /admin_email_domain = rawAdmin \? normalizeCompanyDomain\(rawAdmin\)/],
     why: 'the canonical writer; normalises both columns before insert/update',
   },
-  'pages/api/onboarding/complete.ts': {
-    premise: [/admin_email_domain:\s*publicEmailDomain \? null : \(normalizeCompanyDomain\(emailDomain\) \|\| null\)/],
-    why: 'founder path; stores the normalised root or null for a public mail domain',
-  },
   'pages/api/admin/create-company.ts': {
     premise: [/website_domain:\s*websiteDomain,/, /const websiteDomain = domainList\[0\] \? \(normalizeCompanyDomain\(domainList\[0\]\) \|\| null\) : null;/],
     why: 'super-admin create; stores the normalised root of the first domain',
@@ -43,6 +39,11 @@ const VARIABLE_WRITERS: Record<string, { count: number; premise: RegExp[]; why: 
     count: 2,
     premise: [/website_domain = rawDomain \? normalizeCompanyDomain\(rawDomain\)/, /\.from\('companies'\)\.insert\(record\)/],
     why: 'insert(record) / update(patch): record and patch are built by buildCompanyIdentity, which normalises',
+  },
+  'pages/api/onboarding/complete.ts': {
+    count: 1,
+    premise: [/insertCompany: async \(record\) =>/, /websiteDomain:\s*founderRoot,/, /adminEmailDomain: founderRoot,/, /const founderRoot = publicEmailDomain \? '' : normalizeCompanyDomain\(emailDomain\);/],
+    why: 'founder path (owner ruling 2026-11-19): the insertCompany callback handed to companyIdentityWriter inserts the record the writer built; website_domain = admin_email_domain = the normalised email root',
   },
   'pages/api/onboarding/setup-company.ts': {
     count: 1,
@@ -103,7 +104,7 @@ describe('companies domain columns: every writer stores the normalised root', ()
 
   it('every inline writer is listed, and the list has no stale entries', () => {
     const found = files.filter((f) => inlineDomainWrites(fs.readFileSync(f, 'utf8')) > 0).map(rel).sort();
-    expect(found.length).toBeGreaterThanOrEqual(3);
+    expect(found.length).toBeGreaterThanOrEqual(2); // create-company + approve (complete.ts now goes through the writer)
     const listedInline = Object.keys(WRITERS).filter((k) => k !== 'backend/services/companyIdentityWriter.ts').sort();
     expect({ unlisted: found.filter((f) => !WRITERS[f]), stale: listedInline.filter((k) => !found.includes(k)) })
       .toEqual({ unlisted: [], stale: [] });

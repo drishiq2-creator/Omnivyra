@@ -149,3 +149,15 @@ it('control: a DB error on an unclaimed domain (signup_intents insert) never rea
   expect(res.statusCode).toBe(500);
   expect(JSON.stringify(res.body)).not.toMatch(/SECRET|idx_|duplicate/);
 });
+
+it('owner ruling 2026-11-19: a company holding the domain ONLY as admin_email_domain (website elsewhere) claims nothing', async () => {
+  mockDb.companies = [{ id: 'co-b', name: 'Beta Brand Co', status: 'active', website_domain: 'beta.test', admin_email_domain: 'victim.test' }];
+  const r = await post();
+  await settle();
+  expect(r.body?.code).not.toBe('CLAIMED_DOMAIN');
+  expect(mockSent).toEqual([]);
+  // CONTROL: the same row holding it as its WEBSITE domain does claim it
+  mockDb.companies = [{ id: 'co-b', name: 'Beta Brand Co', status: 'active', website_domain: 'victim.test', admin_email_domain: 'shared.test' }];
+  const c = await post();
+  expect([c.statusCode, c.body?.code]).toEqual([409, 'CLAIMED_DOMAIN']);
+});

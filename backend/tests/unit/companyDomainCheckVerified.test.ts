@@ -108,8 +108,8 @@ describe('the SAME verified-domain lookup as setup-company (findCompaniesByVerif
     expect([r.statusCode, r.body]).toEqual([200, { matched: true }]);
   });
   it('several companies on the domain: the same 409 COMPANY_DOMAIN_AMBIGUOUS setup-company gives, nothing revealed', async () => {
-    mockDb.companies.push({ id: 'c-acme-2', name: 'Acme Two', status: 'active', website_domain: null, admin_email_domain: 'acme.com' });
-    mockDb.companies[0].admin_email_domain = null;
+    // website domains only (owner ruling 2026-11-19); a legacy host-stamped row normalises to the same root
+    mockDb.companies.push({ id: 'c-acme-2', name: 'Acme Two', status: 'active', website_domain: 'shop.acme.com', admin_email_domain: null });
     const r = await get();
     expect(r.statusCode).toBe(409);
     expect(r.body.code).toBe('COMPANY_DOMAIN_AMBIGUOUS');

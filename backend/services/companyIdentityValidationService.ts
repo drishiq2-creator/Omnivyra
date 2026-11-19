@@ -254,7 +254,10 @@ export interface ValidateCompanyIdentityDeps {
   cacheSet?: (domain: string, verdict: CachedDomainVerdict) => void;
 }
 
-/** Default rule-5 lookup: an active company already owning this domain. */
+/**
+ * Default rule-5 lookup: an active company already owning this domain - by its WEBSITE domain only (owner
+ * ruling 2026-11-19: identity = website domain; several companies may share an admin email domain).
+ */
 async function defaultLookupClaimedCompany(
   normalizedDomain: string,
 ): Promise<{ id: string; name: string | null } | null> {
@@ -263,7 +266,7 @@ async function defaultLookupClaimedCompany(
     .from('companies')
     .select('id, name')
     .eq('status', 'active')
-    .or(`website_domain.eq.${normalizedDomain},admin_email_domain.eq.${normalizedDomain}`)
+    .eq('website_domain', normalizedDomain)
     .maybeSingle();
   return data ? { id: (data as any).id, name: (data as any).name ?? null } : null;
 }

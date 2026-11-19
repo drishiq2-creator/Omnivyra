@@ -134,7 +134,7 @@ const ADMIN = 'u-admin';
 function world(adminName: string | null = 'Ada Admin') {
   seed({
     companies: [
-      { id: CO_W, name: 'Acme', status: 'active', admin_email_domain: 'acme.test' },
+      { id: CO_W, name: 'Acme', status: 'active', website_domain: 'acme.test', admin_email_domain: 'acme.test' },
       { id: OTHER, name: 'Other Co', status: 'active', website_domain: 'other.test' },
     ],
     users: [

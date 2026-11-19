@@ -196,21 +196,14 @@ async function handler(
   // endpoint is also IP rate-limited above).
   // The first user of a domain is unaffected: their company row doesn't
   // exist yet at signup time, so there's nothing to match.
+  // Owner ruling (2026-11-19): a company's identity is its WEBSITE domain; several companies may share an
+  // ADMIN email domain, so admin_email_domain never claims a domain here.
   {
-    const { data: byWebsite } = await supabase
+    const { data: claimedCompany } = await supabase
       .from('companies')
       .select('id, name')
       .eq('website_domain', domain)
       .maybeSingle();
-    const claimedCompany =
-      byWebsite ??
-      (
-        await supabase
-          .from('companies')
-          .select('id, name')
-          .eq('admin_email_domain', domain)
-          .maybeSingle()
-      ).data;
 
     if (claimedCompany) {
       const company = claimedCompany as { id: string; name: string | null };

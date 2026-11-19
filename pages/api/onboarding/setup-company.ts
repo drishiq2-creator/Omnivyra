@@ -396,11 +396,11 @@ async function handler(req: NextApiRequest, res: NextApiResponse<Result>) {
     const now = new Date().toISOString();
 
     // ── 3. Create companies row ───────────────────────────────────────────────
-    // website_domain: normalised domain from the website URL (e.g. "drishiq.com"
-    //   from "www.drishiq.com"). Used for fast indexed lookup when a new user
-    //   from the same domain signs up independently.
-    // admin_email_domain: fallback for companies created without a real website.
-    // Both stamped as the registrable ROOT (normalizeCompanyDomain), the key every lookup uses.
+    // website_domain: the company's IDENTITY (owner ruling 2026-11-19): the registrable root of the
+    //   website, which canonicalWebsite above binds to the verified email domain - so it equals the
+    //   email root. The match key of every lookup and of idx_companies_website_domain_unique.
+    // admin_email_domain: a stored attribute (several companies may share one), never a match key.
+    // Both stamped as the registrable ROOT (normalizeCompanyDomain).
     const websiteDomain = (() => {
       const d = extractDomain(canonicalWebsite);
       return d && !isFreeEmailDomain(d) ? normalizeCompanyDomain(d) || null : null;
@@ -411,7 +411,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse<Result>) {
     })();
 
     // ── STEP 1: Domain-first lookup — prevent duplicate companies per domain ──
-    // The single verified-domain match from step 3 (website_domain or admin_email_domain).
+    // The single verified-domain match from step 3 (website_domain only - a shared admin email domain claims nothing).
     const domainLookupResult = domainLookup.companies[0]
       ? { id: domainLookup.companies[0].company_id, name: domainLookup.companies[0].company_name }
       : null;
@@ -455,6 +455,21 @@ async function handler(req: NextApiRequest, res: NextApiResponse<Result>) {
         // Verified by construction: domainLookupResult comes only from the verified email domain.
         return respondJoinRequested(domainCompany.id, domainCompany.name, 'DOMAIN_ALREADY_CLAIMED');
       }
+    }
+
+    // ── Self-signup identity binding (owner ruling 2026-11-19) ────────────────
+    // A self-opened company's website domain IS the signup email's registrable root, and the INSERT
+    // must stamp it: idx_companies_website_domain_unique (20270217000063) is the only database guard
+    // against two concurrent same-domain signups, and a row without website_domain escapes it. A
+    // corporate email whose website root is missing or different never self-opens a company here
+    // (unreachable today: canonicalWebsite is bound to the email domain above); it is refused before
+    // any write. Free-mail users never reach this point (invite / approved access request only).
+    if (adminEmailDomain && websiteDomain !== adminEmailDomain) {
+      console.error('[setup-company] self-signup website domain does not match the email domain; refusing', { hasWebsiteDomain: !!websiteDomain });
+      return res.status(409).json({
+        code:  'COMPANY_DOMAIN_UNAVAILABLE',
+        error: 'This domain cannot be used to create a workspace right now. Please contact support.',
+      });
     }
 
     // ── Rule 4 (live-website / canonical / forwarding) REMOVED — Phase 8 ──────
@@ -506,12 +521,13 @@ async function handler(req: NextApiRequest, res: NextApiResponse<Result>) {
     }
 
     // ── Race condition: another request won the domain UNIQUE race ────────────
-    // 23505 can now fire on either partial unique index: admin_email_domain
-    // (20260322) or website_domain (20260713, AUTH-001 §8). Re-resolve the
-    // winner by whichever domain key we hold.
-    if (companyErr?.code === '23505' && (adminEmailDomain || websiteDomain)) {
-      // Both domain keys are the verified email domain (the website is bound to it above), so the
-      // winner is re-resolved by the same verified-domain lookup.
+    // 23505 fires on idx_companies_website_domain_unique (20270217000063, one LIVE company per website
+    // domain) - the only domain unique index (owner ruling 2026-11-19: admin_email_domain is never
+    // unique). Every self-signup insert stamps website_domain (guard above), so a concurrent same-domain
+    // signup always reaches it.
+    if (companyErr?.code === '23505' && websiteDomain) {
+      // website_domain is the verified email root (bound above), so the winner is re-resolved by the
+      // same verified-domain lookup.
       const raceLookup = await findCompaniesByVerifiedEmailDomain(user.email);
       if (raceLookup.ok && (raceLookup.ambiguous || raceLookup.companies.length > 1)) {
         console.error('[setup-company] ambiguous company domain after race', { count: raceLookup.companies.length });

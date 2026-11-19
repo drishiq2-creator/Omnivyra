@@ -39,6 +39,7 @@ import { getTrustedClientIp } from '../../../lib/security/clientIp';
 import { notifyAdminAndProspectOfClaimedDomain } from '../../../backend/services/claimedDomainNotifyService';
 import { isFreeEmailDomain, findCompaniesByVerifiedEmailDomain } from '../../../backend/services/companyMatchService';
 import { normalizeCompanyDomain } from '../../../lib/shared/domain/companyDomain';
+import { createCompanyIdentity } from '../../../backend/services/companyIdentityWriter';
 import { keepAliveAfterResponse } from '../../../lib/runtime/keepAlive';
 import {
   emitSignupEvent,
@@ -214,10 +215,11 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     //  1. MATCHING: exact (case-insensitive) equality on the FULL verified email domain, decided in
     //     code - never a pattern match on a name. (The old name-label ILIKE bound x@acme.io to
     //     acme.com's company 'acme'; its .limit(1) also refused members of a 2nd same-name company.)
-    //  2. BINDING: an existing company is reachable ONLY via companies.admin_email_domain AND an
+    //  2. BINDING: an existing company is reachable ONLY via its WEBSITE domain (owner ruling 2026-11-19:
+    //     identity = website domain; a shared admin email domain claims nothing) AND an
     //     active/invited membership the user already holds. A domain match without one gets NO access
     //     - a join request goes to the company's admin, who invites them (step 3 below). No domain match -> a NEW company,
-    //     even if another company has the same name (names are not unique; admin_email_domain is).
+    //     even if another company has the same name (names are not unique; the live website domain is).
     //  3. PROMOTION: COMPANY_ADMIN only for a company THIS request created - never because a company
     //     "has no initial credit claim" (that billing-as-identity gate is removed; a company with no
     //     admin is a Super Admin recovery case, not a signup outcome).
@@ -236,7 +238,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     const publicEmailDomain = !emailDomain || isFreeEmailDomain(emailDomain);
     if (!publicEmailDomain) {
       // The SAME verified-domain lookup as setup-company and company-domain-check (host + registrable
-      // root, both domain columns, case-insensitive, soft-deleted excluded), so the three never disagree.
+      // root, website_domain only, case-insensitive, soft-deleted excluded), so the three never disagree.
       const domainLookup = await findCompaniesByVerifiedEmailDomain(authEmail);
       if (!domainLookup.ok) {
         console.error('[onboarding/complete] company domain lookup failed');
@@ -294,24 +296,43 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       }
       companyId = domainCompanyId;
     } else {
-      const website = emailDomain ? `https://${emailDomain}` : 'https://example.com';
-      const { data: newCompany, error: createError } = await supabase
-        .from('companies')
-        .insert({
-          name:               finalCompanyName,
-          website,
-          admin_email_domain: publicEmailDomain ? null : (normalizeCompanyDomain(emailDomain) || null),
-          industry:           industry || null,
-          created_at:         new Date().toISOString(),
-        })
-        .select('id')
-        .single();
-
-      if (createError) {
-        console.error('[onboarding/complete] company creation failed:', createError.message);
+      // FOUNDER (owner ruling 2026-11-19): a company's identity is its WEBSITE domain, and self-signup
+      // requires the email's registrable domain to BE the website's - so the founder's company is created
+      // with website_domain = the email root (the key of idx_companies_website_domain_unique and of every
+      // lookup). A public-provider email (or none) has no domain to found a company on: it never self-opens
+      // one (an approved access request / invite is the only way in), whatever the eligibility classifier
+      // above concluded - no placeholder website, no company.
+      const founderRoot = publicEmailDomain ? '' : normalizeCompanyDomain(emailDomain);
+      if (!founderRoot) {
+        return res.status(403).json({ code: 'INVITE_REQUIRED', error: 'You can only join via an organization invite' });
+      }
+      const website = `https://${emailDomain}`;
+      // Through the canonical identity writer: website <-> website_domain are written together, both
+      // domains normalised (Invariants A-D). The injected insert keeps the PostgREST error visible.
+      let newCompanyId: string;
+      try {
+        ({ id: newCompanyId } = await createCompanyIdentity(
+          {
+            name:             finalCompanyName,
+            website,
+            websiteDomain:    founderRoot,
+            adminEmailDomain: founderRoot,
+            industry:         industry || null,
+            created_at:       new Date().toISOString(),
+          },
+          {
+            insertCompany: async (record) => {
+              const { data, error } = await supabase.from('companies').insert(record).select('id').single();
+              if (error || !data) throw new Error(error?.message ?? 'company insert failed');
+              return { id: (data as { id: string }).id };
+            },
+          },
+        ));
+      } catch (createError) {
+        console.error('[onboarding/complete] company creation failed:', (createError as Error)?.message);
         return res.status(500).json({ error: 'Could not create company' });
       }
-      companyId = newCompany.id;
+      companyId = newCompanyId;
       createdThisRequest = true;
 
       await supabase.from('company_profiles').upsert({

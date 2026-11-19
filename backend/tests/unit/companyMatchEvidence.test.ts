@@ -5,6 +5,11 @@
  * at all, so the only lookup left is findCompaniesByVerifiedEmailDomain - keyed on the registrable
  * domain of the verified email (lib/shared/domain/companyDomain.normalizeCompanyDomain), returning EVERY
  * company on that domain so the caller can refuse an ambiguous one, and failing closed on a read error.
+ *
+ * Owner ruling (2026-11-19): a company's identity is its WEBSITE domain. Only companies.website_domain is
+ * matched; admin_email_domain is a stored attribute several companies may share (e.g. company A, website
+ * alpha.test, and company B, website beta.test, both administered from shared.test), so a shared admin
+ * email domain claims NOTHING.
  */
 export {};
 type Row = Record<string, any>;
@@ -57,7 +62,7 @@ beforeEach(() => {
   );
 });
 
-it('the verified corporate email domain -> that company, once (it holds both columns)', async () => {
+it('the verified corporate email domain -> the company whose WEBSITE domain it is', async () => {
   const r = await findCompaniesByVerifiedEmailDomain('p@acme.com');
   expect(r).toEqual({ ok: true, domain: 'acme.com', companies: [{ company_id: 'c-acme', company_name: 'Acme Corporation' }] });
 });
@@ -65,8 +70,8 @@ it('the verified corporate email domain -> that company, once (it holds both col
 it('the comparison is by registrable domain (normalizeCompanyDomain): a mail subdomain reaches its company', async () => {
   const r = await findCompaniesByVerifiedEmailDomain('p@mail.acme.com');
   expect(r).toMatchObject({ ok: true, domain: 'acme.com', companies: [{ company_id: 'c-acme' }] });
-  // exact root, then the subdomain suffix, for each column - never the raw host as a wildcard-free key
-  expect(mockQueries.map((q) => q.website_domain ?? q.admin_email_domain)).toEqual(['acme.com', '%.acme.com', 'acme.com', '%.acme.com']);
+  // exact root, then the subdomain suffix, on website_domain ONLY - never the raw host as a wildcard-free key
+  expect(mockQueries).toEqual([{ website_domain: 'acme.com' }, { website_domain: '%.acme.com' }]);
 });
 
 it('acme.co.uk and foo.co.uk are different domains: x@foo.co.uk matches nothing', async () => {
@@ -90,7 +95,7 @@ it('a free / public email domain looks nothing up and matches nothing', async ()
 });
 
 it('several companies on the domain are ALL returned (the caller refuses an ambiguous domain)', async () => {
-  mockCompanies.push({ id: 'c-zeta-2', name: 'Zeta Two', status: 'active', website_domain: null, admin_email_domain: 'zeta.io' });
+  mockCompanies.push({ id: 'c-zeta-2', name: 'Zeta Two', status: 'active', website_domain: 'eu.zeta.io', admin_email_domain: null });
   const r = await findCompaniesByVerifiedEmailDomain('p@zeta.io');
   expect(r.ok).toBe(true);
   expect(r.companies.map((c: { company_id: string }) => c.company_id).sort()).toEqual(['c-zeta', 'c-zeta-2']);
@@ -102,7 +107,7 @@ it('a failed read is ok:false - never "no company"', async () => {
 });
 
 it('c6 F1: a row stamped with a HOST (legacy) is found from the same host and from the root', async () => {
-  mockCompanies.push({ id: 'c-legacy', name: 'Legacy', status: 'active', website_domain: null, admin_email_domain: 'mail.legacy.io' });
+  mockCompanies.push({ id: 'c-legacy', name: 'Legacy', status: 'active', website_domain: 'mail.legacy.io', admin_email_domain: null });
   for (const email of ['jane2@mail.legacy.io', 'bob@legacy.io', 'eve@eu.legacy.io']) {
     const r = await findCompaniesByVerifiedEmailDomain(email);
     expect([email, r]).toEqual([email, { ok: true, domain: 'legacy.io', companies: [{ company_id: 'c-legacy', company_name: 'Legacy' }] }]);
@@ -120,7 +125,7 @@ it('the subdomain suffix never widens to a different registrable domain (notacme
 
 it('7c: a soft-deleted company is out of the match and the ambiguity count; a suspended one is in', async () => {
   mockCompanies.push(
-    { id: 'c-dead', name: 'Dead', status: 'inactive', deleted_at: '2026-10-01T00:00:00Z', website_domain: null, admin_email_domain: 'zeta.io' },
+    { id: 'c-dead', name: 'Dead', status: 'inactive', deleted_at: '2026-10-01T00:00:00Z', website_domain: 'zeta.io', admin_email_domain: null },
   );
   const zeta = await findCompaniesByVerifiedEmailDomain('p@zeta.io');
   expect(zeta.ok && zeta.companies.map((c: { company_id: string }) => c.company_id)).toEqual(['c-zeta']);
@@ -130,7 +135,7 @@ it('7c: a soft-deleted company is out of the match and the ambiguity count; a su
 });
 
 it('PSL guard: an email whose host IS a public suffix is ambiguous - never a match - even with a company stored under it', async () => {
-  mockCompanies.push({ id: 'c-sfx', name: 'Suffix Holder', status: 'active', website_domain: null, admin_email_domain: 'co.il' });
+  mockCompanies.push({ id: 'c-sfx', name: 'Suffix Holder', status: 'active', website_domain: 'co.il', admin_email_domain: null });
   for (const email of ['x@co.il', 'x@github.io', 'x@com.sg']) {
     const r = await findCompaniesByVerifiedEmailDomain(email);
     expect([email, r]).toEqual([email, { ok: true, domain: expect.any(String), companies: [], ambiguous: true }]);
@@ -139,7 +144,7 @@ it('PSL guard: an email whose host IS a public suffix is ambiguous - never a mat
 });
 
 it('PSL: foo.co.il and bar.co.il are different registrable domains', async () => {
-  mockCompanies.push({ id: 'c-foo', name: 'Foo IL', status: 'active', website_domain: null, admin_email_domain: 'foo.co.il' });
+  mockCompanies.push({ id: 'c-foo', name: 'Foo IL', status: 'active', website_domain: 'foo.co.il', admin_email_domain: null });
   const r = await findCompaniesByVerifiedEmailDomain('bar@bar.co.il');
   expect(r).toEqual({ ok: true, domain: 'bar.co.il', companies: [] });
 });
@@ -155,4 +160,39 @@ it('PSL guard: a host with no registrable root (no dot) is ambiguous, never a ma
   const r = await findCompaniesByVerifiedEmailDomain('not-an-email');
   expect(r).toMatchObject({ ok: true, companies: [], ambiguous: true });
   expect(mockQueries).toEqual([]);
+});
+
+describe('owner ruling 2026-11-19: identity is the WEBSITE domain; a shared admin email domain claims nothing', () => {
+  // POLICY fixture (synthetic): two live companies administered from ONE email domain (shared.test).
+  const ALPHA = { id: 'c-alpha', name: 'Alpha', status: 'active', website_domain: 'alpha.test', admin_email_domain: 'shared.test' };
+  const BETA = { id: 'c-beta', name: 'Beta', status: 'active', website_domain: 'beta.test', admin_email_domain: 'shared.test' };
+  const SHARED = { id: 'c-shared', name: 'Shared Co', status: 'active', website_domain: 'shared.test', admin_email_domain: 'shared.test' };
+
+  it('A and B share admin domain shared.test; a company whose WEBSITE is shared.test exists: x@shared.test reaches ONLY that company', async () => {
+    mockCompanies.push(SHARED, ALPHA, BETA);
+    for (const email of ['x@shared.test', 'a@shared.test', 'b@shared.test']) {
+      const r = await findCompaniesByVerifiedEmailDomain(email);
+      expect([email, r]).toEqual([email, { ok: true, domain: 'shared.test', companies: [{ company_id: 'c-shared', company_name: 'Shared Co' }] }]);
+    }
+  });
+
+  it('a company reachable ONLY through admin_email_domain (website elsewhere) is NOT matched', async () => {
+    mockCompanies.push(ALPHA, BETA);
+    const r = await findCompaniesByVerifiedEmailDomain('x@shared.test');
+    expect(r).toEqual({ ok: true, domain: 'shared.test', companies: [] });
+    const own = await findCompaniesByVerifiedEmailDomain('x@beta.test');
+    expect(own).toEqual({ ok: true, domain: 'beta.test', companies: [{ company_id: 'c-beta', company_name: 'Beta' }] });
+  });
+
+  it('a company with NO website domain but a matching admin_email_domain is not matched (no column is a fallback)', async () => {
+    mockCompanies.push({ id: 'c-adminonly', name: 'Admin Only', status: 'active', website_domain: null, admin_email_domain: 'adminonly.test' });
+    expect(await findCompaniesByVerifiedEmailDomain('p@adminonly.test')).toEqual({ ok: true, domain: 'adminonly.test', companies: [] });
+  });
+
+  it('the lookup never reads admin_email_domain at all', async () => {
+    mockCompanies.push(SHARED, ALPHA, BETA);
+    await findCompaniesByVerifiedEmailDomain('x@shared.test');
+    expect(mockQueries.length).toBeGreaterThan(0);
+    expect(mockQueries.filter((q) => 'admin_email_domain' in q)).toEqual([]);
+  });
 });

@@ -493,7 +493,8 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
             const { data: domainOwners } = await supabase
               .from('companies')
               .select('id')
-              .or(`website_domain.eq.${candidateDomain},admin_email_domain.eq.${candidateDomain}`)
+              // Website-domain identity only (owner ruling 2026-11-19): an admin email domain is shared, not owned.
+              .eq('website_domain', candidateDomain)
               .neq('id', resolvedCompanyId)
               .limit(1);
             if (domainOwners && domainOwners.length > 0) {

@@ -170,7 +170,7 @@ function world(member: Record<string, unknown> = {}, invitations: Record<string,
   seed({
     companies: [
       { id: CO, name: 'Invited Co', status: 'active' },
-      { id: CO_W, name: 'Acme', status: 'active', admin_email_domain: 'acme.test' },
+      { id: CO_W, name: 'Acme', status: 'active', website_domain: 'acme.test', admin_email_domain: 'acme.test' },
       { id: OTHER, name: 'Other', status: 'active' },
       { id: P, name: 'Platform', status: 'active' },
     ],

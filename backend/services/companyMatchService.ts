@@ -10,10 +10,11 @@ import { ownedDbTable } from '../db/writeOwner';
  *   New user email:  jane@drishiq.com  →  email domain = "drishiq.com"
  *   → Match found → user added as CONTENT_CREATOR, company admin notified.
  *
- * Match priority:
- *   1. companies.website_domain == user email domain  (indexed, primary)
- *   2. companies.admin_email_domain == user email domain  (fallback for companies
- *      created without a real website URL)
+ * Match key (owner ruling, 2026-11-19): companies.website_domain ONLY. A company's identity is its
+ * WEBSITE domain (one live company per registrable website domain, enforced by
+ * idx_companies_website_domain_unique, 20270217000063). admin_email_domain is a stored attribute that
+ * several companies MAY share (e.g. alpha.test and beta.test both administered from shared.test), so it is
+ * never a match key: a shared admin email domain claims nothing.
  * Free/public email providers (gmail, yahoo, …) are never matched by domain, and a company name or a
  * typed website never matches at all (CI-231) - see findCompaniesByVerifiedEmailDomain.
  */
@@ -109,6 +110,10 @@ export type VerifiedDomainLookup =
  * typed never matches anything (the former name / entered-website steps let anyone with a verified
  * non-free email learn another company's id, name and admin).
  *
+ * Only companies.website_domain is compared (owner ruling 2026-11-19: identity = website domain; a shared
+ * ADMIN email domain claims nothing - see the file header). Self-signup requires the email root to equal
+ * the website root, so the verified email root is looked up as a website domain.
+ *
  * The comparison key is the registrable ROOT from lib/shared/domain/companyDomain
  * (normalizeCompanyDomain), applied to BOTH sides: the root is what companyIdentityWriter STORES, and a
  * legacy / pre-writer row stamped with a HOST (mail.acme.com) normalizes to the same root (c6 review,
@@ -144,24 +149,22 @@ export async function findCompaniesByVerifiedEmailDomain(
   const escapedRoot = domain.replace(/[\\%_]/g, (c) => `\\${c}`).replace(/\*/g, '_');
   const byId = new Map<string, VerifiedDomainCompany>();
   let capHit = false;
-  for (const column of ['website_domain', 'admin_email_domain'] as const) {
-    for (const pattern of [escapedRoot, `%.${escapedRoot}`]) {
-      // The leading-wildcard ILIKE can never use a btree index. If this ever needs optimising, the right
-      // fix is a stored normalized-root column maintained by companyIdentityWriter with a plain btree
-      // index (which also removes the suffix pattern) - NOT an index on the raw domain columns.
-      const { data, error } = await ownedDbTable('companies')
-        .select(`id, name, ${column}`)
-        .ilike(column, pattern)
-        .is('deleted_at', null)
-        .limit(MAX_DOMAIN_CANDIDATES);
-      if (error) return { ok: false };
-      // A full page is potentially incomplete: never decide on it.
-      if ((data ?? []).length >= MAX_DOMAIN_CANDIDATES) capHit = true;
-      for (const row of (data ?? []) as Array<Record<string, unknown>>) {
-        const stored = row?.[column];
-        if (row?.id == null || typeof stored !== 'string' || normalizeCompanyDomain(stored) !== domain) continue;
-        byId.set(String(row.id), { company_id: String(row.id), company_name: String(row.name ?? '') });
-      }
+  for (const pattern of [escapedRoot, `%.${escapedRoot}`]) {
+    // The leading-wildcard ILIKE can never use a btree index. If this ever needs optimising, the right
+    // fix is a stored normalized-root column maintained by companyIdentityWriter with a plain btree
+    // index (which also removes the suffix pattern) - NOT an index on the raw domain columns.
+    const { data, error } = await ownedDbTable('companies')
+      .select('id, name, website_domain')
+      .ilike('website_domain', pattern)
+      .is('deleted_at', null)
+      .limit(MAX_DOMAIN_CANDIDATES);
+    if (error) return { ok: false };
+    // A full page is potentially incomplete: never decide on it.
+    if ((data ?? []).length >= MAX_DOMAIN_CANDIDATES) capHit = true;
+    for (const row of (data ?? []) as Array<Record<string, unknown>>) {
+      const stored = row?.website_domain;
+      if (row?.id == null || typeof stored !== 'string' || normalizeCompanyDomain(stored) !== domain) continue;
+      byId.set(String(row.id), { company_id: String(row.id), company_name: String(row.name ?? '') });
     }
   }
   if (capHit) {

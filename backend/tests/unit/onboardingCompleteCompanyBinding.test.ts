@@ -3,7 +3,8 @@
  * company whose name matched the email domain's first label (x@acme.io -> 'acme', i.e. acme.com's
  * company) and, when that company had no initial credit claim, inserted the signer as COMPANY_ADMIN.
  * Owner ruling, three decisions:
- *  1. MATCHING by exact equality on the FULL verified domain vs companies.admin_email_domain;
+ *  1. MATCHING by the registrable root of the verified domain vs companies.website_domain (owner ruling
+ *     2026-11-19: identity = website domain; admin_email_domain is shared, never matched);
  *  2. BINDING to an existing company only with an active/invited membership (else no access);
  *     no domain match -> a NEW company even when the name collides;
  *  3. PROMOTION to COMPANY_ADMIN only for a company this request created (credit-claim gate removed).
@@ -117,7 +118,7 @@ beforeEach(() => {
   mockNotifyHangs = false; mockFailTable = null; mockFailInsert = null;
   mockDb.users = [{ id: USER, supabase_uid: 'sb-user', email: 'x', is_deleted: false }];
   // acme.com's company: created by an admin flow, so it has NO initial free-credit claim
-  mockDb.companies = [{ id: VICTIM, name: 'Acme', admin_email_domain: 'acme.com' }];
+  mockDb.companies = [{ id: VICTIM, name: 'Acme', website: 'https://acme.com', website_domain: 'acme.com', admin_email_domain: 'acme.com' }];
   mockDb.free_credit_claims = [];
   mockDb.user_company_roles = [];
 });
@@ -175,7 +176,7 @@ describe('decision 1+2: matching and binding', () => {
   });
 
   it('same domain (stored in another case), INVITED: joins the right company, not promoted', async () => {
-    mockDb.companies[0].admin_email_domain = 'ACME.com';
+    mockDb.companies[0].website_domain = 'ACME.com';
     mockEmail = 'invitee@acme.com';
     mockDb.user_company_roles = [{ id: 'r1', user_id: USER, company_id: VICTIM, role: 'CONTENT_CREATOR', status: 'invited' }];
     const r = await post();
@@ -199,7 +200,7 @@ describe('decision 1+2: matching and binding', () => {
   });
 
   it('a lookalike domain never matches by pattern (acme_com / acme.co)', async () => {
-    mockDb.companies = [{ id: VICTIM, name: 'Acme', admin_email_domain: 'acmeXcom' }, { id: OTHER, name: 'Acme', admin_email_domain: 'acme.com.au' }];
+    mockDb.companies = [{ id: VICTIM, name: 'Acme', website_domain: 'acmeXcom' }, { id: OTHER, name: 'Acme', website_domain: 'acme.com.au' }];
     mockEmail = 'mallory@acme.com';
     const r = await post();
     expect(r.statusCode).toBe(200);
@@ -208,7 +209,7 @@ describe('decision 1+2: matching and binding', () => {
   });
 
   it('two companies claiming the same domain (modulo case) are ambiguous: 409, nothing bound', async () => {
-    mockDb.companies.push({ id: OTHER, name: 'Acme 2', admin_email_domain: 'ACME.COM' });
+    mockDb.companies.push({ id: OTHER, name: 'Acme 2', website_domain: 'ACME.COM' });
     mockEmail = 'x@acme.com';
     const r = await post();
     expect(r.statusCode).toBe(409);
@@ -296,5 +297,51 @@ describe('no raw database error text in any complete.ts response', () => {
     const r = await post();
     expect([r.statusCode, r.body]).toEqual([500, { error: 'Something went wrong. Please try again.' }]);
     expect(JSON.stringify(r.body)).not.toMatch(/SECRET|free_credit_profiles|constraint/);
+  });
+});
+
+describe('owner ruling 2026-11-19: the founder company is identified by its WEBSITE domain', () => {
+  const S = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+  const B = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+  // POLICY fixture (synthetic): S's website is shared.test, B's is beta.test; both administered from shared.test.
+  const sCo = { id: S, name: 'Shared Site Co', website: 'https://shared.test', website_domain: 'shared.test', admin_email_domain: 'shared.test' };
+  const bCo = { id: B, name: 'Beta Brand Co', website: 'https://beta.test', website_domain: 'beta.test', admin_email_domain: 'shared.test' };
+
+  it('the founder path stores website_domain = the email root, beside website and admin_email_domain', async () => {
+    mockEmail = 'x@mail.newco.io';
+    const r = await post();
+    expect(r.statusCode).toBe(200);
+    expect(mockDb.companies.find((c) => c.id !== VICTIM)).toMatchObject({
+      website: 'https://mail.newco.io', website_domain: 'newco.io', admin_email_domain: 'newco.io',
+    });
+  });
+
+  it('x@shared.test with S and B: a join request to S ONLY - never a 409, never B', async () => {
+    mockDb.companies = [sCo, bCo];
+    mockEmail = 'x@shared.test';
+    const r = await post();
+    expect([r.statusCode, r.body.code, r.body.joinRequested]).toEqual([403, 'INVITE_REQUIRED', true]);
+    expect(mockNotified).toEqual([expect.objectContaining({ companyId: S })]);
+    expect(bindingWrites()).toEqual([]);
+  });
+
+  it('a company matched ONLY via admin_email_domain (B) is NOT matched: a new shared.test company is founded', async () => {
+    mockDb.companies = [bCo];
+    mockEmail = 'x@shared.test';
+    const r = await post();
+    expect(r.statusCode).toBe(200);
+    expect(mockNotified).toEqual([]);
+    expect(rolesIn(B)).toEqual([]);
+    expect(mockDb.companies.find((c) => c.id !== B)).toMatchObject({ website_domain: 'shared.test', admin_email_domain: 'shared.test' });
+  });
+
+  it('a public-provider email never founds a company here, even if eligibility let it through (no placeholder website)', async () => {
+    mockEmail = 'someone@gmail.com';
+    const before = mockDb.companies.length;
+    const r = await post();
+    expect([r.statusCode, r.body.code]).toEqual([403, 'INVITE_REQUIRED']);
+    expect(mockDb.companies).toHaveLength(before);
+    expect(mockDb.companies.find((c) => c.website === 'https://example.com')).toBeUndefined();
+    expect(mockGrants).toEqual([]);
   });
 });

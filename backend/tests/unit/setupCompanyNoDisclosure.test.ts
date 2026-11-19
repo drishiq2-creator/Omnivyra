@@ -70,10 +70,13 @@ jest.mock('../../services/signupEventService', () => ({
 }));
 /** null = the REAL resolver; a string pins resolveValidatedWebsite's answer (e.g. the user_input source). */
 let mockPinnedWebsite: string | null = null;
+/** true = deriveWebsiteFromEmail answers null (models a corporate email with no derivable website). */
+let mockNoDerivedWebsite = false;
 jest.mock('../../services/validatedWebsiteService', () => {
   const actual = jest.requireActual('../../services/validatedWebsiteService');
   return {
     ...actual,
+    deriveWebsiteFromEmail: (...a: unknown[]) => (mockNoDerivedWebsite ? null : actual.deriveWebsiteFromEmail(...a)),
     resolveValidatedWebsite: async (...a: unknown[]) =>
       mockPinnedWebsite !== null ? { canonicalWebsite: mockPinnedWebsite, source: 'user_input' } : actual.resolveValidatedWebsite(...a),
   };
@@ -314,7 +317,7 @@ describe('same verified domain -> admin-approved join request, no disclosure', (
   it('race path: another request wins the domain INSERT race -> the same neutral join request, nothing revealed', async () => {
     const WIN = '30930930-0000-4000-8000-0000000000ee';
     world({ users: [{ id: 'u-wadmin', email: 'wendy@race.test', name: 'Wendy Winner', status: 'active' }] }, 'rita@race.test');
-    uniqueKey('companies', 'admin_email_domain');
+    uniqueKey('companies', 'website_domain');
     let raced = false;
     mockBeforeWrite.fn = (table, op) => {
       if (table !== 'companies' || op !== 'insert' || raced) return;
@@ -342,7 +345,7 @@ describe('ambiguous domain', () => {
     world({
       companies: [
         { id: A, name: 'Dup Alpha', status: 'active', website: 'https://www.dup.test', website_domain: 'dup.test', admin_email_domain: null },
-        { id: B, name: 'Dup Beta', status: 'active', website: null, website_domain: null, admin_email_domain: 'dup.test' },
+        { id: B, name: 'Dup Beta', status: 'active', website: 'https://shop.dup.test', website_domain: 'shop.dup.test', admin_email_domain: null },
       ],
     }, 'x@dup.test');
     const r = await setup('x@dup.test', { companyName: 'Dup Alpha' });
@@ -404,7 +407,7 @@ describe('the denial is recorded server-side (signup.CompanyExists audit event)'
     world({
       companies: [
         { id: '30930930-0000-4000-8000-0000000000d1', name: 'Dup Alpha', status: 'active', website: 'https://www.dup.test', website_domain: 'dup.test', admin_email_domain: null },
-        { id: '30930930-0000-4000-8000-0000000000d2', name: 'Dup Beta', status: 'active', website: null, website_domain: null, admin_email_domain: 'dup.test' },
+        { id: '30930930-0000-4000-8000-0000000000d2', name: 'Dup Beta', status: 'active', website: 'https://shop.dup.test', website_domain: 'shop.dup.test', admin_email_domain: null },
       ],
     }, 'x@dup.test');
     const r = await setup('x@dup.test');
@@ -448,7 +451,7 @@ describe('company-domain-check and setup-company never disagree (one shared veri
     world({
       companies: [
         { id: '30930930-0000-4000-8000-0000000000d1', name: 'Dup Alpha', status: 'active', website: 'https://www.dup.test', website_domain: 'dup.test', admin_email_domain: null },
-        { id: '30930930-0000-4000-8000-0000000000d2', name: 'Dup Beta', status: 'active', website: null, website_domain: null, admin_email_domain: 'dup.test' },
+        { id: '30930930-0000-4000-8000-0000000000d2', name: 'Dup Beta', status: 'active', website: 'https://shop.dup.test', website_domain: 'shop.dup.test', admin_email_domain: null },
       ],
     }, 'x@dup.test');
     expect(await both('x@dup.test')).toEqual({ check: 'COMPANY_DOMAIN_AMBIGUOUS', setup: 'COMPANY_DOMAIN_AMBIGUOUS' });
@@ -458,14 +461,14 @@ describe('company-domain-check and setup-company never disagree (one shared veri
 describe('F1 (c6 review): a company stamped with the raw HOST (legacy / complete.ts) is still found by [host, root]', () => {
   const LEGACY = '30930930-0000-4000-8000-0000000000f1';
   const legacyWorld = (requester: string) => world({
-    companies: [{ id: LEGACY, name: 'Legacy Acme', status: 'active', website: null, website_domain: null, admin_email_domain: 'mail.acme.test' }],
+    companies: [{ id: LEGACY, name: 'Legacy Acme', status: 'active', website: 'https://mail.acme.test', website_domain: 'mail.acme.test', admin_email_domain: 'mail.acme.test' }],
     users: [{ id: 'u-ladmin', email: 'lena@mail.acme.test', name: 'Lena Legacyadmin', status: 'active' }],
     roles: [{ id: 'r-ladmin', user_id: 'u-ladmin', company_id: LEGACY, role: 'COMPANY_ADMIN', status: 'active' }],
   }, requester);
 
   it('jane2@mail.acme.test (same host) gets the neutral join request - no duplicate company, no 500', async () => {
     legacyWorld('jane2@mail.acme.test');
-    uniqueKey('companies', 'admin_email_domain');
+    uniqueKey('companies', 'website_domain');
     const r = await setup('jane2@mail.acme.test');
     await settle();
     expect([r.status, r.body]).toEqual([200, { companyExists: true, joinRequested: true, message: expect.any(String) }]);
@@ -495,7 +498,7 @@ describe('F1 (c6 review): a company stamped with the raw HOST (legacy / complete
   it('race path, subdomain requester: the winner is found by [host, root] and a join request follows', async () => {
     const WIN = '30930930-0000-4000-8000-0000000000f2';
     world({ users: [{ id: 'u-wadmin', email: 'wendy@race2.test', name: 'Wendy Winner', status: 'active' }] }, 'rita@mail.race2.test');
-    uniqueKey('companies', 'admin_email_domain');
+    uniqueKey('companies', 'website_domain');
     let raced = false;
     mockBeforeWrite.fn = (table, op) => {
       if (table !== 'companies' || op !== 'insert' || raced) return;
@@ -538,7 +541,7 @@ describe('all three surfaces agree: setup-company, company-domain-check, onboard
 
   it('a user of the host-stamped (legacy) company: existing everywhere', async () => {
     const mk = () => world({
-      companies: [{ id: '30930930-0000-4000-8000-0000000000f3', name: 'Legacy Co', status: 'active', website: null, website_domain: null, admin_email_domain: 'mail.legacy.test' }],
+      companies: [{ id: '30930930-0000-4000-8000-0000000000f3', name: 'Legacy Co', status: 'active', website: 'https://mail.legacy.test', website_domain: 'mail.legacy.test', admin_email_domain: null }],
     }, 'jo@mail.legacy.test');
     expect(await allThree('jo@mail.legacy.test', mk)).toEqual({ check: 'existing', setup: 'existing', complete: 'existing' });
   });
@@ -547,7 +550,7 @@ describe('all three surfaces agree: setup-company, company-domain-check, onboard
     const mk = () => world({
       companies: [
         { id: '30930930-0000-4000-8000-0000000000d1', name: 'Dup Alpha', status: 'active', website: 'https://www.dup.test', website_domain: 'dup.test', admin_email_domain: null },
-        { id: '30930930-0000-4000-8000-0000000000d2', name: 'Dup Beta', status: 'active', website: null, website_domain: null, admin_email_domain: 'dup.test' },
+        { id: '30930930-0000-4000-8000-0000000000d2', name: 'Dup Beta', status: 'active', website: 'https://shop.dup.test', website_domain: 'shop.dup.test', admin_email_domain: null },
       ],
     }, 'x@dup.test');
     expect(await allThree('x@dup.test', mk)).toEqual({ check: 'COMPANY_DOMAIN_AMBIGUOUS', setup: 'COMPANY_DOMAIN_AMBIGUOUS', complete: 'COMPANY_DOMAIN_AMBIGUOUS' });
@@ -557,18 +560,17 @@ describe('all three surfaces agree: setup-company, company-domain-check, onboard
 describe('7c merge precondition: soft-deleted companies (deleted_at) are out of the match and the ambiguity count', () => {
   const DEAD = '30930930-0000-4000-8000-0000000000a1';
   const LIVE = '30930930-0000-4000-8000-0000000000a2';
-  const deadCo = (domain: string) => ({ id: DEAD, name: 'Dead Co', status: 'inactive', deleted_at: '2026-10-01T00:00:00Z', website: null, website_domain: null, admin_email_domain: domain });
+  const deadCo = (domain: string) => ({ id: DEAD, name: 'Dead Co', status: 'inactive', deleted_at: '2026-10-01T00:00:00Z', website: `https://${domain}`, website_domain: domain, admin_email_domain: null });
   const deadAdmin = { users: [{ id: 'u-dadmin', email: 'dora@dead.test', name: 'Dora Deadadmin', status: 'active' }] };
 
   // (i) The lookup treats a domain held only by a deleted company as NEW (no join request, no notice).
-  // The INSERT that follows is then refused by idx_companies_admin_email_domain_unique, which the
-  // soft-deleted row still occupies (soft_delete_company does not release the domain) - so the company
-  // cannot actually be created until a migration scopes the index to deleted_at IS NULL or releases
-  // domains on soft delete. Modelled here with the real unique key; the assertions are the no-disclosure
-  // ones that hold either way.
+  // The harness models an UNSCOPED unique key on website_domain, so the INSERT that follows is refused
+  // 23505 although no live company holds the domain (20270217000063 scopes the real index to
+  // deleted_at IS NULL, so in the database this insert succeeds). It pins the 23505-with-no-live-winner
+  // answer; the assertions are the no-disclosure ones that hold either way.
   it('(i) a domain held only by a deleted company is NOT matched: no join request, nobody notified, nothing about it leaks', async () => {
     world({ companies: [deadCo('dead.test')], ...deadAdmin, roles: [{ id: 'r-dadmin', user_id: 'u-dadmin', company_id: DEAD, role: 'COMPANY_ADMIN', status: 'active' }] }, 'nina@dead.test');
-    uniqueKey('companies', 'admin_email_domain');
+    uniqueKey('companies', 'website_domain');
     const r = await setup('nina@dead.test', { companyName: 'Nina Co' });
     await settle();
     expect(r.body?.companyExists).toBeUndefined();
@@ -578,7 +580,7 @@ describe('7c merge precondition: soft-deleted companies (deleted_at) are out of 
 
   it('(i) the INSERT refused by the domain index the deleted row holds -> 409 COMPANY_DOMAIN_UNAVAILABLE, no DB text', async () => {
     world({ companies: [deadCo('dead.test')] }, 'nina@dead.test');
-    uniqueKey('companies', 'admin_email_domain');
+    uniqueKey('companies', 'website_domain');
     const r = await setup('nina@dead.test', { companyName: 'Nina Co' });
     expect([r.status, r.body]).toEqual([409, {
       code: 'COMPANY_DOMAIN_UNAVAILABLE',
@@ -590,8 +592,8 @@ describe('7c merge precondition: soft-deleted companies (deleted_at) are out of 
   it('(ii) one live + one deleted company on the domain: a join request to the LIVE one, not a 409', async () => {
     world({
       companies: [
-        { ...deadCo(null as unknown as string), website: 'https://www.both.test', website_domain: 'both.test' },
-        { id: LIVE, name: 'Live Co', status: 'active', website: null, website_domain: null, admin_email_domain: 'both.test' },
+        deadCo('both.test'),
+        { id: LIVE, name: 'Live Co', status: 'active', website: 'https://www.both.test', website_domain: 'both.test', admin_email_domain: null },
       ],
       users: [{ id: 'u-liveadmin', email: 'liv@both.test', name: 'Liv Liveadmin', status: 'active' }],
       roles: [{ id: 'r-liveadmin', user_id: 'u-liveadmin', company_id: LIVE, role: 'COMPANY_ADMIN', status: 'active' }],
@@ -604,7 +606,7 @@ describe('7c merge precondition: soft-deleted companies (deleted_at) are out of 
 
   it('(iii) control: a SUSPENDED (not deleted) company still gets the join request', async () => {
     world({
-      companies: [{ id: LIVE, name: 'Suspended Co', status: 'suspended', deleted_at: null, website: null, website_domain: null, admin_email_domain: 'susp.test' }],
+      companies: [{ id: LIVE, name: 'Suspended Co', status: 'suspended', deleted_at: null, website: 'https://susp.test', website_domain: 'susp.test', admin_email_domain: null }],
       users: [{ id: 'u-sadmin', email: 'sue@susp.test', name: 'Sue Suspadmin', status: 'active' }],
       roles: [{ id: 'r-sadmin', user_id: 'u-sadmin', company_id: LIVE, role: 'COMPANY_ADMIN', status: 'active' }],
     }, 'tom@susp.test');
@@ -650,7 +652,7 @@ describe('PSL guard (7c): a public suffix is never a company domain', () => {
   for (const [email, suffix] of [['x@co.il', 'co.il'], ['x@github.io', 'github.io']] as const) {
     it(`an email whose host IS a public suffix (${email}) is ambiguous on all three surfaces, even with a company stored under it`, async () => {
       const mk = () => world({
-        companies: [{ id: '30930930-0000-4000-8000-0000000000b1', name: 'Suffix Holder', status: 'active', website: null, website_domain: null, admin_email_domain: suffix }],
+        companies: [{ id: '30930930-0000-4000-8000-0000000000b1', name: 'Suffix Holder', status: 'active', website: `https://${suffix}`, website_domain: suffix, admin_email_domain: suffix }],
         users: [{ id: 'u-sfx', email: `boss@${suffix}`, name: 'Suffix Boss', status: 'active' }],
         roles: [{ id: 'r-sfx', user_id: 'u-sfx', company_id: '30930930-0000-4000-8000-0000000000b1', role: 'COMPANY_ADMIN', status: 'active' }],
       }, email);
@@ -685,5 +687,86 @@ describe('candidate cap: a query that returns MAX_DOMAIN_CANDIDATES rows is pote
     await settle();
     expect([r.status, r.body?.code]).toEqual([409, 'COMPANY_DOMAIN_AMBIGUOUS']);
     expect(sentTo(VADMIN_EMAIL)).toEqual([]);
+  });
+});
+
+describe('owner ruling 2026-11-19: identity is the WEBSITE domain; a shared ADMIN email domain claims nothing', () => {
+  // POLICY fixture (synthetic): company S's website is shared.test; company B's website is beta.test; BOTH are
+  // administered from shared.test. One live company per WEBSITE domain; several may share an admin domain.
+  const S = '30930930-0000-4000-8000-0000000005a1';
+  const B = '30930930-0000-4000-8000-0000000005b1';
+  const sCo = { id: S, name: 'Shared Site Co', status: 'active', website: 'https://www.shared.test', website_domain: 'shared.test', admin_email_domain: 'shared.test' };
+  const bCo = { id: B, name: 'Beta Brand Co', status: 'active', website: 'https://www.beta.test', website_domain: 'beta.test', admin_email_domain: 'shared.test' };
+  const admins = {
+    users: [
+      { id: 'u-sadm', email: 'a@shared.test', name: 'Sal Sharedadmin', status: 'active' },
+      { id: 'u-badm', email: 'b@shared.test', name: 'Bo Betaadmin', status: 'active' },
+    ],
+    roles: [
+      { id: 'r-sadm', user_id: 'u-sadm', company_id: S, role: 'COMPANY_ADMIN', status: 'active' },
+      { id: 'r-badm', user_id: 'u-badm', company_id: B, role: 'COMPANY_ADMIN', status: 'active' },
+    ],
+  };
+  afterEach(() => { mockNoDerivedWebsite = false; mockPinnedWebsite = null; });
+
+  it('x@shared.test, with S (website shared.test) and B (website beta.test, admin shared.test): a join request to S ONLY - never a 409, never B', async () => {
+    world({ companies: [sCo, bCo], ...admins }, 'x@shared.test');
+    const r = await setup('x@shared.test');
+    await settle();
+    expect([r.status, r.body]).toEqual([200, { companyExists: true, joinRequested: true, message: expect.any(String) }]);
+    expect(sentTo('a@shared.test').map((m) => m.kind)).toEqual(['admin_notice']);
+    expect(sentTo('b@shared.test')).toEqual([]);
+    expect(companyExistsEvents()).toEqual([expect.objectContaining({ reason: 'DOMAIN_ALREADY_CLAIMED', companyId: S })]);
+    expect(createdCompanies()).toEqual([]);
+  });
+
+  it('a company matched ONLY via admin_email_domain (B: website beta.test) is NOT matched: the founder opens shared.test', async () => {
+    world({ companies: [bCo], ...admins }, 'x@shared.test');
+    uniqueKey('companies', 'website_domain');
+    const r = await setup('x@shared.test', { companyName: 'Shared Site Co' });
+    await settle();
+    expect([r.status, Object.keys(r.body ?? {})]).toEqual([200, ['companyId']]);
+    expect(createdCompanies()).toEqual([expect.objectContaining({ id: r.body.companyId, website_domain: 'shared.test', admin_email_domain: 'shared.test' })]);
+    expect(sentTo('b@shared.test')).toEqual([]);
+    expect(rolesOf(REQ)).toEqual([expect.objectContaining({ company_id: r.body.companyId, role: 'COMPANY_ADMIN' })]);
+  });
+
+  it('race path relies on the WEBSITE index: a concurrent same-website winner -> 23505 -> a join request to the winner', async () => {
+    const WIN = '30930930-0000-4000-8000-0000000005c1';
+    world({ companies: [bCo], ...admins, users: [...admins.users, { id: 'u-wadm', email: 'w@shared.test', name: 'Win Admin', status: 'active' }] }, 'x@shared.test');
+    uniqueKey('companies', 'website_domain'); // the ONLY domain unique key (no admin_email_domain key)
+    let raced = false;
+    mockBeforeWrite.fn = (table, op) => {
+      if (table !== 'companies' || op !== 'insert' || raced) return;
+      raced = true;
+      rows('companies').push({ id: WIN, name: 'Race Winner', status: 'active', website: 'https://www.shared.test', website_domain: 'shared.test', admin_email_domain: 'shared.test' });
+      rows('user_company_roles').push({ id: 'r-wadm', user_id: 'u-wadm', company_id: WIN, role: 'COMPANY_ADMIN', status: 'active' });
+    };
+    const r = await setup('x@shared.test');
+    await settle();
+    expect(raced).toBe(true);
+    expect([r.status, r.body]).toEqual([200, { companyExists: true, joinRequested: true, message: expect.any(String) }]);
+    expect(sentTo('w@shared.test').map((m) => m.kind)).toEqual(['admin_notice']);
+    expect(sentTo('b@shared.test')).toEqual([]);
+    expect(rows('companies').filter((c) => c.website_domain === 'shared.test')).toHaveLength(1);
+  });
+
+  it('every self-signup insert stamps website_domain = the email root: with no website resolvable, NO company is created (409)', async () => {
+    world({}, 'founder@nosite.test');
+    mockNoDerivedWebsite = true;
+    mockPinnedWebsite = '';
+    const r = await setup('founder@nosite.test', { companyName: 'No Site Co' });
+    await settle();
+    expect([r.status, r.body]).toEqual([409, { code: 'COMPANY_DOMAIN_UNAVAILABLE', error: expect.any(String) }]);
+    expect(createdCompanies()).toEqual([]);
+    expect(rolesOf(REQ)).toEqual([]);
+  });
+
+  it('CONTROL: the same founder with the website resolvable is created, website_domain = email root', async () => {
+    world({}, 'founder@nosite.test');
+    const r = await setup('founder@nosite.test', { companyName: 'No Site Co' });
+    await settle();
+    expect(r.status).toBe(200);
+    expect(createdCompanies()).toEqual([expect.objectContaining({ website_domain: 'nosite.test', admin_email_domain: 'nosite.test' })]);
   });
 });
