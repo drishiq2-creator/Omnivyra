@@ -32,7 +32,7 @@ const passThroughGateway: StageGenerator = llmGatewayToStageGenerator(({ fields 
 function makeDeps(): { deps: ProductionDeps; rendered: { count: number; lastPayload: unknown } } {
   const rendered = { count: 0, lastPayload: null as unknown };
   const fakeRenderAsset = async (payload: Record<string, unknown>) => { rendered.count++; rendered.lastPayload = payload; return { bundle: 'rendered', payload }; };
-  const renderAsset: RealRenderFn = renderAssetToRenderAdapter(fakeRenderAsset, (creative) => ({ creator_card: { id: creative.creativeId, family: creative.assetFamily, fields: creative.fields, slides: creative.slides } }));
+  const renderAsset: RealRenderFn = renderAssetToRenderAdapter(fakeRenderAsset, (creative) => ({ creator_card: { id: creative.creativeId, family: creative.assetFamily, fields: creative.fields, slides: creative.slides } }), { companyId: 'co-synthetic' });
   return { deps: { generate: passThroughGateway, renderAsset }, rendered };
 }
 
@@ -102,5 +102,23 @@ describe('Runtime Cutover — single production execution engine', () => {
       const { result } = await executeCreatorRuntime(inputFor(fam), makeDeps().deps);
       expect(result.trace.validation.ok).toBe(true);
     }
+  });
+});
+
+describe('render adapter carries the company (CI-176, 7c 2026-11-20)', () => {
+  it('renderAssetToRenderAdapter forwards options.companyId to renderAsset - the tenancy chokepoint needs it', async () => {
+    const seen: Array<Record<string, unknown> | undefined> = [];
+    const adapter = renderAssetToRenderAdapter(
+      async (_payload, options) => { seen.push(options); return {}; },
+      () => ({}),
+      { companyId: 'co-synthetic' },
+    );
+    await adapter({} as never, {} as never);
+    expect(seen).toEqual([{ companyId: 'co-synthetic' }]);
+  });
+  it('the options (with companyId) are REQUIRED by the type: an adapter cannot be built without deciding the company', () => {
+    // @ts-expect-error - missing options: a cutover that forgot the company must not compile (the backend-tests typecheck pins this)
+    const forgot = () => renderAssetToRenderAdapter(async () => ({}), () => ({}));
+    expect(typeof forgot).toBe('function');
   });
 });

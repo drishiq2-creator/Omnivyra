@@ -53,11 +53,16 @@ export type RealRenderFn = (creative: GeneratedCreative, ctx: { assembly: AssetA
 
 /** Wrap the existing `renderAsset(payload, options)` as a RealRenderFn without
  * touching it: the caller supplies the GeneratedCreative→payload mapping (the
- * existing creator_card shape) so renderer inputs stay byte-for-byte unchanged. */
+ * existing creator_card shape) so renderer inputs stay byte-for-byte unchanged.
+ *
+ * `options.companyId` is REQUIRED (CI-176, 7c 2026-11-20): renderAsset refuses every USER template not owned by
+ * that company (dropForeignUserTemplateRefs), so an adapter built without it would silently render every
+ * company's own templates in the family default once production routes through executeCreatorRuntime. Pass the
+ * authorized company; null only for a render that has none (user templates then fall back, by design). */
 export function renderAssetToRenderAdapter(
   renderAsset: (payload: Record<string, unknown>, options?: Record<string, unknown>) => Promise<Record<string, unknown>>,
   toPayload: (creative: GeneratedCreative, ctx: { assembly: AssetAssembly; population: CreatorTemplatePopulation }) => Record<string, unknown>,
-  options: Record<string, unknown> = {},
+  options: { companyId: string | null } & Record<string, unknown>,
 ): RealRenderFn {
   return async (creative, ctx) => {
     const bundle = await renderAsset(toPayload(creative, ctx), options);
@@ -105,6 +110,7 @@ export async function executeCreatorRuntime(
   });
 
   // The ONE real render, only when verification authorized it.
+  // deps.renderAsset carries the render options (incl. the REQUIRED companyId) fixed when renderAssetToRenderAdapter built it.
   let render: RenderResult | null = null;
   if (authorized && result.trace.renderStatus === 'RENDERED') {
     render = await deps.renderAsset(result.creative, { assembly: result.assembly, population: result.population });
