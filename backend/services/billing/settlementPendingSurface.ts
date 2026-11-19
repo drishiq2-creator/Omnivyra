@@ -61,8 +61,16 @@ export function runWithSettlementSurface<T>(res: JsonRes, fn: () => T): T {
     restore();
     throw err;
   }
-  if (out && typeof (out as unknown as Promise<unknown>).then === 'function') {
-    return (out as unknown as Promise<unknown>).finally(restore) as unknown as T;
+  // 7c: a thenable is not necessarily a native Promise - use .finally only when it exists, else then(restore, rethrow).
+  // Note: the wrapper exists only while the handler runs, so a fire-and-forget res.json AFTER the handler settled no
+  // longer gets settlementPending (writing the response after returning is already a bug).
+  const thenable = out as unknown as { then?: unknown; finally?: unknown };
+  if (out && typeof thenable.then === 'function') {
+    if (typeof thenable.finally === 'function') return (out as unknown as Promise<unknown>).finally(restore) as unknown as T;
+    return (out as unknown as PromiseLike<unknown>).then(
+      (v) => { restore(); return v; },
+      (e) => { restore(); throw e; },
+    ) as unknown as T;
   }
   restore();
   return out;
