@@ -84,7 +84,7 @@ it('CONCURRENT submissions of one code: exactly one is accepted', async () => {
   jest.setSystemTime(T0);
   const results = await Promise.all([1, 2, 3, 4].map(() => verifyTotp({ userId: 'u-1', token: code })));
   expect(results.filter((r) => r.ok)).toHaveLength(1);
-  expect(results.filter((r) => !r.ok && r.reason === 'TOKEN_REPLAYED')).toHaveLength(3);
+  expect(results.filter((r) => !r.ok && 'reason' in r && r.reason === 'TOKEN_REPLAYED')).toHaveLength(3);
 });
 
 it('if the one-time-use record cannot be written, the code is REFUSED (never accepted unrecorded)', async () => {
