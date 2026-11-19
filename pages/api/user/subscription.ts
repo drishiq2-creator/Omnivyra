@@ -12,6 +12,7 @@ import { supabase } from '../../../backend/db/supabaseClient';
 import { enforceCompanyAccess } from '../../../backend/services/userContextService';
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
+  // Billing-write gate EXEMPT (CI-434, 2026-11-19): GET-only read of the plan tier; every other method is 405 here.
   if (req.method !== 'GET') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
