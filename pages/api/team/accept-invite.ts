@@ -127,7 +127,8 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     .maybeSingle();
   // Reads contract (e9 BLOCKING): a FAILED read is not "absent" - refuse retryably instead of acting on a guess. (a failed read let the invitation be consumed before the insert failed)
   if (existingRoleErr) {
-    return res.status(503).json({ error: 'Could not verify your membership. Please retry - your invitation is still valid.', retryable: true });
+    res.setHeader('Retry-After', '5');
+    return res.status(503).json({ code: 'MEMBERSHIP_UNVERIFIABLE', error: 'Could not verify your membership. Please retry - your invitation is still valid.', retryable: true });
   }
 
   const existingStatus = (existingRole as any)?.status ?? null;

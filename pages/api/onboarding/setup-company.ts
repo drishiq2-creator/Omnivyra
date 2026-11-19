@@ -268,7 +268,10 @@ async function handler(req: NextApiRequest, res: NextApiResponse<Result>) {
         .eq('user_id', user.id)
         .eq('status', 'active');
       // Reads contract (e9 BLOCKING): a FAILED read is not "absent" - refuse retryably instead of acting on a guess. (a null count read as 0 bypassed the org limit)
-      if (orgCountErr) return res.status(503).json({ code: 'ORG_LIMIT_UNVERIFIABLE', error: 'Could not verify your organization count. Please retry.', retryable: true });
+      if (orgCountErr) {
+        res.setHeader('Retry-After', '5');
+        return res.status(503).json({ code: 'ORG_LIMIT_UNVERIFIABLE', error: 'Could not verify your organization count. Please retry.', retryable: true });
+      }
 
       if ((activeOrgCount ?? 0) >= maxOrgs) {
         return res.status(403).json({
@@ -315,7 +318,10 @@ async function handler(req: NextApiRequest, res: NextApiResponse<Result>) {
         .eq('company_id', orgId)
         .maybeSingle();
       // Reads contract (e9 BLOCKING): a FAILED read is not "absent" - refuse retryably instead of acting on a guess. (a failed read inserted a second / reinstated admin row)
-      if (existingRoleErr) return res.status(503).json({ code: 'MEMBERSHIP_UNVERIFIABLE', error: 'Could not verify your membership. Please retry.', retryable: true });
+      if (existingRoleErr) {
+        res.setHeader('Retry-After', '5');
+        return res.status(503).json({ code: 'MEMBERSHIP_UNVERIFIABLE', error: 'Could not verify your membership. Please retry.', retryable: true });
+      }
 
       if (!existingRole) {
         await supabase.from('user_company_roles').insert({
@@ -357,7 +363,10 @@ async function handler(req: NextApiRequest, res: NextApiResponse<Result>) {
       .eq('status', 'active')
       .order('created_at', { ascending: false });
     // Reads contract (e9 BLOCKING): a FAILED read is not "absent" - refuse retryably instead of acting on a guess. (a failed read skipped the idempotent return and created a new company + admin)
-    if (existingRowsErr) return res.status(503).json({ code: 'MEMBERSHIP_UNVERIFIABLE', error: 'Could not verify your existing companies. Please retry.', retryable: true });
+    if (existingRowsErr) {
+      res.setHeader('Retry-After', '5');
+      return res.status(503).json({ code: 'MEMBERSHIP_UNVERIFIABLE', error: 'Could not verify your existing companies. Please retry.', retryable: true });
+    }
 
     if (existingRows?.length) {
       const existingCompanyIds = Array.from(new Set(

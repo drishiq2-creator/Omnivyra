@@ -136,7 +136,8 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
         logger.error('payment_webhook_purchase_lookup_failed', {
           provider, eventId: result.eventId, providerOrderId: success.orderId, message: purchaseErr.message,
         });
-        return res.status(503).json({ ok: false, error: 'purchase_lookup_failed', retryable: true });
+        res.setHeader('Retry-After', '5');
+        return res.status(503).json({ ok: false, code: 'PURCHASE_LOOKUP_FAILED', error: 'purchase_lookup_failed', retryable: true });
       }
       if (purchase) {
         const alreadyFulfilled = (purchase as any).status === 'completed'

@@ -27,7 +27,8 @@ describe('company/users - the one-active-admin rule is never bypassed by a faile
     const before = rows('invitations')?.length ?? 0;
     failSelectOnce('user_company_roles', adminCount);
     const r = await invoke(usersRoute, { method: 'POST', as: 'A', body: { companyId: CO_A, email: 'second.admin@acmeinc.com', role: 'COMPANY_ADMIN' }, headers: { 'idempotency-key': `inv-${Math.random()}` } });
-    expect(r).toMatchObject({ status: 503, body: { error: 'ADMIN_STATE_UNVERIFIABLE', retryable: true } });
+    expect(r).toMatchObject({ status: 503, body: { code: 'ADMIN_STATE_UNVERIFIABLE', error: 'ADMIN_STATE_UNVERIFIABLE', retryable: true } });
+    expect(r.headers['retry-after']).toBe('5'); // b3 standing rule (2026-11-19)
     expect(rows('invitations')?.length ?? 0).toBe(before);
   });
   it('CONTROL: the same request with the read working gets the existing 409 (an admin already exists)', async () => {
@@ -42,18 +43,22 @@ describe('every fixed site reads its error and refuses BEFORE acting (structural
   const src = (rel: string) => fs.readFileSync(path.join(ROOT, rel), 'utf8');
   // [file, the error variable, the refusal that must follow it]
   const SITES: Array<[string, string, RegExp]> = [
-    ['pages/api/onboarding/setup-company.ts', 'orgCountErr', /if \(orgCountErr\) return res\.status\(503\)/],
-    ['pages/api/onboarding/setup-company.ts', 'existingRoleErr', /if \(existingRoleErr\) return res\.status\(503\)/],
-    ['pages/api/onboarding/setup-company.ts', 'existingRowsErr', /if \(existingRowsErr\) return res\.status\(503\)/],
-    ['pages/api/company/users.ts', 'adminCountErr', /if \(adminCountErr\) return res\.status\(503\)/],
-    ['pages/api/company/users.ts', 'anotherAdminErr', /if \(anotherAdminErr\) return res\.status\(503\)/],
+    ['pages/api/onboarding/setup-company.ts', 'orgCountErr', /if \(orgCountErr\) \{\s*res\.setHeader\('Retry-After', '5'\);\s*return res\.status\(503\)/],
+    ['pages/api/onboarding/setup-company.ts', 'existingRoleErr', /if \(existingRoleErr\) \{\s*res\.setHeader\('Retry-After', '5'\);\s*return res\.status\(503\)/],
+    ['pages/api/onboarding/setup-company.ts', 'existingRowsErr', /if \(existingRowsErr\) \{\s*res\.setHeader\('Retry-After', '5'\);\s*return res\.status\(503\)/],
+    ['pages/api/company/users.ts', 'adminCountErr', /if \(adminCountErr\) \{\s*res\.setHeader\('Retry-After', '5'\);\s*return res\.status\(503\)/],
+    ['pages/api/company/users.ts', 'anotherAdminErr', /if \(anotherAdminErr\) \{\s*res\.setHeader\('Retry-After', '5'\);\s*return res\.status\(503\)/],
+    // grant.ts: NO Retry-After (c6, 2026-11-19). Credits are already granted at this point and, before c6's money
+    // SHIP, every request mints a new grant row and key - an automatic retry would GRANT AGAIN. SHIP replaces this
+    // block (role read failure -> 200 roleEnsured:false); SHIP merges first and its block wins the rebase.
     ['pages/api/super-admin/free-credits/grant.ts', 'existingRoleErr', /if \(existingRoleErr\) \{\s*return res\.status\(503\)/],
-    ['pages/api/super-admin/free-credits/requests.ts', 'existingRoleErr', /if \(existingRoleErr\) \{\s*return res\.status\(503\)/],
-    ['pages/api/team/accept-invite.ts', 'existingRoleErr', /if \(existingRoleErr\) \{\s*return res\.status\(503\)/],
-    ['pages/api/super-admin/companies.ts', 'previousActiveErr', /if \(previousActiveErr\) return res\.status\(503\)/],
-    ['pages/api/admin/bootstrap-super-admin.ts', 'existingCount2Err', /if \(existingCount2Err\) return res\.status\(503\)/],
-    ['pages/api/admin/bootstrap-super-admin.ts', 'existingCountErr', /if \(existingCountErr\) return res\.status\(503\)/],
-    ['pages/api/credits/claim-action.ts', 'membershipErr', /if \(membershipErr\) \{[\s\S]{0,300}?free_credit_claims'\)\.delete\(\)[\s\S]{0,200}?res\.status\(503\)/],
+    ['pages/api/super-admin/free-credits/requests.ts', 'existingRoleErr', /if \(existingRoleErr\) \{\s*res\.setHeader\('Retry-After', '5'\);\s*return res\.status\(503\)/],
+    ['pages/api/team/accept-invite.ts', 'existingRoleErr', /if \(existingRoleErr\) \{\s*res\.setHeader\('Retry-After', '5'\);\s*return res\.status\(503\)/],
+    ['pages/api/super-admin/companies.ts', 'previousActiveErr', /if \(previousActiveErr\) \{\s*res\.setHeader\('Retry-After', '5'\);\s*return res\.status\(503\)/],
+    ['pages/api/admin/bootstrap-super-admin.ts', 'existingCount2Err', /if \(existingCount2Err\) \{\s*res\.setHeader\('Retry-After', '5'\);\s*return res\.status\(503\)/],
+    ['pages/api/admin/bootstrap-super-admin.ts', 'existingCountErr', /if \(existingCountErr\) \{\s*res\.setHeader\('Retry-After', '5'\);\s*return res\.status\(503\)/],
+    ['pages/api/credits/claim-action.ts', 'membershipErr', /if \(membershipErr\) \{[\s\S]{0,300}?free_credit_claims'\)\.delete\(\)[\s\S]{0,200}?res\.setHeader\('Retry-After', '5'\);\s*return res\.status\(503\)/],
+    ['pages/api/webhooks/payments/[provider].ts', 'purchaseErr', /if \(purchaseErr\) \{[\s\S]{0,400}?res\.setHeader\('Retry-After', '5'\);\s*return res\.status\(503\)/],
     ['backend/services/omnivyraWebsiteCompanyService.ts', 'rolesErr', /if \(rolesErr\) return null;/],
   ];
   it.each(SITES)('%s - %s', (rel, errVar, refusal) => {

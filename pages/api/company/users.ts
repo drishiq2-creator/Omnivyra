@@ -135,7 +135,10 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
           .eq('role', Role.COMPANY_ADMIN)
           .eq('status', 'active');
         // Reads contract (e9 BLOCKING): a FAILED read is not "absent" - refuse retryably instead of acting on a guess. (a null count read as 0 allowed a second admin)
-        if (adminCountErr) return res.status(503).json({ error: 'ADMIN_STATE_UNVERIFIABLE', retryable: true });
+        if (adminCountErr) {
+          res.setHeader('Retry-After', '5');
+          return res.status(503).json({ code: 'ADMIN_STATE_UNVERIFIABLE', error: 'ADMIN_STATE_UNVERIFIABLE', retryable: true });
+        }
 
         if ((activeAdminCount ?? 0) > 0) {
           return res.status(409).json({
@@ -335,7 +338,10 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
         .maybeSingle();
 
       // Reads contract (e9 BLOCKING): a FAILED read is not "absent" - refuse retryably instead of acting on a guess. (a failed read promoted a second admin)
-      if (anotherAdminErr) return res.status(503).json({ error: 'ADMIN_STATE_UNVERIFIABLE', retryable: true });
+      if (anotherAdminErr) {
+        res.setHeader('Retry-After', '5');
+        return res.status(503).json({ code: 'ADMIN_STATE_UNVERIFIABLE', error: 'ADMIN_STATE_UNVERIFIABLE', retryable: true });
+      }
       if (anotherAdmin) {
         return res.status(409).json({
           error: 'ADMIN_TRANSFER_REQUIRED',

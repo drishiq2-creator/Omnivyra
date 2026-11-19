@@ -111,6 +111,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
           .maybeSingle();
         // Reads contract (e9 BLOCKING): a FAILED read is not "absent" - refuse retryably instead of acting on a guess.
         if (existingRoleErr) {
+          res.setHeader('Retry-After', '5');
           return res.status(503).json({ error: 'The user role could not be verified - retry.', code: 'ROLE_UNVERIFIABLE', retryable: true });
         }
 

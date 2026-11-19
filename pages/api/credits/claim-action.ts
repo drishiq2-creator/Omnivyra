@@ -113,7 +113,8 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     if (membershipErr) {
       logger.error('credits_claim_action_membership_unreadable', { userId: user.id, category, message: membershipErr.message });
       await serviceSb.from('free_credit_claims').delete().eq('user_id', user.id).eq('category', category);
-      return res.status(503).json({ error: 'Could not verify your organization. Please try again.', retryable: true });
+      res.setHeader('Retry-After', '5');
+      return res.status(503).json({ code: 'ORGANIZATION_UNVERIFIABLE', error: 'Could not verify your organization. Please try again.', retryable: true });
     }
 
     const orgId = (membership as any)?.company_id ?? null;

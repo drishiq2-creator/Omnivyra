@@ -224,7 +224,10 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       .eq('role', SUPER_ADMIN_ROLE)
       .eq('status', 'active');
     // Reads contract (e9 BLOCKING): a FAILED read is not "absent" - refuse retryably instead of acting on a guess. (a null count skipped the single-use guard)
-    if (existingCount2Err) return res.status(503).json({ error: 'Could not verify existing super admins. Retry.', code: 'BOOTSTRAP_STATE_UNVERIFIABLE' });
+    if (existingCount2Err) {
+      res.setHeader('Retry-After', '5');
+      return res.status(503).json({ error: 'Could not verify existing super admins. Retry.', code: 'BOOTSTRAP_STATE_UNVERIFIABLE' });
+    }
     if ((existingCount2 ?? 0) > 0) {
       await deny('env_credential_already_consumed', ip, ua);
       return res.status(409).json({
@@ -343,7 +346,10 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     .eq('role', SUPER_ADMIN_ROLE)
     .eq('status', 'active');
   // Reads contract (e9 BLOCKING): a FAILED read is not "absent" - refuse retryably instead of acting on a guess. (a null count skipped the single-use guard)
-  if (existingCountErr) return res.status(503).json({ error: 'Could not verify existing super admins. Retry.', code: 'BOOTSTRAP_STATE_UNVERIFIABLE' });
+  if (existingCountErr) {
+    res.setHeader('Retry-After', '5');
+    return res.status(503).json({ error: 'Could not verify existing super admins. Retry.', code: 'BOOTSTRAP_STATE_UNVERIFIABLE' });
+  }
   if ((existingCount ?? 0) > 0) {
     await deny('bootstrap_already_consumed', ip, ua);
     return res.status(409).json({
