@@ -305,6 +305,13 @@ export default function FreeCreditsPage() {
       return;
     }
     setGrantLoading(false);
+    const okBody = r.ok ? await r.json().catch(() => ({} as { warning?: string })) as { warning?: string } : null;
+    if (r.ok && okBody?.warning) {
+      // PARTIAL success (credits granted, a follow-up step not done): KEEP the key and the form - re-sending the same
+      // grant resolves the existing grant server-side and completes the step; a fresh key would grant AGAIN.
+      setGrantError(`Credits were granted, but: ${okBody.warning}. Submit the same form again to complete it - it will not grant the credits twice.`);
+      return;
+    }
     if (r.ok) {
       grantKey.current.settle();
       setGrantError(null);

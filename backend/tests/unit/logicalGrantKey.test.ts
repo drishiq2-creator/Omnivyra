@@ -44,4 +44,12 @@ describe('the page uses it (source pins)', () => {
     expect(s.match(/grantKey\.current\.settle\(\)/g)).toHaveLength(1);
     expect(s).toMatch(/\} catch \{[\s\S]{0,500}the grant may already have gone through/);
   });
+  test('a 2xx carrying a warning (partial: credits granted, role step not done) KEEPS the key - settle() comes after it', () => {
+    const warn = s.indexOf('if (r.ok && okBody?.warning) {');
+    expect(warn).toBeGreaterThan(-1);
+    const block = s.slice(warn, s.indexOf('if (r.ok) {', warn));
+    expect(block).toMatch(/return;/);
+    expect(block).not.toMatch(/settle\(\)/);
+    expect(s.indexOf('grantKey.current.settle()')).toBeGreaterThan(warn);
+  });
 });
