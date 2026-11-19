@@ -207,11 +207,19 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     // key bound to (user, company) so back-to-back reinvite requests
     // collapse to a single email instead of spamming the recipient.
     // Owner ruling 2026-11-19: the invite names the company it is for (null -> the template's fallback).
-    const { data: inviteCompany } = await supabaseAdmin
+    const { data: inviteCompany, error: inviteCompanyError } = await supabaseAdmin
       .from('companies')
       .select('name')
       .eq('id', companyId)
       .maybeSingle();
+    if (inviteCompanyError) {
+      // Display text only: the invite still goes out with the template's neutral fallback, never a wrong name. But a
+      // failed read is never silent (b3's read-failure rule; a9 review).
+      console.warn('[reinvite] company name read failed; the invite uses the neutral fallback', {
+        companyId,
+        code: (inviteCompanyError as { code?: string }).code ?? null,
+      });
+    }
     await sendInvite(
       normalizedEmail,
       inviteUrl,
