@@ -175,22 +175,29 @@ const HEADER_MAIN = readFileSync(
   'utf8',
 ) as string;
 
-/** The two `href="/dashboard"` Link blocks: [0] desktop nav, [1] mobile drawer. */
+// Owner decision 2026-11-13 (D2): Home = the Command Center, same as the logo. Both Home links now use
+// href={HOME_ROUTE} from components/layout/homeRoute. The logo uses HOME_ROUTE too, so a Home link is a
+// HOME_ROUTE <Link> that renders the <Home> icon (the logo renders an image, not the icon).
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const { HOME_ROUTE } = require('../../../components/layout/homeRoute');
+
+/** The two Home Link blocks: [0] desktop nav, [1] mobile drawer. */
 const homeLinks = (): string[] => {
   const out: string[] = [];
   let from = 0;
   for (;;) {
-    const at = HEADER_MAIN.indexOf('href="/dashboard"', from);
+    const at = HEADER_MAIN.indexOf('href={HOME_ROUTE}', from);
     if (at < 0) break;
     const open = HEADER_MAIN.lastIndexOf('<Link', at);
     const close = HEADER_MAIN.indexOf('</Link>', at);
-    out.push(HEADER_MAIN.slice(open, close));
+    const block = HEADER_MAIN.slice(open, close);
+    if (/<Home\s/.test(block)) out.push(block);
     from = close;
   }
   return out;
 };
 
-describe('10 — Home stays outside the nav config and keeps its destination', () => {
+describe('10 — Home stays outside the nav config and goes to the Command Center', () => {
   it('Home is not a HEADER_NAV_ITEMS entry', () => {
     expect(HEADER_NAV_ITEMS.map((i) => i.label)).not.toContain('Home');
     expect(HEADER_NAV_ITEMS.flatMap((i) => i.children.map((c) => c.href))).not.toContain('/dashboard');
@@ -200,12 +207,17 @@ describe('10 — Home stays outside the nav config and keeps its destination', (
     expect(homeLinks()).toHaveLength(2);
   });
 
-  it('both still point at /dashboard', () => {
-    for (const link of homeLinks()) expect(link).toContain('href="/dashboard"');
+  it('both point at HOME_ROUTE, which is the Command Center', () => {
+    expect(HOME_ROUTE).toBe('/command-center');
+    const links = homeLinks();
+    expect(links).toHaveLength(2); // non-vacuous: the loop below cannot pass over nothing
+    for (const link of links) expect(link).toContain('href={HOME_ROUTE}');
   });
 
   it('active state is still computed from the path, not a label', () => {
-    for (const link of homeLinks()) expect(link).toContain("isPathMatch(router.pathname, '/dashboard')");
+    const links = homeLinks();
+    expect(links).toHaveLength(2);
+    for (const link of links) expect(link).toContain('isHomePath(router.pathname)');
   });
 });
 
