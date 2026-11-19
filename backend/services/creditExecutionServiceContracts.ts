@@ -55,6 +55,7 @@ import { evaluateCreditSafetyGate } from './billing/creditSafetyGate';
 import { resolveBillingPolicy } from './billing/billingPolicyResolver';
 import { assertUuid, canonicalizeReference, type Uuid } from '@/lib/shared/uuid';
 import { settledAmountsFromPartialConfirm } from './billing/holdSettlementState';
+import type { PreChargeRefusalCode } from '../../shared/billing/preChargeRefusalCodes';
 
 /** Fire credit threshold alerts in the background — non-blocking, swallows errors. */
 
@@ -159,7 +160,10 @@ export interface SettlementReport {
 }
 
 /** Reads contract: every retryable "could not read / verify" refusal (503 + Retry-After at the edge). */
-export type StateUnreadableCode = 'CREDIT_STATE_UNREADABLE' | 'DAILY_LIMIT_UNVERIFIABLE' | 'ORG_CONTROLS_UNVERIFIABLE';
+// The credit-execution producers' unreadable codes: the two pre-charge codes from orgControlService (one source,
+// shared/billing/preChargeRefusalCodes) plus CREDIT_STATE_UNREADABLE, which is NOT pre-charge (settle paths raise it
+// too). BUDGET_UNVERIFIABLE is excluded: no credit-execution producer returns it. Members unchanged (pinned).
+export type StateUnreadableCode = Exclude<PreChargeRefusalCode, 'BUDGET_UNVERIFIABLE'> | 'CREDIT_STATE_UNREADABLE';
 
 export type ExecuteResult<T> =
   | { status: 'executed';            result: T; settlement?: SettlementReport; settlementPending?: import('./billing/holdSettlementState').SettlementPending }
