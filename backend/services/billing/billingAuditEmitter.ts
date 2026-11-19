@@ -16,7 +16,7 @@ import { logger } from '../logger';
 
 export interface FinancialAuditEvent {
   actorUserId:           string;
-  actionType:            'admin_grant' | 'admin_adjust' | 'admin_refund' | 'admin_rate_change' | 'admin_revoke' | 'system_correction';
+  actionType:            'admin_grant' | 'admin_adjust' | 'admin_refund' | 'admin_rate_change' | 'admin_revoke' | 'system_correction' | 'system_refund';   // system_refund: owed-refund completion (owedRefunds; text column, no CHECK)
   organizationId:        string;
   amountCredits?:        number;
   usdEquivalent?:        number;
