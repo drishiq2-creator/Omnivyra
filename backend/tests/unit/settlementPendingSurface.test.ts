@@ -126,3 +126,30 @@ describe('structural pin: no wirePhase2Route caller can drop settlementPending',
     expect(s).toMatch(/runWithSettlementSurface\(res, \(\) => composed\(req, res\)\)/);
   });
 });
+
+// CI-630 (2026-11-19): the res.json wrapper exists only while the handler runs - callers holding the original res.json
+// (test doubles inspecting res.json.mock) found a plain function afterwards.
+describe('the res.json wrapper is removed when the handler settles', () => {
+  const { runWithSettlementSurface } = require('../../services/billing/settlementPendingSurface');
+  test('async handler: res.json is the original again afterwards, and calls through the wrapper reached it', async () => {
+    const res: any = { statusCode: 200, json: jest.fn((b: unknown) => b) };
+    const original = res.json;
+    await runWithSettlementSurface(res, async () => { res.json({ ok: true }); });
+    expect(res.json).toBe(original);
+    expect(original.mock.calls).toEqual([[{ ok: true }]]);
+  });
+  test('sync handler and a THROWING handler also restore it', () => {
+    const res: any = { statusCode: 200, json: jest.fn() };
+    const original = res.json;
+    runWithSettlementSurface(res, () => 1);
+    expect(res.json).toBe(original);
+    expect(() => runWithSettlementSurface(res, () => { throw new Error('x'); })).toThrow('x');
+    expect(res.json).toBe(original);
+  });
+  test('a rejected async handler restores it', async () => {
+    const res: any = { statusCode: 200, json: jest.fn() };
+    const original = res.json;
+    await expect(runWithSettlementSurface(res, async () => { throw new Error('y'); })).rejects.toThrow('y');
+    expect(res.json).toBe(original);
+  });
+});
