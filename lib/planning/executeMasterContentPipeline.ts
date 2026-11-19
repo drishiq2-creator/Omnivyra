@@ -8,6 +8,7 @@ import type { MasterContentDocument } from './masterContentDocument';
 import { deriveGenerationBias } from '../intelligence/generationBias';
 import type { StrategicMemoryProfile } from '../intelligence/strategicMemory';
 import { apiFetch } from '../apiFetch';
+import { postGenerateVariants, postGenerateMaster } from '../activity-workspace/postGenerateVariants';
 
 type ActivityLike = {
   id?: string;
@@ -106,7 +107,6 @@ export async function executeMasterContentPipeline({
   }
 
   const masterPayload: Record<string, unknown> = {
-    action: 'generate_master',
     activity,
     schedules,
     dailyExecutionItem: dailyExecutionItem || {},
@@ -114,18 +114,9 @@ export async function executeMasterContentPipeline({
   };
   if (biasInstruction) masterPayload.extra_instruction = biasInstruction;
 
-  const resMaster = await apiFetch(CONTENT_API, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(masterPayload),
-  });
-
-  if (!resMaster.ok) {
-    const err = await resMaster.json().catch(() => ({}));
-    throw new Error(String(err?.message || err?.error || 'Failed to execute content pipeline (generate_master)'));
-  }
-
-  const dataMaster = await resMaster.json().catch(() => ({}));
+  // Billed + keyed (c6 @723d40de3): the shared keyed request; an unknown outcome throws
+  // UnconfirmedOutcomeError, so the variants step below is never reached (no second billed call).
+  const dataMaster = await postGenerateMaster(masterPayload, 'Failed to execute content pipeline (generate_master)');
   const master_content =
     (dataMaster?.master_content && typeof dataMaster.master_content === 'object')
       ? dataMaster.master_content
@@ -139,24 +130,16 @@ export async function executeMasterContentPipeline({
     platform_variants: (dailyExecutionItem as any)?.platform_variants,
   };
 
-  const resVariants = await apiFetch(CONTENT_API, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      action: 'generate_variants',
+  // Billed + keyed (c6): the shared keyed request; an unknown outcome throws UnconfirmedOutcomeError.
+  const dataVariants = await postGenerateVariants(
+    {
       activity,
       schedules: schedules.length > 0 ? schedules : (masterDocument?.platforms ?? []).map((p) => ({ platform: p, contentType: 'post' })),
       dailyExecutionItem: itemWithMaster,
       companyId: companyId ?? null,
-    }),
-  });
-
-  if (!resVariants.ok) {
-    const err = await resVariants.json().catch(() => ({}));
-    throw new Error(String(err?.message || err?.error || 'Failed to execute content pipeline (generate_variants)'));
-  }
-
-  const dataVariants = await resVariants.json().catch(() => ({}));
+    },
+    'Failed to execute content pipeline (generate_variants)',
+  );
   const platform_variants = Array.isArray(dataVariants?.platform_variants) ? dataVariants.platform_variants : [];
 
   return { master_content, platform_variants };
