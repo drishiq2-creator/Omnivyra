@@ -3,12 +3,14 @@ import { NextApiRequest, NextApiResponse } from 'next';
 import { runCompletion } from '../../../backend/services/aiGateway';
 import { getCanonicalProfile as getProfile } from '@/backend/services/context/canonicalProfileAdapter';
 import { resolveCompanyAccess } from '../../../backend/services/contentArchitectService';
+import { mergeAiScalarFields, mergeCampaignPurposeIntent } from '../../../backend/services/companyProfile/aiProfileMerge';
 import { buildCompanyKnowledgeGraph, buildKnowledgeGrounding } from '../../../backend/services/companyProfile/companyKnowledgeGraph';
 import {
   orchestrateProfileConversation,
   isQuestionEligibleForOrchestration,
 } from '../../../backend/services/companyProfile/profileConversationOrchestrator';
 import { defineRolloutFlag, resolveRolloutSync } from '../../../lib/platform/rollout';
+import { TARGET_CUSTOMER_FIELDS } from '../../../lib/companyProfile/aiOutputFields';
 
 /**
  * CONVERSATION-INTELLIGENCE-001 Phase C — pilot rollout flag (default OFF).
@@ -63,15 +65,10 @@ const FIELDS_DESCRIPTION = [
 
 // The 7 Phase-1 commercial fields, in DB-column naming. Used to detect which are
 // already captured on the profile so the questionnaire never re-asks them.
-const COMMERCIAL_FIELDS = [
-  'target_customer_segment',
-  'ideal_customer_profile',
-  'pricing_model',
-  'sales_motion',
-  'avg_deal_size',
-  'sales_cycle',
-  'key_metrics',
-] as const;
+// One definition shared with the client's advisory merge (lib/companyProfile/aiOutputFields).
+// NOT the same as backend/services/companyProfile/fieldConstants.ts COMMERCIAL_FIELDS (a different 6-field set
+// used for section scoring). This one is the AI endpoint's 7 output fields (7c).
+const COMMERCIAL_FIELDS = TARGET_CUSTOMER_FIELDS;
 
 // Phase 2: Campaign purpose questions. Parsed into campaign_purpose_intent JSONB.
 const CAMPAIGN_PURPOSE_QUESTIONS = [
@@ -257,28 +254,15 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     }
 
     if (parsed.done && parsed.structuredFields) {
-      // Guard against data loss: if the model returns a blank value for a field
-      // that was already captured, keep the existing profile value.
-      const structuredFields: Record<string, string> = { ...parsed.structuredFields };
-      for (const field of COMMERCIAL_FIELDS) {
-        const aiValue = String(structuredFields[field] ?? '').trim();
-        if (!aiValue && knownCommercial[field]) {
-          structuredFields[field] = knownCommercial[field];
-        }
-      }
-      const cpi = parsed.campaign_purpose_intent;
-      const campaignPurposeIntent =
-        cpi && typeof cpi === 'object'
-          ? {
-              primary_objective: String(cpi.primary_objective ?? '').trim() || null,
-              campaign_intent: String(cpi.campaign_intent ?? '').trim() || null,
-              monetization_intent: String(cpi.monetization_intent ?? '').trim() || null,
-              dominant_problem_domains: Array.isArray(cpi.dominant_problem_domains)
-                ? cpi.dominant_problem_domains.filter((d): d is string => typeof d === 'string')
-                : [],
-              brand_positioning_angle: String(cpi.brand_positioning_angle ?? '').trim() || null,
-            }
-          : null;
+      // e1 D3 (2026-11-13): clients SPREAD this result into the profile and save it. So: only the 7 commercial keys
+      // (never a key the model invented), a blank AI value keeps the stored one, and a field with no value either way
+      // is OMITTED - never '' (which overwrites, and which the scalar clear-lock reads as a deliberate clear).
+      const structuredFields = mergeAiScalarFields(COMMERCIAL_FIELDS, parsed.structuredFields, knownCommercial);
+      // The FULL campaign_purpose_intent: the stored object (all 8 keys) with the AI's non-empty values on top. It used
+      // to be replaced by the AI's 5 keys, erasing reader_emotion_target / narrative_flow_seed / recommended_cta_style.
+      const campaignPurposeIntent = parsed.campaign_purpose_intent
+        ? mergeCampaignPurposeIntent(profile?.campaign_purpose_intent ?? null, parsed.campaign_purpose_intent)
+        : null;
       return res.status(200).json({
         done: true,
         structuredFields,
