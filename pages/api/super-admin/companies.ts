@@ -21,12 +21,7 @@ import {
 } from '../../../backend/services/auditActorService';
 import { logger } from '../../../backend/services/logger';
 import { monitorCompanyIdentityDrift } from '../../../backend/services/companyIdentityDriftService';
-
-const normalizeWebsite = (value: string): string => {
-  const trimmed = value.trim().toLowerCase();
-  const withoutScheme = trimmed.replace(/^https?:\/\//i, '');
-  return withoutScheme.replace(/\/+$/, '');
-};
+import { checkCompanyWebsite, insertCompanyWithWebsite } from '../../../backend/services/companyWebsiteCreation';
 
 /**
  * Phase: Platform Authority Legacy Facade Elimination.
@@ -141,42 +136,33 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       return res.status(400).json({ error: 'name and website are required' });
     }
 
-    const normalizedWebsite = normalizeWebsite(String(website));
-    if (!normalizedWebsite) {
-      return res.status(400).json({ error: 'website is invalid' });
+    // Owner ruling 2026-11-19: a company's identity is its WEBSITE domain (one LIVE company per website
+    // domain). Through companyWebsiteCreation -> companyIdentityWriter: website and website_domain are
+    // written together, both normalised (it used to insert `website` alone, so the company escaped
+    // idx_companies_website_domain_unique and every website-only lookup). Refusals write nothing:
+    // 409 COMPANY_WEBSITE_TAKEN (a live holder, or a concurrent 23505), 409 COMPANY_WEBSITE_AMBIGUOUS
+    // (a public suffix), 422 COMPANY_WEBSITE_INVALID, 503 the check failed. No email: admin_email_domain null.
+    const checked = await checkCompanyWebsite(String(website), { required: true });
+    if (checked.ok !== true) {
+      return res.status(checked.status).json({ code: checked.code, error: checked.error });
     }
-
-    const { data: existing, error: existingError } = await supabase
-      .from('companies')
-      .select('id')
-      .eq('website', normalizedWebsite)
-      .limit(1);
-
-    if (existingError) {
-      return res.status(500).json({ error: 'FAILED_TO_VALIDATE_WEBSITE' });
-    }
-    if (existing && existing.length > 0) {
-      return res.status(409).json({ error: 'WEBSITE_ALREADY_EXISTS' });
-    }
-
-    const { data, error } = await supabase
-      .from('companies')
-      .insert({
+    const createdCompany = await insertCompanyWithWebsite({
+      record: {
         name: String(name).trim(),
-        website: normalizedWebsite,
         industry: industry ? String(industry).trim() : null,
         status: 'active',
         created_at: new Date().toISOString(),
-      })
-      .select('*')
-      .single();
-
-    if (error || !data) {
-      return res.status(500).json({ error: 'FAILED_TO_CREATE_COMPANY' });
+      },
+      website: checked.website,
+      adminEmailDomain: null,
+    });
+    if (createdCompany.ok !== true) {
+      return res.status(createdCompany.status).json({ code: createdCompany.code, error: createdCompany.error });
     }
+    const data = createdCompany.row as { id: string; name: string; industry?: string | null };
+    const normalizedWebsite = String(checked.website ?? '');
 
-    // Telemetry only: admin-created companies set `website` but not
-    // website_domain / admin_email_domain — surface that drift (never blocks).
+    // Telemetry only (never blocks).
     monitorCompanyIdentityDrift(data);
 
     const profileWebsite = String(website || '').trim() || normalizedWebsite;

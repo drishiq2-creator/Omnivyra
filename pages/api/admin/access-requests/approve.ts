@@ -7,7 +7,7 @@ import { createApiRoute as __createApiRoute } from '../../../../lib/platform/rou
  * or a corporate email whose domain is not the company website's).
  *
  * On approval (Option A):
- *  1. Creates a company for the approved user through companyIdentityWriter
+ *  1. Creates a company for the approved user through companyWebsiteCreation -> companyIdentityWriter
  *     (name = brandName, else request.company_name, else request.name):
  *     website + website_domain = the request's website (normalised; the root decides uniqueness),
  *     admin_email_domain = the corporate email root, or NULL for free mail (no domain claim).
@@ -35,13 +35,8 @@ import { supabase } from '@/backend/db/supabaseClient';
 import { requireCapability } from '../../../../backend/security/requireCapability';
 import { requireAdminRateLimit } from '../../../../backend/services/requestAccessService';
 import { IDENTITY_ADMIN_ASSIGN } from '../../../../shared/contracts/security';
-import { createCompanyIdentity, CompanyIdentityInvariantError } from '../../../../backend/services/companyIdentityWriter';
-import {
-  extractDomain,
-  findCompaniesByWebsiteDomain,
-  isFreeEmailDomain,
-  normalizePublicWebsite,
-} from '../../../../backend/services/companyMatchService';
+import { extractDomain, isFreeEmailDomain } from '../../../../backend/services/companyMatchService';
+import { checkCompanyWebsite, insertCompanyWithWebsite } from '../../../../backend/services/companyWebsiteCreation';
 import { normalizeCompanyDomain } from '../../../../lib/shared/domain/companyDomain';
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
@@ -132,63 +127,24 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   // One LIVE company per website domain: a website domain a live company already holds is refused
   // (409 COMPANY_WEBSITE_TAKEN) before anything is written; a concurrent create that wins
   // idx_companies_website_domain_unique (23505) is refused the same way.
-  const rawWebsite = typeof request.website_url === 'string' && request.website_url.trim() ? request.website_url.trim() : null;
-  const website = rawWebsite ? normalizePublicWebsite(rawWebsite) : null;
-  if (rawWebsite && !website) {
-    return res.status(422).json({ code: 'COMPANY_WEBSITE_INVALID', error: 'The requested website is not a valid public company website.' });
-  }
   const emailHost = extractDomain(String(request.email ?? '')) ?? '';
   const emailRoot = normalizeCompanyDomain(String(request.email ?? ''));
   const freeMail = !emailHost || isFreeEmailDomain(emailHost) || !emailRoot || isFreeEmailDomain(emailRoot);
   const adminEmailDomain = freeMail ? null : emailRoot;
 
-  if (website) {
-    const held = await findCompaniesByWebsiteDomain(website);
-    if (!held.ok) {
-      return res.status(503).json({ error: 'Could not check the website. Please try again.' });
-    }
-    if (held.ambiguous) {
-      return res.status(409).json({ code: 'COMPANY_WEBSITE_AMBIGUOUS', error: 'This website cannot identify a single company. Choose another website.' });
-    }
-    if (held.companies.length > 0) {
-      return res.status(409).json({ code: 'COMPANY_WEBSITE_TAKEN', error: 'A company with this website already exists.' });
-    }
+  const checked = await checkCompanyWebsite(request.website_url, { required: false });
+  if (checked.ok !== true) {
+    return res.status(checked.status).json({ code: checked.code, error: checked.error });
   }
-
-  let newCompany: { id: string };
-  try {
-    newCompany = await createCompanyIdentity(
-      {
-        name:             company,
-        website,
-        websiteDomain:    website,
-        adminEmailDomain,
-        status:           'active',
-        created_at:       now,
-        updated_at:       now,
-      },
-      {
-        insertCompany: async (record) => {
-          const { data, error } = await supabase.from('companies').insert(record).select('id').single();
-          if (error || !data) {
-            const e = new Error(error?.message ?? 'company insert failed') as Error & { code?: string };
-            e.code = error?.code;
-            throw e;
-          }
-          return { id: (data as { id: string }).id };
-        },
-      },
-    );
-  } catch (companyErr) {
-    if ((companyErr as { code?: string })?.code === '23505') {
-      return res.status(409).json({ code: 'COMPANY_WEBSITE_TAKEN', error: 'A company with this website already exists.' });
-    }
-    if (companyErr instanceof CompanyIdentityInvariantError) {
-      return res.status(422).json({ code: 'COMPANY_WEBSITE_INVALID', error: 'The requested website is not a valid public company website.' });
-    }
-    console.error('[access-requests/approve] company creation failed:', (companyErr as Error)?.message);
-    return res.status(500).json({ error: 'Failed to create company for approved user' });
+  const createdCompany = await insertCompanyWithWebsite({
+    record: { name: company, status: 'active', created_at: now, updated_at: now },
+    website: checked.website,
+    adminEmailDomain,
+  });
+  if (createdCompany.ok !== true) {
+    return res.status(createdCompany.status).json({ code: createdCompany.code, error: createdCompany.error });
   }
+  const newCompany = { id: String(createdCompany.row.id) };
 
   // ── 2. Update access_requests: status + link organization_id ──────────────
   // organization_id is stored so onboarding can find the pre-created company
