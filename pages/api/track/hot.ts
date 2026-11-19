@@ -13,7 +13,7 @@ import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeF
  *   incomplete: boolean   // the last-hour read hit the row cap, or posts beyond the candidate cap were not evaluated
  * }
  *
- * A failed read answers 500 HOT_UNAVAILABLE (e9 / 05, 2026-11-12). It used to FABRICATE spikes: a
+ * A failed read (error object OR thrown) answers 503 + Retry-After HOT_UNAVAILABLE (e9 / 05, 2026-11-12; b3 11-19). It used to FABRICATE spikes: a
  * failed - or row-capped - 24h read left a post without a baseline, the baseline fell back to the
  * post's own last-hour count, and every post with 3+ views was announced as trending at 6x or more.
  * The baseline is now an EXACT count per candidate post (never row-capped), and a post whose
@@ -22,7 +22,7 @@ import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeF
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { supabase } from '../../../backend/db/supabaseClient';
 import { enforceCompanyAccess } from '../../../backend/services/userContextService';
-import { AnalyticsReadError, countOf, rowsOf } from '../../../backend/services/blog/blogAnalyticsRead';
+import { AnalyticsReadError, countOf, rowsOf, settled } from '../../../backend/services/blog/blogAnalyticsRead';
 
 export interface HotSlug {
   slug:            string;
@@ -53,12 +53,12 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
 
   try {
     // Views in last hour. `count: 'exact'` tells a row-capped read from a complete one.
-    const hourly = await supabase
+    const hourly = await settled('pageviews last hour', supabase
       .from('blog_analytics')
       .select('url_slug', { count: 'exact' })
       .eq('account_id', accountId)
       .eq('event_type', 'pageview')
-      .gte('created_at', oneHourAgo);
+      .gte('created_at', oneHourAgo));
     const hourRows = rowsOf(hourly as { data: { url_slug: string }[] | null; error: { message?: string } | null }, 'pageviews last hour');
     incomplete = typeof hourly.count === 'number' && hourly.count > hourRows.length;
 
@@ -74,13 +74,13 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     const candidates = qualifying.slice(0, MAX_CANDIDATES);
 
     // Each candidate's 24h baseline: an EXACT count (head request - no rows, so no row cap).
-    const baselines = await Promise.all(candidates.map(([slug]) => supabase
+    const baselines = await Promise.all(candidates.map(([slug]) => settled('pageviews 24h baseline', supabase
       .from('blog_analytics')
       .select('url_slug', { count: 'exact', head: true })
       .eq('account_id', accountId)
       .eq('event_type', 'pageview')
       .eq('url_slug', slug)
-      .gte('created_at', twentyFourAgo)));
+      .gte('created_at', twentyFourAgo))));
 
     candidates.forEach(([slug, viewsLastHour], i) => {
       // The 24h window contains the last hour; the reads run at slightly different instants.
@@ -94,7 +94,8 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   } catch (err) {
     if (!(err instanceof AnalyticsReadError)) throw err;
     console.error('[track/hot] read failed', { account_id: accountId, read: err.what, error: err.message });
-    return res.status(500).json({ code: 'HOT_UNAVAILABLE', error: 'Trending detection is temporarily unavailable.' });
+    res.setHeader('Retry-After', '5');
+    return res.status(503).json({ code: 'HOT_UNAVAILABLE', error: 'Trending detection is temporarily unavailable.' });
   }
 
   if (incomplete) console.warn('[track/hot] some posts were not evaluated (row cap or candidate cap); hot posts may be missing', { account_id: accountId });

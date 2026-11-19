@@ -16,6 +16,7 @@ const mockDb = {
   dayRows: [] as { url_slug: string }[], // what a ROW read of the 24h window returns (row-capped)
   dayCount: {} as Record<string, number | null>, // the exact 24h count per post (a head read)
   fail: null as null | 'hour' | 'day',
+  failMode: 'error' as 'error' | 'throw', // b3: an error object AND a thrown rejection
 };
 
 jest.mock('../../../lib/platform/routeFactory', () => ({ createApiRoute: (h: unknown) => h }));
@@ -28,10 +29,11 @@ jest.mock('../../db/supabaseClient', () => ({
       b.select = (_cols: string, opts?: { head?: boolean }) => { f.head = !!opts?.head; return b; };
       b.eq = (c: string, v: unknown) => { f[c] = v; return b; };
       b.gte = (_c: string, v: string) => { f.since = v; return b; };
-      b.then = (res: (v: unknown) => unknown) => {
+      b.then = (res: (v: unknown) => unknown, rej?: (e: unknown) => unknown) => {
         const ageH = (Date.now() - Date.parse(String(f.since))) / 3_600_000;
         const win = ageH > 2 ? 'day' : 'hour';
         const timeout = { data: null, count: null, error: { message: 'canceling statement due to statement timeout' } };
+        if (mockDb.fail === win && mockDb.failMode === 'throw') return Promise.reject(new Error('socket hang up')).then(res, rej);
         if (mockDb.fail === win) return Promise.resolve(timeout).then(res);
         if (win === 'hour') {
           return Promise.resolve({ data: mockDb.hourRows, count: mockDb.hourCount ?? mockDb.hourRows.length, error: null }).then(res);
@@ -50,8 +52,8 @@ jest.mock('../../db/supabaseClient', () => ({
 import handler from '../../../pages/api/track/hot';
 
 async function call() {
-  const res: any = { statusCode: 0, body: undefined };
-  res.setHeader = () => res;
+  const res: any = { statusCode: 0, body: undefined, headers: {} as Record<string, string> };
+  res.setHeader = (k: string, v: string) => { res.headers[k] = v; return res; };
   res.status = (c: number) => { res.statusCode = c; return res; };
   res.json = (p: unknown) => { res.body = p; return res; };
   await (handler as any)({ method: 'GET', query: { account_id: 'co-a' }, headers: {} }, res);
@@ -62,6 +64,7 @@ const views = (slug: string, n: number) => Array.from({ length: n }, () => ({ ur
 let errSpy: jest.SpyInstance;
 beforeEach(() => {
   mockDb.fail = null;
+  mockDb.failMode = 'error';
   mockDb.hourRows = views('post-a', 3);
   mockDb.hourCount = null;
   mockDb.dayRows = views('post-a', 72);
@@ -71,10 +74,12 @@ beforeEach(() => {
 });
 afterEach(() => jest.restoreAllMocks());
 
-it('the 24h read FAILS while the hourly read qualifies (3 views): NO spike - 500 HOT_UNAVAILABLE, logged by name', async () => {
+it.each(['error', 'throw'] as const)('the 24h read FAILS (%s) while the hourly read qualifies (3 views): NO spike - 503 + Retry-After HOT_UNAVAILABLE, logged by name', async (mode) => {
   mockDb.fail = 'day';
+  mockDb.failMode = mode;
   const res = await call();
-  expect(res.statusCode).toBe(500);
+  expect(res.statusCode).toBe(503);
+  expect(res.headers['Retry-After']).toBe('5');
   expect(res.body).toEqual({ code: 'HOT_UNAVAILABLE', error: expect.any(String) });
   expect(errSpy).toHaveBeenCalledWith('[track/hot] read failed', expect.objectContaining({ read: 'pageviews 24h baseline' }));
 });
@@ -90,14 +95,18 @@ it('a post the ROW-CAPPED 24h read dropped is not fabricated as trending: its ba
 it('a baseline read that answers NO count (null) is unavailable, not zero', async () => {
   mockDb.dayCount = { 'post-a': null };
   const res = await call();
-  expect(res.statusCode).toBe(500);
+  expect(res.statusCode).toBe(503);
+  expect(res.headers['Retry-After']).toBe('5');
   expect(res.body.code).toBe('HOT_UNAVAILABLE');
 });
 
-it('the hourly read FAILS: 500, not "nothing is trending"', async () => {
+it.each(['error', 'throw'] as const)('the hourly read FAILS (%s): 503 + Retry-After, not "nothing is trending"', async (mode) => {
   mockDb.fail = 'hour';
+  mockDb.failMode = mode;
   const res = await call();
-  expect(res.statusCode).toBe(500);
+  expect(res.statusCode).toBe(503);
+  expect(res.headers['Retry-After']).toBe('5');
+  expect(res.body).toEqual({ code: 'HOT_UNAVAILABLE', error: expect.any(String) });
   expect(errSpy).toHaveBeenCalledWith('[track/hot] read failed', expect.objectContaining({ read: 'pageviews last hour' }));
 });
 

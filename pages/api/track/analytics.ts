@@ -17,14 +17,14 @@ import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeF
  * Re-introduce a rollup only together with a reader that uses daily rows for COMPLETE past days and raw events
  * for the rest (and a backfill). The table itself is a register item (drop it, or build that reader).
  *
- * UNREADABLE != ZERO (e9, 2026-11-12): every query's error is read. A failed read answers 500
+ * UNREADABLE != ZERO (e9, 2026-11-12): every query's error is read. A failed read (error object OR thrown) answers 503 + Retry-After
  * ANALYTICS_UNAVAILABLE and the panel says so - it never renders "0 views" or a fake trend from a
  * read that did not happen.
  */
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { supabase } from '../../../backend/db/supabaseClient';
 import { enforceCompanyAccess } from '../../../backend/services/userContextService';
-import { AnalyticsReadError, rowsOf } from '../../../backend/services/blog/blogAnalyticsRead';
+import { AnalyticsReadError, rowsOf, settled } from '../../../backend/services/blog/blogAnalyticsRead';
 
 // ── Public types (used by BlogAnalyticsPanel) ──────────────────────────────
 
@@ -181,7 +181,8 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   } catch (err) {
     if (!(err instanceof AnalyticsReadError)) throw err;
     console.error('[track/analytics] read failed', { account_id: req.query.account_id, read: err.what, error: err.message });
-    return res.status(500).json({ code: 'ANALYTICS_UNAVAILABLE', error: 'Blog analytics are temporarily unavailable.' });
+    res.setHeader('Retry-After', '5');
+    return res.status(503).json({ code: 'ANALYTICS_UNAVAILABLE', error: 'Blog analytics are temporarily unavailable.' });
   }
 }
 
@@ -208,8 +209,8 @@ async function analyticsHandler(req: NextApiRequest, res: NextApiResponse) {
   // manual run over a short window) it would have preferred INCOMPLETE aggregates over complete raw events and
   // silently under-reported views. Any future aggregate must be read only where it COVERS the whole window.
   const [pvRes, lvRes] = await Promise.all([
-    supabase.from('blog_analytics').select('url_slug').eq('account_id', accountId).eq('event_type', 'pageview').gte('created_at', since),
-    supabase.from('blog_analytics').select('url_slug, time_on_page, scroll_depth').eq('account_id', accountId).eq('event_type', 'pageleave').gte('created_at', since),
+    settled('pageviews', supabase.from('blog_analytics').select('url_slug').eq('account_id', accountId).eq('event_type', 'pageview').gte('created_at', since)),
+    settled('pageleaves', supabase.from('blog_analytics').select('url_slug, time_on_page, scroll_depth').eq('account_id', accountId).eq('event_type', 'pageleave').gte('created_at', since)),
   ]);
   const agg = aggregateSlice(rowsOf(pvRes, 'pageviews'), rowsOf(lvRes, 'pageleaves'));
   const totalViews = agg.totalViews;
@@ -219,10 +220,10 @@ async function analyticsHandler(req: NextApiRequest, res: NextApiResponse) {
 
   // ── Before/After (always from raw) ────────────────────────────────────
   const [curPv, curLv, prevPv, prevLv] = await Promise.all([
-    supabase.from('blog_analytics').select('url_slug').eq('account_id', accountId).eq('event_type', 'pageview').gte('created_at', cur7Start),
-    supabase.from('blog_analytics').select('url_slug, time_on_page, scroll_depth').eq('account_id', accountId).eq('event_type', 'pageleave').gte('created_at', cur7Start),
-    supabase.from('blog_analytics').select('url_slug').eq('account_id', accountId).eq('event_type', 'pageview').gte('created_at', prev7Start).lt('created_at', cur7Start),
-    supabase.from('blog_analytics').select('url_slug, time_on_page, scroll_depth').eq('account_id', accountId).eq('event_type', 'pageleave').gte('created_at', prev7Start).lt('created_at', cur7Start),
+    settled('pageviews 7d', supabase.from('blog_analytics').select('url_slug').eq('account_id', accountId).eq('event_type', 'pageview').gte('created_at', cur7Start)),
+    settled('pageleaves 7d', supabase.from('blog_analytics').select('url_slug, time_on_page, scroll_depth').eq('account_id', accountId).eq('event_type', 'pageleave').gte('created_at', cur7Start)),
+    settled('pageviews prior 7d', supabase.from('blog_analytics').select('url_slug').eq('account_id', accountId).eq('event_type', 'pageview').gte('created_at', prev7Start).lt('created_at', cur7Start)),
+    settled('pageleaves prior 7d', supabase.from('blog_analytics').select('url_slug, time_on_page, scroll_depth').eq('account_id', accountId).eq('event_type', 'pageleave').gte('created_at', prev7Start).lt('created_at', cur7Start)),
   ]);
 
   const cur  = aggregateSlice(rowsOf(curPv, 'pageviews 7d'),       rowsOf(curLv, 'pageleaves 7d'));

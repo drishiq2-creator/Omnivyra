@@ -11,6 +11,18 @@ export class AnalyticsReadError extends Error {
   }
 }
 
+/**
+ * Await a read. A REJECTION (driver / network throw) is the same unreadable state as an error object,
+ * so it becomes the same named AnalyticsReadError - never a generic 500 (b3 standing rule, 2026-11-19).
+ */
+export async function settled<T>(what: string, read: PromiseLike<T>): Promise<T> {
+  try {
+    return await read;
+  } catch (err) {
+    throw new AnalyticsReadError(what, (err as Error)?.message ?? 'read rejected');
+  }
+}
+
 /** The rows of a read, or a throw naming it - a failed read is never an empty result. */
 export function rowsOf<T>(result: { data: T[] | null; error: { message?: string } | null }, what: string): T[] {
   if (result.error) throw new AnalyticsReadError(what, result.error.message ?? 'unknown error');

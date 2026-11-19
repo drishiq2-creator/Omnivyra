@@ -5,7 +5,8 @@
  * rollup is all-or-nothing - the second test pins that hazard, so re-introducing a partial rollup
  * without fixing the reader is caught here.
  *
- * Every read's error is read (e9): a failed read answers 500 ANALYTICS_UNAVAILABLE, never 0 views.
+ * Every read's error is read (e9): a failed read - error object OR thrown rejection (b3) - answers
+ * 503 + Retry-After ANALYTICS_UNAVAILABLE, never 0 views.
  */
 import fs from 'fs';
 import path from 'path';
@@ -14,6 +15,7 @@ const mockDb = {
   daily: [] as Record<string, unknown>[], pageviews: [] as Record<string, unknown>[], leaves: [] as Record<string, unknown>[],
   /** Which ONE read fails: 'daily', or `${event}:${window}` - event pageview|pageleave, window 30d|7d|prior. */
   fail: null as string | null,
+  failMode: 'error' as 'error' | 'throw',
 };
 
 jest.mock('../../../lib/platform/routeFactory', () => ({ createApiRoute: (h: unknown) => h }));
@@ -28,12 +30,13 @@ jest.mock('../../db/supabaseClient', () => ({
       b.order = () => b;
       b.gte = (_c: string, v: string) => { filters.since = v; return b; };
       b.lt = () => { filters.prior = true; return b; };
-      b.then = (res: (v: unknown) => unknown) => {
+      b.then = (res: (v: unknown) => unknown, rej?: (e: unknown) => unknown) => {
         // The window is keyed on the dates the route passes: .lt => the prior 7d; else the
         // lower bound's age says 30d or 7d. Each of the 7 reads can fail on its own.
         const ageDays = (Date.now() - Date.parse(String(filters.since))) / 86_400_000;
         const win = filters.prior ? 'prior' : ageDays > 20 ? '30d' : '7d';
         const name = table === 'blog_analytics_daily' ? 'daily' : `${String(filters.event_type)}:${win}`;
+        if (mockDb.fail === name && mockDb.failMode === 'throw') return Promise.reject(new Error('socket hang up')).then(res, rej);
         if (mockDb.fail === name) {
           return Promise.resolve({ data: null, error: { message: 'canceling statement due to statement timeout' } }).then(res);
         }
@@ -49,8 +52,8 @@ jest.mock('../../db/supabaseClient', () => ({
 import handler from '../../../pages/api/track/analytics';
 
 async function call() {
-  const res: any = { statusCode: 0, body: undefined };
-  res.setHeader = () => res;
+  const res: any = { statusCode: 0, body: undefined, headers: {} as Record<string, string> };
+  res.setHeader = (k: string, v: string) => { res.headers[k] = v; return res; };
   res.status = (c: number) => { res.statusCode = c; return res; };
   res.json = (p: unknown) => { res.body = p; return res; };
   await (handler as any)({ method: 'GET', query: { account_id: 'co-a', days: '30' }, headers: {} }, res);
@@ -59,6 +62,7 @@ async function call() {
 
 beforeEach(() => {
   mockDb.fail = null;
+  mockDb.failMode = 'error';
   mockDb.daily = [];
   mockDb.pageviews = Array.from({ length: 7 }, () => ({ url_slug: 'post-a' }));
   mockDb.leaves = [{ url_slug: 'post-a', time_on_page: 30, scroll_depth: 50 }];
@@ -91,10 +95,13 @@ describe('a failed read is UNAVAILABLE, never zero views', () => {
   beforeEach(() => { errSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined); });
   afterEach(() => errSpy.mockRestore());
 
-  it.each(['pageview:30d', 'pageleave:30d', 'pageview:7d', 'pageleave:7d', 'pageview:prior', 'pageleave:prior'])('%s read fails -> 500 ANALYTICS_UNAVAILABLE, logged', async (which) => {
+  const READS = ['pageview:30d', 'pageleave:30d', 'pageview:7d', 'pageleave:7d', 'pageview:prior', 'pageleave:prior'];
+  it.each(READS.flatMap((r) => [[r, 'error'], [r, 'throw']] as const))('%s read fails (%s) -> 503 + Retry-After ANALYTICS_UNAVAILABLE, logged', async (which, mode) => {
     mockDb.fail = which;
+    mockDb.failMode = mode;
     const res = await call();
-    expect(res.statusCode).toBe(500);
+    expect(res.statusCode).toBe(503);
+    expect(res.headers['Retry-After']).toBe('5');
     expect(res.body).toEqual(expect.objectContaining({ code: 'ANALYTICS_UNAVAILABLE' }));
     expect(res.body.total_views).toBeUndefined();
     expect(errSpy).toHaveBeenCalledWith('[track/analytics] read failed', expect.objectContaining({ account_id: 'co-a' }));
@@ -115,7 +122,7 @@ it('the mock keys every read on its own window - each of the 6 names is hit exac
     const spy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
     const res = await call();
     spy.mockRestore();
-    if (res.statusCode === 500) seen.push(which);
+    if (res.statusCode === 503) seen.push(which);
   }
   mockDb.fail = null;
   expect(seen).toEqual(['pageview:30d', 'pageleave:30d', 'pageview:7d', 'pageleave:7d', 'pageview:prior', 'pageleave:prior']);
