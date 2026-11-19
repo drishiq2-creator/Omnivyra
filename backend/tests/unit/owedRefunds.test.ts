@@ -155,6 +155,10 @@ describe('owed refunds: the system pays, exactly once', () => {
 
 describe('terminal replay: durable count of failed re-reads', () => {
   const KEY = { scope: 'blog_post', orgId: ORG, key: 'click-1' };
+  // The fake store stamps first_failed_at with mockNowIso, so every replay whose outcome depends on the clock reads the
+  // SAME clock. Without it the 24h window compared a fixed 2026-11-18 stamp with the real date and the count tests went
+  // terminal on their first failure from 2026-11-19 10:00 on (a time bomb, c6 2026-11-20).
+  const atNow = () => ({ ...KEY, now: new Date(mockNowIso) });
   test('found / absent are not failures', async () => {
     expect(await replayBilledResult(KEY)).toEqual({ kind: 'absent' });
     await persistBilledResult({ ...KEY, value: { a: 1 } });
@@ -163,9 +167,9 @@ describe('terminal replay: durable count of failed re-reads', () => {
   });
   test(`a read error is transient until the ${REPLAY_TERMINAL_FAILURES}rd durable failure, then TERMINAL`, async () => {
     mockStore.failRead = true;
-    expect(await replayBilledResult(KEY)).toEqual({ kind: 'transient', failures: 1 });
-    expect(await replayBilledResult(KEY)).toEqual({ kind: 'transient', failures: 2 });
-    expect(await replayBilledResult(KEY)).toMatchObject({ kind: 'terminal', failures: 3 });
+    expect(await replayBilledResult(atNow())).toEqual({ kind: 'transient', failures: 1 });
+    expect(await replayBilledResult(atNow())).toEqual({ kind: 'transient', failures: 2 });
+    expect(await replayBilledResult(atNow())).toMatchObject({ kind: 'terminal', failures: 3 });
     expect(mockCounters).toContain('billed_result_replay_terminal_total');
   });
   test('24h after the FIRST failure (stored, not recomputed) a second failure is TERMINAL', async () => {
@@ -175,12 +179,12 @@ describe('terminal replay: durable count of failed re-reads', () => {
   });
   test('the count is per org + key (another org starts at 1)', async () => {
     mockStore.failRead = true;
-    await replayBilledResult(KEY); await replayBilledResult(KEY);
-    expect(await replayBilledResult({ ...KEY, orgId: '99999999-9999-4999-8999-999999999999' })).toEqual({ kind: 'transient', failures: 1 });
+    await replayBilledResult(atNow()); await replayBilledResult(atNow());
+    expect(await replayBilledResult({ ...atNow(), orgId: '99999999-9999-4999-8999-999999999999' })).toEqual({ kind: 'transient', failures: 1 });
   });
   test('the count itself cannot be recorded -> stays transient (never terminal on an unrecorded count)', async () => {
     mockStore.failRead = true; db.failRpc = true;
-    for (let i = 0; i < 5; i++) expect(await replayBilledResult(KEY)).toEqual({ kind: 'transient', failures: null });
+    for (let i = 0; i < 5; i++) expect(await replayBilledResult(atNow())).toEqual({ kind: 'transient', failures: null });
   });
 });
 
