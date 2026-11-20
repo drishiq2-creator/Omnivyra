@@ -318,8 +318,11 @@ describe('A2 — editing creates a new version', () => {
     fireEvent.click(screen.getByLabelText('Remove Marketing Manager'));
     fireEvent.click(screen.getByTestId('save-edits'));
 
-    await waitFor(() => expect(screen.getByTestId('icp-notice')).toHaveTextContent('Edit rejected'));
-    expect(screen.getByTestId('icp-notice')).toHaveTextContent('value_outside_vocabulary');
+    await waitFor(() => expect(screen.getByTestId('icp-notice')).toHaveTextContent('Could not save this edit.'));
+    // c6 2026-11-20 (7c, named change): this case used to ASSERT the server code on screen - the passthrough class
+    // 04 removed from Settings -> Security. Server text is never user copy; it is logged.
+    expect(screen.getByTestId('icp-notice')).not.toHaveTextContent('value_outside_vocabulary');
+    expect(screen.getByTestId('icp-notice')).not.toHaveTextContent('bad criterion');
   });
 
   it('never ratifies as a side effect of saving', async () => {
@@ -378,7 +381,9 @@ describe('A2 — ratification is an explicit human act', () => {
     fireEvent.click(await screen.findByTestId('ratify-button'));
     fireEvent.click(screen.getByTestId('ratify-confirm-yes'));
 
-    await waitFor(() => expect(screen.getByTestId('icp-notice')).toHaveTextContent('Ratification failed'));
+    await waitFor(() => expect(screen.getByTestId('icp-notice')).toHaveTextContent('Could not ratify this version.'));
+    expect(screen.getByTestId('icp-notice')).toHaveTextContent('changed by someone else');
+    expect(screen.getByTestId('icp-notice')).not.toHaveTextContent('already_ratified');
     expect(screen.getByTestId('icp-notice')).not.toHaveTextContent('is now the ratified ICP');
   });
 
@@ -438,7 +443,10 @@ describe('A2 — version handling makes no assumption about "current"', () => {
 });
 
 describe('A2 — generation surfaces the 422 refusal contract', () => {
-  it('shows the refusal code and reason without claiming a proposal exists', async () => {
+  // c6 2026-11-20 (7c, named change): the refusal is shown as CLIENT copy (it explains the evidence gap); the server's
+  // code and reason are LOGGED for developers, never shown - server text is not user copy (04 212d4b393 class).
+  it('explains the refusal in client words, logs the code, and does not claim a proposal exists', async () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
     mockGet(workspace({ proposals: [], history: [] }));
     mockApiFetch.mockImplementation((url: string) => (
       url.startsWith('/api/prospect-icp/versions')
@@ -450,8 +458,13 @@ describe('A2 — generation surfaces the 422 refusal contract', () => {
 
     renderWorkspace();
     fireEvent.click(await screen.findByTestId('generate-button'));
-    await waitFor(() => expect(screen.getByTestId('icp-notice')).toHaveTextContent('INSUFFICIENT_EVIDENCE'));
-    expect(screen.getByTestId('icp-notice')).toHaveTextContent('too few buyer signals');
+    await waitFor(() => expect(screen.getByTestId('icp-notice')).toHaveTextContent('company profile does not yet hold enough'));
+    expect(screen.getByTestId('icp-notice')).not.toHaveTextContent('INSUFFICIENT_EVIDENCE');
+    expect(screen.getByTestId('icp-notice')).not.toHaveTextContent('too few buyer signals');
+    expect(screen.getByTestId('icp-notice')).not.toHaveTextContent('Proposal generated');
+    expect(warn).toHaveBeenCalledWith('[icp-workspace] action refused',
+      expect.objectContaining({ action: 'propose', status: 422, code: 'INSUFFICIENT_EVIDENCE' }));
+    warn.mockRestore();
   });
 });
 

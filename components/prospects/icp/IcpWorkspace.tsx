@@ -34,6 +34,7 @@ import React from 'react';
 import useSWR from 'swr';
 import { useCompanyContext } from '@/components/CompanyContext';
 import { apiFetch } from '@/lib/apiFetch';
+import { icpActionNotice, logIcpRefusal } from './icpNotices';
 
 // ── The shapes the API returns. Read-only mirrors, not a second contract. ────
 type SectionState = 'available' | 'empty' | 'not_evaluated' | 'not_implemented' | 'failed';
@@ -266,7 +267,8 @@ export default function IcpWorkspace({ icpKey = 'first-cut' }: { icpKey?: string
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
         // The 422 refusal contract: a reason code plus what was refused.
-        setNotice(res.status === 403 ? 'Only company admins can change the Ideal Customer Profile.' : `Could not generate a proposal — ${body.code ?? res.status}: ${body.error ?? 'unknown reason'}`);
+        logIcpRefusal('propose', res.status, body);
+        setNotice(icpActionNotice('propose', res.status));
       } else {
         setNotice(`Proposal generated as version ${body.version}. Review it before ratifying.`);
         await mutate();
@@ -304,7 +306,8 @@ export default function IcpWorkspace({ icpKey = 'first-cut' }: { icpKey?: string
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
-        setNotice(res.status === 403 ? 'Only company admins can change the Ideal Customer Profile.' : `Edit rejected — ${body.code ?? res.status}: ${body.error ?? 'unknown reason'}`);
+        logIcpRefusal('edit', res.status, body);
+        setNotice(icpActionNotice('edit', res.status));
       } else {
         setNotice(`Saved as version ${body.version}. Version ${active.version} is unchanged. Nothing is ratified yet.`);
         setEditedTitles(null);
@@ -325,7 +328,8 @@ export default function IcpWorkspace({ icpKey = 'first-cut' }: { icpKey?: string
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
-        setNotice(res.status === 403 ? 'Only company admins can change the Ideal Customer Profile.' : `Ratification failed — ${body.code ?? res.status}: ${body.error ?? 'unknown reason'}`);
+        logIcpRefusal('ratify', res.status, body);
+        setNotice(icpActionNotice('ratify', res.status));
       } else {
         setNotice(`Version ${body.version} is now the ratified ICP.`);
         await mutate();
