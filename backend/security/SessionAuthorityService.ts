@@ -357,6 +357,12 @@ export async function ensureSessionForUser(
         sessionId:    existing.id,
       });
       await revokeSession(existing.id, 'foreign_user_session_detected_during_sync');
+    } else if (lookup.reason === 'LOOKUP_FAILED') {
+      // The session read FAILED - we do not know whether this browser already holds a live (or foreign) session.
+      // Minting here would rotate the cookie on every request during an auth_sessions blip and skip the foreign-session
+      // revoke above (7c 2026-11-20). Answer exactly what this function's own failure path answers: no session minted.
+      logger.warn('session_authority_ensure_lookup_failed', { userId: input.userId });
+      return { sessionId: null, minted: false };
     }
 
     const created = await createSession({
