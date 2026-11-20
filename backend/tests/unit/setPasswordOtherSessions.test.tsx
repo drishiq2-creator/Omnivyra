@@ -21,13 +21,20 @@ jest.mock('../../../lib/supabaseBrowser', () => ({
     auth: { getSession: async () => ({ data: { session: { access_token: 'at', user: { id: 'u1', email: 'a@b.test' } } } }) },
   }),
 }));
-jest.mock('../../../utils/authStorage', () => ({ clearBrowserAuthState: jest.fn() }));
+const clearBrowserAuthState = jest.fn();
+jest.mock('../../../utils/authStorage', () => ({ clearBrowserAuthState: (...a: unknown[]) => clearBrowserAuthState(...a) }));
 const apiFetch = jest.fn();
 jest.mock('../../../lib/apiFetch', () => ({ apiFetch: (...a: unknown[]) => apiFetch(...a) }));
 
 import SetPasswordPage from '../../../pages/auth/set-password';
+import fs from 'fs';
+import path from 'path';
 import {
+  OTHER_SESSIONS_NOT_SIGNED_OUT,
   OTHER_SESSIONS_NOTICE,
+  SIGN_OUT_OTHERS_COPY,
+  SIGN_OUT_OTHERS_OUTCOMES,
+  SIGN_OUT_OTHERS_TIMEOUT_MS,
   SIGN_OUT_OTHERS_DONE,
   SIGN_OUT_OTHERS_LABEL,
   SIGN_OUT_OTHERS_REFUSED,
@@ -50,6 +57,7 @@ let warn: jest.SpyInstance;
 beforeEach(() => {
   replace.mockReset();
   apiFetch.mockReset();
+  clearBrowserAuthState.mockReset();
   window.sessionStorage.setItem('auth_flow_session_established_v1', '1');
   warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
 });
@@ -105,6 +113,64 @@ describe('set-password: OTHER_SESSIONS_NOT_SIGNED_OUT', () => {
     expect(screen.queryByRole('button', { name: SIGN_OUT_OTHERS_LABEL })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
     expect(replace).toHaveBeenCalledWith(continueTo);
+  });
+
+  it.each<[string, number | 'throw', boolean]>([
+    ['done', 200, true],
+    ['refused', 403, false],
+    ['unknown', 503, false],
+  ])('%s: browser auth state is cleared ONLY when revokeAll succeeded (it ends this session too)', async (_n, revokeAnswer, cleared) => {
+    apiFetch.mockImplementation((url: string) =>
+      url === '/api/auth/set-password' ? ok({ success: true, route: '/dashboard', code: 'OTHER_SESSIONS_NOT_SIGNED_OUT' }) : ok({}, revokeAnswer as number),
+    );
+    render(<SetPasswordPage />);
+    await submitPassword();
+    await waitFor(() => screen.getByRole('button', { name: SIGN_OUT_OTHERS_LABEL }));
+    const before = clearBrowserAuthState.mock.calls.length;
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: SIGN_OUT_OTHERS_LABEL })); });
+    await waitFor(() => expect(screen.queryByRole('button', { name: SIGN_OUT_OTHERS_LABEL })).toBeNull());
+    expect(clearBrowserAuthState.mock.calls.length - before).toBe(cleared ? 1 : 0);
+  });
+
+  it('a revoke that never answers: still "Signing out…" before the timeout, "not sure" after it', async () => {
+    apiFetch.mockImplementation((url: string, init?: RequestInit) => {
+      if (url === '/api/auth/set-password') return ok({ success: true, route: '/dashboard', code: 'OTHER_SESSIONS_NOT_SIGNED_OUT' });
+      // Like real fetch: rejects only when the caller's signal aborts.
+      return new Promise((_, reject) => init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError'))));
+    });
+    render(<SetPasswordPage />);
+    await submitPassword();
+    await waitFor(() => screen.getByRole('button', { name: SIGN_OUT_OTHERS_LABEL }));
+    jest.useFakeTimers();
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: SIGN_OUT_OTHERS_LABEL })); });
+    await act(async () => { jest.advanceTimersByTime(SIGN_OUT_OTHERS_TIMEOUT_MS - 1); });
+    expect(screen.getByRole('button', { name: 'Signing out…' })).toBeTruthy(); // control: genuinely waiting
+    await act(async () => { jest.advanceTimersByTime(1); });
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toContain(SIGN_OUT_OTHERS_UNKNOWN));
+    expect(clearBrowserAuthState).not.toHaveBeenCalled();
+  });
+
+  it('outcome union: SIGN_OUT_OTHERS_COPY covers SIGN_OUT_OTHERS_OUTCOMES in both directions', () => {
+    expect(Object.keys(SIGN_OUT_OTHERS_COPY).sort()).toEqual([...SIGN_OUT_OTHERS_OUTCOMES].sort());
+  });
+
+  it('outcome union: every outcome classifySignOutOthers produces is a member, and every member is producible', () => {
+    const produced = new Set([200, 403, 503, null].map(classifySignOutOthers));
+    expect([...produced].sort()).toEqual([...SIGN_OUT_OTHERS_OUTCOMES].sort());
+  });
+
+  it('unknown member: an unexpected status is "unknown" (never done, never refused)', () => {
+    expect([0, 100, 302, 304, 600, 999].map(classifySignOutOthers)).toEqual(['unknown', 'unknown', 'unknown', 'unknown', 'unknown', 'unknown']);
+    // Controls: the definitive ranges really classify, so the line above is not vacuous.
+    expect(classifySignOutOthers(204)).toBe('done');
+    expect(classifySignOutOthers(401)).toBe('refused');
+  });
+
+  it("the client's code constant equals the server's export (pages/api/auth/set-password.ts)", () => {
+    const src = fs.readFileSync(path.join(__dirname, '../../../pages/api/auth/set-password.ts'), 'utf8');
+    const m = src.match(/export const OTHER_SESSIONS_NOT_SIGNED_OUT = '([A-Z_]+)' as const;/);
+    expect(m).not.toBeNull();
+    expect(m![1]).toBe(OTHER_SESSIONS_NOT_SIGNED_OUT);
   });
 
   it('classifySignOutOthers: 2xx done, 4xx refused, 5xx/thrown unknown', () => {

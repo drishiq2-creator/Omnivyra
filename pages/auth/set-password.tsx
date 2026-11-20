@@ -24,10 +24,9 @@ import { apiFetch } from '../../lib/apiFetch';
 import { validatePassword, PASSWORD_MIN_LENGTH, PASSWORD_MAX_LENGTH } from '../../lib/auth/passwordPolicy';
 import {
   OTHER_SESSIONS_NOTICE,
-  SIGN_OUT_OTHERS_DONE,
+  SIGN_OUT_OTHERS_COPY,
   SIGN_OUT_OTHERS_LABEL,
-  SIGN_OUT_OTHERS_REFUSED,
-  SIGN_OUT_OTHERS_UNKNOWN,
+  SIGN_OUT_OTHERS_TIMEOUT_MS,
   classifySignOutOthers,
   otherSessionsNotSignedOut,
   type SignOutOthersOutcome,
@@ -56,17 +55,26 @@ export default function SetPasswordPage() {
   async function signOutOtherDevices() {
     setSignOutOthers('busy');
     let status: number | null = null;
+    // Bounded: apiFetch re-throws a caller's abort, and the catch below turns it into status null -> 'unknown'.
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), SIGN_OUT_OTHERS_TIMEOUT_MS);
     try {
       const r = await apiFetch('/api/auth/sessions/revoke', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ revokeAll: true }),
+        signal: ctrl.signal,
       });
       status = r.status;
     } catch (err) {
       console.warn('[set-password] sign out other devices did not complete:', err);
+    } finally {
+      clearTimeout(timer);
     }
-    setSignOutOthers(classifySignOutOthers(status));
+    const outcome = classifySignOutOthers(status);
+    // revokeAll ends THIS session too (revoke.ts: "including current"); drop the dead tokens so /login starts clean.
+    if (outcome === 'done') clearBrowserAuthState({ preservePkce: false });
+    setSignOutOthers(outcome);
   }
 
   const attempted = useRef(false);
@@ -350,9 +358,11 @@ export default function SetPasswordPage() {
                           {signOutOthers === 'busy' ? 'Signing out…' : SIGN_OUT_OTHERS_LABEL}
                         </button>
                       )}
-                      {signOutOthers === 'done' && <p className="mt-3">{SIGN_OUT_OTHERS_DONE}</p>}
-                      {signOutOthers === 'refused' && <p className="mt-3">{SIGN_OUT_OTHERS_REFUSED}</p>}
-                      {signOutOthers === 'unknown' && <p className="mt-3">{SIGN_OUT_OTHERS_UNKNOWN}</p>}
+                      {/* Pass-through: every outcome renders its own copy from the total table, so a new outcome
+                          cannot ship without copy (SIGN_OUT_OTHERS_COPY is Record<SignOutOthersOutcome, string>). */}
+                      {signOutOthers !== 'idle' && signOutOthers !== 'busy' && (
+                        <p className="mt-3">{SIGN_OUT_OTHERS_COPY[signOutOthers]}</p>
+                      )}
                     </div>
                     <button
                       type="button"
