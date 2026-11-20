@@ -20,6 +20,14 @@ import {
   buildSocialProfilesFromScalars,
 } from '../pages/company-profile.types';
 import { normalizeCanonicalWebsite } from '../utils/companyProfileValidation';
+import { saveProfileWithListEdits } from '../lib/companyProfile/listReplace';
+import {
+  mergeCampaignPurposeIntent,
+  mergeNonEmptyFields,
+  TARGET_CUSTOMER_FIELDS,
+  MARKETING_INTELLIGENCE_FIELDS,
+} from '../utils/mergeCampaignPurposeIntent';
+import { planMarketPulseSave, marketPulseReadFromBody, type MarketPulseRead } from '../utils/profileMarketPulseMirror';
 
 const ONBOARDING_CHECKPOINT_PREFIX = 'company_profile_onboarding:';
 const ONBOARDING_REFINE_STALE_MS = 2 * 60 * 1000;
@@ -781,8 +789,34 @@ export function useCompanyProfileState() {
       // `override` lets a guided-capture flow persist the exact fields it just
       // staged without waiting for the activeProfile state to settle.
       const source = override ?? activeProfile;
+      // UI step 6.4b: report_settings.market_pulse is replaced WHOLE by the server, so
+      // RE-READ it now and overlay only what the user changed (05: never merge against a
+      // stale copy). Offerings / growth priorities are mirrored into it (55's rules).
+      // If the re-read fails, market_pulse is OMITTED (the server keeps the stored object)
+      // and the user is told if their Market Pulse changes did not land (05's review).
+      const loadedMarketPulse = (profile?.report_settings?.market_pulse ?? null) as Record<string, unknown> | null;
+      let marketPulseRead: MarketPulseRead = { ok: false };
+      try {
+        const fresh = await fetchWithAuth(`/api/company-profile?companyId=${encodeURIComponent(companyId)}`);
+        if (fresh.ok) marketPulseRead = marketPulseReadFromBody(await fresh.json().catch(() => null));
+      } catch {
+        marketPulseRead = { ok: false };
+      }
+      const productsServicesListForSave = source.products_services_list ?? splitToList(source.products_services);
+      const marketPulsePlan = planMarketPulseSave({
+        read: marketPulseRead,
+        loaded: loadedMarketPulse,
+        client: (source.report_settings?.market_pulse ?? null) as Record<string, unknown> | null,
+        productsServicesList: productsServicesListForSave,
+        growthPrioritiesText: source.growth_priorities,
+      });
+      const { market_pulse: _formMarketPulse, ...reportSettingsWithoutMarketPulse } = (source.report_settings ?? {}) as Record<string, unknown>;
+      const reportSettingsForSave = marketPulsePlan.include
+        ? { ...reportSettingsWithoutMarketPulse, market_pulse: marketPulsePlan.marketPulse }
+        : reportSettingsWithoutMarketPulse;
       const payload = {
         ...source,
+        report_settings: reportSettingsForSave as CompanyProfile['report_settings'],
         companyId: companyId || source.company_id,
         company_id: companyId || source.company_id,
         industry_list: source.industry_list ?? splitToList(source.industry),
@@ -790,7 +824,7 @@ export function useCompanyProfileState() {
         geography_list: source.geography_list ?? splitToList(source.geography),
         competitors_list: source.competitors_list ?? splitToList(source.competitors),
         content_themes_list: source.content_themes_list ?? splitToList(source.content_themes),
-        products_services_list: source.products_services_list ?? splitToList(source.products_services),
+        products_services_list: productsServicesListForSave,
         target_audience_list: source.target_audience_list ?? splitToList(source.target_audience),
         goals_list: source.goals_list ?? splitToList(source.goals),
         brand_voice_list: source.brand_voice_list ?? splitToList(source.brand_voice),
@@ -805,16 +839,25 @@ export function useCompanyProfileState() {
         transformation_mechanism: source.transformation_mechanism ?? null,
         authority_domains: Array.isArray(source.authority_domains) ? source.authority_domains : splitToList(String(source.authority_domains || '')),
       };
-      const response = await fetchWithAuth('/api/company-profile', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+      // D2 (CI-397): a user can DELETE a list item; the request (rebased on a re-read, bulk confirm) lives in
+      // lib/companyProfile/listReplace so it is one tested unit.
+      const outcome = await saveProfileWithListEdits({
+        fetch: fetchWithAuth as any,
+        companyId,
+        base: profile as Record<string, unknown> | null,
+        payload,
+        confirm: (text) => typeof window !== 'undefined' && window.confirm(text),
       });
-      if (!response.ok) {
-        const errorBody = await response.json().catch(() => null);
-        throw new Error(errorBody?.error || errorBody?.details || 'Failed to save profile');
+      if (outcome.kind === 'cancelled') {
+        setErrorMessage('Nothing was saved.');
+        return false;
       }
-      const data = await response.json();
+      if (outcome.kind === 'reread_failed') {
+        setErrorMessage('We couldn’t check the latest profile, so nothing was saved. Please try again.');
+        return false;
+      }
+      if (outcome.kind === 'failed') throw new Error(outcome.error);
+      const data = outcome.data;
       setProfile(data.profile || source);
       setDraftProfile(data.profile || source);
       setOverallProfileCompletion(
@@ -834,7 +877,11 @@ export function useCompanyProfileState() {
       }
       setNotFound(false);
       setIsEditing(false);
-      setSuccessMessage('Profile saved.');
+      setSuccessMessage(
+        'userChangesDropped' in marketPulsePlan && marketPulsePlan.userChangesDropped
+          ? 'Profile saved, but your Market Pulse changes were not saved (we could not read the latest Market Pulse settings). Save again to update Market Pulse.'
+          : 'Profile saved.',
+      );
       notifyCompanyProfileUpdated(data.profile?.company_id || companyId);
       return true;
     } catch (error) {
@@ -1410,8 +1457,12 @@ export function useCompanyProfileState() {
       if (data.done && data.structuredFields) {
         const updated = {
           ...activeProfile,
-          ...data.structuredFields,
-          ...(data.campaign_purpose_intent != null ? { campaign_purpose_intent: data.campaign_purpose_intent } : {}),
+          // AI blank never overwrites a stored value; unexpected keys dropped (scalar audit).
+          ...mergeNonEmptyFields(activeProfile, data.structuredFields, TARGET_CUSTOMER_FIELDS),
+          // MERGE, never replace: this chat returns 5 of the 8 keys (D3, 2026-11-13).
+          ...(data.campaign_purpose_intent != null
+            ? { campaign_purpose_intent: mergeCampaignPurposeIntent(activeProfile.campaign_purpose_intent, data.campaign_purpose_intent) }
+            : {}),
         };
         updateActiveProfile(updated);
         setTargetCustomerPendingSave(true);
@@ -1481,7 +1532,11 @@ export function useCompanyProfileState() {
       }
       const data = await response.json();
       if (data.done && data.campaign_purpose_intent) {
-        updateActiveProfile({ ...activeProfile, campaign_purpose_intent: data.campaign_purpose_intent });
+        // MERGE, never replace: keys this chat leaves empty keep their stored value (D3).
+        updateActiveProfile({
+          ...activeProfile,
+          campaign_purpose_intent: mergeCampaignPurposeIntent(activeProfile.campaign_purpose_intent, data.campaign_purpose_intent),
+        });
         setCampaignPurposePanelOpen(false);
         setCampaignPurposeMessages([]);
         setSuccessMessage('Campaign purpose updated. Click Save Profile to lock it.');
@@ -1549,7 +1604,11 @@ export function useCompanyProfileState() {
       }
       const data = await response.json();
       if (data.done && data.structuredFields) {
-        const updated = { ...activeProfile, ...data.structuredFields };
+        // AI blank never overwrites a stored value; unexpected keys dropped (scalar audit).
+        const updated = {
+          ...activeProfile,
+          ...mergeNonEmptyFields(activeProfile, data.structuredFields, MARKETING_INTELLIGENCE_FIELDS),
+        };
         updateActiveProfile(updated);
         setMarketingIntelligencePendingSave(true);
         setMarketingIntelligenceMessages((prev) => [
@@ -1803,14 +1862,14 @@ export function useCompanyProfileState() {
       const updated = {
         ...activeProfile,
         core_problem_statement: sf.core_problem_statement ?? activeProfile.core_problem_statement,
-        pain_symptoms: Array.isArray(sf.pain_symptoms) ? sf.pain_symptoms : activeProfile.pain_symptoms ?? [],
+        pain_symptoms: Array.isArray(sf.pain_symptoms) && sf.pain_symptoms.length > 0 ? sf.pain_symptoms : activeProfile.pain_symptoms ?? [],
         awareness_gap: sf.awareness_gap ?? activeProfile.awareness_gap,
         problem_impact: sf.problem_impact ?? activeProfile.problem_impact,
         life_with_problem: sf.life_with_problem ?? activeProfile.life_with_problem,
         life_after_solution: sf.life_after_solution ?? activeProfile.life_after_solution,
         desired_transformation: sf.desired_transformation ?? activeProfile.desired_transformation,
         transformation_mechanism: sf.transformation_mechanism ?? activeProfile.transformation_mechanism,
-        authority_domains: Array.isArray(sf.authority_domains) ? sf.authority_domains : activeProfile.authority_domains ?? [],
+        authority_domains: Array.isArray(sf.authority_domains) && sf.authority_domains.length > 0 ? sf.authority_domains : activeProfile.authority_domains ?? [],
       };
       updateActiveProfile(updated);
       setProfile(updated);
@@ -1962,14 +2021,14 @@ export function useCompanyProfileState() {
         const updated = {
           ...activeProfile,
           core_problem_statement: sf.core_problem_statement ?? activeProfile.core_problem_statement,
-          pain_symptoms: Array.isArray(sf.pain_symptoms) ? sf.pain_symptoms : activeProfile.pain_symptoms ?? [],
+          pain_symptoms: Array.isArray(sf.pain_symptoms) && sf.pain_symptoms.length > 0 ? sf.pain_symptoms : activeProfile.pain_symptoms ?? [],
           awareness_gap: sf.awareness_gap ?? activeProfile.awareness_gap,
           problem_impact: sf.problem_impact ?? activeProfile.problem_impact,
           life_with_problem: sf.life_with_problem ?? activeProfile.life_with_problem,
           life_after_solution: sf.life_after_solution ?? activeProfile.life_after_solution,
           desired_transformation: sf.desired_transformation ?? activeProfile.desired_transformation,
           transformation_mechanism: sf.transformation_mechanism ?? activeProfile.transformation_mechanism,
-          authority_domains: Array.isArray(sf.authority_domains) ? sf.authority_domains : activeProfile.authority_domains ?? [],
+          authority_domains: Array.isArray(sf.authority_domains) && sf.authority_domains.length > 0 ? sf.authority_domains : activeProfile.authority_domains ?? [],
         };
         updateActiveProfile(updated);
         setProfile(updated);
@@ -2026,9 +2085,11 @@ export function useCompanyProfileState() {
       }
       const data = await response.json();
       const structuredFields = data.structuredFields || {};
+      // generate-marketing-intelligence returns '' for fields the model left empty: those
+      // must never wipe a stored value (scalar audit). Unexpected keys are dropped.
       updateActiveProfile({
         ...activeProfile,
-        ...structuredFields,
+        ...mergeNonEmptyFields(activeProfile, structuredFields, MARKETING_INTELLIGENCE_FIELDS),
       });
       setSuccessMessage('Marketing intelligence generated. Review, edit if needed, then click Save Profile to persist and lock.');
     } catch (e) {
