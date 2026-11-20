@@ -96,8 +96,13 @@ describe('a PRICE that cannot be resolved is PRICING_UNAVAILABLE (503 + Retry-Af
     const out = await runBilledAiCompletion(ARGS).catch((x) => x);
     expect(isBillingRefusalError(out)).toBe(false);          // no 503 / Retry-After / "try again"
     expect(out).toMatchObject({ settlementUnpriced: true, text: 'AI TEXT' });
+    // NB-B: no fake ids or zero usage on an unsettled call.
+    expect(out).toMatchObject({ operationId: null, correlationId: null, idempotencyKey: null, promptTokens: null, completionTokens: null });
     expect(providerCalls).toHaveLength(1);                   // the provider ran exactly once
-    expect(errSpy.mock.calls.some((c) => String(c[0]).includes('billed_ai_settlement_unpriced'))).toBe(true); // reconciliation signal
+    const line = errSpy.mock.calls.find((c) => String(c[0]).includes('billed_ai_settlement_unpriced'));
+    expect(line).toBeDefined(); // reconciliation signal
+    // NB-A: it carries the JOIN KEYS, so it can be reconciled against the request and its ledger attempt.
+    expect(JSON.parse(String(line![1]))).toMatchObject({ referenceId: 'r', idempotencyReferenceId: 'r', orgId: 'o', action: 'content_rewrite' });
     errSpy.mockRestore();
   });
 

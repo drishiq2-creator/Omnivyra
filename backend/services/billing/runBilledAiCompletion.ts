@@ -129,11 +129,13 @@ export interface BilledAiCompletionResult {
    */
   settlementUnpriced?: true;
   text:            string;
-  operationId:     string;
-  correlationId:   string;
-  idempotencyKey:  string;
-  promptTokens:    number;
-  completionTokens: number;
+  /** null ONLY when settlementUnpriced: no settled operation exists. A '' would be type-identical to a real id (7c NB-B). */
+  operationId:     string | null;
+  correlationId:   string | null;
+  idempotencyKey:  string | null;
+  /** null ONLY when settlementUnpriced: usage was consumed but never settled; 0 would under-report silently. */
+  promptTokens:    number | null;
+  completionTokens: number | null;
   provider:        string;
   model:           string;
 }
@@ -216,18 +218,24 @@ export async function runBilledAiCompletion(
       // AFTER it (settlement could not price the actual usage): deliver the work that was done, flag it, and log it
       // for reconciliation. NOT a refusal and no Retry-After: answering "try again" would spend on the provider twice.
       if (producedText !== null) {
+        // Join keys (7c NB-A): referenceId + the idempotency referenceId tie this line to the request and its ledger
+        // attempt; without them it is an alarm, not a record. (A durable DB row is a registered follow-up; Redis
+        // settlement observations expire, so they are deliberately NOT used here.)
         console.error('[runBilledAiCompletion] billed_ai_settlement_unpriced', JSON.stringify({
-          module: args.module, orgId: args.orgId, action: args.action, provider: args.llmPricing.provider,
-          model: args.llmPricing.model, error: err instanceof Error ? err.message : String(err),
+          module: args.module, orgId: args.orgId, userId: args.userId, action: args.action,
+          referenceType: args.referenceType, referenceId: args.referenceId,
+          idempotencyReferenceId: args.idempotency?.referenceId ?? null,
+          provider: args.llmPricing.provider, model: args.llmPricing.model,
+          error: err instanceof Error ? err.message : String(err),
         }));
         return {
           settlementUnpriced: true,
           text:             producedText,
-          operationId:      '',
-          correlationId:    '',
-          idempotencyKey:   '',
-          promptTokens:     0,
-          completionTokens: 0,
+          operationId:      null,
+          correlationId:    null,
+          idempotencyKey:   null,
+          promptTokens:     null,
+          completionTokens: null,
           provider:         args.llmPricing.provider,
           model:            args.llmPricing.model,
         };
