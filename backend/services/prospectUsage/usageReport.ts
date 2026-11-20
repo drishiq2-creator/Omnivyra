@@ -6,7 +6,6 @@
  * READS the existing ledgers only (no parallel ledger, no backfill):
  *   prospect_enrichment_attempts   vendor enrichment calls (Apollo, ...)
  *   prospect_discovery_attempts    vendor searches (Apollo discovery, ...)
- *   prospect_capture_runs          Sales Navigator capture pushes
  *
  * Tenant-scoped on every read (organization_id). Counts, ids and dates only:
  * no person data leaves this module. Users are named only when they are an
@@ -21,23 +20,24 @@ import { ownedDbTable } from '../../db/writeOwner';
 export const USAGE_MAX_DAYS = 92;
 export const USAGE_ROW_CAP = 5000;
 
-export type UsageKind = 'enrichment' | 'discovery' | 'capture';
+// 'capture' (Sales Navigator) removed with the capture (owner 2026-11-20; PL-170).
+export type UsageKind = 'enrichment' | 'discovery';
 
 /** One ledger row, normalised. */
 export interface UsageEvent {
   kind: UsageKind;
   source: string;                    // provider key, e.g. 'apollo', 'linkedin_sales_navigator'
-  runId: string;                     // attempt id or capture command id
+  runId: string;                     // attempt id
   at: string;                        // ISO time
   userId: string | null;
   funding: 'tenant' | 'platform' | null;
   vendorUnits: number | null;        // what the VENDOR billed, in its own unit
   creditsCharged: number | null;     // Omnivyra credits confirmed
-  outcome: string | null;            // enrichment outcome / discovery status / capture status
+  outcome: string | null;            // enrichment outcome / discovery status
   // Value: what the tenant got.
-  leadsReceived: number;             // capture: received; discovery: observed
-  leadsAdded: number;                // capture: created; discovery: ingested; enrichment: 1 if enriched
-  leadsUpdated: number;              // capture: updated
+  leadsReceived: number;             // discovery: observed
+  leadsAdded: number;                // discovery: ingested; enrichment: 1 if enriched
+  leadsUpdated: number;              // reserved; 0 for enrichment and discovery
   heldForReview: number;
   skippedDuplicates: number;
 }
@@ -71,7 +71,7 @@ const zero = (): UsageTotals => ({
 
 function add(t: UsageTotals, e: UsageEvent): void {
   t.runs += 1;
-  if (e.vendorUnits == null) { if (e.kind !== 'capture') t.vendorUnitsUnknownRuns += 1; } else t.vendorUnits += e.vendorUnits;
+  if (e.vendorUnits == null) t.vendorUnitsUnknownRuns += 1; else t.vendorUnits += e.vendorUnits;
   t.creditsCharged += e.creditsCharged ?? 0;
   t.leadsReceived += e.leadsReceived;
   t.leadsAdded += e.leadsAdded;
@@ -136,10 +136,6 @@ const LEDGER: Record<UsageKind, { table: string; time: string; cols: string }> =
     table: 'prospect_discovery_attempts', time: 'started_at',
     cols: 'id, provider_key, started_at, execution_status, provider_cost_units, funding, credits_charged, initiated_by, results_observed, results_ingested, results_skipped_duplicate, results_held_for_review',
   },
-  capture: {
-    table: 'prospect_capture_runs', time: 'created_at',
-    cols: 'command_id, provider, created_at, status, initiated_by, received, created, updated, duplicates_parked',
-  },
 };
 
 async function defaultRead(kind: UsageKind, org: string, from: string, to: string): Promise<Read> {
@@ -182,15 +178,6 @@ async function defaultMemberLabels(org: string, userIds: string[]): Promise<Map<
 }
 
 export function toEvent(kind: UsageKind, r: Record<string, unknown>): UsageEvent {
-  if (kind === 'capture') {
-    return {
-      kind, source: String(r.provider ?? 'linkedin_sales_navigator'), runId: String(r.command_id ?? ''),
-      at: String(r.created_at ?? ''), userId: (r.initiated_by as string) ?? null,
-      funding: null, vendorUnits: null, creditsCharged: 0, outcome: (r.status as string) ?? null,
-      leadsReceived: n(r.received), leadsAdded: n(r.created), leadsUpdated: n(r.updated),
-      heldForReview: 0, skippedDuplicates: n(r.duplicates_parked),
-    };
-  }
   if (kind === 'discovery') {
     return {
       kind, source: String(r.provider_key ?? ''), runId: String(r.id ?? ''),
@@ -226,7 +213,7 @@ export async function buildUsageReport(
   if (!org?.trim()) throw new Error('organization is required');
   const read = deps.read ?? defaultRead;
   const labelsOf = deps.memberLabels ?? defaultMemberLabels;
-  const kinds: UsageKind[] = ['enrichment', 'discovery', 'capture'];
+  const kinds: UsageKind[] = ['enrichment', 'discovery'];
   const reads = await Promise.all(kinds.map((k) => read(k, org, window.from, window.to)));
   const ledgers = {} as UsageReport['ledgers'];
   const events: UsageEvent[] = [];

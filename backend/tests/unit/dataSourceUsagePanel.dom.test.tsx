@@ -18,7 +18,7 @@ const json = (status: number, body: unknown) => ({ ok: status >= 200 && status <
 const T = (o: Record<string, number> = {}) => ({ runs: 0, vendorUnits: 0, vendorUnitsUnknownRuns: 0, creditsCharged: 0, leadsReceived: 0, leadsAdded: 0, leadsUpdated: 0, heldForReview: 0, skippedDuplicates: 0, ...o });
 const REPORT = {
   window: { from: '2026-10-11T00:00:00.000Z', to: '2026-11-10T00:00:00.000Z' },
-  ledgers: { enrichment: 'ok', discovery: 'ok', capture: 'unavailable' },
+  ledgers: { enrichment: 'ok', discovery: 'unavailable' },
   totals: T({ runs: 2, vendorUnits: 2, creditsCharged: 18, leadsAdded: 1 }),
   bySource: [{ source: 'apollo', kind: 'enrichment', ...T({ runs: 2, vendorUnits: 2, creditsCharged: 18, leadsAdded: 1 }) }],
   byUser: [{ userId: 'u1', label: 'Asha', ...T({ runs: 2, vendorUnits: 2, creditsCharged: 18 }) }],
@@ -38,7 +38,7 @@ it('shows totals, the vendor name, who paid, and a ledger that is not available 
   expect(screen.getByTestId('usage-by-source')).toHaveTextContent('Apollo');
   expect(screen.getByTestId('usage-runs')).toHaveTextContent('Omnivyra credits');
   expect(screen.getByTestId('usage-runs')).toHaveTextContent('Your key');
-  expect(screen.getByTestId('usage-gap-capture')).toHaveTextContent('not available yet');
+  expect(screen.getByTestId('usage-gap-discovery')).toHaveTextContent('not available yet');
   expect(mockApiFetch.mock.calls[0][0]).toMatch(/^\/api\/prospect-sources\/usage\?companyId=c1&from=.+&to=.+/);
 });
 

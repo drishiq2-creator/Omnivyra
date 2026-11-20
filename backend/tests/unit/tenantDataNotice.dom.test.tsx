@@ -15,10 +15,10 @@ jest.mock('@/components/CompanyContext', () => ({ useCompanyContext: () => ({ se
 const TenantDataNotice = require('../../../components/compliance/TenantDataNotice').default;
 const json = (status: number, body: unknown) => ({ ok: status >= 200 && status < 300, status, json: async () => body });
 const NOTICE = { version: 'v2', status: 'PENDING COUNSEL REVIEW', title: 'Your data', intro: 'You are the controller.', textSha256: 'h'.repeat(64),
-  categories: { vendor_data: 'Vendors text', salesnav_capture: 'SN text', contact_data: 'Contact text' } };
+  categories: { vendor_data: 'Vendors text', contact_data: 'Contact text' } };
 const cat = (state: string, extra: Record<string, unknown> = {}) => ({ state, allowed: state === 'current' || state === 'grace', acceptedAt: null, graceEndsAt: null, ...extra });
 const payload = (vendor: string, extra: Record<string, unknown> = {}) => ({ notice: NOTICE, readable: true, categories: {
-  vendor_data: cat(vendor, extra), salesnav_capture: cat('required'), contact_data: cat('required') } });
+  vendor_data: cat(vendor, extra), contact_data: cat('required') } });
 
 beforeEach(() => mockApiFetch.mockReset());
 

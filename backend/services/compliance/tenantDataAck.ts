@@ -1,8 +1,8 @@
 /**
  * Tenant DATA-CONTROLLER ACKNOWLEDGEMENT (owner requirement, 2026-11-11).
  *
- * Data a tenant brings in from a data vendor (Apollo, BYOK or central), from
- * Sales Navigator capture, or as contact data, is stored in the tenant's
+ * Data a tenant brings in from a data vendor (Apollo, with the tenant's own key) or as contact data, is stored in the
+ * tenant's
  * workspace with the TENANT as controller and Omnivyra as processor. A tenant
  * ADMIN accepts the notice ONCE per wording version and category; the notice is
  * still shown on every connect/fetch (informational). Omnivyra's own central
@@ -33,7 +33,8 @@ import { normalizeRole, Role } from '../rbacPrimitives';
 
 export const TENANT_DATA_ACK_CAPABILITY = 'tenant_data_controller_ack';
 export const TENANT_DATA_ACK_PLATFORM = 'pi_data';
-export const DATA_CATEGORIES = ['vendor_data', 'salesnav_capture', 'contact_data'] as const;
+// 'salesnav_capture' removed with Sales Navigator capture (owner 2026-11-20; PL-170 restores it with the capture).
+export const DATA_CATEGORIES = ['vendor_data', 'contact_data'] as const;
 export type DataCategory = (typeof DATA_CATEGORIES)[number];
 export type CategoryState = 'required' | 'current' | 'grace' | 'expired' | 'text_changed' | 'unknown';
 

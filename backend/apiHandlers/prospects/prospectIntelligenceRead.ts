@@ -56,7 +56,7 @@ import { executePlannedField, type PlanFieldExecution } from '../../services/enr
 // layer and re-exported below under the name this boundary already used.
 import { makeProductionEnrichmentPorts } from '../../services/enrichment/productionPorts';
 import type { AttemptRecorder } from '../../services/enrichment/recordedExecution';
-import { readPersonLocators } from '../../services/salesNavCapture/locator';
+import { readPersonLocators } from '../../services/enrichment/personLocators';
 import {
   tenantCredentialPort,
   listSourceStatus,
