@@ -11,5 +11,7 @@
  * wiped by the OFF period: the columns either do not exist yet, or exist with no values written.
  */
 export function isPiLdbSchemaReady(env: NodeJS.ProcessEnv = process.env): boolean {
-  return String(env.PI_LDB_SCHEMA_READY ?? '').trim().toLowerCase() === 'true';
+  // STRICT (7c 2026-11-20): ON is the dangerous state (writes columns that may not exist), so only the exact string
+  // 'true' opens it - a config tool that writes 'True' or ' true' stays OFF. Same parse as the WhatsApp launch gate.
+  return env.PI_LDB_SCHEMA_READY === 'true';
 }
