@@ -10,7 +10,7 @@
  */
 
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 
 // next/head — render children inline so jsdom is happy.
 jest.mock('next/head', () => ({
@@ -20,22 +20,30 @@ jest.mock('next/head', () => ({
 
 import BillingShellPage from '../../../pages/billing/index';
 
-interface FetchCall { url: string }
+interface FetchCall { url: string; method?: string }
 let __calls: FetchCall[] = [];
 
 /** Install a fetch mock: context responds first, providers second. */
+type ContextAnswer = { country: string | null; currency: string | null; region?: string | null } | { __status: number } | 'throw';
 function installFetch(opts: {
-  context: { country: string | null; currency: string | null } | { __status: number };
+  context: ContextAnswer | (() => ContextAnswer);
+  profile?: { __status: number; body: unknown };
   providers: (url: string) => { visible: any[]; supported_methods: string[]; recommended: string | null } | { __status: number };
 }) {
   __calls = [];
-  (global as any).fetch = jest.fn(async (url: string) => {
-    __calls.push({ url });
+  (global as any).fetch = jest.fn(async (url: string, init?: RequestInit) => {
+    __calls.push({ url, method: init?.method });
+    if (url.startsWith('/api/billing/profile')) {
+      const pr = opts.profile ?? { __status: 200, body: { captured: true } };
+      return { ok: pr.__status >= 200 && pr.__status < 300, status: pr.__status, json: async () => pr.body };
+    }
     if (url.startsWith('/api/billing/context')) {
-      if ('__status' in opts.context) {
-        return { ok: false, status: opts.context.__status, json: async () => ({}) };
+      const c = typeof opts.context === 'function' ? opts.context() : opts.context;
+      if (c === 'throw') throw new TypeError('Failed to fetch');
+      if ('__status' in c) {
+        return { ok: false, status: c.__status, json: async () => ({ error: 'billing_context_unreadable', code: 'BILLING_CONTEXT_UNREADABLE' }) };
       }
-      return { ok: true, status: 200, json: async () => opts.context };
+      return { ok: true, status: 200, json: async () => c };
     }
     if (url.startsWith('/api/billing/payment-providers')) {
       const r = opts.providers(url);
@@ -81,16 +89,86 @@ describe('billing shell — context → provider propagation', () => {
     expect(providerCall.url).not.toContain('?');
   });
 
-  test('context fetch failure is non-fatal — shell still queries providers unrestricted', async () => {
+  // INVERTED (Rule 1, c6 2026-11-20). This test used to pin "context fetch failure is non-fatal: shell still queries
+  // providers unrestricted", i.e. an unreadable context rendered as "no billing profile".
+  test.each<[string, ContextAnswer]>([
+    ['503 BILLING_CONTEXT_UNREADABLE', { __status: 503 }],
+    ['500', { __status: 500 }],
+    ['a lost connection (thrown)', 'throw'],
+  ])('context %s: honest error + Retry; NO empty form, NO provider query on unread geography', async (_n, answer) => {
+    installFetch({ context: answer, providers: () => ({ visible: [{ provider: 'razorpay' }], supported_methods: [], recommended: null }) });
+    render(<BillingShellPage />);
+    await waitFor(() => expect(screen.getByTestId('billing-context-failed')).toBeTruthy());
+    expect(screen.getByRole('alert').textContent).toContain("We couldn't load your billing details.");
+    expect(screen.queryByLabelText(/country/i)).toBeNull();
+    expect(screen.queryByTestId('billing-shell')).toBeNull();
+    expect(__calls.some((c) => c.url.startsWith('/api/billing/payment-providers'))).toBe(false);
+  });
+
+  test('Retry re-reads the context; success then prefills the form and queries providers with it', async () => {
+    let n = 0;
     installFetch({
-      context: { __status: 500 },
-      providers: (url) => {
-        expect(url).toBe('/api/billing/payment-providers');
-        return { visible: [{ provider: 'razorpay' }], supported_methods: [], recommended: null };
-      },
+      context: () => (++n === 1 ? { __status: 503 } : { country: 'IN', currency: 'INR', region: null }),
+      providers: () => ({ visible: [{ provider: 'razorpay' }], supported_methods: [], recommended: null }),
+    });
+    render(<BillingShellPage />);
+    await waitFor(() => screen.getByTestId('billing-context-failed'));
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Retry' })); });
+    await waitFor(() => expect(screen.getByTestId('billing-shell').getAttribute('data-state')).toBe('ready'));
+    expect(__calls.filter((c) => c.url.startsWith('/api/billing/context'))).toHaveLength(2);
+    expect((screen.getByDisplayValue('IN') as HTMLInputElement).value).toBe('IN');
+    expect(__calls.find((c) => c.url.startsWith('/api/billing/payment-providers'))!.url).toContain('country=IN');
+  });
+
+  test('empty-success control: a readable context with no geography shows the EMPTY form, no error', async () => {
+    installFetch({
+      context: { country: null, currency: null, region: null },
+      providers: () => ({ visible: [{ provider: 'razorpay' }], supported_methods: [], recommended: null }),
     });
     render(<BillingShellPage />);
     await waitFor(() => expect(screen.getByTestId('billing-shell').getAttribute('data-state')).toBe('ready'));
+    expect(screen.queryByTestId('billing-context-failed')).toBeNull();
+    expect(screen.getByTestId('bpf-submit')).toBeTruthy();
+  });
+
+  test('saved geography PREFILLS the form (it used to mount before the read and never prefill)', async () => {
+    installFetch({
+      context: { country: 'IN', currency: 'INR', region: 'south' },
+      providers: () => ({ visible: [{ provider: 'razorpay' }], supported_methods: [], recommended: null }),
+    });
+    render(<BillingShellPage />);
+    await waitFor(() => expect(screen.getByTestId('billing-shell').getAttribute('data-state')).toBe('ready'));
+    expect(screen.getByDisplayValue('IN')).toBeTruthy();
+    expect(screen.getByDisplayValue('INR')).toBeTruthy();
+    expect(screen.getByDisplayValue('south')).toBeTruthy();
+  });
+
+  test('PUT saved but the re-read failed (200 reread: billing_context_unreadable): "couldn\'t load" + "Your changes were saved."', async () => {
+    let n = 0;
+    installFetch({
+      context: () => (++n === 1 ? { country: 'IN', currency: 'INR', region: null } : { __status: 503 }),
+      profile: { __status: 200, body: { captured: true, organization_id: 'o1', reread: 'billing_context_unreadable' } },
+      providers: () => ({ visible: [{ provider: 'razorpay' }], supported_methods: [], recommended: null }),
+    });
+    render(<BillingShellPage />);
+    await waitFor(() => screen.getByTestId('bpf-submit'));
+    await act(async () => { fireEvent.click(screen.getByTestId('bpf-submit')); });
+    await waitFor(() => screen.getByTestId('billing-context-failed'));
+    expect(screen.getByRole('alert').textContent).toContain('Your changes were saved.');
+    expect(__calls.some((c) => c.url.startsWith('/api/billing/profile') && c.method === 'PUT')).toBe(true);
+  });
+
+  test('providers 503 (server could not read context): provider error + a Retry that re-reads', async () => {
+    let n = 0;
+    installFetch({
+      context: { country: 'IN', currency: 'INR', region: null },
+      providers: () => (++n === 1 ? { __status: 503 } : { visible: [{ provider: 'razorpay' }], supported_methods: [], recommended: null }),
+    });
+    render(<BillingShellPage />);
+    await waitFor(() => expect(screen.getByTestId('billing-shell').getAttribute('data-state')).toBe('error'));
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Retry' })); });
+    await waitFor(() => expect(screen.getByTestId('billing-shell').getAttribute('data-state')).toBe('ready'));
+    expect(__calls.filter((c) => c.url.startsWith('/api/billing/payment-providers'))).toHaveLength(2);
   });
 });
 

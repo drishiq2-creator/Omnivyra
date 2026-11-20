@@ -56,6 +56,14 @@ export default function BillingShellPage() {
 
   // Billing-profile capture form state.
   const [initialCtx, setInitialCtx] = useState<Partial<BillingProfileCaptureValues>>({});
+  // Rule 1 (read failure is never absence; c6 2026-11-20): /api/billing/context answers 503 BILLING_CONTEXT_UNREADABLE
+  // when it can't read. Before, a non-ok context carried on with EMPTY geography, so the form looked like "no billing
+  // profile" and invited re-entry. Now: 'failed' shows an honest error + Retry, and neither the form nor the provider
+  // query runs on unread geography.
+  const [ctxState, setCtxState] = useState<'loading' | 'ready' | 'failed'>('loading');
+  // The form copies `initial` into its own state at MOUNT, so it mounts only after the first successful read (before,
+  // it mounted with {} and the saved geography never prefilled).
+  const [ctxLoadedOnce, setCtxLoadedOnce] = useState(false);
   const [formSubmitting, setFormSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [formSaved, setFormSaved] = useState(false);
@@ -68,18 +76,27 @@ export default function BillingShellPage() {
       let country: string | null = null;
       let currency: string | null = null;
       let region: string | null = null;
-      const ctxRes = await fetch('/api/billing/context');
-      if (ctxRes.ok) {
-        const ctx = (await ctxRes.json()) as { country: string | null; currency: string | null; region: string | null };
-        country = ctx.country ?? null;
-        currency = ctx.currency ?? null;
-        region = ctx.region ?? null;
+      setCtxState('loading');
+      const ctxRes = await fetch('/api/billing/context').catch(() => null);
+      const ctx = ctxRes?.ok
+        ? ((await ctxRes.json().catch(() => null)) as { country?: string | null; currency?: string | null; region?: string | null } | null)
+        : null;
+      if (!ctx || typeof ctx !== 'object') {
+        // Unread geography is NOT "no geography": stop here, say so, offer Retry.
+        setCtxState('failed');
+        setLoading(false);
+        return;
       }
+      country = ctx.country ?? null;
+      currency = ctx.currency ?? null;
+      region = ctx.region ?? null;
       setInitialCtx({
         billing_country: country ?? '',
         preferred_currency: currency ?? '',
         billing_region: region ?? '',
       });
+      setCtxState('ready');
+      setCtxLoadedOnce(true);
 
       // Step 2 — relay the resolved context verbatim as query params.
       const params = new URLSearchParams();
@@ -140,20 +157,39 @@ export default function BillingShellPage() {
       </Head>
       <main>
         <h1>Billing</h1>
-        <BillingProfileCaptureForm
-          initial={initialCtx}
-          submitting={formSubmitting}
-          error={formError}
-          saved={formSaved}
-          onSubmit={handleProfileSubmit}
-        />
-        <BillingProviderShell
-          loading={loading}
-          error={error}
-          providers={providers}
-          supportedMethods={supportedMethods}
-          recommended={recommended}
-        />
+        {ctxState === 'failed' ? (
+          <div role="alert" data-testid="billing-context-failed">
+            <p>
+              We couldn&apos;t load your billing details.
+              {/* A PUT can answer 200 { captured:true, reread:'billing_context_unreadable' }: the save worked and only the
+                  re-read failed, so say the save landed rather than inviting re-entry. */}
+              {formSaved && ' Your changes were saved.'}
+            </p>
+            <button type="button" onClick={() => { void loadProviders(); }}>Retry</button>
+          </div>
+        ) : (
+          <>
+            {ctxLoadedOnce && (
+              <BillingProfileCaptureForm
+                initial={initialCtx}
+                submitting={formSubmitting}
+                error={formError}
+                saved={formSaved}
+                onSubmit={handleProfileSubmit}
+              />
+            )}
+            <BillingProviderShell
+              loading={loading}
+              error={error}
+              providers={providers}
+              supportedMethods={supportedMethods}
+              recommended={recommended}
+            />
+            {error && !loading && (
+              <button type="button" onClick={() => { void loadProviders(); }}>Retry</button>
+            )}
+          </>
+        )}
       </main>
     </>
   );
