@@ -32,19 +32,20 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   // A failed read is not "not found" (unread-error census). PGRST116 is the genuine no-row case.
   // b3 read-failure rule: 503 + Retry-After + a distinct code, for an error object AND a thrown rejection.
   let existing: { id: string; company_id: string } | null = null;
-  let existingUnreadable = false;
+  let existingUnreadable: string | null = null;
   try {
     const r = await supabase
       .from('opportunity_items')
       .select('id, company_id')
       .eq('id', opportunityId)
       .single();
-    if (r.error && r.error.code !== 'PGRST116') existingUnreadable = true;
+    if (r.error && r.error.code !== 'PGRST116') existingUnreadable = String(r.error.message ?? 'read error');
     else existing = (r.data as { id: string; company_id: string } | null) ?? null;
-  } catch {
-    existingUnreadable = true;
+  } catch (e) {
+    existingUnreadable = e instanceof Error ? e.message : String(e);
   }
-  if (existingUnreadable) {
+  if (existingUnreadable !== null) {
+    console.warn('[outreach-plans] opportunity_items unreadable', existingUnreadable); // a 503 with a trail (7c)
     res.setHeader('Retry-After', '5');
     return res.status(503).json({ error: 'The opportunity could not be read', code: 'OPPORTUNITY_UNREADABLE' });
   }
