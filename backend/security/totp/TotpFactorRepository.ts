@@ -15,6 +15,7 @@ import { ownedDbTable } from '../../db/writeOwner';
 
 import { supabase as db } from '../../db/supabaseClient';
 import { logger } from '../../services/logger';
+import { throwOnSecurityReadError } from '../SecurityReadError';
 import type {
   StoredTotpFactor,
   TotpAlgorithm,
@@ -54,12 +55,15 @@ function rowToStored(row: FactorRow): StoredTotpFactor {
 }
 
 export async function findActiveForUser(userId: string): Promise<StoredTotpFactor | null> {
-  const { data } = await ownedDbTable('totp_factors')
+  // A failed read THROWS (SecurityReadError) - never "no factor": the MFA login gate decides on this (b3 2026-11-20).
+  const result = await ownedDbTable('totp_factors')
     .select('*')
     .eq('user_id', userId)
     .is('revoked_at', null)
     .limit(1)
     .maybeSingle();
+  throwOnSecurityReadError(result, 'findActiveForUser', 'totp_factors');
+  const { data } = result;
   if (!data) return null;
   return rowToStored(data as FactorRow);
 }

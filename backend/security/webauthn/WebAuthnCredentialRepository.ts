@@ -17,6 +17,7 @@ import { ownedDbTable } from '../../db/writeOwner';
 
 import { supabase as db } from '../../db/supabaseClient';
 import { logger } from '../../services/logger';
+import { throwOnSecurityReadError } from '../SecurityReadError';
 import type { StoredWebAuthnCredential } from './webauthnTypes';
 
 interface CredentialRow {
@@ -71,12 +72,14 @@ function rowToStored(row: CredentialRow): StoredWebAuthnCredential {
 }
 
 export async function listForUser(userId: string): Promise<ReadonlyArray<StoredWebAuthnCredential>> {
-  const { data } = await ownedDbTable('webauthn_credentials')
+  // A failed read THROWS (SecurityReadError) - never "no passkeys": the MFA login gate decides on this (b3 2026-11-20).
+  const result = await ownedDbTable('webauthn_credentials')
     .select('*')
     .eq('user_id', userId)
     .is('revoked_at', null)
     .order('created_at', { ascending: false });
-  return (data ?? []).map((r) => rowToStored(r as CredentialRow));
+  throwOnSecurityReadError(result, 'listForUser', 'webauthn_credentials');
+  return (result.data ?? []).map((r) => rowToStored(r as CredentialRow));
 }
 
 export async function findByCredentialId(
