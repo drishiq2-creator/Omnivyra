@@ -82,6 +82,8 @@ export type PendingAction = TenantScoped & {
    * status 'approved' (a9), so a status check can never find them.
    */
   retired_schedule?: boolean;
+  approved_at?: string | null;
+  created_at?: string | null;
   execution_mode?: string | null;
   execution_modes_config?: {
     api_allowed: boolean;

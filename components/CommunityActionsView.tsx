@@ -14,7 +14,7 @@ import {
 const tabs = ['Pending', 'Completed', 'Skipped'];
 
 import type { useCommunityActions } from '../hooks/useCommunityActions';
-import { APPROVED_NOT_SENT_LABEL, SEND_NOW_LABEL, scheduledNotSentCopy } from '../lib/communityAi/scheduledRetiredCopy';
+import { APPROVED_NOT_SENT_LABEL, SEND_NOW_LABEL, approvedAgeCopy, scheduledNotSentCopy } from '../lib/communityAi/scheduledRetiredCopy';
 type S = ReturnType<typeof useCommunityActions>;
 export default function CommunityActionsView({ d }: { d: S }) {
   const {
@@ -269,6 +269,11 @@ export default function CommunityActionsView({ d }: { d: S }) {
                         <span>{action.status}</span>
                         {isApproved && !isScheduledNotSent && (
                           <span className="text-[11px] text-amber-700">{APPROVED_NOT_SENT_LABEL}</span>
+                        )}
+                        {isApproved && approvedAgeCopy(action.approved_at, action.created_at, Date.now()) && (
+                          <span className="text-xs font-semibold text-amber-800">
+                            {approvedAgeCopy(action.approved_at, action.created_at, Date.now())}
+                          </span>
                         )}
                         {autoExecuted && (
                           <span

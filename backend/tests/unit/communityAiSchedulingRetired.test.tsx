@@ -161,3 +161,39 @@ describe('approved-but-unsent replies are visible (a9 confirmed, 2026-11-20)', (
     expect(screen.getAllByText('Approved — not sent yet')).toHaveLength(1);
   });
 });
+
+describe('waiting replies show their AGE prominently; no bulk send (7c)', () => {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { approvedAgeCopy } = require('../../../lib/communityAi/scheduledRetiredCopy');
+  const NOW = Date.parse('2026-11-20T12:00:00Z'); // fixed clock: the date and "now" move together
+
+  it('approvedAgeCopy: days since approval (falls back to created), with a fixed now', () => {
+    expect(approvedAgeCopy('2026-11-08T12:00:00Z', null, NOW)).toBe("Approved 12 days ago — check it's still worth sending.");
+    expect(approvedAgeCopy('2026-11-19T12:00:00Z', null, NOW)).toBe("Approved 1 day ago — check it's still worth sending.");
+    expect(approvedAgeCopy('2026-11-20T08:00:00Z', null, NOW)).toBe("Approved today — check it's still worth sending.");
+    expect(approvedAgeCopy(null, '2026-10-21T12:00:00Z', NOW)).toBe("Created 30 days ago — check it's still worth sending.");
+    expect(approvedAgeCopy(null, null, NOW)).toBeNull();
+  });
+
+  it('both waiting populations render an age line; an ordinary pending row does not', async () => {
+    const APPROVED = { ...base, action_id: 'a-appr', target_id: 't3', status: 'approved', approved_at: '2026-11-01T09:00:00Z' };
+    fetchWithAuth.mockImplementation(() =>
+      okJson({
+        pending_actions: [PENDING, APPROVED],
+        scheduled_actions: [SCHEDULED],
+        completed_actions: [],
+        skipped_actions: [],
+        permissions: { canApprove: true, canExecute: true, canSkip: true, canManageConnectors: false },
+      }),
+    );
+    render(<Harness />);
+    await waitFor(() => expect(screen.getAllByText(/^Approved \d+ days? ago|^Approved today/)).toHaveLength(2));
+  });
+
+  it('no bulk-send affordance exists (per-row and deliberate)', async () => {
+    render(<Harness />);
+    await waitFor(() => screen.getByText(/this reply was not sent/));
+    expect(screen.queryByRole('button', { name: /send all|execute all|bulk/i })).toBeNull();
+    expect(document.querySelector('input[type="checkbox"]')).toBeNull();
+  });
+});
