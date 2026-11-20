@@ -20,6 +20,7 @@
 import React from 'react';
 import useSWR from 'swr';
 import { apiFetch } from '@/lib/apiFetch';
+import { describeEnrichResponse, type EnrichView } from './enrichOutcomeView';
 
 type SectionState = 'available' | 'empty' | 'not_evaluated' | 'not_implemented' | 'failed';
 
@@ -51,7 +52,8 @@ interface ProspectDetail {
     consistency: { contested: string[]; unattested: string[] };
     freshness: { attributesUpdatedAt: string | null; ageDays: number | null };
   }>;
-  enrichment: Section<{ counts: Record<string, number>; toEnrich: Array<{ attribute: string }> }>;
+  // The read model sends the whole planned field; `subject` is what the enrich route needs alongside `attribute`.
+  enrichment: Section<{ counts: Record<string, number>; toEnrich: Array<{ attribute: string; subject?: 'person' | 'account'; reason?: string }> }>;
   scoring: Section<{ dimensions: DimensionView[]; overall: number | null; confidence: number; contextGaps: Array<{ kind: string; detail: string }> }>;
   recommendation: Section<{ action: string | null; channel: string | null; timing: string | null; confidence: number | null; unknowns: string[]; evidenceIds: string[] }>;
   readiness: Section<{
@@ -118,11 +120,68 @@ export interface ProspectIntelligencePanelProps {
   prospectId: string;
 }
 
+const TONE_STYLE: Record<EnrichView['tone'], string> = {
+  success: 'text-emerald-700',
+  info: 'text-gray-600',
+  warning: 'text-amber-700',
+  error: 'text-rose-700',
+  unknown: 'text-slate-600',
+};
+
+/**
+ * PI (c6 2026-11-20): one planned field with an "Enrich" button. Runs ONE attribute through
+ * POST /api/prospects/:id/enrich (admin-only, PROSPECT_ENRICH_EXECUTE - a non-admin sees the route's 403 in plain
+ * words) and shows what the answer means (enrichOutcomeView). The panel is re-read afterwards so a filled field shows.
+ */
+const EnrichFieldRow: React.FC<{
+  companyId: string; prospectId: string; field: { attribute: string; subject?: 'person' | 'account' };
+  onDone: () => void;
+}> = ({ companyId, prospectId, field, onDone }) => {
+  const [running, setRunning] = React.useState(false);
+  const [view, setView] = React.useState<EnrichView | null>(null);
+  const subject = field.subject === 'account' ? 'account' : 'person';
+  const run = async () => {
+    setRunning(true);
+    setView(null);
+    let status: number | null = null;
+    let body: unknown = null;
+    try {
+      const res = await apiFetch(
+        `/api/prospects/${encodeURIComponent(prospectId)}/enrich?companyId=${encodeURIComponent(companyId)}`,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ attribute: field.attribute, subject }) },
+      );
+      status = res.status;
+      try { body = await res.json(); } catch { body = null; }
+    } catch {
+      status = null; // no answer: the server may still have run it - describeEnrichResponse says 'unknown'
+    }
+    setView(describeEnrichResponse(status, body));
+    setRunning(false);
+    onDone();
+  };
+  return (
+    <li className="border-b border-gray-100 py-1.5 last:border-0">
+      <div className="flex items-center justify-between gap-3">
+        <span className="text-xs text-gray-700">{subject === 'account' ? 'Company' : 'Person'} · {field.attribute.replace(/_/g, ' ')}</span>
+        <button
+          type="button"
+          onClick={run}
+          disabled={running}
+          className="rounded-md border border-gray-300 px-2 py-0.5 text-[11px] font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+        >
+          {running ? 'Enriching…' : 'Enrich'}
+        </button>
+      </div>
+      {view ? <p role="status" className={`mt-1 text-[11px] ${TONE_STYLE[view.tone]}`}>{view.message}</p> : null}
+    </li>
+  );
+};
+
 const ProspectIntelligencePanel: React.FC<ProspectIntelligencePanelProps> = ({ companyId, prospectId }) => {
   const key = companyId && prospectId
     ? `/api/prospects/${encodeURIComponent(prospectId)}?companyId=${encodeURIComponent(companyId)}`
     : null;
-  const { data, error, isLoading } = useSWR<ProspectDetail>(key, (u: string) => apiFetch(u).then((r) => r.json()));
+  const { data, error, isLoading, mutate } = useSWR<ProspectDetail>(key, (u: string) => apiFetch(u).then((r) => r.json()));
 
   if (!companyId) return <p className="text-sm text-gray-500">Select a company to view prospect intelligence.</p>;
   if (isLoading) return <p className="text-sm text-gray-500">Loading prospect intelligence…</p>;
@@ -274,6 +333,19 @@ const ProspectIntelligencePanel: React.FC<ProspectIntelligencePanelProps> = ({ c
       <div className="grid gap-4 lg:grid-cols-2">
         <Card title="Enrichment plan" section={data.enrichment}>
           <Row label="Fields planned" value={data.enrichment.data?.toEnrich?.length ?? 0} />
+          {(data.enrichment.data?.toEnrich?.length ?? 0) > 0 ? (
+            <ul className="mt-2" aria-label="Fields to enrich">
+              {data.enrichment.data!.toEnrich.map((f) => (
+                <EnrichFieldRow
+                  key={`${f.subject ?? 'person'}.${f.attribute}`}
+                  companyId={companyId}
+                  prospectId={prospectId}
+                  field={f}
+                  onDone={() => { void mutate(); }}
+                />
+              ))}
+            </ul>
+          ) : null}
           <div className="mt-2 space-y-1">
             {Object.entries(data.enrichment.data?.counts ?? {}).map(([state, n]) => (
               <Row key={state} label={state} value={n as number} />

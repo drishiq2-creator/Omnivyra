@@ -201,6 +201,9 @@ describe('A6 — POST /api/prospects/[id]/enrich', () => {
       const { code, body } = await call();
       expect(code).toBe(503);
       expect(body).toMatchObject({ error: 'prospect_enrichment_unavailable', retryable: true });
+      // c6 2026-11-20: the internal error detail is LOGGED, never returned (it can carry a database message).
+      expect(JSON.stringify(body)).not.toContain('source_assertions read failed');
+      expect(body).not.toHaveProperty('detail');
     });
 
     it('does not convert a declining outcome into an error', async () => {

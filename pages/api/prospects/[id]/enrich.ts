@@ -58,6 +58,7 @@ import { createApiRoute as __createApiRoute } from '../../../../lib/platform/rou
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { requireTenantAccess } from '../../../../backend/security/TenantGuard';
 import { requireCapability } from '../../../../backend/security/requireCapability';
+import { logger } from '../../../../backend/services/logger';
 import { PROSPECT_ENRICH_EXECUTE } from '../../../../shared/contracts/security';
 import { executeProspectEnrichment } from '../../../../backend/apiHandlers/prospects/prospectIntelligenceRead';
 import { isProviderErrorView, providerErrorResponse } from '../../../../backend/services/providerErrors/apolloErrors';
@@ -139,10 +140,11 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     if (/not found in tenant/i.test(detail)) {
       return res.status(404).json({ error: 'prospect_not_found' });
     }
+    // The internal detail is LOGGED, never returned (c6 2026-11-20): it can carry a database message.
+    logger.error('prospect_enrich_unavailable', { prospectId, attribute, detail });
     return res.status(503).json({
       error: 'prospect_enrichment_unavailable',
       retryable: true,
-      detail,
     });
   }
 }
