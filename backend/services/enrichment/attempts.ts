@@ -219,11 +219,11 @@ export interface CompleteAttemptInput {
   readonly sourceRecordId?: string | null;
   readonly attributesReturned?: readonly string[];
   readonly detail?: string | null;
-  /** Mode B usage: who paid the vendor. Written only when supplied. */
-  readonly funding?: 'tenant' | 'platform' | null;
-  /** Mode B usage: what the VENDOR billed, in its own unit. Written only when supplied. */
+  /** Vendor usage: who paid the vendor (own key only). Written only when supplied. */
+  readonly funding?: 'tenant' | null;
+  /** Vendor usage: what the VENDOR billed, in its own unit. Written only when supplied. */
   readonly providerCostUnits?: number | null;
-  /** Mode B usage: Omnivyra credits CONFIRMED (0 for own key). Written only when supplied. */
+  /** Omnivyra credits charged: always 0 (own key only; PL-171). Written only when supplied. */
   readonly creditsCharged?: number | null;
   readonly executorVersion?: string | null;
   readonly completedAt: string;
@@ -641,7 +641,7 @@ export async function completeAttempt(input: CompleteAttemptInput): Promise<void
     .eq('organization_id', input.organizationId);
   if (error) throw new Error(`prospect_enrichment_attempts update failed: ${error.message}`);
 
-  // Mode B usage columns, in a SEPARATE best-effort write. They are reporting,
+  // Vendor usage columns, in a SEPARATE best-effort write. They are reporting,
   // not control state, and they only exist once the usage-ledger migration is
   // applied: folding them into the close above would let a schema that lacks
   // them fail the close and leave a truthful attempt open. Only stated values

@@ -3,8 +3,8 @@
  * what it brought in, per source, per user, per day and per run.
  *
  * Vendor units are shown in the vendor's own unit so the tenant can reconcile
- * with the vendor's usage page; Omnivyra credits are charged only for central
- * (platform-key) access. A ledger that cannot be read says so; it is never
+ * with the vendor's usage page. Vendors are used with the tenant's OWN key only (owner 2026-11-20), so no Omnivyra
+ * credits are charged for them. A ledger that cannot be read says so; it is never
  * shown as zero.
  */
 import { useEffect, useState } from 'react';
@@ -17,7 +17,7 @@ interface Totals {
 }
 interface Run {
   kind: 'enrichment' | 'discovery'; source: string; runId: string; at: string; userId: string | null;
-  funding: 'tenant' | 'platform' | null; vendorUnits: number | null; creditsCharged: number | null; outcome: string | null;
+  funding: 'tenant' | null; vendorUnits: number | null; creditsCharged: number | null; outcome: string | null;
   leadsReceived: number; leadsAdded: number; heldForReview: number; skippedDuplicates: number;
 }
 interface Report {
@@ -78,8 +78,8 @@ export default function DataSourceUsagePanel() {
       <h2 id="usage-heading" className="mb-1 text-base font-semibold text-gray-900">Data sources &amp; usage</h2>
       <p className="mb-3 text-sm text-gray-500">
         What each data source used and what it brought in. Vendor units are in the vendor&apos;s own unit, so
-        you can match them against the vendor&apos;s usage page. Omnivyra credits are charged only for
-        centralized access; your own key costs no credits.
+        you can match them against the vendor&apos;s usage page. Data sources use your own key, so they cost no
+        Omnivyra credits.
       </p>
       <div className="mb-3 flex gap-2" role="group" aria-label="Period">
         {PERIODS.map((d) => (
@@ -163,7 +163,7 @@ export default function DataSourceUsagePanel() {
                 <tr key={`${r.kind}:${r.runId}`}>
                   <td>{r.at.slice(0, 16).replace('T', ' ')}</td>
                   <td>{label(r.source)} {KIND_LABEL[r.kind]?.toLowerCase()}</td>
-                  <td>{r.funding === 'platform' ? 'Omnivyra credits' : r.funding === 'tenant' ? 'Your key' : '-'}</td>
+                  <td>{r.funding === 'tenant' ? 'Your key' : '-'}</td>
                   <td>{r.outcome ?? '-'}</td>
                   <td align="right">{r.vendorUnits ?? 'unrecorded'}</td>
                   <td align="right">{r.creditsCharged ?? '-'}</td>

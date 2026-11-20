@@ -1,5 +1,5 @@
 /**
- * The mode B usage columns are written in a SEPARATE best-effort update, so a
+ * The vendor-usage columns are written in a SEPARATE best-effort update, so a
  * schema without them (before the usage-ledger migration) can never fail the
  * attempt close itself.
  */
@@ -24,10 +24,10 @@ const base = { organizationId: ORG, attemptId: 'a1', outcome: 'enriched' as cons
 beforeEach(() => { updates.length = 0; failUsage = false; });
 
 it('close first, usage second; the close row never carries usage columns', async () => {
-  await completeAttempt({ ...base, funding: 'platform', providerCostUnits: 1, creditsCharged: 18 } as never);
+  await completeAttempt({ ...base, funding: 'tenant', providerCostUnits: 1, creditsCharged: 0 } as never);
   expect(updates).toHaveLength(2);
   expect(updates[0]).not.toHaveProperty('funding');
-  expect(updates[1]).toEqual({ funding: 'platform', provider_cost_units: 1, credits_charged: 18 });
+  expect(updates[1]).toEqual({ funding: 'tenant', provider_cost_units: 1, credits_charged: 0 });
 });
 
 it('a usage write failure (column missing) does NOT fail the close', async () => {

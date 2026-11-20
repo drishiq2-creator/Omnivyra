@@ -1,5 +1,5 @@
 /**
- * Mode B usage on discovery executions: funding, credits and R3 screening
+ * Vendor usage on discovery executions (own key only; PL-171): funding, credits and R3 screening
  * counts, written AFTER the close, best-effort, cumulative across resumed runs.
  */
 const calls: Array<{ op: string; row?: Record<string, unknown> }> = [];

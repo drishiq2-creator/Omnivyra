@@ -43,16 +43,9 @@ jest.mock('../../services/enrichment/apolloFieldGroups', () => {
   const actual = jest.requireActual('../../services/enrichment/apolloFieldGroups');
   return { ...actual, writeTenantFieldGroups: async (...a: unknown[]) => { writes.push(a); return ['job_role']; }, readTenantFieldGroups: async () => ['job_role'] };
 });
-jest.mock('../../services/enrichment/centralVendorAccess', () => ({
-  CentralAccessSelectionRefused: class extends Error {},
-  writeCentralVendorOptIns: async (...a: unknown[]) => { writes.push(a); return []; },
-  readCentralVendorOptIns: async () => [],
-  quoteCentralVendorAccess: async () => [],
-}));
 
 import ackHandler from '../../../pages/api/compliance/tenant-data-ack';
 import groupsHandler from '../../../pages/api/prospect-sources/apollo-field-groups';
-import centralHandler from '../../../pages/api/billing/central-vendor-access';
 import { TenantDataAckRefused } from '../../services/compliance/tenantDataAck';
 
 type Res = { statusCode?: number; body?: Record<string, unknown> };
@@ -112,13 +105,5 @@ describe('enforcement', () => {
     ackState = { vendor_data: { state: 'current', allowed: true }, contact_data: { state: 'current', allowed: true } };
     await call(groupsHandler, 'PUT', { companyId: ORG }, { groups: ['job_role'] });
     expect((writes[1] as unknown[])[3]).toEqual({ contactAllowed: true });
-  });
-
-  it('central vendor access: opting IN needs vendor_data; opting OUT is never blocked', async () => {
-    let r = await call(centralHandler, 'PUT', { companyId: ORG }, { vendors: ['apollo'] });
-    expect(r.statusCode).toBe(403);
-    expect(writes).toEqual([]);
-    r = await call(centralHandler, 'PUT', { companyId: ORG }, { vendors: [] });
-    expect(r.statusCode).toBe(200);
   });
 });

@@ -27,8 +27,8 @@ beforeEach(() => {
   reads.length = 0;
   tables = {
     prospect_enrichment_attempts: { data: [
-      { id: 'e1', provider_key: 'apollo', started_at: '2026-11-10T10:00:00Z', outcome: 'enriched', funding: 'platform', provider_cost_units: 1, credits_charged: 18, initiated_by: U1 },
-      { id: 'e2', provider_key: 'apollo', started_at: '2026-11-10T11:00:00Z', outcome: null, funding: 'platform', provider_cost_units: 1, credits_charged: 0, initiated_by: U1 },
+      { id: 'e1', provider_key: 'apollo', started_at: '2026-11-10T10:00:00Z', outcome: 'enriched', funding: 'tenant', provider_cost_units: 1, credits_charged: 0, initiated_by: U1 },
+      { id: 'e2', provider_key: 'apollo', started_at: '2026-11-10T11:00:00Z', outcome: null, funding: 'tenant', provider_cost_units: 1, credits_charged: 0, initiated_by: U1 },
       { id: 'e3', provider_key: 'apollo', started_at: '2026-11-09T09:00:00Z', outcome: 'no_match', funding: 'tenant', provider_cost_units: null, credits_charged: 0, initiated_by: null },
     ], error: null },
     prospect_discovery_attempts: { data: [
@@ -53,9 +53,17 @@ it('totals: vendor units (reconcilable), credits, and the value received', async
   const r = await buildUsageReport(ORG, W);
   expect(r.ledgers).toEqual({ enrichment: 'ok', discovery: 'ok' });
   expect(r.totals).toMatchObject({
-    runs: 4, vendorUnits: 4, vendorUnitsUnknownRuns: 1, creditsCharged: 18,
+    runs: 4, vendorUnits: 4, vendorUnitsUnknownRuns: 1, creditsCharged: 0,
     leadsReceived: 10, leadsAdded: 1 + 6, leadsUpdated: 0, heldForReview: 1, skippedDuplicates: 3,
   });
+});
+
+it('a stored funding this build does not offer (e.g. a legacy "platform") reads as UNKNOWN, never as a funding', async () => {
+  tables.prospect_enrichment_attempts = { data: [
+    { id: 'p1', provider_key: 'apollo', started_at: '2026-11-10T10:00:00Z', outcome: 'enriched', funding: 'platform', provider_cost_units: 1, credits_charged: 5, initiated_by: U1 },
+  ], error: null };
+  const r = await buildUsageReport(ORG, W);
+  expect(r.runs.find((x) => x.runId === 'p1')!.funding).toBeNull();
 });
 
 it('the paid-not-stored row still counts its vendor unit with 0 credits', async () => {

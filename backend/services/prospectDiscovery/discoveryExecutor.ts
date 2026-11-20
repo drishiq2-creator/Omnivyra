@@ -144,7 +144,7 @@ export interface DiscoveryPorts {
   readonly nextAttemptNumber?: typeof nextDiscoveryAttemptNumber;
   readonly claim?: typeof claimDiscoveryExecution;
   readonly complete?: typeof completeDiscoveryExecution;
-  /** Mode B usage write (best-effort, after the close). */
+  /** Vendor usage write (best-effort, after the close). */
   readonly recordUsage?: typeof recordDiscoveryUsage;
   readonly getExecution?: typeof getDiscoveryExecution;
   readonly markPending?: typeof markDiscoveryProviderCallPending;
@@ -396,7 +396,7 @@ export async function runDiscoveryExecution(input: {
   const recordUsage = ports.recordUsage ?? recordDiscoveryUsage;
   // Discovery is funded by the tenant's own key only (no platform route yet),
   // so once a credential resolves the funding is 'tenant' and costs 0 credits.
-  let funding: 'tenant' | 'platform' | null = null;
+  let funding: 'tenant' | null = null;   // own key only (owner 2026-11-20; PL-171)
   const readExecution = ports.getExecution ?? getDiscoveryExecution;
   const markPending = ports.markPending ?? markDiscoveryProviderCallPending;
   const recordPage = ports.recordPage ?? recordDiscoveryPage;

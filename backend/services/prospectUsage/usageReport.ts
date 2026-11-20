@@ -30,7 +30,7 @@ export interface UsageEvent {
   runId: string;                     // attempt id
   at: string;                        // ISO time
   userId: string | null;
-  funding: 'tenant' | 'platform' | null;
+  funding: 'tenant' | null;
   vendorUnits: number | null;        // what the VENDOR billed, in its own unit
   creditsCharged: number | null;     // Omnivyra credits confirmed
   outcome: string | null;            // enrichment outcome / discovery status
@@ -120,7 +120,8 @@ export function aggregateUsage(
 
 const n = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
 const nn = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
-const fund = (v: unknown): 'tenant' | 'platform' | null => (v === 'tenant' || v === 'platform' ? v : null);
+// Own key only (owner 2026-11-20). Any other stored value reads as unknown (null), never as a funding we no longer offer.
+const fund = (v: unknown): 'tenant' | null => (v === 'tenant' ? 'tenant' : null);
 
 type Read = { rows: Array<Record<string, unknown>>; state: 'ok' | 'unavailable' | 'truncated' };
 

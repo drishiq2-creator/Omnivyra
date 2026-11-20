@@ -519,7 +519,7 @@ export async function completeDiscoveryExecution(input: {
 }
 
 /**
- * Mode B usage ("Data sources & usage", migration 20270209000000): who funded a
+ * Vendor usage ("Data sources & usage", migration 20270209000000): who funded a
  * discovery execution, the Omnivyra credits charged, and R3's screening counts.
  *
  * Reporting, not control state, so it is a SEPARATE best-effort write after the
@@ -534,7 +534,7 @@ export async function completeDiscoveryExecution(input: {
 export async function recordDiscoveryUsage(input: {
   readonly organizationId: string;
   readonly id: string;
-  readonly funding: 'tenant' | 'platform' | null;
+  readonly funding: 'tenant' | null;
   readonly creditsCharged: number | null;
   readonly screeningDelta: { skippedDuplicates: number; heldForReview: number; probeUnknown: number };
 }): Promise<void> {
