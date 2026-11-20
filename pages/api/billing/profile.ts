@@ -79,6 +79,10 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   }
 
   const ctx = result.context;
+  if (ctx === null) {
+    // The capture WROTE; only the re-read failed. Never report a saved profile as a failed save.
+    return res.status(200).json({ captured: true, organization_id: organizationId, reread: 'billing_context_unreadable' });
+  }
   return res.status(200).json({
     captured: true,
     organization_id: organizationId,

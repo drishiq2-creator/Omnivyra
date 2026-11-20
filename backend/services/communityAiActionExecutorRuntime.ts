@@ -71,18 +71,20 @@ const emitWebhook = async (
 ) => {
   if (!enabled) return;
   try {
-    await sendCommunityAiWebhooks({
+    const base = {
       tenant_id: action.tenant_id,
       organization_id: action.organization_id,
-      event_type: event === 'sent_unverified' ? 'executed' : event,
       action_id: action.id,
       message: `Action ${event} on ${action.platform}`,
-      metadata: {
-        platform: action.platform,
-        action_type: action.action_type,
-        confirmed: event === 'executed',
-      },
-    });
+    };
+    const metadata = { platform: action.platform, action_type: action.action_type };
+    // Webhook contract: an unconfirmed send is event 'executed' with confirmed: false (b3 ruling; see
+    // communityAiWebhookService). The log records it as 'sent_unverified'; the webhook keeps 'executed' for compatibility.
+    await sendCommunityAiWebhooks(
+      event === 'failed'
+        ? { ...base, event_type: 'failed', metadata }
+        : { ...base, event_type: 'executed', metadata: { ...metadata, confirmed: event === 'executed' } },
+    );
   } catch (error: any) {
     console.warn('COMMUNITY_AI_WEBHOOK_FAILED', error?.message || error);
   }
