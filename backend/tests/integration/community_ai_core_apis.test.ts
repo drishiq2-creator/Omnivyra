@@ -2,7 +2,11 @@ import type { NextApiRequest } from 'next';
 import dashboardHandler from '../../../pages/api/community-ai/dashboard';
 import platformHandler from '../../../pages/api/community-ai/platform/[platform]';
 import postHandler from '../../../pages/api/community-ai/post/[platform]/[postId]';
-import { getProfile } from '../../services/companyProfileService';
+// The routes resolve the brand voice through the canonical adapter (Wave 2F, 107c21d1f, 2026-07-14), which reads
+// the profile from companyProfileServiceRest1Rest2Pulse - NOT the companyProfileService barrel this suite used to
+// mock, so every brand voice silently fell back to 'professional' (3 tests red on main since July). Mock the seam
+// the routes actually import.
+import { getCanonicalProfile as getProfile } from '../../services/context/canonicalProfileAdapter';
 import { evaluateCommunityAiEngagement } from '../../services/omnivyraClientV1';
 import {
   actionLogStore,
@@ -35,8 +39,8 @@ jest.mock('../../services/userContextService', () => ({
   }),
 }));
 
-jest.mock('../../services/companyProfileService', () => ({
-  getProfile: jest.fn(),
+jest.mock('../../services/context/canonicalProfileAdapter', () => ({
+  getCanonicalProfile: jest.fn(),
 }));
 
 jest.mock('../../services/omnivyraClientV1', () => ({
