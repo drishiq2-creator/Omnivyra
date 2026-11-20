@@ -94,9 +94,12 @@ function blockReturnsAbsence(src, i, n) {
   for (let k = i + 1; k < Math.min(src.length, i + 1 + n); k++) {
     const l = src[k];
     if (/\bthrow\b/.test(l)) return false;
-    // The block already ANSWERED the HTTP request (e.g. res.status(503).json(...)); the trailing `return null` is the
-    // guard's "response sent" convention, not an absence answer (false positive found on TenantGuard.ts:672, 2026-11-20).
-    if (/\bres\.(status|json|send|end|writeHead)\s*\(/.test(l)) return false;
+    // The block already answered the request with a demonstrable FAILURE status (a LITERAL 4xx/5xx, e.g.
+    // res.status(503).json(...)); the trailing `return null` is the guard's "response sent" convention, not an absence
+    // answer (false positive found on TenantGuard.ts:672, 2026-11-20). 7c: a 2xx (res.status(200).json({items: []})),
+    // a bare res.json(...) (implicit 200) or a non-literal status does NOT buy the exemption - a read failure answered
+    // as a successful empty response is the WORST instance of shape B.
+    if (/\bres\.(status|writeHead)\s*\(\s*[45]\d\d\s*[,)]/.test(l)) return false;
     if (RETURN_ABSENCE.test(l)) return true;
     if (/^\s*\}/.test(l)) return false;
     if (/\breturn\b/.test(l)) return false; // returns something real (a result object, a Response, a typed error)
