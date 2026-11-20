@@ -255,7 +255,7 @@ Every contact step passes these whichever engine serves it. The central gate is 
 | Consent and suppression (`mayContact`) | Fact + engine | Fact + send time | Fact | Not contact | No actions |
 | Human approval | WS-3 task (super-admin only today) | **None exists: refuses** | Engine record | Release, not approval | No actions |
 | Deduplication | Bridge unique per task | Request ledger | Engine record | Observation only | No actions |
-| Quota | WS-3 attempts | **None in this path** | **None in this path** | Not contact | No actions |
+| Quota | WS-3 attempts + journey quota 200/day | Journey quota 250/day (and the number's Meta tier once readable) | Journey quota 25/day | Not contact (none) | No actions |
 | Credits | **None** | **None** | **None** | **None** | **None** |
 | Audit | Decisions + attempts | Decisions + ledger | Decisions + engine | Decisions | Decisions |
 | Retention and erasure | **Open: B-3, B-4** | **Open** | **Open** | | |
@@ -314,6 +314,8 @@ Each layer is read from the store its owner already writes. No layer is stored t
 - **A `no_response` elapsed window starts at `delivery.confirmed`, NEVER at `execution.accepted`** (PI condition G6). `sent_unverified` / accepted proves no delivery; starting the clock there moves an undelivered prospect to nurture.
 - **One approval surface (owner decisions A-E, 2026-11-20).** Every channel, WhatsApp included, uses one approval record. The shared API is `journeyApproval.ts` (begin / approve / resubmit / revoke: content-hash binding, self-approval off by default, passkey once per session, 7-day expiry). Approvers: COMPANY_ADMIN and CONTENT_REVIEWER (`OUTREACH_JOURNEY_APPROVE`); a SUPER_ADMIN only through a platform-authorised call into the same functions, never the operator override, which refuses journey-origin tasks (`JOURNEY_TASK_USE_TENANT_APPROVAL`). The single approval screen is Outreach's queue, deep link `/outreach/approvals?companyId=<uuid>&taskId=<outreach_tasks.id>` (both optional; the server authorises every read and approve; not-found and another tenant's are one "not available" state).
 - **Reply classification (SC7-R, owner 2026-11-20): AI suggests, a person confirms in one click.** No classifier output drives a journey by itself.
+- **Journey send quotas (owner, 2026-11-20).** Per company per day: email 200, WhatsApp 250 (capped further by the number's Meta tier once it is readable), community 25; social publish and internal have none. All are per-company governance settings (0 = the channel is off for journeys). Checked by the sweeper BEFORE the engine is called, from a durable counter that fails closed. Over quota, the step WAITS (outcome `quota_exhausted`) until the next day; it is never skipped.
+- **needs_human expiry (owner, 2026-11-20).** A `needs_human` step unresolved for 7 days PAUSES the run (`journey.suspended`), and it is listed in Needs attention; it is no longer re-evaluated every sweep.
 
 ### Pending, not done
 
