@@ -100,3 +100,27 @@ describe('a failed read is an error with retry, never an empty history', () => {
     expect(JSON.stringify(r.body)).toMatch(/B Category/);
   });
 });
+
+// Casing (b3 2026-11-20): the access check matches a uuid column (any casing); the history tables store TEXT.
+describe('a differently-cased company id neither empties the history nor crosses the company filter', () => {
+  const UA = '0a0a0a0a-0000-4000-8000-00000000000a';
+  const UB = '0b0b0b0b-0000-4000-8000-00000000000b';
+  beforeEach(() => {
+    mockDb.recommendation_snapshots = [
+      { id: 'rec-ua', company_id: UA, trend_topic: 'UA topic', category: 'UA Category' },
+      { id: 'rec-ub', company_id: UB, trend_topic: 'UB topic', category: 'UB Category' },
+    ];
+  });
+  it('UPPER-cased own id: the history is there (same as lowercase)', async () => {
+    mockDb.campaign_versions = [campaignOf(UB, 'rec-ub')];
+    const upper = await getStrategyHistoryForCompany(UB.toUpperCase());
+    const lower = await getStrategyHistoryForCompany(UB);
+    expect(upper).toEqual(lower);
+    expect(JSON.stringify(upper)).toMatch(/UB Category/);
+  });
+  it('UPPER-cased id still never resolves ANOTHER company\'s recommendation', async () => {
+    mockDb.campaign_versions = [campaignOf(UB, 'rec-ua')];
+    const r = await getStrategyHistoryForCompany(` ${UB.toUpperCase()} `);
+    expect(JSON.stringify(r)).not.toMatch(/UA Category|UA topic/);
+  });
+});

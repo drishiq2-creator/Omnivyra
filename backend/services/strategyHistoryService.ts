@@ -50,10 +50,17 @@ export class StrategyHistoryReadError extends Error {
   }
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export async function getStrategyHistoryForCompany(
-  companyId: string
+  rawCompanyId: string
 ): Promise<StrategyHistoryResult> {
-  if (!companyId?.trim()) return EMPTY;
+  if (!rawCompanyId?.trim()) return EMPTY;
+  // campaign_versions.company_id and recommendation_snapshots.company_id are TEXT holding the canonical (lowercase)
+  // uuid; the access check upstream matches a uuid column, which accepts any casing. Canonicalise so a differently
+  // cased id from a client neither empties this history nor slips past the company filter (b3 2026-11-20).
+  const trimmed = rawCompanyId.trim();
+  const companyId = UUID_RE.test(trimmed) ? trimmed.toLowerCase() : trimmed;
 
   const { data: versionRows, error: versionError } = await supabase
     .from('campaign_versions')
