@@ -220,9 +220,48 @@ async function loadLedger(organizationId: string): Promise<LedgerRow[] | null> {
   return rows;
 }
 
+/**
+ * Optimistic-concurrency SNAPSHOT of the org's ledger (b3 2026-11-19, BLOCKING follow-up to the keyset fix): the exact
+ * row count, read before and after the scan. credit_transactions is APPEND-ONLY - 20260663's
+ * credit_transactions_immutable_update / _delete triggers raise on UPDATE/DELETE, and no application code updates or
+ * deletes ledger rows (the only writers are the SQL credit functions, which INSERT) - so the count is a COMPLETE change
+ * detector: any write during the scan changes it. (Whether the triggers are live in prod is on cb's read pack; if they
+ * were not, an in-place UPDATE would escape the count - no app path performs one.) Returns null on a read error.
+ */
+async function countLedger(organizationId: string): Promise<number | null> {
+  const { count, error } = await supabase
+    .from('credit_transactions')
+    .select('id', { count: 'exact', head: true })
+    .eq('organization_id', organizationId);
+  if (error || typeof count !== 'number') {
+    diag('ledger_count_failed', { organizationId, message: error?.message ?? 'no count' });
+    return null;
+  }
+  return count;
+}
+
 async function reconcileImpl(organizationId: string): Promise<ReconcileResult> {
+  const countBefore = await countLedger(organizationId);
+  if (countBefore === null) return { outcome: 'failed', organizationId };
   const ledger = await loadLedger(organizationId);
   if (ledger === null) {
+    return { outcome: 'failed', organizationId };
+  }
+  // The scan must describe ONE ledger state, or ABORT and write nothing. Two checks, and they are NOT redundant (7c):
+  //   1. countAfter === countBefore - DID THE POPULATION CHANGE. Append-only means the count only grows, so equal counts
+  //      imply no insert anywhere in the window spanning countBefore, every page of the scan, and countAfter - what a
+  //      transaction would give, without one. Do not drop either count read.
+  //   2. ledger.length === countAfter - DID WE SEE ALL OF IT. A completeness check on the scan itself: it catches a
+  //      keyset paging bug, a page-boundary off-by-one, a .limit() interaction or a row sorting before the cursor -
+  //      all of which give a SHORT sum over a STABLE ledger that check 1 can never see.
+  // Because the sum is taken over exactly the counted rows, a correct count implies a correct population (no sum check
+  // needed under append-only). The append-only premise is two layers: 20260663's immutability triggers (live-in-prod
+  // is cb read-pack #6) AND no application UPDATE/DELETE of ledger rows; if the triggers were not live, only the second
+  // layer would hold.
+  const countAfter = await countLedger(organizationId);
+  if (countAfter === null) return { outcome: 'failed', organizationId };
+  if (countAfter !== countBefore || ledger.length !== countAfter) {
+    diag('reconcile_aborted_ledger_changed', { organizationId, countBefore, countAfter, scanned: ledger.length });
     return { outcome: 'failed', organizationId };
   }
 

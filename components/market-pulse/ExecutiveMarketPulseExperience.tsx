@@ -29,13 +29,17 @@ export default function ExecutiveMarketPulseExperience(props: Parameters<typeof 
     benchmarkingReadiness, busyAction, collaboration, comment, comparative, createInvestigation, criticalCount, decision,
     degradedContext, departmentFilter, digestItems, escalationEvents, expandedSections, governanceSafety, groupedThemes,
     heldEscalations, historicalTimeline, intentFilter, lifecycleFilter, loadContext, loadError, loading, operationalHealth,
-    opportunities, overview, overviewPayload, payload, people, peopleSearch, personById, postCollaboration, refinedDigest,
+    opportunities, overview, overviewPayload, payload, people, peopleLoadFailed, peopleSearch, personById, postCollaboration, refinedDigest,
+    retryPeople,
     resilience, saveAnnotation, saveDecision, saveWatchlist, selectedAnnotations, selectedAssignmentHistory, selectedComments,
     selectedDecisions, selectedId, selectedItem, selectedRef, selectedThreads, setActiveView, setAnnotation, setBusyAction,
     setComment, setDecision, setDepartmentFilter, setExpandedSections, setIntentFilter, setLifecycleFilter, setLoadError, setLoading,
     setPayload, setPeople, setPeopleSearch, setSelectedId, setSeverityFilter, setThreadForm, setWatchlistForm, severityFilter,
     stabilizingCount, threadForm, unresolvedCritical, updateThreadStatus, watchlistForm, worseningCount
   } = f;
+  // b3 rule 2026-11-19: a failed context read must not render as "No digest items yet" (absence).
+  // On failure the controller clears the payload, so everything below would show empty-state copy.
+  const contextLoadFailed = !!loadError && !loading;
   return (
     <div className="space-y-5">
       {routeMode && (
@@ -65,14 +69,22 @@ export default function ExecutiveMarketPulseExperience(props: Parameters<typeof 
               <option value="operational">Operational only</option>
             </select>
           </div>
-          {loadError && (
-            <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
-              MarketPulse loaded a protected fallback state: {loadError}
-            </div>
-          )}
         </section>
       )}
 
+      {contextLoadFailed ? (
+        <section role="alert" className="rounded-lg border border-amber-200 bg-amber-50 p-5 text-sm text-amber-900">
+          <p>We couldn&apos;t load this just now. Try again.</p>
+          <button
+            type="button"
+            onClick={() => void loadContext(activeView)}
+            className="mt-3 rounded-lg border border-amber-300 bg-white px-3 py-1.5 text-sm font-medium text-amber-900 hover:bg-amber-100"
+          >
+            Try again
+          </button>
+        </section>
+      ) : (
+      <>
       <section className="rounded-lg border border-gray-200 bg-white p-4 shadow-sm md:p-5">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div>
@@ -461,6 +473,14 @@ export default function ExecutiveMarketPulseExperience(props: Parameters<typeof 
                     <option value="supply_chain">Supply Chain</option>
                   </select>
                 </div>
+                {peopleLoadFailed && (
+                  <p role="alert" className="text-xs text-amber-800">
+                    We couldn&apos;t load the list of owners just now.{' '}
+                    <button type="button" onClick={retryPeople} className="font-medium underline">
+                      Try again
+                    </button>
+                  </p>
+                )}
                 <input
                   value={threadForm.assignmentNote}
                   onChange={(event) => setThreadForm((current) => ({ ...current, assignmentNote: event.target.value }))}
@@ -752,6 +772,8 @@ export default function ExecutiveMarketPulseExperience(props: Parameters<typeof 
           </section>
         </aside>
       </div>
+      </>
+      )}
     </div>
   );
 }
