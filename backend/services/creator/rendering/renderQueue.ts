@@ -62,21 +62,63 @@ export interface EnqueueArgs {
   maxRetries?: number;
 }
 
+/**
+ * The render could not be put on the queue, or whether it already is could not be read (dropped-error a9
+ * renderQueue.ts:74). NOT "queued": a caller must not report a job as queued when no queue row exists, because
+ * nothing would ever claim it. Matched by `code` (not instanceof) so a mocked module cannot break the check.
+ */
+export class RenderEnqueueError extends Error {
+  constructor(readonly code: 'RENDER_QUEUE_UNREADABLE' | 'RENDER_QUEUE_INSERT_FAILED', detail: string) {
+    super(`${code}: ${detail}`);
+    this.name = 'RenderEnqueueError';
+  }
+}
+export function isRenderEnqueueError(e: unknown): e is RenderEnqueueError {
+  const code = (e as { code?: unknown } | null)?.code;
+  return code === 'RENDER_QUEUE_UNREADABLE' || code === 'RENDER_QUEUE_INSERT_FAILED';
+}
+
 /** PHASE-2 enqueue. Idempotent on render_job_id (UNIQUE) — re-enqueue of
- *  the same render lineage returns the existing row (no dup attempts). */
+ *  the same render lineage returns the existing row (no dup attempts).
+ *  Returns a queue row id in every success case; THROWS RenderEnqueueError otherwise (never a null id). */
 export async function enqueueRenderJob(
   deps: RenderQueueDeps, a: EnqueueArgs,
-): Promise<{ queue_job_id: string | null; event: 'render_enqueued' | 'render_enqueue_existing' }> {
+): Promise<{ queue_job_id: string; event: 'render_enqueued' | 'render_enqueue_existing' }> {
   const { supabase, ownedDbTable } = deps;
-  const { data: existing } = await supabase
-    .from('creator_render_queue_job').select('id').eq('render_job_id', a.renderJobId).maybeSingle();
-  if (existing?.id) return { queue_job_id: existing.id, event: 'render_enqueue_existing' };
-  const { data } = await ownedDbTable('creator_render_queue_job').insert({
-    render_job_id: a.renderJobId, provider_key: a.providerKey,
-    queue_state: 'queued', priority: a.priority ?? 'standard',
-    max_retries: a.maxRetries ?? 3,
-  }).select('id').single();
-  return { queue_job_id: data?.id ?? null, event: 'render_enqueued' };
+  const readExisting = async (): Promise<string | null> => {
+    let res: { data: { id?: string } | null; error: { message?: string } | null };
+    try {
+      res = await supabase
+        .from('creator_render_queue_job').select('id').eq('render_job_id', a.renderJobId).maybeSingle();
+    } catch (e) {
+      throw new RenderEnqueueError('RENDER_QUEUE_UNREADABLE', e instanceof Error ? e.message : String(e));
+    }
+    if (res.error) throw new RenderEnqueueError('RENDER_QUEUE_UNREADABLE', String(res.error.message ?? 'read error'));
+    return res.data?.id ?? null;
+  };
+  const existingId = await readExisting();
+  if (existingId) return { queue_job_id: existingId, event: 'render_enqueue_existing' };
+  let inserted: { data: { id?: string } | null; error: { message?: string; code?: string } | null };
+  try {
+    inserted = await ownedDbTable('creator_render_queue_job').insert({
+      render_job_id: a.renderJobId, provider_key: a.providerKey,
+      queue_state: 'queued', priority: a.priority ?? 'standard',
+      max_retries: a.maxRetries ?? 3,
+    }).select('id').single();
+  } catch (e) {
+    throw new RenderEnqueueError('RENDER_QUEUE_INSERT_FAILED', e instanceof Error ? e.message : String(e));
+  }
+  const { data, error } = inserted;
+  if (error) {
+    // 23505 on render_job_id: a concurrent enqueue of the same lineage won - that row IS the queue entry.
+    if ((error as { code?: string }).code === '23505') {
+      const raced = await readExisting();
+      if (raced) return { queue_job_id: raced, event: 'render_enqueue_existing' };
+    }
+    throw new RenderEnqueueError('RENDER_QUEUE_INSERT_FAILED', String(error.message ?? 'insert error'));
+  }
+  if (!data?.id) throw new RenderEnqueueError('RENDER_QUEUE_INSERT_FAILED', 'insert returned no row');
+  return { queue_job_id: data.id, event: 'render_enqueued' };
 }
 
 /**

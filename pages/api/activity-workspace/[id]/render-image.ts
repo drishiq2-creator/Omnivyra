@@ -29,6 +29,7 @@ import {
   createRenderProviderRegistry,
   isCreatorRenderQueueEnabled,
   enqueueRenderJob,
+  isRenderEnqueueError,
   projectRenderRequest,
   RenderProjectionError,
 } from '@/backend/services/creator/rendering';
@@ -143,6 +144,13 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
           queue_job_id: enq.queue_job_id, events: [enq.event] },
       });
     } catch (e) {
+      // Not queued (the queue could not be read or written): a distinct STATE, never "queued" (dropped-error a9).
+      if (isRenderEnqueueError(e)) {
+        res.setHeader('Retry-After', '5');
+        return res.status(503).json({
+          render: { ok: false, status: 'not_queued', reason: e.code === 'RENDER_QUEUE_UNREADABLE' ? 'render_queue_unreadable' : 'render_queue_insert_failed' },
+        });
+      }
       return res.status(e instanceof RenderProjectionError ? 409 : 500).json({
         render: { ok: false, status: 'failed', reason: e instanceof RenderProjectionError ? e.code : 'enqueue_failed' },
       });

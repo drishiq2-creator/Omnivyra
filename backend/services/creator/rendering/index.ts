@@ -40,6 +40,8 @@ export {
 export {
   isCreatorRenderQueueEnabled,
   enqueueRenderJob,
+  RenderEnqueueError,
+  isRenderEnqueueError,
   claimRenderJob,
   advanceQueueState,
   completeRenderJob,
