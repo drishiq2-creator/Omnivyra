@@ -15,7 +15,7 @@ jest.mock('../../services/systemHealthMetricsService', () => ({ recordMetric: as
 
 jest.mock('../../../lib/platform/routeFactory', () => ({ createApiRoute: (h: unknown) => h }));
 
-import { getFxConfig, PriceConfigUnavailableError } from '../../services/pricingConfigService';
+import { getFxConfig, getChargeFxConfig, PriceConfigUnavailableError } from '../../services/pricingConfigService';
 import fxRoute from '../../../pages/api/billing/fx';
 import { DEFAULT_FX } from '../../../lib/billing/currency';
 
@@ -90,5 +90,60 @@ describe('GET /api/billing/fx (display) - unreadable config is 503 with a code, 
     const r = await call();
     expect(r.statusCode).toBe(200);
     expect(r.body.overrides).toEqual({ credits_100: { INR: 499 } });
+  });
+});
+
+// b3 ruling 2026-11-20 (i): the CHARGE path refuses empty or partial rates; display keeps defaults, labelled estimate.
+describe('getChargeFxConfig - strict on the charge path', () => {
+  const rows = (...cs: Array<[string, number]>): R => ({ data: cs.map(([currency, rate]) => ({ currency, rate })), error: null });
+  const NO_OVERRIDES: R = { data: [], error: null };
+  beforeEach(() => { mockTables.billing_price_overrides = async () => NO_OVERRIDES; });
+  it('EMPTY rates -> INR charge refused (never DEFAULT_FX)', async () => {
+    mockTables.billing_fx_rates = async () => ({ data: [], error: null });
+    await expect(getChargeFxConfig('INR', 'credits_100')).rejects.toBeInstanceOf(PriceConfigUnavailableError);
+  });
+  it('PARTIAL rates (no INR row) -> INR charge refused', async () => {
+    mockTables.billing_fx_rates = async () => rows(['USD', 1], ['EUR', 0.92]);
+    await expect(getChargeFxConfig('INR')).rejects.toBeInstanceOf(PriceConfigUnavailableError);
+  });
+  it('a non-positive / non-numeric INR rate is not "configured" -> refused', async () => {
+    mockTables.billing_fx_rates = async () => rows(['USD', 1], ['INR', 0]);
+    await expect(getChargeFxConfig('INR')).rejects.toBeInstanceOf(PriceConfigUnavailableError);
+  });
+  it('CONTROL (PROD SHAPE C143): USD/INR/EUR configured, no overrides -> every chargeable currency prices', async () => {
+    mockTables.billing_fx_rates = async () => rows(['USD', 1], ['INR', 84], ['EUR', 0.92]);
+    for (const c of ['USD', 'INR', 'EUR'] as const) await expect(getChargeFxConfig(c, 'credits_100')).resolves.toBeDefined();
+    expect(mockMetrics).toEqual([]);
+  });
+  it('CONTROL: a configured override for (sku, currency) prices even without that rate', async () => {
+    mockTables.billing_fx_rates = async () => rows(['USD', 1]);
+    mockTables.billing_price_overrides = async () => ({ data: [{ sku: 'credits_100', currency: 'INR', amount: 499 }], error: null });
+    await expect(getChargeFxConfig('INR', 'credits_100')).resolves.toMatchObject({ overrides: { credits_100: { INR: 499 } } });
+  });
+  it('CONTROL: a USD charge needs no rate (canonical)', async () => {
+    mockTables.billing_fx_rates = async () => ({ data: [], error: null });
+    await expect(getChargeFxConfig('USD')).resolves.toBeDefined();
+  });
+});
+
+describe('GET /api/billing/fx - defaults are labelled an estimate', () => {
+  const call = async () => {
+    const res: any = { statusCode: 0, body: null, headers: {} };
+    res.status = (c: number) => { res.statusCode = c; return res; };
+    res.json = (b: unknown) => { res.body = b; return res; };
+    res.setHeader = (k: string, v: string) => { res.headers[k] = v; return res; };
+    await (fxRoute as any)({ method: 'GET', query: {}, headers: {} }, res);
+    return res;
+  };
+  it('partial rates -> 200 with estimate: true', async () => {
+    mockTables.billing_fx_rates = async () => ({ data: [{ currency: 'USD', rate: 1 }], error: null });
+    const r = await call();
+    expect(r.statusCode).toBe(200);
+    expect(r.body.estimate).toBe(true);
+  });
+  it('CONTROL: all rates configured -> estimate: false', async () => {
+    mockTables.billing_fx_rates = async () => ({ data: [{ currency: 'USD', rate: 1 }, { currency: 'INR', rate: 84 }, { currency: 'EUR', rate: 0.92 }], error: null });
+    const r = await call();
+    expect(r.body.estimate).toBe(false);
   });
 });

@@ -13,7 +13,7 @@ import { withOrgAccess } from '../../../../backend/middleware/withOrgAccess';
 import { logger } from '../../../../backend/services/logger';
 import { supabase } from '@/backend/db/supabaseClient';
 import { resolvePrincipal } from '@/backend/security/IdentityResolver';
-import { getFxConfig, PriceConfigUnavailableError } from '@/backend/services/pricingConfigService';
+import { getChargeFxConfig, PriceConfigUnavailableError } from '@/backend/services/pricingConfigService';
 import { resolvePrice, CURRENCIES, type Currency } from '@/lib/billing/currency';
 import { createOrder as orchestratorCreateOrder } from '@/backend/services/payments/orchestrator';
 import { getProviderCredentials, getActiveMode } from '@/backend/services/payments/orchestrator';
@@ -59,7 +59,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (canonicalUsd != null && Number.isFinite(Number(canonicalUsd))) {
     let fx;
     try {
-      fx = await getFxConfig();
+      fx = await getChargeFxConfig(currency, (pkg as any).sku ?? undefined); // strict: no default/partial rates
     } catch (err) {
       // b3 ruling 2026-11-20: never price a top-up from rates/overrides we could not read. Answered BEFORE any purchase
       // row or provider order exists. State only (the client decides whether to retry).

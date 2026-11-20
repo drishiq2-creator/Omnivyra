@@ -11,7 +11,7 @@ import { requireCapability } from '@/backend/security/requireCapability';
 import { requireAdminRateLimit } from '@/backend/services/requestAccessService';
 import { BILLING_PLAN_MANAGE } from '@/shared/contracts/security';
 import {
-  getFxConfig, getPlanPricing, setFxRate, setPriceOverride, setPlanPricing,
+  getFxConfig, getPlanPricing, setFxRate, setPriceOverride, setPlanPricing, PriceConfigUnavailableError,
 } from '@/backend/services/pricingConfigService';
 import type { Currency } from '@/lib/billing/currency';
 
@@ -26,8 +26,14 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (guard.ok !== true) return;
 
   if (req.method === 'GET') {
-    const [fx, planPricing] = await Promise.all([getFxConfig(), getPlanPricing()]);
-    return res.status(200).json({ fx, planPricing });
+    try {
+      const [fx, planPricing] = await Promise.all([getFxConfig(), getPlanPricing()]);
+      return res.status(200).json({ fx, planPricing });
+    } catch (err) {
+      // Never render DEFAULT_FX to an admin about to edit live rates (7c): an unreadable config is stated as such.
+      if (err instanceof PriceConfigUnavailableError) return res.status(503).json({ error: 'price_config_unavailable', code: err.code });
+      throw err;
+    }
   }
 
   if (req.method === 'POST') {
@@ -43,8 +49,16 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       } else {
         return res.status(400).json({ error: 'unknown action' });
       }
-      const [fx, planPricing] = await Promise.all([getFxConfig(), getPlanPricing()]);
-      return res.status(200).json({ ok: true, fx, planPricing });
+      // The write above SUCCEEDED; a failed re-read must not look like a failed save (7c).
+      try {
+        const [fx, planPricing] = await Promise.all([getFxConfig(), getPlanPricing()]);
+        return res.status(200).json({ ok: true, fx, planPricing });
+      } catch (readErr) {
+        if (readErr instanceof PriceConfigUnavailableError) {
+          return res.status(200).json({ ok: true, saved: true, reread: 'price_config_unavailable', code: readErr.code });
+        }
+        throw readErr;
+      }
     } catch (err: any) {
       return res.status(400).json({ ok: false, error: err?.message ?? 'update_failed' });
     }

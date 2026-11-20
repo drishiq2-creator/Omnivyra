@@ -5,12 +5,13 @@ import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeF
  * PRICE_CONFIG_UNAVAILABLE (c6 2026-11-20). Charge currency is INR regardless of display.
  */
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { getFxConfig, PriceConfigUnavailableError } from '@/backend/services/pricingConfigService';
+import { getFxDisplayConfig, PriceConfigUnavailableError } from '@/backend/services/pricingConfigService';
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'GET') return res.status(405).end();
   try {
-    const fx = await getFxConfig();
+    // DISPLAY only: `estimate: true` when any shown rate is a code default, not a configured rate (b3 2026-11-20).
+    const fx = await getFxDisplayConfig();
     res.setHeader('Cache-Control', 'public, max-age=300');
     return res.status(200).json(fx);
   } catch (err: any) {

@@ -8,7 +8,7 @@ import {
   recordMonetizationOperationalEvent,
 } from '../monetizationOpsService';
 import { assertMonetizationBetaAccess, getMonetizationBetaRuntimeMode, getOrganizationBetaTag } from '../monetizationBetaAccessService';
-import { getFxConfig } from '../pricingConfigService';
+import { getChargeFxConfig } from '../pricingConfigService';
 import { resolvePrice } from '@/lib/billing/currency';
 
 const PROVIDER = 'razorpay';
@@ -199,7 +199,7 @@ export async function createRazorpayStagingCreditOrder(input: {
   const canonicalUsd = (pkg as any).canonical_usd_price;
   let amount = Number((pkg as any).price);
   if (canonicalUsd != null && Number.isFinite(Number(canonicalUsd))) {
-    const fx = await getFxConfig();
+    const fx = await getChargeFxConfig('INR', (pkg as any).sku ?? undefined); // a charge: strict, never defaults
     amount = resolvePrice(Number(canonicalUsd), 'INR', fx, (pkg as any).sku ?? undefined);
   }
   const amountSubunits = toSubunits(amount, currency);
