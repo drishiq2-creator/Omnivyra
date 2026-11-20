@@ -51,6 +51,28 @@ import { runBilledOperation, type OrchestratorResult } from './enterpriseBilling
 import type { BillingIdempotencyArgs } from './billingIdempotencyService';
 import type { CreditAction, LlmExecutorResult } from '../creditExecutionService';
 import { checkAiBillingGuard, runWithCreditHandle, type CreditHandle } from './aiGatewayBillingGuard';
+import {
+  BILLING_REFUSAL_HTTP_STATUS, billingRefusalCodeForOrchestratorStatus, type BillingRefusalCode,
+} from '../../../shared/billing/billingRefusalCodes';
+
+/**
+ * Billing REFUSED the call (04, 2026-11-20): the executor never ran and nothing was charged.
+ * Before, this was a plain Error whose only signal was "status=insufficient_credits" inside its message, so each route
+ * mangled it differently: chat-brief showed the internal message, field/campaign assist silently fell back, and
+ * refine_variant answered a generic 500. Routes map this to `res.status(err.httpStatus).json({ error, code })`.
+ */
+export class BillingRefusalError extends Error {
+  readonly httpStatus: number;
+  constructor(readonly code: BillingRefusalCode, readonly orchestratorStatus: string) {
+    super(`billing refused: ${code}`);
+    this.name = 'BillingRefusalError';
+    this.httpStatus = BILLING_REFUSAL_HTTP_STATUS[code];
+  }
+}
+
+export function isBillingRefusalError(e: unknown): e is BillingRefusalError {
+  return e instanceof BillingRefusalError || (e as { name?: unknown } | null)?.name === 'BillingRefusalError';
+}
 
 export interface RunBilledAiCompletionArgs {
   module:        string;
@@ -160,6 +182,9 @@ export async function runBilledAiCompletion(
   });
 
   if (orchestratorResult.result.status !== 'executed') {
+    const refusal = billingRefusalCodeForOrchestratorStatus(String(orchestratorResult.result.status));
+    if (refusal) throw new BillingRefusalError(refusal, String(orchestratorResult.result.status));
+    // Not a billing refusal (already settled / internal error): unchanged.
     throw new Error(
       `[runBilledAiCompletion] orchestrator did not execute: status=${orchestratorResult.result.status}`,
     );

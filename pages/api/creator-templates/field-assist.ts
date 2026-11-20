@@ -108,9 +108,21 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     });
     return result.text;
   };
+  // b3 (A) 2026-11-20: a billing refusal still gets the deterministic result, but the response SAYS so
+  // (billing_refusal_code), and the client labels it "AI wasn't used"; it is never presented as AI output.
+  let billingRefusalCode: string | null = null;
+  const billedLlm: typeof llm = async (messages) => {
+    try {
+      return await llm(messages);
+    } catch (err) {
+      const { isBillingRefusalError } = await import('../../../backend/services/billing/runBilledAiCompletion');
+      if (isBillingRefusalError(err)) billingRefusalCode = err.code;
+      throw err; // the service's own fallback still runs
+    }
+  };
 
   try {
-    const { updates, usedFallback, invalidTargets, violations, fallbackReason } = await runCreatorFieldAssist({ template, request, llm });
+    const { updates, usedFallback, invalidTargets, violations, fallbackReason } = await runCreatorFieldAssist({ template, request, llm: billedLlm });
     // Surface WHY the AI degraded to the deterministic transform so a silent
     // fallback (shallow/duplicate copy) is diagnosable in logs + the response.
     if (usedFallback && fallbackReason) {
@@ -126,11 +138,13 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       })),
       used_fallback: usedFallback,
       ...(fallbackReason ? { fallback_reason: fallbackReason } : {}),
+      ...(usedFallback && billingRefusalCode ? { billing_refusal_code: billingRefusalCode } : {}),
       ...(violations.length > 0 ? { violations } : {}),
       ...(invalidTargets.length > 0 ? { skipped_targets: invalidTargets } : {}),
     });
   } catch (error) {
-    return res.status(500).json({ error: error instanceof Error ? error.message : 'field assist failed' });
+    console.error('[pages/api/creator-templates/field-assist.ts] failed', error);
+    return res.status(500).json({ error: 'field assist failed' });
   }
 }
 

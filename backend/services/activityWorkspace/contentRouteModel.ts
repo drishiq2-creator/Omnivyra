@@ -81,13 +81,14 @@ export async function runReservedFixedWorkflow<T>(input: {
   if (result.status === 'insufficient_credits') {
     throw new MonetizedWorkflowError(402, {
       error: 'Insufficient credits to generate content',
+      code: 'INSUFFICIENT_CREDITS',
       required: result.required,
       balance: result.available,
     });
   }
-  if (result.status === 'not_a_member') throw new MonetizedWorkflowError(403, { error: 'ORG_SCOPE_VIOLATION' });
-  if (result.status === 'org_control_blocked') throw new MonetizedWorkflowError(403, { error: result.code, detail: result.reason });
-  if (result.status === 'no_credit_account') throw new MonetizedWorkflowError(402, { error: 'No credit account for org' });
+  if (result.status === 'not_a_member') throw new MonetizedWorkflowError(403, { error: 'ORG_SCOPE_VIOLATION', code: 'ORG_SCOPE_VIOLATION' });
+  if (result.status === 'org_control_blocked') throw new MonetizedWorkflowError(403, { error: result.code, code: 'ORG_CONTROL_BLOCKED', detail: result.reason });
+  if (result.status === 'no_credit_account') throw new MonetizedWorkflowError(402, { error: 'No credit account for org', code: 'NO_CREDIT_ACCOUNT' });
   throw new MonetizedWorkflowError(409, { error: `Credit reservation is already settled: ${result.status}` });
 }
 
