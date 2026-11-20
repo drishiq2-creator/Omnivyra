@@ -6,6 +6,8 @@
  * returned null, so a terminal lead ('won' -> only 'archived') could be moved to 'working': the guard failed open.
  * Each failure assertion is paired with a control that passes through the same path with a successful read.
  */
+export {}; // an ES module: a require-only test file is a global script, and its helpers collide with other files' (CI-496)
+
 type Resp = { data: unknown; error: unknown };
 const calls: Array<{ table: string; verb: string }> = [];
 let responses: Record<string, Resp> = {};
