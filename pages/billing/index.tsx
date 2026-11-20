@@ -96,6 +96,11 @@ export default function BillingShellPage() {
         billing_region: region ?? '',
       });
       setCtxState('ready');
+      // Stays true across later reloads ON PURPOSE: after a save the form stays mounted, so its "saved" message
+      // survives the re-read. Consequence (7c 2026-11-20): the mounted form keeps showing what the user SUBMITTED, not
+      // what was stored (initialCtx updates, but the form read it only at mount). Harmless today: the provider query
+      // below uses the freshly-read country. If the server ever normalises or partially stores geography, re-mount the
+      // form from the re-read (e.g. key it on the stored values) so the user can see the difference.
       setCtxLoadedOnce(true);
 
       // Step 2 — relay the resolved context verbatim as query params.
