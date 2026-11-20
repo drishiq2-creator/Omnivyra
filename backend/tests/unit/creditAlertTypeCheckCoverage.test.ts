@@ -29,14 +29,24 @@ export function unionMembers(src: string): { alternatives: string[]; literals: s
   return { alternatives, literals };
 }
 
-/** The literal values of the CHECK in the highest-versioned migration that (re)defines it. */
-export function effectiveCheckValues(dir: string): { file: string; values: string[] } {
-  const files = fs.readdirSync(dir).filter((f) => f.endsWith('.sql')).sort();
-  let last: { file: string; values: string[] } | null = null;
-  for (const f of files) {
+/** A migration's version prefix, normalised to 14 digits (YYYYMMDD -> YYYYMMDD000000) so mixed-length versions order by
+ *  DATE, not lexically (7c M3). Non-numeric prefixes return null. */
+export const versionKey = (file: string): string | null => {
+  const v = file.split('_')[0];
+  return /^\d{8}$|^\d{14}$/.test(v) ? v.padEnd(14, '0') : null;
+};
+
+/** The literal values of the CHECK in the newest (by normalised version) migration that (re)defines it. */
+export function effectiveCheckValues(dir: string): { file: string; values: string[]; version: string } {
+  let last: { file: string; values: string[]; version: string } | null = null;
+  for (const f of fs.readdirSync(dir).filter((x) => x.endsWith('.sql'))) {
     const sql = fs.readFileSync(path.join(dir, f), 'utf8');
     const m = sql.match(/ADD CONSTRAINT credit_alert_log_alert_type_check CHECK \(alert_type IN \(([\s\S]*?)\)\)/);
-    if (m) last = { file: f, values: [...m[1].matchAll(/'([a-z0-9_]+)'/g)].map((x) => x[1]) };
+    if (!m) continue;
+    const key = versionKey(f);
+    expect(key).not.toBeNull();
+    expect(key).not.toBe(last?.version);   // a normalised tie has no defined winner: fail loudly
+    if (!last || key! > last.version) last = { file: f, values: [...m[1].matchAll(/'([a-z0-9_]+)'/g)].map((x) => x[1]), version: key! };
   }
   expect(last).not.toBeNull();
   return last!;
@@ -47,6 +57,32 @@ const check = effectiveCheckValues(MIG_DIR);
 
 it('the effective CHECK is 064 (the newest definition)', () => {
   expect(check.file).toBe('20270217000064_credit_alert_log_runway_3d.sql');
+});
+
+it('the selected definition can actually run: its version prefix is UNIQUE among migrations (7c M3: 56 versions collide)', () => {
+  const prefix = check.file.split('_')[0];
+  const same = fs.readdirSync(MIG_DIR).filter((f) => f.endsWith('.sql') && f.split('_')[0] === prefix);
+  expect(same).toEqual([check.file]);
+});
+
+it('control: version keys order by DATE, refuse any length but 8 / 14, and expose a normalised tie', () => {
+  expect(versionKey('20280101_x.sql')! > versionKey('20270217000064_x.sql')!).toBe(true);   // 2028 after 2027
+  expect(versionKey('20260831_x.sql')! < versionKey('20260831000001_x.sql')!).toBe(true);   // same day, later time
+  expect(versionKey('202608310000_x.sql')).toBeNull();                                       // 12 digits: refused
+  expect(versionKey('2026_x.sql')).toBeNull();
+  expect(versionKey('20260831_x.sql')).toBe(versionKey('20260831000000_x.sql'));             // a tie -> must fail below
+});
+
+it('control: two definitions with the same normalised version make the selection fail loudly', () => {
+  const dir = fs.mkdtempSync(path.join(require('os').tmpdir(), 'alert-check-'));
+  try {
+    const def = (vals: string) => `ALTER TABLE public.credit_alert_log ADD CONSTRAINT credit_alert_log_alert_type_check CHECK (alert_type IN (${vals}));`;
+    fs.writeFileSync(path.join(dir, '20260831_a.sql'), def("'low_20'"));
+    fs.writeFileSync(path.join(dir, '20260831000000_b.sql'), def("'low_50'"));
+    expect(() => effectiveCheckValues(dir)).toThrow();
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 it('every AlertType alternative is a plain string literal (nothing invisible to the extractor)', () => {
