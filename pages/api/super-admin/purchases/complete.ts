@@ -137,7 +137,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     const failResult = result as Extract<typeof result, { success: false }>;
     // A non-live purchase in production is a DEFINITIVE refusal (completePurchase granted nothing and closed the row):
     // 409 with the code of its STORED mode (PL-162): an offline ('manual') sale is OFFLINE_PURCHASE_NO_AUTO_CREDIT with
-    // "grant them via Admin → Credits", never "test payment". Never the 500 that reads as "something broke".
+    // "grant them in Usage → Credits → Grant Credits", never "test payment". Never the 500 that reads as "something broke".
     if (failResult.reason === NON_LIVE_NO_GRANT) {
       const refusal = nonLivePurchaseRefusal(failResult.providerMode);
       return res.status(409).json({ error: failResult.reason, code: refusal.code, detail: refusal.message });

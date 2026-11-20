@@ -145,7 +145,7 @@ export async function completePurchase(
   // ── 2b. Only a LIVE payment grants credits in production (b3 / owner, 2026-11-20; PL-162) ─────────────────────
   // This refuses every non-'live' stored mode, not only 'test': NULL, '', 'unknown', 'sandbox' and 'manual' too
   // (c6's original comment below was written for the narrower === 'test' guard). 'manual' = an offline sale: the owner
-  // ruled it never adds credits automatically; a Super Admin grants them via Admin → Credits. Each stored mode is
+  // ruled it never adds credits automatically; a Super Admin grants them in Usage → Credits → Grant Credits. Each stored mode is
   // refused with its own code and recorded reason (shared/billing/purchaseModeRefusal.ts), never "test payment".
   // Prod runs on TEST provider keys today (PAYMENT_PROVIDER_MODE unset → 'test'), so a test-card payment verifies
   // and - before this - granted paid credits. This is the chokepoint for every PURCHASE-driven grant path (verify,

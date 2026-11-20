@@ -25,7 +25,7 @@ describe('1. nonLivePurchaseRefusal: one code per stored mode', () => {
   });
   it('the offline copy is the owner\'s wording, and never says "test"', () => {
     expect(nonLivePurchaseRefusal('manual').message).toBe(OFFLINE_PURCHASE_NO_AUTO_CREDIT_MESSAGE);
-    expect(OFFLINE_PURCHASE_NO_AUTO_CREDIT_MESSAGE).toBe("Offline purchases don't add credits automatically: grant them via Admin → Credits");
+    expect(OFFLINE_PURCHASE_NO_AUTO_CREDIT_MESSAGE).toBe("Offline purchases don't add credits automatically: grant them in Usage → Credits → Grant Credits.");
     expect(OFFLINE_PURCHASE_NO_AUTO_CREDIT_MESSAGE).not.toMatch(/test/i);
   });
   it.each<[string, unknown]>([

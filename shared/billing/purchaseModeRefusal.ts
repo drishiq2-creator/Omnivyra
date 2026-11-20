@@ -1,6 +1,6 @@
 /**
  * Why a purchase granted no credits in production, named by its STORED provider_mode (PL-162; owner ruling 2026-11-20
- * via b3: offline purchases never add credits automatically; a Super Admin grants them via Admin → Credits).
+ * via b3: offline purchases never add credits automatically; a Super Admin grants them in Usage → Credits → Grant Credits).
  *
  * completePurchase refuses every non-'live' row in production (liveProviderMode.ts). Before PL-162 every refusal said
  * "test-mode payment", which is false for an offline ('manual') sale. Each stored mode now has its own code, copy and
@@ -23,8 +23,12 @@ export type PurchaseModeRefusal = {
   fulfillmentError: string;
 };
 
+/**
+ * Points at the REAL grant flow (b3, 2026-11-21): super-admin header "Usage" (/super-admin/consumption) → "Credits"
+ * tab → "Grant Credits" (components/super-admin/CreditsManagementPanel). If that navigation is renamed, this follows it.
+ */
 export const OFFLINE_PURCHASE_NO_AUTO_CREDIT_MESSAGE =
-  "Offline purchases don't add credits automatically: grant them via Admin → Credits";
+  "Offline purchases don't add credits automatically: grant them in Usage → Credits → Grant Credits.";
 
 export function nonLivePurchaseRefusal(storedMode: unknown): PurchaseModeRefusal {
   if (storedMode === 'test') {

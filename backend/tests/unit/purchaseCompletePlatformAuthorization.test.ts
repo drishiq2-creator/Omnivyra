@@ -247,7 +247,7 @@ describe('G — super-admin complete vs the production test-mode guard', () => {
   afterEach(() => { mockIsProd = false; });
 
   // PL-162: one case per STORED mode, each with its own code and recorded reason. 'manual' (an offline sale, the
-  // column DEFAULT) is never told "test payment" (owner ruling 2026-11-20: a Super Admin grants via Admin → Credits).
+  // column DEFAULT) is never told "test payment" (owner ruling 2026-11-20: a Super Admin grants in Usage → Credits → Grant Credits).
   it.each<[string, unknown, string, string]>([
     ['test', 'test', 'TEST_MODE_PAYMENT_NO_CREDITS', 'test_mode_payment_no_grant'],
     ['manual (offline sale)', 'manual', 'OFFLINE_PURCHASE_NO_AUTO_CREDIT', 'offline_purchase_no_auto_credit'],
@@ -267,7 +267,7 @@ describe('G — super-admin complete vs the production test-mode guard', () => {
     mockIsProd = true;
     Object.assign(row('pur-b'), { provider_mode: 'manual' });
     const res = await call(U.SUPER, { purchase_id: 'pur-b' });
-    expect(res.body.detail).toBe("Offline purchases don't add credits automatically: grant them via Admin → Credits");
+    expect(res.body.detail).toBe("Offline purchases don't add credits automatically: grant them in Usage → Credits → Grant Credits.");
     expect(JSON.stringify(res.body)).not.toMatch(/test/i);
   });
 

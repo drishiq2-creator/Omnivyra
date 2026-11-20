@@ -81,7 +81,7 @@ describe('a TEST-mode payment in production grants nothing', () => {
     mockState.row = row({ provider_mode: 'manual' });
     const r = await completePurchase('p1', 'pay_1');
     expect(r).toMatchObject({ success: false, reason: 'non_live_no_grant', providerMode: 'manual' });
-    expect(String((r as { detail?: string }).detail)).toMatch(/Admin → Credits/);
+    expect(String((r as { detail?: string }).detail)).toMatch(/Usage → Credits → Grant Credits/);
     expect(mockState.credits).toEqual([]);
     expect(mockState.updates[0]).toMatchObject({ fulfillment_error: 'offline_purchase_no_auto_credit' });
   });
