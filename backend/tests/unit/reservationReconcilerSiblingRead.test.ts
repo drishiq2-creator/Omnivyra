@@ -54,6 +54,25 @@ jest.mock('../../services/monetizationOpsService', () => ({ recordMonetizationOp
 const { reconcileDurableMonetizationReservations } = require('../../services/monetizationReservationReconciliationService');
 
 const ERR = { data: null, error: { message: 'connection reset' } };
+
+// MAIN since c36d7cfc7 (c6): bulk hold release is DEFAULT-OFF behind CREDIT_HOLD_REAP_ENABLED (holdReleaseGate.ts).
+// A7 guards the path that runs when the gate is OPEN, so these cases open it; the case below pins the default.
+const savedGate = process.env.CREDIT_HOLD_REAP_ENABLED;
+beforeAll(() => { process.env.CREDIT_HOLD_REAP_ENABLED = 'true'; });
+afterAll(() => { if (savedGate === undefined) delete process.env.CREDIT_HOLD_REAP_ENABLED; else process.env.CREDIT_HOLD_REAP_ENABLED = savedGate; });
+
+it('GATE CLOSED (the default on main): the reconciler refuses before reading anything, and settles nothing', async () => {
+  const prev = process.env.CREDIT_HOLD_REAP_ENABLED;
+  process.env.CREDIT_HOLD_REAP_ENABLED = 'false';
+  try {
+    db.reportStatus = 'completed';
+    await expect(reconcileDurableMonetizationReservations()).rejects.toMatchObject({ code: 'HOLD_RELEASE_DISABLED' });
+    expect(confirmCreditReservation).not.toHaveBeenCalled();
+    expect(releaseCreditReservation).not.toHaveBeenCalled();
+  } finally {
+    process.env.CREDIT_HOLD_REAP_ENABLED = prev; // restore what beforeAll set - never assert the gate open from here
+  }
+});
 beforeEach(() => {
   db.parentRead = { data: null, error: null }; db.keyedRead = { data: null, error: null }; db.reads = [];
   confirmCreditReservation.mockClear(); releaseCreditReservation.mockClear(); events.length = 0;
