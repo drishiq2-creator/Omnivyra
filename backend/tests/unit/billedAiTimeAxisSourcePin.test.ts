@@ -14,6 +14,10 @@
  * runWithCreditHandle / runCompletionWithOperation resolves a price, the positions diverge and the late flag turns a
  * completed, paid-for call into a 503 that invites a retry (the BLOCKING defect 7c raised on 8ff86fd72).
  * So the placement is pinned here, by reading the file. The checker is a pure function with failing controls below.
+ *
+ * IF THIS GOES RED AFTER A REFORMAT: that is a prompt, not a bug. The pin matches the flag line and the gateway line
+ * exactly (after trimming), so a reformat fails it on purpose rather than passing silently. Re-check the placement
+ * by hand (flag immediately before the provider call, produced text immediately after), then update the patterns.
  */
 import { readFileSync } from 'fs';
 import { join } from 'path';
