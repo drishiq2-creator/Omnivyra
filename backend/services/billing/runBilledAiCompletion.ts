@@ -93,7 +93,8 @@ export interface RunBilledAiCompletionArgs {
   action:        CreditAction;
   referenceType: string;
   referenceId:   string;
-  llmPricing: {
+  /** TOKEN mode: settle on actual tokens via the model rate card. Exactly one of llmPricing / fixedPricing. */
+  llmPricing?: {
     provider:        string;
     model:           string;
     maxInputTokens:  number;
@@ -101,6 +102,12 @@ export interface RunBilledAiCompletionArgs {
     actionKey:       string;
     timestamp?:      string | Date;
   };
+  /**
+   * FIXED mode (c6 2026-11-20, owner's pricing hold: no new rate-priced billing): the charge is the action's own
+   * credit_cost_config row (getCreditCost via runBilledOperation's fixed path), whatever the tokens. provider/model
+   * only label the result.
+   */
+  fixedPricing?: { provider: string; model: string };
   idempotency:   BillingIdempotencyArgs;
   note?:         string;
   metadata?:     Record<string, unknown>;
@@ -143,74 +150,112 @@ export interface BilledAiCompletionResult {
 export async function runBilledAiCompletion(
   args: RunBilledAiCompletionArgs,
 ): Promise<BilledAiCompletionResult> {
+  // Exactly one pricing mode, checked BEFORE any billing or provider call (c6, fixed-price rework).
+  if ((args.llmPricing ? 1 : 0) + (args.fixedPricing ? 1 : 0) !== 1) {
+    throw new Error('[runBilledAiCompletion] exactly one of llmPricing / fixedPricing is required');
+  }
+  const labelProvider = args.llmPricing?.provider ?? args.fixedPricing!.provider;
+  const labelModel = args.llmPricing?.model ?? args.fixedPricing!.model;
   // 7c on 306b8498c: a PRICE that cannot be resolved (missing row, or the lookup itself failed) is
   // PRICING_UNAVAILABLE, the union's one retryable "unknown" (503 + Retry-After). It used to leave as a generic 500.
   // It is raised while the hold is being computed, before any reservation or provider call, so nothing was charged.
   let orchestratorResult: OrchestratorResult<string>;
   // TIME AXIS (7c BLOCKING on 8ff86fd72): a price failure BEFORE the provider call means nothing happened (retry is
   // right); AFTER it, the AI work exists and was paid for, so the answer must never invite a repeat.
+  // Both pricing modes make their provider call through callAi below, so BOTH carry the time axis.
   let providerCallStarted = false;
   let producedText: string | null = null;
-  try {
-    orchestratorResult = await runBilledOperation<string>({
-      module:         args.module,
-      action:         args.action,
-      userId:         args.userId,
+  const base = {
+    module:         args.module,
+    action:         args.action,
+    userId:         args.userId,
+    orgId:          args.orgId,
+    referenceType:  args.referenceType,
+    referenceId:    args.referenceId,
+    idempotency:    args.idempotency,
+    note:           args.note,
+    metadata:       args.metadata,
+    validateMembership: args.validateMembership,
+  };
+  // The AI call, identical in both modes. The time axis is set immediately BEFORE the provider call and the produced
+  // text recorded immediately AFTER it - here, once, for both pricing modes.
+  const callAi = async () => {
+    // We have a handle by virtue of being inside the orchestrator. Notify the
+    // guard so violations cannot accidentally proliferate at this seam.
+    const creditHandle: CreditHandle = {
+      operationId:    'in-flight',
+      idempotencyKey: 'in-flight',
       orgId:          args.orgId,
-      referenceType:  args.referenceType,
-      referenceId:    args.referenceId,
-      idempotency:    args.idempotency,
-      note:           args.note,
-      metadata:       args.metadata,
-      validateMembership: args.validateMembership,
-      llmPricing: {
-        provider:        args.llmPricing.provider,
-        model:           args.llmPricing.model,
-        actionKey:       args.llmPricing.actionKey,
-        maxInputTokens:  args.llmPricing.maxInputTokens,
-        maxOutputTokens: args.llmPricing.maxOutputTokens,
-        timestamp:       args.llmPricing.timestamp,
-      },
-      executor: async (): Promise<LlmExecutorResult<string>> => {
-        // We have a handle by virtue of being inside the orchestrator. Notify the
-        // guard so violations cannot accidentally proliferate at this seam.
-        const creditHandle: CreditHandle = {
-          operationId:    'in-flight',
-          idempotencyKey: 'in-flight',
-          orgId:          args.orgId,
-          action:         args.action,
-          source:         'orchestrator',
-        };
-        await checkAiBillingGuard({
-          operation: args.completion.operation,
-          creditHandle,
-          orgId: args.orgId,
-        });
-  
-        // SEC91-D2: the gateway re-checks the billing guard; the handle must be
-        // visible there too, or this billed call is recorded as an untracked
-        // violation (and blocked outright once BILLING_REQUIRE_AI_HANDLE=true).
-        providerCallStarted = true;
-        const gatewayResp = await runWithCreditHandle(creditHandle, () => runCompletionWithOperation({
-          ...args.completion,
-        }));
-  
-        const text = typeof gatewayResp.output === 'string' ? gatewayResp.output : '';
-        producedText = text;
-        const usage = gatewayResp.metadata?.token_usage ?? {};
-  
-        return {
-          result: text,
-          usage: {
+      action:         args.action,
+      source:         'orchestrator',
+    };
+    await checkAiBillingGuard({
+      operation: args.completion.operation,
+      creditHandle,
+      orgId: args.orgId,
+    });
+
+    // SEC91-D2: the gateway re-checks the billing guard; the handle must be
+    // visible there too, or this billed call is recorded as an untracked
+    // violation (and blocked outright once BILLING_REQUIRE_AI_HANDLE=true).
+    providerCallStarted = true;
+    const gatewayResp = await runWithCreditHandle(creditHandle, () => runCompletionWithOperation({
+      ...args.completion,
+    }));
+
+    const text = typeof gatewayResp.output === 'string' ? gatewayResp.output : '';
+    producedText = text;
+    return { gatewayResp, text };
+  };
+  const providerOf = (r: { metadata: { provider?: string } }): string =>
+    (r.metadata.provider === 'direct-anthropic' ? 'anthropic' : 'openai');
+
+  let fixedUsed: { inputTokens: number; outputTokens: number; provider: string; model: string } | null = null;
+  try {
+    if (args.fixedPricing) {
+      // FIXED: runBilledOperation's fixed path (llmPricing absent) prices the action via getCreditCost.
+      orchestratorResult = await runBilledOperation<string>({
+        ...base,
+        executor: async (): Promise<string> => {
+          const { gatewayResp, text } = await callAi();
+          const usage = gatewayResp.metadata?.token_usage ?? {};
+          fixedUsed = {
             inputTokens:  Number(usage.prompt_tokens ?? 0),
             outputTokens: Number(usage.completion_tokens ?? 0),
-            source:       (Number(usage.total_tokens ?? 0) > 0 ? 'provider' : 'cache'),
-          },
-          provider: gatewayResp.metadata.provider === 'direct-anthropic' ? 'anthropic' : 'openai',
-          model:    gatewayResp.metadata.model ?? args.completion.model,
-        };
-      },
-    });
+            provider:     providerOf(gatewayResp),
+            model:        gatewayResp.metadata.model ?? args.completion.model,
+          };
+          return text;
+        },
+      });
+    } else {
+      const llm = args.llmPricing!;
+      orchestratorResult = await runBilledOperation<string>({
+        ...base,
+        llmPricing: {
+          provider:        llm.provider,
+          model:           llm.model,
+          actionKey:       llm.actionKey,
+          maxInputTokens:  llm.maxInputTokens,
+          maxOutputTokens: llm.maxOutputTokens,
+          timestamp:       llm.timestamp,
+        },
+        executor: async (): Promise<LlmExecutorResult<string>> => {
+          const { gatewayResp, text } = await callAi();
+          const usage = gatewayResp.metadata?.token_usage ?? {};
+          return {
+            result: text,
+            usage: {
+              inputTokens:  Number(usage.prompt_tokens ?? 0),
+              outputTokens: Number(usage.completion_tokens ?? 0),
+              source:       (Number(usage.total_tokens ?? 0) > 0 ? 'provider' : 'cache'),
+            },
+            provider: providerOf(gatewayResp),
+            model:    gatewayResp.metadata.model ?? args.completion.model,
+          };
+        },
+      });
+    }
   } catch (err) {
     if (isPriceResolutionError(err)) {
       // BEFORE the provider call (the hold could not be priced): nothing ran, nothing was charged, retry is right.
@@ -228,7 +273,7 @@ export async function runBilledAiCompletion(
           // so a queue- or cron-driven call still logs its ledger join key, never null.
           idempotencyKind: args.idempotency.kind,
           idempotencyReference: idempotencyReference(args.idempotency),
-          provider: args.llmPricing.provider, model: args.llmPricing.model,
+          provider: labelProvider, model: labelModel,
           error: err instanceof Error ? err.message : String(err),
         }));
         return {
@@ -239,8 +284,8 @@ export async function runBilledAiCompletion(
           idempotencyKey:   null,
           promptTokens:     null,
           completionTokens: null,
-          provider:         args.llmPricing.provider,
-          model:            args.llmPricing.model,
+          provider:         labelProvider,
+          model:            labelModel,
         };
       }
       // The provider call started but produced nothing: not a pricing problem we can answer for, so propagate it
@@ -258,6 +303,20 @@ export async function runBilledAiCompletion(
     );
   }
 
+  if (args.fixedPricing) {
+    const used = fixedUsed as { inputTokens: number; outputTokens: number; provider: string; model: string } | null;
+    return {
+      text:             orchestratorResult.result.result,
+      operationId:      orchestratorResult.operationId,
+      correlationId:    orchestratorResult.correlationId,
+      idempotencyKey:   orchestratorResult.idempotencyKey,
+      promptTokens:     used ? used.inputTokens : null,
+      completionTokens: used ? used.outputTokens : null,
+      provider:         used ? used.provider : labelProvider,
+      model:            used ? used.model : labelModel,
+    };
+  }
+
   const settlement = orchestratorResult.result.settlement as {
     creditsCharged?: number;
     actualUsage?: { inputTokens?: number; outputTokens?: number };
@@ -273,7 +332,7 @@ export async function runBilledAiCompletion(
     idempotencyKey:   orchestratorResult.idempotencyKey,
     promptTokens:     Number(actualUsage.inputTokens ?? 0),
     completionTokens: Number(actualUsage.outputTokens ?? 0),
-    provider:         settlement?.provider ?? args.llmPricing.provider,
-    model:            settlement?.model    ?? args.llmPricing.model,
+    provider:         settlement?.provider ?? labelProvider,
+    model:            settlement?.model    ?? labelModel,
   };
 }

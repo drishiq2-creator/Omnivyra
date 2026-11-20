@@ -1,5 +1,5 @@
 -- =============================================================================
--- ROLLBACK — PI-LDB-5 `lead_attribute_mapping` catalog rows
+-- ROLLBACK — PI-LDB-5 `lead_attribute_mapping` catalog row (fixed price, 2026-11-20)
 --            (forward: 20270211000004_pi_ldb_attribute_mapping_pricing.sql)
 --
 -- WHAT THIS REFUSES, AND WHY
@@ -14,8 +14,12 @@
 --   2. If any credit ledger entry references the action, the same argument
 --      applies with money actually moved.
 --
--- So this script REFUSES rather than discarding. Deactivating is the correct
--- move in that case, not deletion — see the final section.
+-- So this script REFUSES rather than discarding. In that case keep the row and
+-- stop the code from calling the action instead.
+--
+-- The forward file is fixed-price (owner 2026-11-20): it writes ONE
+-- credit_cost_config row and no action_pricing_config row, so this script
+-- removes only that one row.
 --
 -- WHAT IT DOES NOT PROTECT
 -- ------------------------
@@ -27,15 +31,14 @@
 --   SELECT count(*) FROM usage_events         WHERE action_key = 'lead_attribute_mapping';
 --   SELECT count(*) FROM unified_transactions WHERE action_key = 'lead_attribute_mapping';
 --   SELECT count(*) FROM credit_cost_config   WHERE action_type = 'lead_attribute_mapping';
---   SELECT count(*) FROM action_pricing_config WHERE action_key  = 'lead_attribute_mapping';
 --
 -- ORDERING NOTE
 -- -------------
 -- Run this only after the application no longer passes the action. With the
--- code still deployed, removing the pricing row turns every mapping call into
--- a thrown `Missing action_pricing_config row` — which the engine survives
--- (it degrades to deterministic mapping) but which is a silent capability loss
--- rather than an intended rollback.
+-- code still deployed, removing the price row makes every mapping proposal fail
+-- its price lookup — which the engine survives (it degrades to deterministic
+-- mapping) but which is a silent capability loss rather than an intended
+-- rollback.
 -- =============================================================================
 
 DO $$
@@ -65,7 +68,7 @@ BEGIN
 
   IF v_usage > 0 OR v_ledger > 0 THEN
     RAISE EXCEPTION
-      'ROLLBACK REFUSED: lead_attribute_mapping has % usage_events row(s) and % unified_transactions row(s). Removing its pricing would leave recorded spend with no rate to reproduce it. Deactivate instead: UPDATE action_pricing_config SET is_active = false WHERE action_key = ''lead_attribute_mapping'';',
+      'ROLLBACK REFUSED: lead_attribute_mapping has % usage_events row(s) and % unified_transactions row(s). Removing its price would leave recorded spend with no price to reproduce it. Keep the row; stop the code from calling the action instead.',
       v_usage, v_ledger;
   END IF;
 
@@ -73,20 +76,18 @@ BEGIN
 END
 $$;
 
--- ── Remove the catalog rows ─────────────────────────────────────────────────
-DELETE FROM action_pricing_config WHERE action_key  = 'lead_attribute_mapping';
+-- ── Remove the catalog row ──────────────────────────────────────────────────
 DELETE FROM credit_cost_config    WHERE action_type = 'lead_attribute_mapping';
 
 -- ── Postcondition ───────────────────────────────────────────────────────────
 DO $$
 DECLARE v_left bigint;
 BEGIN
-  SELECT (SELECT count(*) FROM action_pricing_config WHERE action_key  = 'lead_attribute_mapping')
-       + (SELECT count(*) FROM credit_cost_config    WHERE action_type = 'lead_attribute_mapping')
+  SELECT count(*) FROM credit_cost_config WHERE action_type = 'lead_attribute_mapping'
     INTO v_left;
   IF v_left <> 0 THEN
     RAISE EXCEPTION 'ROLLBACK PI-LDB-5 postcondition: % catalog row(s) survived the delete.', v_left;
   END IF;
-  RAISE NOTICE 'ROLLBACK PI-LDB-5: catalog rows removed. The code-side registry entry in shared/monetization/featureRegistry.ts must be reverted separately, or assertCanonicalCreditAction will resolve an action with no pricing.';
+  RAISE NOTICE 'ROLLBACK PI-LDB-5: catalog row removed. The code-side registry entry in shared/monetization/featureRegistry.ts must be reverted separately, or assertCanonicalCreditAction will resolve an action with no pricing.';
 END
 $$;

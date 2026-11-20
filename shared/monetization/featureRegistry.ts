@@ -249,8 +249,9 @@ const BASE_FEATURES: MonetizationFeatureRegistryEntry[] = [
     display_name: 'Lead Attribute Mapping',
     display_group: 'Lead Detection',
     display_color: 'bg-amber-500',
-    charge_mode: 'token_priced',
-    pricing_strategy: 'llm_model_pricing',
+    // FIXED 2 credits per AI mapping proposal (owner 2026-11-20); was token-priced (pricing hold).
+    charge_mode: 'fixed_credits',
+    pricing_strategy: 'credit_cost_config',
     usage_metering_enabled: true,
     requires_credit_hold: true,
     plan_eligible: true,
@@ -261,7 +262,6 @@ const BASE_FEATURES: MonetizationFeatureRegistryEntry[] = [
     pricing_keys: {
       action_key: 'lead_attribute_mapping',
       credit_cost_config: 'lead_attribute_mapping',
-      action_pricing_config: 'lead_attribute_mapping',
       usage_action_key: 'lead_attribute_mapping',
     },
   },

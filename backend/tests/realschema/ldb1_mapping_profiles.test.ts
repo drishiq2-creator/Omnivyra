@@ -610,42 +610,22 @@ describe('PI-LDB-1 · an entry cannot cross a tenant', () => {
 
 /* ── the rest of the PI-LDB migration set ───────────────────────────────── */
 
-describe('PI-LDB-5 · the billed action can actually be priced', () => {
-  it('has exactly one credit row and one ACTIVE pricing row', async () => {
+describe('PI-LDB-5 · the billed action is priced, FIXED (owner 2026-11-20)', () => {
+  it('has exactly one credit row, at 2 credits', async () => {
     const { rows } = await db.query(
-      `SELECT (SELECT count(*)::int FROM credit_cost_config WHERE action_type='lead_attribute_mapping') credit,
-              (SELECT count(*)::int FROM action_pricing_config WHERE action_key='lead_attribute_mapping' AND is_active) pricing`,
+      `SELECT credits FROM credit_cost_config WHERE action_type='lead_attribute_mapping'`,
     );
-    // `fetchActionPricingRow` throws on zero, which is what makes AI mapping
-    // dark rather than broken until this migration is applied.
-    expect(rows[0].credit).toBe(1);
-    expect(rows[0].pricing).toBe(1);
+    // getCreditCost reads this row; without it AI mapping is dark (degrades to deterministic mapping).
+    expect(rows).toHaveLength(1);
+    expect(Number(rows[0].credits)).toBe(2);
   });
 
-  it('is priced from the model rate card, not the flat fallback', async () => {
+  it('has NO active token-pricing row (pricing hold: no new rate-priced billing)', async () => {
     const { rows } = await db.query(
-      `SELECT source_type FROM action_pricing_config
+      `SELECT count(*)::int n FROM action_pricing_config
         WHERE action_key='lead_attribute_mapping' AND is_active`,
     );
-    expect(rows).toHaveLength(1);
-    // 'fixed' would apply cleanly and then bill every mapping call at the flat
-    // credit_cost_config rate, ignoring tokens entirely. The NOT NULL on this
-    // column caught the first version of the migration omitting it; only an
-    // assertion catches it being present but wrong.
-    expect(rows[0].source_type).toBe('llm');
-  });
-
-  it('sets a spend ceiling rather than leaving it open', async () => {
-    const { rows } = await db.query(
-      `SELECT ceiling_usd, cost_multiplier FROM action_pricing_config
-        WHERE action_key='lead_attribute_mapping' AND is_active`,
-    );
-    expect(rows).toHaveLength(1);
-    // A NULL ceiling leaves the confirm unbounded while `estimateMaxHoldCredits`
-    // falls back to `minimum_charge_usd * 5` = 0, so the hold would sit at the
-    // 1-credit floor while the actual charge was uncapped.
-    expect(rows[0].ceiling_usd).not.toBeNull();
-    expect(Number(rows[0].cost_multiplier)).toBeGreaterThan(0);
+    expect(rows[0].n).toBe(0);
   });
 });
 
