@@ -22,6 +22,7 @@ import { onApprovalDecision } from '../../../../backend/services/creator/enterpr
 import { getReviewRecord } from '../../../../backend/services/creator/creativeReviewStateMachine';
 import type { ReviewState } from '../../../../backend/services/creator/creativeReviewStateMachine';
 import type { CreativeReviewRole } from '../../../../backend/services/creator/creativeReviewRoles';
+import { governanceReviewPersona } from '../../../../backend/services/creator/governanceReviewPersona';
 
 const ALLOWED_ROLES = [
   Role.SUPER_ADMIN,
@@ -36,18 +37,12 @@ const DECISION_TO_STATE: Record<string, ReviewState> = {
   archive: 'archived',
 };
 
-function rbacRoleToReviewRole(role: string | null): CreativeReviewRole {
-  switch (role) {
-    case Role.SUPER_ADMIN: return 'executive_reviewer';
-    case Role.COMPANY_ADMIN: return 'campaign_manager';
-    case Role.CONTENT_REVIEWER: return 'compliance_reviewer';
-    case Role.CONTENT_PUBLISHER: return 'campaign_manager';
-    // SEC-91 W2-A: an unmapped role gets the least-privileged review role
-    // (cannot approve, reject or bypass), never a reviewer role. Unreachable
-    // today — withRBAC admits only the four roles above.
-    default: return 'creative_operator';
-  }
-}
+// SEC-91 W2-A: a role without a reviewer persona gets the least-privileged review role (cannot approve, reject
+// or bypass), never a reviewer role. Every canonical role is mapped explicitly (one map for comment + decide):
+// see governanceReviewPersona. NOTE: under the Approach A tiers CONTENT_MANAGER satisfies this route's list
+// (base tiers CONTENT_PUBLISHER + CONTENT_REVIEWER) and acts as 'creative_operator' - its persona is an open
+// product ruling (b3), kept least-privileged until then.
+const rbacRoleToReviewRole = (role: string | null): CreativeReviewRole => governanceReviewPersona(role);
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'POST') {

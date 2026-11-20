@@ -18,6 +18,7 @@ import {
   ReviewTransitionError,
 } from '../../../../backend/services/creator/creativeReviewStateMachine';
 import type { CreativeReviewRole } from '../../../../backend/services/creator/creativeReviewRoles';
+import { governanceReviewPersona } from '../../../../backend/services/creator/governanceReviewPersona';
 
 const ALLOWED_ROLES = [
   Role.SUPER_ADMIN,
@@ -27,16 +28,8 @@ const ALLOWED_ROLES = [
   Role.CONTENT_CREATOR,
 ];
 
-function rbacRoleToReviewRole(role: string | null): CreativeReviewRole {
-  switch (role) {
-    case Role.SUPER_ADMIN: return 'executive_reviewer';
-    case Role.COMPANY_ADMIN: return 'campaign_manager';
-    case Role.CONTENT_REVIEWER: return 'compliance_reviewer';
-    case Role.CONTENT_PUBLISHER: return 'campaign_manager';
-    case Role.CONTENT_CREATOR: return 'creative_operator';
-    default: return 'creative_operator';
-  }
-}
+// Every canonical role mapped explicitly (one map for comment + decide): see governanceReviewPersona.
+const rbacRoleToReviewRole = (role: string | null): CreativeReviewRole => governanceReviewPersona(role);
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'POST') {
