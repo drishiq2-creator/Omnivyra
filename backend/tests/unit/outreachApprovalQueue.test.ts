@@ -12,7 +12,7 @@ let next: R = { data: [], error: null };
 const calls: Array<[string, unknown[]]> = [];
 function builder() {
   const b: Record<string, unknown> = {};
-  for (const m of ['select', 'eq', 'in', 'order', 'limit']) b[m] = (...a: unknown[]) => { calls.push([m, a]); return b; };
+  for (const m of ['select', 'eq', 'or', 'order', 'limit']) b[m] = (...a: unknown[]) => { calls.push([m, a]); return b; };
   b.then = (res: (v: unknown) => unknown, rej: (e: unknown) => unknown) =>
     (next === 'throw' ? Promise.reject(new Error('socket hang up')) : Promise.resolve({ data: next.data ?? null, error: next.error ?? null })).then(res, rej);
   return b;
@@ -41,7 +41,25 @@ describe('listTasksAwaitingApproval', () => {
       expect.objectContaining({ taskId: '2', stage: 'not_submitted' }),
     ] });
     expect(calls).toContainEqual(['eq', ['company_id', 'co-1']]);
-    expect(calls).toContainEqual(['in', ['status', ['awaiting_approval', 'pending']]]);
+    expect(calls).toContainEqual(['or', ['status.eq.awaiting_approval,and(status.eq.pending,requires_approval.eq.true)']]);
+  });
+
+  it('TENANT PIN: the company filter is its own top-level eq, and the .or() string never mentions company_id', async () => {
+    await listTasksAwaitingApproval('co-1');
+    const ors = calls.filter(([m]) => m === 'or');
+    expect(ors).toHaveLength(1);
+    expect(String(ors[0][1][0])).not.toMatch(/company_id/);
+    expect(calls.filter(([m, a]) => m === 'eq' && a[0] === 'company_id')).toEqual([['eq', ['company_id', 'co-1']]]);
+  });
+
+  it('NO STARVATION: the database filters, so the read asks for exactly limit + 1 decision rows', async () => {
+    await listTasksAwaitingApproval('co-1', { limit: 2 });
+    expect(calls).toContainEqual(['limit', [3]]);
+  });
+
+  it('CONTROL: exactly limit decision rows is complete, not truncated', async () => {
+    next = { data: [row('1', 'awaiting_approval', true), row('2', 'awaiting_approval', true)] };
+    await expect(listTasksAwaitingApproval('co-1', { limit: 2 })).resolves.toMatchObject({ ok: true, truncated: false });
   });
 
   it('reports truncation when more decision rows exist than the limit', async () => {

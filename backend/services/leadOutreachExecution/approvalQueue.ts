@@ -7,6 +7,14 @@
  *   - 'pending' with requires_approval = true  materialised, not yet submitted (the approve route submits then decides).
  * Ordered oldest first, capped at `limit` (truncated is reported, never hidden).
  *
+ * THE DATABASE FILTERS, NOT JS (7c review of 07fdab4ef). An earlier form read both statuses oldest-first with a 4x cap
+ * and filtered in JS: a company with many older 'pending' rows that need no approval filled the window, and the queue
+ * answered empty + truncated FOREVER while real tasks waited (the window never advances). The decision predicate is
+ * now an `.or()` so `limit` is exact and `truncated` precise. TRADE-OFF CHOSEN: an `.or()` string is where a tenant
+ * filter gets swallowed if someone moves `company_id` inside it - so the company filter is a SEPARATE top-level
+ * `.eq()` (PostgREST ANDs top-level filters) and a test pins that the `.or()` string never mentions company_id.
+ * The JS predicate below is kept as a fail-closed second check (NULL requires_approval is never listed).
+ *
  * A FAILED read is never an empty queue (b3 read-failure rule): it returns { ok: false, code } and the route answers
  * 503. The caller names the company; authorization is the ROUTE's job (requireTenantAccess) - this function trusts
  * only the companyId it is given and filters every row by it.
@@ -32,6 +40,8 @@ export type ApprovalQueueResult =
 
 export const APPROVAL_QUEUE_DEFAULT_LIMIT = 50;
 export const APPROVAL_QUEUE_MAX_LIMIT = 200;
+/** The decision predicate. MUST NOT mention company_id - tenant scope is the separate .eq() (pinned by a test). */
+export const APPROVAL_QUEUE_DECISION_FILTER = 'status.eq.awaiting_approval,and(status.eq.pending,requires_approval.eq.true)';
 
 type Row = {
   id: string; lead_id: string; status: string; requires_approval: boolean;
@@ -45,15 +55,15 @@ export async function listTasksAwaitingApproval(companyId: string, opts: { limit
     const { data, error } = await ownedDbTable('outreach_tasks')
       .select('id, lead_id, status, requires_approval, channel, kind, action, explanation, created_at')
       .eq('company_id', companyId)
-      .in('status', ['awaiting_approval', 'pending'])
+      .or(APPROVAL_QUEUE_DECISION_FILTER)
       .order('created_at', { ascending: true })
-      .limit(limit * 4 + 1);
+      .limit(limit + 1);
     if (error) return { ok: false, code: 'OUTREACH_TASKS_UNREADABLE', message: String(error.message ?? 'read error') };
     rows = (data ?? []) as Row[];
   } catch (e) {
     return { ok: false, code: 'OUTREACH_TASKS_UNREADABLE', message: e instanceof Error ? e.message : String(e) };
   }
-  // 'pending' rows that do NOT require approval are not waiting for anyone; only the two decision stages are listed.
+  // Fail-closed second check: the database already filtered; a row that is not a decision row is never listed.
   const waiting = rows.filter((r) => r.status === 'awaiting_approval' || (r.status === 'pending' && r.requires_approval === true));
   const items = waiting.slice(0, limit).map((r): ApprovalQueueItem => ({
     taskId: r.id,
@@ -65,7 +75,7 @@ export async function listTasksAwaitingApproval(companyId: string, opts: { limit
     explanation: r.explanation ?? null,
     createdAt: r.created_at,
   }));
-  // Truncated when more decision rows exist than shown, OR the read hit its cap (more rows may exist beyond it).
-  const truncated = waiting.length > limit || rows.length > limit * 4;
+  // The read asks for limit + 1 decision rows: one more than shown means more exist.
+  const truncated = rows.length > limit;
   return { ok: true, items, truncated };
 }
