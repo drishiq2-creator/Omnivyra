@@ -40,6 +40,8 @@ jest.mock('../../security/IdentityResolver', () => ({
 // so an upsert is visible to the subsequent resolver read.
 let __profileRow: any = null;
 let __billingContextRow: any = null;
+// c6 2026-11-20: a READ ERROR on billing_context - the re-read after a successful capture fails.
+let __ctxReadError: { code?: string; message: string } | null = null;
 let __upsertCalls: any[] = [];
 let __upsertError: any = null;
 
@@ -50,7 +52,7 @@ jest.mock('@/backend/db/supabaseClient', () => ({
       b.select = () => b;
       b.eq = () => b;
       b.maybeSingle = () => {
-        if (table === 'billing_context') return Promise.resolve({ data: __billingContextRow, error: null });
+        if (table === 'billing_context') return Promise.resolve(__ctxReadError ? { data: null, error: __ctxReadError } : { data: __billingContextRow, error: null });
         if (table === 'company_billing_profiles') return Promise.resolve({ data: __profileRow, error: null });
         return Promise.resolve({ data: null, error: null });
       };
@@ -83,7 +85,7 @@ function mockReqRes(method: string, body?: unknown) {
 
 beforeEach(() => {
   __authOk = true; __activeOrgId = 'org-1'; __sessionEmail = 'user@example.com';
-  __profileRow = null; __billingContextRow = null; __upsertCalls = []; __upsertError = null;
+  __profileRow = null; __billingContextRow = null; __upsertCalls = []; __upsertError = null; __ctxReadError = null;
 });
 
 describe('PUT /api/billing/profile — auth + method', () => {
@@ -235,5 +237,17 @@ describe('PUT /api/billing/profile — geography propagation + pricing-blindness
     for (const f of ['price', 'amount', 'plan', 'pricing', 'cost', 'total', 'subtotal']) {
       expect(serialized).not.toContain(`"${f}"`);
     }
+  });
+});
+
+// c6 2026-11-20: a profile that was SAVED is never reported as a failed save because the re-read failed.
+describe('PUT /api/billing/profile - re-read after a successful capture fails', () => {
+  test('-> 200 captured + reread note (not 500)', async () => {
+    __ctxReadError = { code: '08006', message: 'connection reset' };
+    const { req, res } = mockReqRes('PUT', { billing_country: 'IN' });
+    await handler(req, res);
+    expect(__upsertCalls.length).toBeGreaterThan(0); // PREMISE: the write happened
+    expect(res._status).toBe(200);
+    expect(res._json).toMatchObject({ captured: true, reread: 'billing_context_unreadable' });
   });
 });

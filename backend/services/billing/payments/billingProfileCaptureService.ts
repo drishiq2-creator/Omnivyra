@@ -21,7 +21,7 @@
  */
 
 import { supabase } from '../../../db/supabaseClient';
-import { resolveOrgBillingContext, type OrgBillingContext } from './orgBillingContextResolver';
+import { resolveOrgBillingContext, OrgBillingContextUnreadableError, type OrgBillingContext } from './orgBillingContextResolver';
 
 const ISO_COUNTRY = /^[A-Za-z]{2}$/;
 const ISO_CURRENCY = /^[A-Za-z]{3}$/;
@@ -86,7 +86,8 @@ export interface CaptureArgs {
 }
 
 export type CaptureResult =
-  | { ok: true; context: OrgBillingContext }
+  /** context null = the write SUCCEEDED but the re-read failed (never reported as a failed capture). */
+  | { ok: true; context: OrgBillingContext | null }
   | { ok: false; code: 'billing_email_unavailable' | 'company_billing_profiles_unavailable' | 'profile_read_failed' | 'profile_capture_failed'; message?: string };
 
 /**
@@ -147,6 +148,11 @@ export async function captureBillingProfileGeography(args: CaptureArgs): Promise
     return { ok: false, code: 'profile_capture_failed', message: upsertErr.message };
   }
 
-  const context = await resolveOrgBillingContext(organizationId);
-  return { ok: true, context };
+  try {
+    const context = await resolveOrgBillingContext(organizationId);
+    return { ok: true, context };
+  } catch (err) {
+    if (err instanceof OrgBillingContextUnreadableError) return { ok: true, context: null };
+    throw err;
+  }
 }

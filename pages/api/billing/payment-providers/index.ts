@@ -27,7 +27,7 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 import { resolvePrincipal } from '../../../../backend/security/IdentityResolver';
 import { assertTenantAccess } from '../../../../backend/security/TenantGuard';
 import { resolveAvailableProviders } from '../../../../backend/services/billing/payments/paymentProviderPolicyResolver';
-import { resolveOrgBillingContext } from '../../../../backend/services/billing/payments/orgBillingContextResolver';
+import { resolveOrgBillingContext, OrgBillingContextUnreadableError } from '../../../../backend/services/billing/payments/orgBillingContextResolver';
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'GET') {
@@ -75,7 +75,14 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       organizationId: auth.principal.activeOrgId,
     });
     const authorizedOrgId = orgAccess.ok === true ? orgAccess.access.organizationId : null;
-    const orgCtx = await resolveOrgBillingContext(authorizedOrgId);
+    let orgCtx;
+    try {
+      orgCtx = await resolveOrgBillingContext(authorizedOrgId);
+    } catch (err) {
+      // An unreadable context is not "geography unknown" (which would list providers for no geography).
+      if (err instanceof OrgBillingContextUnreadableError) return res.status(503).json({ error: 'billing_context_unreadable', code: err.code });
+      throw err;
+    }
     country = orgCtx.country;
     currency = orgCtx.currency;
     geographyKnown = orgCtx.country !== null;

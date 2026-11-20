@@ -15,6 +15,7 @@ import {
   type CreateTemplateInput,
 } from '../../../../backend/services/whatsappTemplateService';
 import { loadOwnedSenderAccount } from '../../../../backend/services/whatsappBroadcastService';
+import { refuseIfWhatsAppDisabled } from '../../../../backend/services/whatsappAvailability';
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
   // ── GET: list templates ───────────────────────────────────────────────────
@@ -44,6 +45,9 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
 
   // ── POST: submit template ─────────────────────────────────────────────────
   if (req.method === 'POST') {
+    // Launch gate (b3, 11-18): no template is submitted to Meta while WhatsApp is disabled. First, before any read.
+    if (refuseIfWhatsAppDisabled(res)) return;
+
     const {
       company_id,
       social_account_id,

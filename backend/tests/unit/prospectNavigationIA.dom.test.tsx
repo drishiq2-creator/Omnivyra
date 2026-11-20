@@ -14,11 +14,11 @@
  */
 
 import { HEADER_NAV_ITEMS, isPathMatch } from '../../../components/layout/GlobalHeaderNav';
+import { WEBSITE_LEAD_CAPTURE_LINKS } from '../../../lib/nav/websiteLeadCapture';
 
 const byId = (id: string) => HEADER_NAV_ITEMS.find((i) => i.id === id);
 const byLabel = (label: string) => HEADER_NAV_ITEMS.find((i) => i.label === label);
 const prospect = () => byId('prospect')!;
-const website = () => byId('website-capture')!;
 const childLabels = (id: string) => byId(id)!.children.map((c) => c.label);
 const childHref = (id: string, label: string) =>
   byId(id)!.children.find((c) => c.label === label)?.href;
@@ -65,15 +65,17 @@ describe('3/4 — Lead Intelligence nests under Prospect and keeps its two items
   });
 });
 
-describe('5/6 — Web & Capture is separate and complete', () => {
-  it('is its own top-level group, not a child of Prospect', () => {
-    expect(website()).toBeDefined();
-    expect(website().label).toBe('Web & Capture');
+// UPDATED (owner 2026-11-20, via b3): "Web & Capture" left the header. Its five destinations moved, routes UNCHANGED,
+// to the admin-only "Website & lead capture" section at the bottom of the Command Center (lib/nav/websiteLeadCapture.ts).
+describe('5/6 — website & lead capture moved out of the header, routes unchanged', () => {
+  it('Web & Capture is no longer a header group, and its items are not in Prospect either', () => {
+    expect(byId('website-capture')).toBeUndefined();
+    expect(byLabel('Web & Capture')).toBeUndefined();
     expect(childLabels('prospect')).not.toContain('Website Setup');
   });
 
-  it('retains all five existing routes unchanged', () => {
-    expect(website().children.map((c) => c.href)).toEqual([
+  it('retains all five existing routes unchanged, now in WEBSITE_LEAD_CAPTURE_LINKS', () => {
+    expect(WEBSITE_LEAD_CAPTURE_LINKS.map((c) => c.href)).toEqual([
       '/website-setup',
       '/website-health',
       '/integrations?focus=website',
@@ -97,14 +99,17 @@ describe('8 — matcher behaviour: no unintended double activation', () => {
     ['/prospects', 'Prospect'],
     ['/prospects/abc-123', 'Prospect'],
     ['/lead-intelligence', 'Prospect'],
-    ['/website-setup', 'Web & Capture'],
-    ['/website-health', 'Web & Capture'],
-    ['/integrations', 'Web & Capture'],
-    ['/leads', 'Web & Capture'],
-    ['/lead-capture', 'Web & Capture'],
+    ['/command-center/active-leads', 'Prospect'],
   ])('%s activates exactly one group: %s', (pathname, expected) => {
     expect(activeGroups(pathname as string)).toEqual([expected]);
   });
+
+  // UPDATED (owner 2026-11-20): the website & lead-capture routes left the header, so they activate NO header group.
+  // They still never activate Prospect (the old overlap the CRITICAL cases below guard).
+  it.each(['/website-setup', '/website-health', '/integrations', '/leads', '/lead-capture'])(
+    '%s activates no header group (it moved to the Command Center section)', (pathname) => {
+      expect(activeGroups(pathname)).toEqual([]);
+    });
 
   it('CRITICAL: /lead-capture does not also activate Prospect via /lead-intelligence', () => {
     expect(activeGroups('/lead-capture')).not.toContain('Prospect');
@@ -121,8 +126,8 @@ describe('8 — matcher behaviour: no unintended double activation', () => {
 
   it('query strings do not change activation (normalizePath strips them)', () => {
     expect(activeGroups('/lead-intelligence?tab=leads')).toEqual(['Prospect']);
-    expect(activeGroups('/leads?tab=forms')).toEqual(['Web & Capture']);
-    expect(activeGroups('/integrations?focus=website')).toEqual(['Web & Capture']);
+    expect(activeGroups('/leads?tab=forms')).toEqual([]);
+    expect(activeGroups('/integrations?focus=website')).toEqual([]);
   });
 });
 
@@ -133,8 +138,13 @@ describe('9 — existing routes and deep links are unchanged', () => {
     }
   });
 
-  it('every route previously reachable is still reachable somewhere in the nav', () => {
-    const hrefs = HEADER_NAV_ITEMS.flatMap((i) => i.children.map((c) => c.href));
+  // UPDATED (owner 2026-11-20): "reachable" is the header OR the Command Center's Website & lead capture section,
+  // where the five website routes moved. The property is unchanged: no destination disappeared.
+  it('every route previously reachable is still reachable (header or Command Center section)', () => {
+    const hrefs = [
+      ...HEADER_NAV_ITEMS.flatMap((i) => i.children.map((c) => c.href)),
+      ...WEBSITE_LEAD_CAPTURE_LINKS.map((l) => l.href),
+    ];
     for (const href of [
       '/lead-intelligence',
       '/lead-intelligence?tab=leads',
@@ -237,5 +247,24 @@ describe('12 — mobile Home is unchanged', () => {
 
   it('still closes the drawer on click', () => {
     expect(homeLinks()[1]).toContain('setMobileOpen(false)');
+  });
+});
+
+
+describe('10 — owner 2026-11-20: a user sees their LEADS and their activity under Prospect', () => {
+  it('Active Leads is under Prospect ONLY (removed from Engagement); its route is unchanged', () => {
+    expect(childHref('prospect', 'Active Leads')).toBe('/command-center/active-leads');
+    expect(byLabel('Engagement')!.children.map((c) => c.label)).not.toContain('Active Leads');
+    expect(byLabel('Engagement')!.children.map((c) => c.href)).not.toContain('/command-center/active-leads');
+  });
+
+  it('every Prospect item points at a route that exists on main (no link to an unbuilt feature)', () => {
+    expect(byId('prospect')!.children.map((c) => c.href)).toEqual([
+      '/prospects', '/lead-intelligence', '/lead-intelligence?tab=leads', '/command-center/active-leads',
+    ]);
+  });
+
+  it('ICP is NOT linked yet (main mis-renders its 403; it is added when c6\'s 403-safe page lands)', () => {
+    expect(byId('prospect')!.children.map((c) => c.href)).not.toContain('/prospects/icp');
   });
 });
