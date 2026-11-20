@@ -16,13 +16,18 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 const apiFetch = jest.fn();
 jest.mock('@/lib/apiFetch', () => ({ apiFetch: (...a: unknown[]) => apiFetch(...a) }));
 
-import TopUpPanel from '../../../components/billing/TopUpPanel';
+import TopUpPanel, { TOPUP_CHECK_TIMEOUT_MS } from '../../../components/billing/TopUpPanel';
 import {
   BLOCKS_NEW_PURCHASE, NOT_CHARGED_ACTIONS, TOPUP_NOT_CHARGED, TOPUP_PAID_PENDING, TOPUP_UNCONFIRMED, VERIFY_OUTCOME_KINDS,
   classifyClose, classifyVerify, createOrderMessage,
 } from '../../../lib/billing/topUpOutcome';
 
 type Answer = { status: number; body?: unknown } | 'throw';
+/** 'hang' = the server accepts and never answers; like real fetch, the request rejects only when its signal aborts. */
+const hang = (init?: RequestInit): Promise<any> =>
+  new Promise((_, reject) => {
+    init?.signal?.addEventListener('abort', () => reject(new DOMException('The operation was aborted.', 'AbortError')));
+  });
 const res = (a: Answer | Promise<Answer>): Promise<any> =>
   a instanceof Promise
     ? a.then(res)
@@ -33,18 +38,24 @@ const PACK = { id: 'p1', credits: 250, price: 499, currency: 'INR', label: 'Star
 const ORDER_OK = { status: 200, body: { ok: true, provider: 'razorpay', purchase_id: 'pu1', provider_order_id: 'o1', key_id: 'k', amount_subunits: 49900, currency: 'INR' } };
 
 let verifyAnswers: Answer[] = [];
-let closeAnswers: (Answer | Promise<Answer>)[] = [];
+let closeAnswers: (Answer | Promise<Answer> | 'hang')[] = [];
+let verifyHangs = false;
 let createOrder: Answer = ORDER_OK;
 beforeEach(() => {
   apiFetch.mockReset();
   verifyAnswers = [];
+  verifyHangs = false;
   closeAnswers = [{ status: 200, body: { ok: true, action: 'closed' } }];
   createOrder = ORDER_OK;
-  apiFetch.mockImplementation((url: string) => {
+  apiFetch.mockImplementation((url: string, init?: RequestInit) => {
     if (url.includes('/api/billing/topup/catalog')) return res({ status: 200, body: { packs: [PACK] } });
     if (url.includes('/api/billing/checkout/create-order')) return res(createOrder);
+    if (url.includes('/api/billing/checkout/verify') && verifyHangs) return hang(init);
     if (url.includes('/api/billing/checkout/verify')) return res(verifyAnswers.length > 1 ? verifyAnswers.shift()! : verifyAnswers[0]);
-    if (url.includes('/api/billing/checkout/close')) return res(closeAnswers.length > 1 ? closeAnswers.shift()! : closeAnswers[0]);
+    if (url.includes('/api/billing/checkout/close')) {
+      const a = closeAnswers.length > 1 ? closeAnswers.shift()! : closeAnswers[0];
+      return a === 'hang' ? hang(init) : res(a);
+    }
     return res({ status: 200, body: {} });
   });
   // A Razorpay checkout that "pays" as soon as it opens.
@@ -207,6 +218,28 @@ describe('browser cancel / failure is a claim; /checkout/close (provider-first) 
       .toEqual({ org_id: 'co-a', purchase_id: 'pu1', reason: 'client_cancelled' });
     expect(verifyCalls()).toHaveLength(0);
     expect(buyButton().disabled).toBe(false);
+  });
+
+  it.each<[string, () => void]>([
+    ['a close that never answers (after a dismissal)', () => { razorpayDismisses(); closeAnswers = ['hang']; }],
+    ['a verify that never answers (after payment)', () => { verifyHangs = true; }],
+  ])('%s: still "verifying" before the timeout; after it, "couldn\'t confirm" + Check again, Buy disabled', async (_n, setup) => {
+    jest.useFakeTimers();
+    try {
+      setup();
+      render(<TopUpPanel orgId="co-a" />);
+      await buy();
+      // Control: before the timeout the panel is genuinely stuck waiting (so the timeout is what releases it).
+      await act(async () => { jest.advanceTimersByTime(TOPUP_CHECK_TIMEOUT_MS - 1); });
+      expect(screen.queryByRole('button', { name: 'Check again' })).toBeNull();
+      await act(async () => { jest.advanceTimersByTime(1); });
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Check again' })).toBeTruthy());
+      expect(screen.getByText(TOPUP_UNCONFIRMED)).toBeTruthy();
+      expect(screen.queryByText('Payment cancelled')).toBeNull();
+      expect(buyButton().disabled).toBe(true);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   it('a slow close answer never overwrites a LATER verify (payment.failed, then success inside the same modal)', async () => {

@@ -67,18 +67,31 @@ async function postJson(url: string, body: unknown, extraHeaders?: Record<string
   return res.json();
 }
 
-/** Like postJson but keeps the HTTP status (verify outcomes depend on it). Never throws: status null = no answer. */
+/** verify / close may wait on the payment provider; past this, the panel stops waiting and says "couldn't confirm". */
+export const TOPUP_CHECK_TIMEOUT_MS = 30_000;
+
+/**
+ * Like postJson but keeps the HTTP status (verify outcomes depend on it). Never throws: status null = no answer.
+ * Bounded (7c 2026-11-20): a server that accepts and never answers must not leave the panel in 'verifying' with Buy
+ * disabled forever. The abort is caught HERE: apiFetch re-throws a caller's abort (lib/apiFetch.ts), and the callers
+ * are fire-and-forget (`void reportClosure(...)`), so an uncaught abort would strand the panel in 'verifying'.
+ */
 async function postJsonWithStatus(url: string, body: unknown, extraHeaders?: Record<string, string>): Promise<{ status: number | null; body: any }> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), TOPUP_CHECK_TIMEOUT_MS);
   try {
     const res = await apiFetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...(extraHeaders ?? {}) },
       body: JSON.stringify(body),
+      signal: ctrl.signal,
     });
     return { status: res.status, body: await res.json().catch(() => null) };
   } catch (err) {
     console.warn('[top-up] request did not complete:', url, err);
     return { status: null, body: null };
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -158,7 +171,10 @@ export default function TopUpPanel({ orgId }: { orgId: string | null | undefined
   // outcome kinds, is the mechanism, not style (7c 2026-11-20): a new VerifyOutcome kind is a compile error here until
   // Status is widened and the panel decides how to show it. Do not rewrite it as a per-kind switch or widen Status['kind'].
   const applyOutcome = useCallback((seq: number, outcome: VerifyOutcome, notChargedKind: 'cancelled' | 'failed') => {
-    if (seq !== checkSeq.current) return; // a newer check owns the panel
+    // A newer check owns the panel. This return sits ABOVE every branch on purpose (7c): a stale answer must not run
+    // `lastCheck.current = null` either, or a late close would wipe the newer check's "Check again". Do not move it
+    // down to guard only the setStatus calls.
+    if (seq !== checkSeq.current) return;
     if (outcome.kind === 'credited') {
       lastCheck.current = null;
       setStatus({ kind: 'success', msg: outcome.credits ? `${outcome.credits.toLocaleString()} credits added` : 'Credits added' });
@@ -181,6 +197,10 @@ export default function TopUpPanel({ orgId }: { orgId: string | null | undefined
    * The panel shows the SERVER's answer (7c 2026-11-20): the browser event alone
    * proves nothing about the charge. A lost close leaves the row to the expiry
    * sweep and shows "couldn't confirm" with Buy disabled; "Check again" re-closes.
+   *
+   * Accepted cost (7c, stated so it is a choice): while the provider is unreachable, close answers deferred_unknown,
+   * so a user who dismissed WITHOUT paying also sees "couldn't confirm" with Buy disabled until the provider recovers
+   * (reload is the escape). We never invite a second payment when we don't know whether the first one was taken.
    */
   const reportClosure = useCallback(async (
     order: any,
