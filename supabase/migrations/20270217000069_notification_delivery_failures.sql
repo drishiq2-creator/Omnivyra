@@ -54,6 +54,20 @@ GRANT SELECT, INSERT, DELETE ON TABLE public.notification_delivery_failures TO s
 -- POSTCONDITION: the shape this file promises, read back from the catalog.
 DO $postcondition$
 BEGIN
+  -- REFUSE RATHER THAN ADOPT (7c): CREATE TABLE IF NOT EXISTS would silently adopt a pre-existing table of this name
+  -- with another shape, and then neither CHECK below would exist. Assert the exact columns, types and nullability,
+  -- and both CHECK constraints by name.
+  IF (SELECT string_agg(a.attname || ':' || format_type(a.atttypid, a.atttypmod) || ':' || CASE WHEN a.attnotnull THEN 'nn' ELSE 'null' END, ',' ORDER BY a.attname)
+        FROM pg_attribute a
+       WHERE a.attrelid = 'public.notification_delivery_failures'::regclass AND a.attnum > 0 AND NOT a.attisdropped)
+     IS DISTINCT FROM 'company_id:uuid:null,created_at:timestamp with time zone:nn,id:uuid:nn,reason:text:nn,type:text:nn' THEN
+    RAISE EXCEPTION '20270217000069 postcondition: notification_delivery_failures exists with an unexpected shape - refusing to adopt it';
+  END IF;
+  IF (SELECT count(*) FROM pg_constraint
+       WHERE conrelid = 'public.notification_delivery_failures'::regclass AND contype = 'c'
+         AND conname IN ('notification_delivery_failures_reason_known', 'notification_delivery_failures_type_bounded')) <> 2 THEN
+    RAISE EXCEPTION '20270217000069 postcondition: the reason / type CHECK constraints are missing - refusing to adopt the table';
+  END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_class WHERE oid = 'public.notification_delivery_failures'::regclass AND relrowsecurity) THEN
     RAISE EXCEPTION '20270217000069 postcondition: RLS is not enabled';
   END IF;
