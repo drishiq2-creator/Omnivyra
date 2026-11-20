@@ -108,6 +108,8 @@ async function probeSchema(): Promise<SchemaHealthResult> {
           .select(exp.column)
           .limit(0);
         if (probe.error) {
+          // security-read-exempt: boot-time schema diagnostic, not an authorization decision; a real probe error is
+          // deliberately reported as the column MISSING so operators see any drift (the conservative direction).
           const msg = (probe.error.message ?? '').toLowerCase();
           if (msg.includes(`could not find the '${exp.column}' column`) || (probe.error as any).code === 'PGRST204') {
             missing.push({ table: exp.table, column: exp.column, migration: exp.migration, consumer: exp.consumer });
