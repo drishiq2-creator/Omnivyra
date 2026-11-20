@@ -209,10 +209,6 @@ export const HEADER_NAV_ITEMS: HeaderNavItem[] = [
     matchers: ['/prospects', '/lead-intelligence', '/command-center/active-leads'],
     children: [
       { label: 'Prospects', href: '/prospects', description: 'Every prospect this company has, newest first.' },
-      // PI-LDB — reachable from the menu, not only by URL. `/prospects/[id]`
-      // sat unreachable for exactly this reason until WS-10 added the list
-      // page; an import flow nothing links to would repeat that mistake.
-      { label: 'Import', href: '/prospects/import', description: 'Bring prospects in from a CSV export, with the columns mapped for you.' },
       { label: 'Overview', href: '/lead-intelligence', group: 'Lead Intelligence', description: 'Totals, intent, source and status distribution.' },
       { label: 'All Leads', href: '/lead-intelligence?tab=leads', group: 'Lead Intelligence', description: 'Unified list across every source. Open a lead for its activity.' },
       { label: 'Active Leads', href: '/command-center/active-leads', group: 'Work your leads', description: 'Lead review and action workspace.' },

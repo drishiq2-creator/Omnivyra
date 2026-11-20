@@ -39,6 +39,9 @@ import {
   createGatewayMappingProposer,
   parseProposerResponse,
   GatewayProposerError,
+  MappingInputTooLargeError,
+  AI_MAPPING_MAX_COLUMNS,
+  AI_MAPPING_MAX_INPUT_TOKENS,
   LEAD_ATTRIBUTE_MAPPING_OPERATION,
   LEAD_ATTRIBUTE_MAPPING_ACTION,
 } from '../../services/leadMapping/gatewayProposer';
@@ -351,7 +354,7 @@ describe('PI-LDB-5 · billing and gateway arguments', () => {
       request({ headers: ['A'], samples: { A: [] } }),
     );
 
-    const wideHeaders = Array.from({ length: 60 }, (_, i) => `Column ${i}`);
+    const wideHeaders = Array.from({ length: AI_MAPPING_MAX_COLUMNS }, (_, i) => `Column ${i}`);
     const wide = fakeGateway('{"proposals":[]}');
     await createGatewayMappingProposer(ctx, { runCompletion: wide.run })(
       request({
@@ -363,8 +366,69 @@ describe('PI-LDB-5 · billing and gateway arguments', () => {
     const a = (small.calls[0] as any).completion.max_tokens;
     const b = (wide.calls[0] as any).completion.max_tokens;
     expect(b).toBeGreaterThan(a);
-    // Capped: at a fixed price an unbounded output is unbounded cost to us.
-    expect(b).toBeLessThanOrEqual(3_000);
+    // Capped: at a fixed price an unbounded output is unbounded cost to us (the 10x bound, gatewayProposer.ts).
+    expect(b).toBeLessThanOrEqual(1_000);
+  });
+
+  /* ── THE COST BOUND (7c + b3, 2026-11-20): refused BEFORE the billed call, so nothing is charged. ── */
+  const columns = (n: number) => Array.from({ length: n }, (_, i) => `Column ${i}`);
+  const wide = (n: number, describe = '') => {
+    const headers = columns(n);
+    return request({
+      headers,
+      samples: Object.fromEntries(headers.map((h) => [h, []])),
+      ...(describe ? { fieldDescriptions: Object.fromEntries(headers.map((h) => [h, describe])) } : {}),
+    });
+  };
+
+  it('control: exactly at the column bound, the call is made', async () => {
+    const gw = fakeGateway('{"proposals":[]}');
+    await createGatewayMappingProposer(ctx, { runCompletion: gw.run })(wide(AI_MAPPING_MAX_COLUMNS));
+    expect(gw.calls).toHaveLength(1);
+  });
+
+  it('one column over the bound is REFUSED before any billed call', async () => {
+    const gw = fakeGateway('{"proposals":[]}');
+    await expect(
+      createGatewayMappingProposer(ctx, { runCompletion: gw.run })(wide(AI_MAPPING_MAX_COLUMNS + 1)),
+    ).rejects.toBeInstanceOf(MappingInputTooLargeError);
+    expect(gw.calls).toHaveLength(0);
+  });
+
+  it('input over the token bound (few columns, long text) is REFUSED before any billed call', async () => {
+    // 10 columns x 2,000 chars of description = 20,000 chars ~ 7,300 estimated tokens > the bound.
+    const gw = fakeGateway('{"proposals":[]}');
+    await expect(
+      createGatewayMappingProposer(ctx, { runCompletion: gw.run })(wide(10, 'x'.repeat(2_000))),
+    ).rejects.toBeInstanceOf(MappingInputTooLargeError);
+    expect(gw.calls).toHaveLength(0);
+    expect(AI_MAPPING_MAX_INPUT_TOKENS).toBe(5_000);
+  });
+
+  it('control: the same 10 columns with short text are under the token bound, and the call is made', async () => {
+    const gw = fakeGateway('{"proposals":[]}');
+    await createGatewayMappingProposer(ctx, { runCompletion: gw.run })(wide(10, 'Work email of the contact'));
+    expect(gw.calls).toHaveLength(1);
+  });
+
+  it('the wizard copy is keyed on the SAME cause and limit the server uses (pinned both ways)', () => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const client = require('../../../components/prospects/import/aiMappingNotices');
+    expect(client.AI_MAPPING_TOO_LARGE_CAUSE).toBe(`proposer_unavailable:${new MappingInputTooLargeError('x').name}`);
+    expect(client.AI_MAPPING_COLUMN_LIMIT).toBe(AI_MAPPING_MAX_COLUMNS);
+  });
+
+  it('an oversize file still maps deterministically, and the run SAYS why AI was not used', async () => {
+    const gw = fakeGateway('{"proposals":[]}');
+    const headers = ['Work E-mail', ...columns(AI_MAPPING_MAX_COLUMNS)];
+    const result = await proposeFieldMappings(
+      { sourceType: 'csv', tenantId: TENANT, headers, samples: Object.fromEntries(headers.map((h) => [h, []])) } as never,
+      createGatewayMappingProposer(ctx, { runCompletion: gw.run }),
+    );
+    expect(gw.calls).toHaveLength(0);
+    expect(result.proposals).toHaveLength(headers.length);
+    // The wizard keys its user-facing copy on exactly this cause.
+    expect(result.degraded).toEqual([{ sourceField: '*', cause: 'proposer_unavailable:MappingInputTooLargeError' }]);
   });
 
   it('keys idempotency on the schema AND the question, not on the schema alone', async () => {
