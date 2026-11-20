@@ -7,9 +7,31 @@
  * preservation. Sandbox-only — no live settlement, no network.
  */
 
-// Inert supabase mock — the orchestrator transitively imports modules that
-// build a supabase client at load time; injected deps mean it is never used.
-jest.mock('../../db/supabaseClient', () => ({ supabase: { from: () => ({}) } }));
+// supabase mock. c6 2026-11-20: was `from: () => ({})`, described as "never used" - but the real replay lookup and the
+// catalog resolver DID call it; their catches swallowed the TypeError into "no session" / compiled fallback, so these
+// cases were green for the wrong reason. Now explicit per table (same as checkoutSessionOrchestrator.test.ts):
+// billing_checkout_sessions = genuinely none; hidden_billing_catalog = the documented absent-table fallback.
+jest.mock('../../db/supabaseClient', () => {
+  const make = (single: () => Promise<any>) => {
+    const chain: any = {};
+    chain.select = () => chain; chain.eq = () => chain;
+    chain.maybeSingle = single;
+    chain.upsert = async () => ({ error: null });
+    chain.insert = async () => ({ error: null });
+    return chain;
+  };
+  return {
+    supabase: {
+      from: (table: string) => {
+        if (table === 'billing_checkout_sessions') return make(async () => ({ data: null, error: null }));
+        if (table === 'hidden_billing_catalog') {
+          return make(async () => ({ data: null, error: { message: 'relation "hidden_billing_catalog" does not exist' } }));
+        }
+        throw new Error(`cashfreePhonepeProviders.test: unexpected table ${table}`);
+      },
+    },
+  };
+});
 
 import {
   getProviderAdapter,

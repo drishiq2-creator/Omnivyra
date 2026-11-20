@@ -37,9 +37,11 @@ jest.mock('../../security/IdentityResolver', () => ({
 
 let __orchestratorResult: any = null;
 let __orchestratorArgs: any[] = [];
+let __orchestratorThrow: unknown = null;
 jest.mock('../../services/billing/payments/checkoutSessionOrchestrator', () => ({
   orchestrateCheckoutSession: async (args: any) => {
     __orchestratorArgs.push(args);
+    if (__orchestratorThrow) throw __orchestratorThrow;
     return __orchestratorResult;
   },
 }));
@@ -69,7 +71,7 @@ const OK_RESULT = {
 
 beforeEach(() => {
   __authOk = true; __activeOrgId = 'org-1';
-  __orchestratorResult = OK_RESULT; __orchestratorArgs = [];
+  __orchestratorResult = OK_RESULT; __orchestratorArgs = []; __orchestratorThrow = null;
 });
 
 describe('checkout-session endpoint — auth + method', () => {
@@ -203,5 +205,31 @@ describe('checkout-session endpoint — hidden-pricing preservation', () => {
     for (const f of ['amount', 'price', 'plan_price', 'pricing', 'subtotal', 'total', 'invoice']) {
       expect(serialized).not.toContain(`"${f}"`);
     }
+  });
+});
+
+// c6 2026-11-20 (dropped-error batch 4): the orchestrator's idempotent-replay lookup now THROWS on a failed read
+// (it answered "no session" and a second provider checkout was dispatched). The route answers 503, state only.
+describe('checkout-session endpoint - unreadable checkout state', () => {
+  const { CheckoutSessionStoreReadError } = jest.requireActual('../../services/billing/payments/checkoutSessionStore');
+  const BODY = { provider: 'razorpay', intent_type: 'topup', topup_reference: 'topup_credits_500' };
+  test('CheckoutSessionStoreReadError -> 503 checkout_state_unreadable, no session, no retry wording', async () => {
+    __orchestratorThrow = new CheckoutSessionStoreReadError('lookup', 'connection terminated');
+    const { req, res } = mockReqRes('POST', BODY);
+    await handler(req, res);
+    expect(res._status).toBe(503);
+    expect(res._json).toEqual({ error: 'checkout_state_unreadable', code: 'CHECKOUT_SESSION_STATE_UNREADABLE' });
+    expect(JSON.stringify(res._json).toLowerCase()).not.toMatch(/retry|try again/);
+  });
+  test('CONTROL: any other error is NOT mapped to 503 (the catch is keyed on the class)', async () => {
+    __orchestratorThrow = new Error('something else');
+    const { req, res } = mockReqRes('POST', BODY);
+    await Promise.resolve(handler(req, res)).catch(() => undefined);
+    expect(res._status).not.toBe(503);
+  });
+  test('CONTROL: no throw -> 200 on the same body', async () => {
+    const { req, res } = mockReqRes('POST', BODY);
+    await handler(req, res);
+    expect(res._status).toBe(200);
   });
 });

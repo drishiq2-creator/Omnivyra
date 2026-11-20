@@ -1537,7 +1537,9 @@ async function runSchedulerCycleBody(opts: { includePublishSafetyNet?: boolean }
     lastSettlementExpirySweepRun = Date.now();
     try {
       const result = await runSettlementExpirySweepJob();
-      if (result.ran && (result.expired > 0 || result.duplicateSuppressed > 0)) {
+      if (result.failed) {
+        console.error('❌ Settlement expiry sweep could not complete (see settlement_expiry_sweep_failed)');
+      } else if (result.ran && (result.expired > 0 || result.duplicateSuppressed > 0)) {
         console.log(
           `✅ Settlement expiry sweep: ${result.expired} expired, ${result.duplicateSuppressed} duplicate-suppressed (${result.candidates} scanned)`
         );

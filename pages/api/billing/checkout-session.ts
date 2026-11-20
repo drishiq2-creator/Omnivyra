@@ -29,6 +29,7 @@ import {
   type OrchestrateCheckoutResult,
 } from '../../../backend/services/billing/payments/checkoutSessionOrchestrator';
 import type { SupportedProvider } from '../../../backend/services/billing/payments/paymentProviderAdapter';
+import { CheckoutSessionStoreReadError } from '../../../backend/services/billing/payments/checkoutSessionStore';
 
 // Rejection codes that are the caller's fault (4xx) vs a provider fault (502).
 const CLIENT_REJECTIONS = new Set([
@@ -107,14 +108,24 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     return res.status(400).json({ error: 'unknown_provider', provider });
   }
 
-  const result: OrchestrateCheckoutResult = await orchestrateCheckoutSession({
-    // The AUTHORIZED organization, not the pointer it came from.
-    organizationId: tenant.organizationId,
-    initiatedByUserId: auth.principal.userId,
-    provider: provider as SupportedProvider,
-    intentType,
-    reference,
-  });
+  let result: OrchestrateCheckoutResult;
+  try {
+    result = await orchestrateCheckoutSession({
+      // The AUTHORIZED organization, not the pointer it came from.
+      organizationId: tenant.organizationId,
+      initiatedByUserId: auth.principal.userId,
+      provider: provider as SupportedProvider,
+      intentType,
+      reference,
+    });
+  } catch (err) {
+    // c6 2026-11-20: the idempotent-replay lookup could not be read. Answer before ANY provider dispatch - a second
+    // session for the same key is what "not found" used to cause. State only; the client decides whether to retry.
+    if (err instanceof CheckoutSessionStoreReadError) {
+      return res.status(503).json({ error: 'checkout_state_unreadable', code: err.code });
+    }
+    throw err;
+  }
 
   if (!result.ok) {
     const fail = result as { ok: false; code: string; reason: string };

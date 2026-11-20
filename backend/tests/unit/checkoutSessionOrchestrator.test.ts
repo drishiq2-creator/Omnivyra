@@ -10,7 +10,32 @@
 // Inert supabase mock — the orchestrator transitively imports modules that
 // construct a supabase client at load time; injected deps mean it is never
 // exercised, but the mock keeps the module graph clean.
-jest.mock('../../db/supabaseClient', () => ({ supabase: { from: () => ({}) } }));
+// c6 2026-11-20: was `from: () => ({})` - the replay lookup threw a TypeError that findPersistedCheckoutSession's catch
+// SWALLOWED into "no session", so every case here passed through a swallowed error (green for the wrong reason). Now a
+// real chain per table: billing_checkout_sessions answers "genuinely no persisted session" (insert succeeds), since a
+// failed lookup now throws. hidden_billing_catalog answers the DOCUMENTED absent-table error, so billingAmountResolver
+// takes its compiled-fallback path EXPLICITLY (before, it got there through the same swallowed TypeError).
+jest.mock('../../db/supabaseClient', () => {
+  const make = (single: () => Promise<any>) => {
+    const chain: any = {};
+    chain.select = () => chain; chain.eq = () => chain;
+    chain.maybeSingle = single;
+    chain.upsert = async () => ({ error: null });
+    chain.insert = async () => ({ error: null });
+    return chain;
+  };
+  return {
+    supabase: {
+      from: (table: string) => {
+        if (table === 'billing_checkout_sessions') return make(async () => ({ data: null, error: null }));
+        if (table === 'hidden_billing_catalog') {
+          return make(async () => ({ data: null, error: { message: 'relation "hidden_billing_catalog" does not exist' } }));
+        }
+        throw new Error(`checkoutSessionOrchestrator.test: unexpected table ${table}`);
+      },
+    },
+  };
+});
 
 import {
   orchestrateCheckoutSession,

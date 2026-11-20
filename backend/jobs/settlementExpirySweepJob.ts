@@ -39,6 +39,9 @@ const SWEEP_LOCK_TTL_MS = 15 * 60 * 1000;
 export interface SettlementExpirySweepReport {
   /** false → the distributed lock was held elsewhere; this run was a no-op. */
   ran: boolean;
+  /** true → the sweep ran but could not complete (e.g. its candidate read failed). The counts are then NOT a
+   *  measurement - never read a failed run as "nothing to expire" (c6 2026-11-20). */
+  failed: boolean;
   candidates: number;
   expired: number;
   duplicateSuppressed: number;
@@ -47,7 +50,7 @@ export interface SettlementExpirySweepReport {
 }
 
 const SKIPPED_LOCKED: SettlementExpirySweepReport = {
-  ran: false, candidates: 0, expired: 0, duplicateSuppressed: 0, skipped: 0, durationMs: 0,
+  ran: false, failed: false, candidates: 0, expired: 0, duplicateSuppressed: 0, skipped: 0, durationMs: 0,
 };
 
 /** Runtime collaborators — injectable so the job is unit-testable without a DB. */
@@ -89,6 +92,7 @@ export async function runSettlementExpirySweepJob(
     await rt.recordMetric('duplicate_expiry_suppressions', result.duplicateSuppressed);
     const report: SettlementExpirySweepReport = {
       ran: true,
+      failed: false,
       candidates: result.candidates,
       expired: result.expired,
       duplicateSuppressed: result.duplicateSuppressed,
@@ -101,12 +105,12 @@ export async function runSettlementExpirySweepJob(
     });
     return report;
   } catch (err) {
-    // Defensive — the sweeper itself never throws, but a job must not crash
-    // the cron cycle.
+    // The sweep could not complete (its candidate read throws on a failed read). A job must not crash the cron
+    // cycle, but the report says FAILED - its zero counts are not "nothing to expire".
     logger.warn('settlement_expiry_sweep_failed', {
       message: err instanceof Error ? err.message : String(err),
     });
-    return { ran: true, candidates: 0, expired: 0, duplicateSuppressed: 0, skipped: 0, durationMs: Date.now() - startedAt };
+    return { ran: true, failed: true, candidates: 0, expired: 0, duplicateSuppressed: 0, skipped: 0, durationMs: Date.now() - startedAt };
   } finally {
     // Release the lease so the next tick can acquire promptly.
     await rt.releaseLock(SETTLEMENT_SWEEP_LOCK_KEY, lock.ownerToken);

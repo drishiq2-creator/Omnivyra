@@ -29,7 +29,25 @@ export interface PersistCheckoutSessionInput {
   session: NormalizedCheckoutSession;
 }
 
-/** Look up a persisted normalized session by idempotency key. Never throws. */
+/**
+ * A checkout-session read or settlement-event record FAILED (c6 2026-11-20, dropped-error batch 4). It used to be
+ * answered as ABSENCE: an unread idempotent-replay lookup -> a SECOND provider checkout dispatched for the same key; an
+ * unread provider-reference lookup -> the webhook recorded its idempotency anchor and returned "unmatched" (2xx), so the
+ * provider stopped retrying and a paid session was never settled. Now thrown: the checkout route answers 503, the
+ * settlement webhook's catch answers 500 (the provider retries), the expiry sweeper skips that candidate.
+ */
+export class CheckoutSessionStoreReadError extends Error {
+  readonly code = 'CHECKOUT_SESSION_STATE_UNREADABLE';
+  constructor(op: string, detail: string) {
+    super(`checkout session ${op} could not be completed: ${detail}`);
+    this.name = 'CheckoutSessionStoreReadError';
+  }
+}
+const asStoreError = (op: string, err: unknown): CheckoutSessionStoreReadError =>
+  err instanceof CheckoutSessionStoreReadError ? err : new CheckoutSessionStoreReadError(op, err instanceof Error ? err.message : String(err));
+
+/** Look up a persisted normalized session by idempotency key. null = genuinely none; a FAILED read THROWS
+ *  CheckoutSessionStoreReadError (never "none" - that dispatched a second provider session). */
 export async function findPersistedCheckoutSession(
   idempotencyKey: string,
 ): Promise<NormalizedCheckoutSession | null> {
@@ -39,7 +57,8 @@ export async function findPersistedCheckoutSession(
       .select('provider, provider_reference, session_status, redirect_url, provider_mode, expires_at, supported_payment_methods')
       .eq('idempotency_key', idempotencyKey)
       .maybeSingle();
-    if (error || !data) return null;
+    if (error) throw new CheckoutSessionStoreReadError('lookup', error.message);
+    if (!data) return null;
     const row = data as Record<string, unknown>;
     return {
       provider: String(row.provider ?? ''),
@@ -55,7 +74,7 @@ export async function findPersistedCheckoutSession(
     logger.warn('checkout_session_find_failed', {
       message: err instanceof Error ? err.message : String(err),
     });
-    return null;
+    throw asStoreError('lookup', err);
   }
 }
 
@@ -107,7 +126,8 @@ export interface CheckoutSettlementRecord {
 
 /**
  * Locate the persisted checkout session a provider webhook settles, by
- * (provider, provider_reference). Never throws — returns null on any error.
+ * (provider, provider_reference). null = genuinely no such session; a FAILED read THROWS CheckoutSessionStoreReadError
+ * (it returned null, the webhook recorded its anchor as "unmatched" and the payment was never settled).
  */
 export async function findCheckoutSessionByProviderReference(
   provider: string,
@@ -120,7 +140,8 @@ export async function findCheckoutSessionByProviderReference(
       .eq('provider', provider)
       .eq('provider_reference', providerReference)
       .maybeSingle();
-    if (error || !data) return null;
+    if (error) throw new CheckoutSessionStoreReadError('settlement lookup', error.message);
+    if (!data) return null;
     const row = data as Record<string, unknown>;
     return {
       idempotencyKey: String(row.idempotency_key ?? ''),
@@ -134,7 +155,7 @@ export async function findCheckoutSessionByProviderReference(
     logger.warn('checkout_session_settlement_find_failed', {
       message: err instanceof Error ? err.message : String(err),
     });
-    return null;
+    throw asStoreError('settlement lookup', err);
   }
 }
 
@@ -154,7 +175,8 @@ export interface RecordSettlementEventInput {
  * provider_event_id) constraint makes a redelivered webhook a deterministic
  * duplicate. Returns { duplicate } — true on a 23505 collision. When the table
  * is absent (migration unapplied) it reports not-duplicate, so the orchestrator
- * degrades to the forward-only state machine for idempotency. Never throws.
+ * degrades to the forward-only state machine for idempotency (unchanged). Any OTHER failure THROWS
+ * CheckoutSessionStoreReadError - the event is not actioned without its anchor; the provider / next sweep retries.
  */
 export async function recordSettlementEvent(
   input: RecordSettlementEventInput,
@@ -172,15 +194,16 @@ export async function recordSettlementEvent(
     } as Record<string, unknown>);
     if (!error) return { duplicate: false };
     if ((error as { code?: string }).code === '23505') return { duplicate: true };
-    if (!String(error.message ?? '').toLowerCase().includes('does not exist')) {
-      logger.warn('settlement_event_record_failed', { message: error.message });
+    if (String(error.message ?? '').toLowerCase().includes('does not exist')) {
+      return { duplicate: false };   // tolerated schema desync (documented above)
     }
-    return { duplicate: false };
+    logger.warn('settlement_event_record_failed', { message: error.message });
+    throw new CheckoutSessionStoreReadError('event record', error.message);
   } catch (err) {
     logger.warn('settlement_event_record_failed', {
       message: err instanceof Error ? err.message : String(err),
     });
-    return { duplicate: false };
+    throw asStoreError('event record', err);
   }
 }
 
@@ -276,8 +299,8 @@ export interface SettlementSweepCandidate {
 /**
  * List non-terminal (`created` / `pending`) persisted checkout sessions — the
  * candidate set for the deterministic expiry sweeper. Terminal sessions are
- * NEVER returned, so the sweeper cannot regress a terminal state. Never throws
- * — returns [] on any error / missing table.
+ * NEVER returned, so the sweeper cannot regress a terminal state. [] = genuinely no candidates; a FAILED read THROWS
+ * CheckoutSessionStoreReadError (c6 2026-11-20: it returned [], so a broken sweep logged as "0 candidates scanned").
  */
 export async function findSettlementSweepCandidates(limit = 500): Promise<SettlementSweepCandidate[]> {
   try {
@@ -286,7 +309,8 @@ export async function findSettlementSweepCandidates(limit = 500): Promise<Settle
       .select('idempotency_key, provider, provider_reference, settlement_status, created_at, last_reconciled_at')
       .in('settlement_status', ['created', 'pending'])
       .limit(limit);
-    if (error || !data) return [];
+    if (error) throw new CheckoutSessionStoreReadError('sweep candidates', error.message);
+    if (!data) return [];
     return (data as unknown as Array<Record<string, unknown>>).map((row) => ({
       idempotencyKey: String(row.idempotency_key ?? ''),
       provider: String(row.provider ?? ''),
@@ -299,6 +323,6 @@ export async function findSettlementSweepCandidates(limit = 500): Promise<Settle
     logger.warn('settlement_sweep_candidates_failed', {
       message: err instanceof Error ? err.message : String(err),
     });
-    return [];
+    throw asStoreError('sweep candidates', err);
   }
 }

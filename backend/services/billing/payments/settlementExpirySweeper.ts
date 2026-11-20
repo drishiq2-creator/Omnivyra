@@ -134,16 +134,25 @@ export async function sweepStaleSettlements(
     if (nowMs - anchorMs < threshold) { skipped++; continue; } // still fresh
 
     // Append-only event first — a deterministic id makes a re-sweep a duplicate.
-    const recorded = await deps.recordSettlementEvent({
-      provider: c.provider,
-      providerEventId: expiryEventId(c.idempotencyKey),
-      sessionReference: c.providerReference ?? '',
-      checkoutIdempotencyKey: c.idempotencyKey,
-      eventType: 'settlement.expired',
-      normalizedStatus: 'expired',
-      providerRawStatus: 'sweeper_expiry',
-      payload: { source: 'settlement_expiry_sweeper', from: state },
-    });
+    // A failed anchor write skips THIS candidate (retried next sweep) - never expire without the anchor, never abort
+    // the whole sweep (c6 2026-11-20: it used to report not-duplicate and expire anyway).
+    let recorded: { duplicate: boolean };
+    try {
+      recorded = await deps.recordSettlementEvent({
+        provider: c.provider,
+        providerEventId: expiryEventId(c.idempotencyKey),
+        sessionReference: c.providerReference ?? '',
+        checkoutIdempotencyKey: c.idempotencyKey,
+        eventType: 'settlement.expired',
+        normalizedStatus: 'expired',
+        providerRawStatus: 'sweeper_expiry',
+        payload: { source: 'settlement_expiry_sweeper', from: state },
+      });
+    } catch (err) {
+      skipped++;
+      logger.warn('settlement_expiry_anchor_failed', { message: err instanceof Error ? err.message : String(err) });
+      continue;
+    }
     if (recorded.duplicate) { skipped++; duplicateSuppressed++; continue; } // already swept
 
     // Persist the expiry transition. providerEventReference is intentionally
