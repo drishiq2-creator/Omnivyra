@@ -11,6 +11,7 @@ import { ownedDbTable } from '../db/writeOwner';
 
 import { supabase } from '../db/supabaseClient';
 import { getValidAccessToken } from '../auth/metaAuthService';
+import { assertWhatsAppEnabled } from './whatsappAvailability';
 
 const META_GRAPH = 'https://graph.facebook.com/v22.0';
 
@@ -59,6 +60,9 @@ export interface WhatsAppTemplate {
 // ── Submit new template version ───────────────────────────────────────────────
 
 export async function submitTemplate(input: CreateTemplateInput): Promise<string> {
+  // Launch gate (b3, 11-18), under the route like the other three Meta egress seams: the next caller (a backfill,
+  // a retry job, an admin tool) inherits the gate instead of assuming it (7c NB1).
+  assertWhatsAppEnabled();
   // 1. Find highest existing version for this template_name + company
   const { data: latest } = await ownedDbTable('whatsapp_templates')
     .select('version')

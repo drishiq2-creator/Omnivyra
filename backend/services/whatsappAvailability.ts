@@ -12,12 +12,19 @@
  * Kept deliberately tiny so it rebases trivially under stage 3.
  *
  * SCOPE (7c review): the gate blocks CONNECTING and SENDING, never REMOVING.
- *   - pages/api/accounts/[platform].ts takes the platform from the query and is deliberately NOT gated:
- *     its writes are DELETE and a deactivate (is_active false, tokens nulled), which only reduce
- *     capability. Gating it would stop a user disconnecting WhatsApp. Do not "complete" the gate there.
- *   - whatsappAdapter.publish / replyToComment are not gated because nothing calls them: the 4 call
- *     sites of getPlatformAdapter (3 files: engagementIngestionService.ts :179 and :1071,
- *     verify-config.ts, test-connection.ts) use only fetchComments / testConnection.
+ *   - pages/api/accounts/[platform].ts takes the platform from the query and is NOT gated, for two
+ *     different reasons by method (7c NB2):
+ *       DELETE and the deactivate path (is_active false, tokens nulled) only REDUCE capability. They must
+ *       NEVER be gated: that would stop a user disconnecting WhatsApp.
+ *       POST is a mock today: it persists nothing and returns a fabricated account, so gating it is
+ *       unnecessary, not harmful. IF POST EVER BECOMES A REAL CONNECT, IT MUST BE GATED like the Meta callback.
+ *   - SERVICE-LEVEL GUARDS: all four Meta egress functions assert the gate themselves, under their routes:
+ *     enqueueBroadcast, processBatch, retryFailed (whatsappBroadcastService) and submitTemplate
+ *     (whatsappTemplateService).
+ *   - whatsappAdapter.publish / replyToComment are not gated because nothing calls them. Census of the
+ *     non-test getPlatformAdapter call sites (main f165c53ba, 4 sites in 3 files): engagementIngestionService.ts
+ *     :179 and :1071 (fetchComments), social-accounts/verify-config.ts:156 and
+ *     social-platforms/test-connection.ts:83 (testConnection). None calls publish or replyToComment.
  */
 import type { NextApiResponse } from 'next';
 
