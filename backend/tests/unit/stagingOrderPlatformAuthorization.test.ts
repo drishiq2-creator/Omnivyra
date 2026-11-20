@@ -8,7 +8,7 @@
  * a Razorpay test order) for their own organisation, while a platform
  * SUPER_ADMIN could only do so for organisations they happened to belong to.
  * Its sibling verify-staging-payment is platform-only; tenants have their own
- * checkout path (/api/billing/checkout-session, /api/billing/checkout/*).
+ * checkout path (/api/billing/checkout/*).
  *
  * THE FIX: authorize on the platform-tier billing.platform.manage with no
  * organisation scope; organization_id stays a required purchase binding.

@@ -32,7 +32,7 @@ export interface SecretRef {
   env: string;
 }
 
-/** Signature schemes with in-repo reference implementations (paymentWebhookVerifier). */
+/** Signature schemes for provider webhook verification (reference implementations live with each webhook verifier). */
 export type SignatureScheme = 'hmac-sha256' | 'stripe' | 'razorpay' | 'cashfree' | 'phonepe';
 
 /**

@@ -123,7 +123,6 @@ import { runDailyIntelligence } from '../schedulers/intelligenceScheduler';
 import { sweepStaleExecutions } from '../services/queueHealth';
 import { runReconciliationPass } from '../services/operationalReconciler';
 import { runIntelligenceEventCleanup } from '../jobs/intelligenceEventCleanup';
-import { runSettlementExpirySweepJob } from '../jobs/settlementExpirySweepJob';
 import { runProspectRetryJob } from '../jobs/prospectRetryJob';
 import { runProspectScoreEvaluationJob } from '../jobs/prospectScoreEvaluationJob';
 import { runSettlementMetricsRetention, pruneRolledSettlementMetrics } from '../services/billing/payments/settlementMetricsRetention';
@@ -206,7 +205,6 @@ const INTELLIGENCE_EVENT_CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000; // once per 
 // Sandbox settlement-expiry sweep — transition stale created/pending checkout
 // sessions to `expired`. Deterministic + idempotent (re-entrancy lock + the
 // append-only event ledger), so a frequent interval is safe.
-const SETTLEMENT_EXPIRY_SWEEP_INTERVAL_MS = 10 * 60 * 1000; // every 10 minutes
 // A7 enrichment retry sweep — hand due retry candidates to the existing
 // enrichment executor. INERT unless PI_RETRY_SCHEDULER_ENABLED='true' AND a
 // tenant allow-list is set: with either absent the job reads nothing and
@@ -350,7 +348,6 @@ let lastPerformanceAggregationRun = 0;
 let lastCampaignHealthEvaluationRun = 0;
 let lastDailyIntelligenceRun = 0;
 let lastIntelligenceEventCleanupRun = 0;
-let lastSettlementExpirySweepRun = 0;
 let lastProspectRetryRun = 0;
 let lastProspectScoreEvaluationRun = 0;
 let lastSettlementMetricsRetentionRun = 0;
@@ -1527,23 +1524,6 @@ async function runSchedulerCycleBody(opts: { includePublishSafetyNet?: boolean }
       }
     } catch (error: unknown) {
       console.error('❌ Intelligence event cleanup error:', formatCaughtError(error));
-    }
-  }
-
-  // Sandbox settlement-expiry sweep — stale created/pending checkout sessions
-  // → expired. The job carries its own re-entrancy lock; CronGuard already
-  // guarantees single-instance cron execution. Deterministic + idempotent.
-  if (shouldRunCronJob("settlementExpirySweep", SETTLEMENT_EXPIRY_SWEEP_INTERVAL_MS, lastSettlementExpirySweepRun)) {
-    lastSettlementExpirySweepRun = Date.now();
-    try {
-      const result = await runSettlementExpirySweepJob();
-      if (result.ran && (result.expired > 0 || result.duplicateSuppressed > 0)) {
-        console.log(
-          `✅ Settlement expiry sweep: ${result.expired} expired, ${result.duplicateSuppressed} duplicate-suppressed (${result.candidates} scanned)`
-        );
-      }
-    } catch (error: unknown) {
-      console.error('❌ Settlement expiry sweep error:', formatCaughtError(error));
     }
   }
 

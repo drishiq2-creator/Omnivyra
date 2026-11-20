@@ -358,8 +358,8 @@ export const envSchema = z.object({
   CONTENT_ARCHITECT_PASSWORD: z.string().optional(),
 
   // ── Critical webhook / scheduler secrets ──────────────────────────────────
-  // Previously read via direct `process.env.X` in pages/api/stripe/webhook.ts,
-  // pages/api/billing/settlement-webhook/[provider].ts, and pages/api/cron/*.
+  // Previously read via direct `process.env.X` in pages/api/stripe/webhook.ts
+  // and pages/api/cron/*.
   // They bypassed boot validation, so a deploy missing them surfaced only on
   // the first request (500). Wiring them through the schema brings them into
   // the typed `config` object and makes their presence/absence observable at
@@ -368,20 +368,6 @@ export const envSchema = z.object({
   // but `.describe()` documents the production expectation for each.
   STRIPE_WEBHOOK_SECRET: z.string().optional()
     .describe('Stripe webhook signing secret (whsec_...). Required in production for /api/stripe/webhook.'),
-  SETTLEMENT_WEBHOOK_SANDBOX_SECRET_RAZORPAY: z.string().optional()
-    .describe('Razorpay sandbox webhook signing secret. Required to receive sandbox settlement webhooks.'),
-  SETTLEMENT_WEBHOOK_SANDBOX_SECRET_STRIPE: z.string().optional()
-    .describe('Stripe sandbox webhook signing secret for /api/billing/settlement-webhook/stripe.'),
-  SETTLEMENT_WEBHOOK_SANDBOX_SECRET_CASHFREE: z.string().optional()
-    .describe('Cashfree sandbox webhook signing secret.'),
-  SETTLEMENT_WEBHOOK_SANDBOX_SECRET_PHONEPE: z.string().optional()
-    .describe('PhonePe sandbox salt key (used as HMAC secret for X-VERIFY validation).'),
-  SETTLEMENT_WEBHOOK_SANDBOX_SALT_INDEX_PHONEPE: z.string().optional()
-    .describe('PhonePe salt index (default "1"); paired with SETTLEMENT_WEBHOOK_SANDBOX_SECRET_PHONEPE.'),
-  SETTLEMENT_WEBHOOK_ALLOW_UNVERIFIED_SANDBOX: z.string().optional()
-    .describe('Dev-only opt-in to accept settlement webhooks without a configured secret. Must NEVER be set in production.'),
-  SETTLEMENT_WEBHOOK_REPLAY_TOLERANCE_SECONDS: z.string().optional()
-    .describe('Override the default 300s replay window for sandbox settlement webhooks.'),
   CRON_SECRET: z.string().optional()
     .describe('Bearer token Vercel cron passes in Authorization header. Required in production for /api/cron/*.'),
   OMNIVYRA_QUEUE_PREFIX_ENABLED: z.string().optional()
@@ -534,13 +520,6 @@ export function validateEnv(): EnvConfig {
       // into the validated config object so callers can switch from direct
       // process.env reads to typed config.X reads at their leisure.
       STRIPE_WEBHOOK_SECRET: process.env.STRIPE_WEBHOOK_SECRET,
-      SETTLEMENT_WEBHOOK_SANDBOX_SECRET_RAZORPAY: process.env.SETTLEMENT_WEBHOOK_SANDBOX_SECRET_RAZORPAY,
-      SETTLEMENT_WEBHOOK_SANDBOX_SECRET_STRIPE: process.env.SETTLEMENT_WEBHOOK_SANDBOX_SECRET_STRIPE,
-      SETTLEMENT_WEBHOOK_SANDBOX_SECRET_CASHFREE: process.env.SETTLEMENT_WEBHOOK_SANDBOX_SECRET_CASHFREE,
-      SETTLEMENT_WEBHOOK_SANDBOX_SECRET_PHONEPE: process.env.SETTLEMENT_WEBHOOK_SANDBOX_SECRET_PHONEPE,
-      SETTLEMENT_WEBHOOK_SANDBOX_SALT_INDEX_PHONEPE: process.env.SETTLEMENT_WEBHOOK_SANDBOX_SALT_INDEX_PHONEPE,
-      SETTLEMENT_WEBHOOK_ALLOW_UNVERIFIED_SANDBOX: process.env.SETTLEMENT_WEBHOOK_ALLOW_UNVERIFIED_SANDBOX,
-      SETTLEMENT_WEBHOOK_REPLAY_TOLERANCE_SECONDS: process.env.SETTLEMENT_WEBHOOK_REPLAY_TOLERANCE_SECONDS,
       CRON_SECRET: process.env.CRON_SECRET,
       OMNIVYRA_QUEUE_PREFIX_ENABLED: process.env.OMNIVYRA_QUEUE_PREFIX_ENABLED,
     };

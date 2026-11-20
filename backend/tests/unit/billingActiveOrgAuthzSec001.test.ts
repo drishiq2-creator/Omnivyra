@@ -12,11 +12,7 @@
  * (20260510) is NOT APPLIED in production, so there was no backstop at either
  * write time or read time.
  *
- * checkout-session was the sharp end. Its idempotency key is a hash over
- * (organizationId, intentType, reference, provider), so an unauthorized caller
- * REPLAYS the victim organization's persisted checkout session — redirect_url
- * included — then resolves a real amount, dispatches to the payment provider
- * and inserts a billing_checkout_sessions row against them.
+ * (checkout-session was the sharp end; that route was RETIRED 2026-11-20 with the hidden-billing line.)
  *
  * The authorization chain here is REAL: requireTenantAccess / assertTenantAccess
  * -> TenantGuard -> membership + company-lifecycle queries. Only the identity
@@ -139,12 +135,6 @@ jest.mock('../../services/billing/payments/orgBillingContextResolver', () => ({
           : { country: null, currency: null, region: null, source: 'none' }
   )),
 }));
-jest.mock('../../services/billing/payments/checkoutSessionOrchestrator', () => ({
-  orchestrateCheckoutSession: jest.fn(async () => ({
-    ok: true, session: { provider: 'razorpay', redirect_url: 'https://pay.example/VICTIM' },
-    idempotency_key: 'idem-1', replayed: false,
-  })),
-}));
 jest.mock('../../services/billing/payments/paymentProviderPolicyResolver', () => ({
   resolveAvailableProviders: jest.fn(async () => ({
     source: 'compiled_default', available: [], visible: [], supported_methods: [], recommended: null,
@@ -153,10 +143,8 @@ jest.mock('../../services/billing/payments/paymentProviderPolicyResolver', () =>
 
 import profileHandler from '../../../pages/api/billing/profile';
 import contextHandler from '../../../pages/api/billing/context';
-import checkoutHandler from '../../../pages/api/billing/checkout-session';
 import providersHandler from '../../../pages/api/billing/payment-providers/index';
 import { captureBillingProfileGeography } from '../../services/billing/payments/billingProfileCaptureService';
-import { orchestrateCheckoutSession } from '../../services/billing/payments/checkoutSessionOrchestrator';
 import { resolveOrgBillingContext } from '../../services/billing/payments/orgBillingContextResolver';
 
 function mockRes() {
@@ -173,13 +161,12 @@ const call = async (h: any, req: Record<string, unknown>) => {
 };
 
 const capture = () => captureBillingProfileGeography as jest.Mock;
-const orchestrate = () => orchestrateCheckoutSession as jest.Mock;
 const ctxResolver = () => resolveOrgBillingContext as jest.Mock;
 
 beforeEach(() => {
   calls = [];
   currentUser = USER_ACTIVE;
-  capture().mockClear(); orchestrate().mockClear(); ctxResolver().mockClear();
+  capture().mockClear(); ctxResolver().mockClear();
 });
 
 /* ════════════════════════════════════════════════════════════════════════════
@@ -200,14 +187,6 @@ const TENANT_ROUTES: Array<{ name: string; run: () => Promise<any>; sink: () => 
     name: 'billing/context (GET — discloses org geography)',
     run: () => call(contextHandler, { method: 'GET' }),
     sink: ctxResolver,
-  },
-  {
-    name: 'billing/checkout-session (POST — money adjacent)',
-    run: () => call(checkoutHandler, {
-      method: 'POST',
-      body: { provider: 'razorpay', intent_type: 'topup', topup_reference: 'topup_small' },
-    }),
-    sink: orchestrate,
   },
 ];
 
@@ -318,15 +297,6 @@ describe('request-supplied tenant aliases are inert', () => {
     expect(capture().mock.calls[0][0].organizationId).toBe(CO_A);
   });
 
-  it('CRITICAL checkout-session: body aliases cannot redirect the order', async () => {
-    currentUser = USER_ACTIVE;
-    await call(checkoutHandler, {
-      method: 'POST',
-      body: { provider: 'razorpay', intent_type: 'topup', topup_reference: 'topup_small', ...ALIASES },
-    });
-    expect(orchestrate().mock.calls[0][0].organizationId).toBe(CO_A);
-  });
-
   it('CRITICAL query aliases cannot redirect either', async () => {
     currentUser = USER_ACTIVE;
     await call(contextHandler, { method: 'GET', query: { ...ALIASES } });
@@ -418,7 +388,6 @@ describe('active_company_id is context, never a credential', () => {
     for (const rel of [
       'pages/api/billing/profile.ts',
       'pages/api/billing/context.ts',
-      'pages/api/billing/checkout-session.ts',
       'pages/api/billing/payment-providers/index.ts',
     ]) {
       const src: string = fs.readFileSync(path.join(repo, rel), 'utf8');
