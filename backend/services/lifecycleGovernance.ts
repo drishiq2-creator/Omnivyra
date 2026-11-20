@@ -4,9 +4,9 @@
  *
  * Responsibilities:
  *   - invalidateUserSessionsAndSignOut(userId, reason) — the
- *     `invalidate_user_sessions` RPC: the in-app `auth_sessions` table and the JWT epoch
- *     (users.session_revoked_after). Supabase refresh tokens are NOT cleared by user id
- *     (see REFRESH_TOKENS_NOT_REVOKED) until step 2.
+ *     `invalidate_user_sessions` RPC (the in-app `auth_sessions` table and the JWT epoch
+ *     users.session_revoked_after) + `revoke_user_gotrue_sessions` (step 2, migration 070:
+ *     the user's GoTrue sessions and refresh tokens, BY USER ID).
  *   - cascadeDisableCompany(companyId, actor, reason) — wrapper around the
  *     `disable_company_cascade` RPC.
  *
@@ -20,18 +20,24 @@ import { logger } from './logger';
 import { SecurityReadError } from '../security/SecurityReadError';
 
 /**
- * Refresh tokens cannot be revoked BY USER ID through supabase-js: auth.admin.signOut(jwt, scope) takes the USER'S
- * JWT (auth-js GoTrueAdminApi: POST /logout with it as the bearer). Until revoke_user_gotrue_sessions (migration 070,
- * step 2) lands, a path that only knows the user id kills live ACCESS tokens (the session_revoked_after epoch) and the
- * canonical auth_sessions, but an outstanding REFRESH token can still mint a new access token (b3/89 2026-11-20).
+ * Step 2 (migration 20270217000070, PL-102): end the user's GoTrue sessions BY USER ID. supabase-js cannot (auth.admin
+ * .signOut takes the USER'S JWT), so a path that only knew the user id left an outstanding REFRESH token able to mint
+ * a new access token after the epoch bump. The SECURITY DEFINER function deletes auth.sessions (refresh tokens
+ * cascade) and marks legacy session-less refresh tokens revoked. Takes the PUBLIC users.id. Throws on any error.
+ * DEPLOY ORDER: the migration must be applied before this ships - a missing function fails every revoke-all closed.
  */
-export const REFRESH_TOKENS_NOT_REVOKED = 'REFRESH_TOKENS_NOT_REVOKED_BY_ID';
+async function revokeGoTrueSessionsById(userId: string, op: string): Promise<void> {
+  const { error } = await supabase.rpc('revoke_user_gotrue_sessions', { p_user_id: userId });
+  if (error) throw new SecurityReadError(op, 'revoke_user_gotrue_sessions', error.message ?? null);
+}
 
 /**
- * Revoke-all for one user (b3 ruling 2026-11-20, step 1): the EXISTING invalidate_user_sessions RPC (epoch bump on
+ * Revoke-all for one user (b3 ruling 2026-11-20): the EXISTING invalidate_user_sessions RPC (epoch bump on
  * users.session_revoked_after + revoke every auth_sessions row, atomic) - error-checked, never "0 revoked" on failure -
- * plus, when the caller holds the user's own access token, Supabase's global sign-out (kills that user's refresh
- * tokens). Throws on ANY failure: callers report success only after both succeeded.
+ * then, when the caller holds the user's own access token, Supabase's global sign-out with it (step 1), then the
+ * by-id GoTrue revoke (step 2) - which covers every path, including those with no user JWT (recovery login, admin MFA
+ * reset). The sign-out runs BEFORE the by-id delete so it never presents a token whose session is already gone.
+ * Throws on ANY failure: callers report success only after all succeeded.
  */
 export async function revokeAllAccessForUser(
   userId: string,
@@ -43,9 +49,11 @@ export async function revokeAllAccessForUser(
   const { data, error } = await supabase.rpc('invalidate_user_sessions', { p_user_id: userId, p_reason: reason });
   if (error) throw new SecurityReadError('revokeAllAccessForUser', 'invalidate_user_sessions', error.message ?? null);
   const revokedAuthSessions = typeof data === 'number' ? data : 0;
-  if (!opts.userJwt) return { revokedAuthSessions, refreshTokensRevoked: false };
-  const { error: signOutErr } = await supabase.auth.admin.signOut(opts.userJwt, 'global');
-  if (signOutErr) throw new SecurityReadError('revokeAllAccessForUser', 'gotrue.logout', signOutErr.message ?? null);
+  if (opts.userJwt) {
+    const { error: signOutErr } = await supabase.auth.admin.signOut(opts.userJwt, 'global');
+    if (signOutErr) throw new SecurityReadError('revokeAllAccessForUser', 'gotrue.logout', signOutErr.message ?? null);
+  }
+  await revokeGoTrueSessionsById(userId, 'revokeAllAccessForUser');
   return { revokedAuthSessions, refreshTokensRevoked: true };
 }
 
@@ -86,15 +94,18 @@ export async function invalidateUserSessionsAndSignOut(
   }
   const revoked = typeof rpcData === 'number' ? rpcData : 0;
 
-  // 2. Refresh tokens: NOT revocable by user id through supabase-js (see REFRESH_TOKENS_NOT_REVOKED). This used to
-  //    call auth.admin.signOut(supabaseUid, 'global') behind an `as unknown as` cast - passing a USER ID where the
-  //    API takes the user's JWT - so it could never succeed and only ever logged lifecycle_supabase_signout_failed
-  //    (2026-11-20). Reported honestly now; step 2 (revoke_user_gotrue_sessions, migration 070) closes it.
-  //    The just-bumped epoch already rejects every existing ACCESS token; a SUSPENDED user is also refused by
-  //    authResolver's status check before the epoch check, so only force-logout depends on step 2.
-  const supabaseSignOutOk = false;
-  const supabaseSignOutError: string | null = REFRESH_TOKENS_NOT_REVOKED;
-  logger.warn('lifecycle_refresh_tokens_not_revoked', { userId, reason });
+  // 2. GoTrue sessions + refresh tokens BY USER ID (step 2, revoke_user_gotrue_sessions). Not thrown: the DB-side
+  //    invalidation above has landed and the epoch already rejects every existing ACCESS token; a failure here is
+  //    REPORTED (supabaseSignOutOk:false + the message) so force-logout / suspend show it, never claimed as done.
+  let supabaseSignOutOk = true;
+  let supabaseSignOutError: string | null = null;
+  try {
+    await revokeGoTrueSessionsById(userId, 'invalidateUserSessionsAndSignOut');
+  } catch (err) {
+    supabaseSignOutOk = false;
+    supabaseSignOutError = err instanceof Error ? err.message : String(err);
+    logger.error('lifecycle_refresh_tokens_not_revoked', { userId, reason, message: supabaseSignOutError });
+  }
 
   return {
     revokedAuthSessions: revoked,
