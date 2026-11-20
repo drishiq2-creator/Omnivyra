@@ -1,4 +1,5 @@
 import { createApiRoute as __createApiRoute } from '../../../../lib/platform/routeFactory';
+import { ALREADY_REVOKED } from '../../../../shared/security/revokeCodes';
 /**
  * POST /api/auth/sessions/revoke
  *
@@ -104,7 +105,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     return res.status(403).json({ error: 'Not your session' });
   }
   if ((target as { revoked_at: string | null }).revoked_at) {
-    return res.status(409).json({ error: 'Already revoked' });
+    return res.status(409).json({ error: 'Already revoked', code: ALREADY_REVOKED });
   }
 
   await revokeSession(id!, 'user_revoked_session');

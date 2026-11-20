@@ -45,6 +45,7 @@ export default function LeadsView({ d }: { d: S }) {
     fromForms,
     fromWebhooks,
     isAdmin,
+    webhookSecretsVisible,
     leadModal,
     leads,
     lmEmail,
@@ -411,7 +412,8 @@ export default function LeadsView({ d }: { d: S }) {
                   <div className="space-y-4">
                     {webhookIntegrations.map(integration => {
                       const test = testResults[integration.id];
-                      const secret = integration.config.secret;
+                      // A redacted secret ('********') is not a secret: never copy it, never send it.
+                      const secret = webhookSecretsVisible ? integration.config.secret : undefined;
                       const webhookLeads = leads.filter(l => l.integration_id === integration.id && !l.is_test).length;
                       return (
                         <div key={integration.id} className="bg-white rounded-xl border border-gray-200/60 shadow-sm p-5">
@@ -436,9 +438,11 @@ export default function LeadsView({ d }: { d: S }) {
                             <div className="bg-gray-50 rounded-lg p-3 sm:col-span-2">
                               <div className="flex justify-between mb-1">
                                 <span className="text-xs text-gray-500 font-medium">Webhook Secret</span>
-                                {secret ? <CopyButton text={secret} /> : <span className="text-xs text-amber-600">Not set — edit in Integrations</span>}
+                                {!webhookSecretsVisible
+                                  ? <span className="text-xs text-gray-500">Only company admins can view this secret</span>
+                                  : secret ? <CopyButton text={secret} /> : <span className="text-xs text-amber-600">Not set — edit in Integrations</span>}
                               </div>
-                              <code className="text-xs text-gray-700">{secret ? '••••••••••••••••' : 'Not configured'}</code>
+                              <code className="text-xs text-gray-700">{!webhookSecretsVisible ? 'Hidden' : secret ? '••••••••••••••••' : 'Not configured'}</code>
                             </div>
                           </div>
                           <div className="bg-gray-900 rounded-lg p-3 mb-4 overflow-x-auto">

@@ -488,7 +488,12 @@ export const createMockRes = (): MockApiResponse => {
   } = {
     status: jest.fn().mockReturnThis(),
     json: jest.fn(),
-    setHeader: jest.fn((key: string, value: string) => { headers[key.toLowerCase()] = value; }),
+    // Same signature as NextApiResponse.setHeader (value may be a number or a list; it returns the response), so the
+    // mock is assignable to the intersection type (was TS2322 on main).
+    setHeader: jest.fn((key: string, value: string | number | readonly string[]) => {
+      headers[key.toLowerCase()] = Array.isArray(value) ? value.join(', ') : String(value);
+      return res as unknown as NextApiResponse;
+    }),
     send: jest.fn(),
     write: jest.fn(),
     end: jest.fn(),
