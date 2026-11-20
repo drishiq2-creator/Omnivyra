@@ -768,11 +768,19 @@ export function resolveMonetizationFeature(input: FeatureResolutionInput): Featu
     (input.action_key ? resolveFeatureFromActionKey(input.action_key) : null) ||
     (input.pricing_key ? resolveFeatureFromActionKey(input.pricing_key) : null) ||
     (input.process_type ? resolveFeatureFromProcessType(input.process_type) : null) ||
-    resolveFeatureFromReport({
-      requested_type: input.requested_type,
-      report_category: input.report_category,
-      report_type: input.report_type,
-    });
+    // The REPORT fallback runs ONLY when a report field was given (b3/c6 2026-11-20, BLOCKING money).
+    // resolveFeatureFromReport treats every ABSENT field as a match, so with none given it returned the FIRST entry
+    // with a report mapping (website_audit): every CreditAction without its own registry entry was then priced by
+    // getCreditCost as a website audit (23 actions, incl. all 17 wirePhase2Route actions, posts, planning, images).
+    // An unmapped action now resolves to null and fails CLOSED (executeWithCredits' assertCanonicalCreditAction
+    // refuses it) instead of being charged another product's price.
+    (input.requested_type || input.report_category || input.report_type
+      ? resolveFeatureFromReport({
+          requested_type: input.requested_type,
+          report_category: input.report_category,
+          report_type: input.report_type,
+        })
+      : null);
 
   if (!feature) return null;
   const actionKey = feature.pricing_keys.action_key ?? feature.pricing_keys.usage_action_key ?? null;
