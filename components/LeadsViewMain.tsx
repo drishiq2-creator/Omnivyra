@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import { useCompanyContext } from './CompanyContext';
 import EmptyState from './shared/EmptyState';
+import { CompanyAdminAccessNotice } from './shared/CompanyAdminOnly';
 import ExamplePreview from './shared/ExamplePreview';
 import { sampleForm, sampleLead } from '../lib/activation/sampleData';
 import { trackActivationEvent } from '../lib/analytics/activationEvents';
@@ -46,6 +47,10 @@ export default function LeadsView({ d }: { d: S }) {
     fromWebhooks,
     isAdmin,
     webhookSecretsVisible,
+    formsAccess,
+    retryFormsAccess,
+    deleteError,
+    setDeleteError,
     leadModal,
     leads,
     lmEmail,
@@ -294,7 +299,10 @@ export default function LeadsView({ d }: { d: S }) {
             )}
 
             {/* ── FORMS TAB ──────────────────────────────────────────────── */}
-            {activeTab === 'forms' && (
+            {activeTab === 'forms' && formsAccess !== 'admin' && formsAccess !== 'no_company' && (
+              <CompanyAdminAccessNotice access={formsAccess} onRetry={retryFormsAccess} />
+            )}
+            {activeTab === 'forms' && (formsAccess === 'admin' || formsAccess === 'no_company') && (
               <div>
                 {forms.length === 0 ? (
                   <EmptyState
@@ -724,13 +732,13 @@ export default function LeadsView({ d }: { d: S }) {
       {deleteConfirm && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl shadow-xl w-full max-w-sm p-6">
-            <h2 className="text-lg font-bold text-gray-900 mb-2">Delete {deleteConfirm.kind === 'form' ? 'Form' : 'Lead'}?</h2>
+            <h2 className="text-lg font-bold text-gray-900 mb-2">Delete Form?</h2>
             <p className="text-sm text-gray-600 mb-5">
-              <strong>{deleteConfirm.name}</strong> will be permanently deleted.
-              {deleteConfirm.kind === 'form' && ' Leads captured by this form will not be deleted.'}
+              <strong>{deleteConfirm.name}</strong> will be permanently deleted. Leads captured by this form will not be deleted.
             </p>
+            {deleteError && <p role="alert" className="mb-4 text-sm text-red-600" data-testid="delete-error">{deleteError}</p>}
             <div className="flex flex-col-reverse sm:flex-row justify-end gap-2">
-              <button onClick={() => setDeleteConfirm(null)} className="px-4 py-2 text-sm font-semibold text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors">Cancel</button>
+              <button onClick={() => { setDeleteConfirm(null); setDeleteError(null); }} className="px-4 py-2 text-sm font-semibold text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors">Cancel</button>
               <button onClick={confirmDelete} disabled={deleting} className="px-4 py-2 text-sm font-semibold text-white bg-red-600 rounded-lg hover:bg-red-700 disabled:opacity-50 transition-colors">
                 {deleting ? 'Deleting…' : 'Delete'}
               </button>
