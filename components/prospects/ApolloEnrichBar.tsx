@@ -13,9 +13,9 @@ import TenantDataNotice from '@/components/compliance/TenantDataNotice';
 interface Estimate { estimatedProviderCalls: number; calls: Array<{ prospectId: string; subject: string; attributes: string[] }>; unreadable: string[]; estimateHash: string }
 interface Preview {
   fieldGroups: string[];
-  funding: 'tenant_apollo_key' | 'central_apollo_access' | 'no_apollo_access' | string;
+  // Own key only (owner 2026-11-20). Any other value - including one this client does not know - cannot confirm.
+  funding: 'tenant_apollo_key' | 'no_apollo_access' | string;
   vendorUnits?: number;
-  omnivyraCredits: number | null;
   estimate: Estimate;
 }
 
@@ -93,17 +93,13 @@ export default function ApolloEnrichBar({ companyId, prospectIds, onDone }: {
           <p className="mt-1 text-xs text-gray-600" data-testid="apollo-enrich-cost">
             {preview.funding === 'tenant_apollo_key'
               ? `This run: ~${preview.vendorUnits ?? preview.estimate.estimatedProviderCalls} Apollo credit(s), billed to your own Apollo account. No Omnivyra credits are charged.`
-              : preview.funding === 'central_apollo_access'
-                ? (preview.omnivyraCredits == null
-                  ? 'Central Apollo access is not priced yet, so this run cannot use it.'
-                  : `This run: ~${preview.vendorUnits ?? preview.estimate.estimatedProviderCalls} Apollo credit(s) = ${preview.omnivyraCredits} Omnivyra credits (central Apollo access).`)
-                : 'No Apollo access: add your own Apollo key, or opt into central Apollo access in Billing.'}
+              : 'No Apollo access: add your own Apollo key in Integrations to enrich prospects.'}
             {preview.estimate.unreadable.length ? ` ${preview.estimate.unreadable.length} prospect(s) could not be read and will be skipped.` : ''}
           </p>
           <div className="mt-2 flex gap-2">
             <button type="button"
-              disabled={busy || preview.estimate.estimatedProviderCalls === 0 || preview.funding === 'no_apollo_access'
-                || (preview.funding === 'central_apollo_access' && preview.omnivyraCredits == null)}
+              // Allow-list, not deny-list: ONLY the tenant's own key may confirm; an unknown funding value cannot.
+              disabled={busy || preview.estimate.estimatedProviderCalls === 0 || preview.funding !== 'tenant_apollo_key'}
               onClick={run}
               className="rounded-lg bg-indigo-600 px-3 py-1.5 font-medium text-white hover:bg-indigo-700 disabled:opacity-50">
               Confirm

@@ -124,7 +124,7 @@ describe('IcpDiscoveryPanel: nothing runs until the tenant acknowledges what the
 const ApolloEnrichBar = require('../../../components/prospects/ApolloEnrichBar').default;
 
 describe('ApolloEnrichBar: cost first, then the exact estimate', () => {
-  const preview = { fieldGroups: ['job_role', 'company_firmographics'], funding: 'tenant_apollo_key', omnivyraCredits: 0,
+  const preview = { fieldGroups: ['job_role', 'company_firmographics'], funding: 'tenant_apollo_key',
     estimate: { estimatedProviderCalls: 2, calls: [], unreadable: [], estimateHash: 'h1' } };
 
   it('preview shows calls, groups and funding; confirm sends the SAME hash', async () => {
@@ -154,48 +154,32 @@ describe('ApolloEnrichBar: cost first, then the exact estimate', () => {
   });
 });
 
-describe('ApolloEnrichBar: the conversion is shown before running (owner point 3)', () => {
-  it('central access shows Apollo credits = Omnivyra credits', async () => {
-    mockApiFetch.mockResolvedValueOnce(json(200, { fieldGroups: ['job_role'], funding: 'central_apollo_access', vendorUnits: 3, omnivyraCredits: 45,
-      estimate: { estimatedProviderCalls: 3, calls: [], unreadable: [], estimateHash: 'h' } }));
-    render(<ApolloEnrichBar companyId="c1" prospectIds={['p1']} />);
-    fireEvent.click(screen.getByRole('button', { name: 'Enrich with Apollo…' }));
-    expect(await screen.findByTestId('apollo-enrich-cost')).toHaveTextContent('This run: ~3 Apollo credit(s) = 45 Omnivyra credits');
-  });
-
-  it('central access without a configured cost cannot be confirmed', async () => {
-    mockApiFetch.mockResolvedValueOnce(json(200, { fieldGroups: ['job_role'], funding: 'central_apollo_access', vendorUnits: 1, omnivyraCredits: null,
-      estimate: { estimatedProviderCalls: 1, calls: [], unreadable: [], estimateHash: 'h' } }));
-    render(<ApolloEnrichBar companyId="c1" prospectIds={['p1']} />);
-    fireEvent.click(screen.getByRole('button', { name: 'Enrich with Apollo…' }));
-    expect(await screen.findByText(/not priced yet/)).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Confirm' })).toBeDisabled();
-  });
-
+describe('ApolloEnrichBar: own key only (owner 2026-11-20; central access = PL-171)', () => {
   it('no Apollo access at all says how to get it, and cannot be confirmed', async () => {
-    mockApiFetch.mockResolvedValueOnce(json(200, { fieldGroups: ['job_role'], funding: 'no_apollo_access', vendorUnits: 1, omnivyraCredits: 0,
+    mockApiFetch.mockResolvedValueOnce(json(200, { fieldGroups: ['job_role'], funding: 'no_apollo_access', vendorUnits: 1,
       estimate: { estimatedProviderCalls: 1, calls: [], unreadable: [], estimateHash: 'h' } }));
     render(<ApolloEnrichBar companyId="c1" prospectIds={['p1']} />);
     fireEvent.click(screen.getByRole('button', { name: 'Enrich with Apollo…' }));
-    expect(await screen.findByText(/add your own Apollo key, or opt into central Apollo access/)).toBeInTheDocument();
+    expect(await screen.findByText(/add your own Apollo key in Integrations/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Confirm' })).toBeDisabled();
   });
-});
 
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const CentralVendorAccessLine = require('../../../components/billing/CentralVendorAccessLine').default;
-
-describe('public pricing line: central vendor access', () => {
-  it('shows the conversion only for a vendor whose cost is configured', async () => {
-    mockApiFetch.mockResolvedValueOnce(json(200, { vendors: [{ vendor: 'apollo', unit: 'credit', creditsPerUnit: 30, available: true }] }));
-    render(<CentralVendorAccessLine />);
-    expect(await screen.findByTestId('central-vendor-access')).toHaveTextContent('Centralized Apollo access: 30 Omnivyra credits = 1 Apollo credit.');
+  it('an UNKNOWN funding value cannot be confirmed (allow-list: only the own key confirms)', async () => {
+    mockApiFetch.mockResolvedValueOnce(json(200, { fieldGroups: ['job_role'], funding: 'central_apollo_access', vendorUnits: 1,
+      estimate: { estimatedProviderCalls: 1, calls: [], unreadable: [], estimateHash: 'h' } }));
+    render(<ApolloEnrichBar companyId="c1" prospectIds={['p1']} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Enrich with Apollo…' }));
+    expect(await screen.findByText(/add your own Apollo key in Integrations/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Confirm' })).toBeDisabled();
   });
 
-  it('renders nothing when no vendor is priced (never advertises an unavailable option)', async () => {
-    mockApiFetch.mockResolvedValueOnce(json(200, { vendors: [{ vendor: 'apollo', unit: 'credit', creditsPerUnit: null, available: false }] }));
-    const { container } = render(<CentralVendorAccessLine />);
-    await waitFor(() => expect(mockApiFetch).toHaveBeenCalled());
-    expect(container).toBeEmptyDOMElement();
+  it('control: the own key CAN confirm', async () => {
+    mockApiFetch.mockResolvedValueOnce(json(200, { fieldGroups: ['job_role'], funding: 'tenant_apollo_key', vendorUnits: 1,
+      estimate: { estimatedProviderCalls: 1, calls: [], unreadable: [], estimateHash: 'h' } }));
+    render(<ApolloEnrichBar companyId="c1" prospectIds={['p1']} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Enrich with Apollo…' }));
+    expect(await screen.findByText(/billed to your own Apollo account/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Confirm' })).toBeEnabled();
   });
 });
+

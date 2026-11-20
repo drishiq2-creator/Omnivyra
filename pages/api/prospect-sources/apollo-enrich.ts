@@ -14,10 +14,8 @@ import {
   allowedAttributesFor,
   readTenantFieldGroups,
 } from '../../../backend/services/enrichment/apolloFieldGroups';
-import { makeFundedCredentialPort, unitsForCall } from '../../../backend/services/enrichment/providers/funding';
-import { readResolvedCredential } from '../../../backend/services/enrichment/providers/execute';
-import { resolveVendorUnitCost } from '../../../backend/services/pricingService';
-import { PROSPECT_ENRICHMENT_ACTION } from '../../../backend/services/enrichment/providers/cost';
+import { unitsForCall } from '../../../backend/services/enrichment/providers/vendorUnits';
+import { tenantCredentialPort } from '../../../backend/services/enrichment/providers/credentials';
 
 /**
  * PI R1: enrich selected prospects from Apollo, PREVIEW FIRST.
@@ -89,34 +87,16 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     if (mode === 'preview') {
       // Who would pay, decided by the SAME credential resolution the run uses.
       // The key VALUE is discarded here; only the funding kind is reported.
-      const resolved = readResolvedCredential(
-        await makeFundedCredentialPort().resolveCredential({ organizationId: companyId, providerId: 'apollo' }));
+      // OWN KEY ONLY (owner 2026-11-20; central access = PL-171): the tenant's own Apollo key, or no access.
+      const ownKey = await tenantCredentialPort.resolveCredential({ organizationId: companyId, providerId: 'apollo' });
+      const hasOwnKey = typeof ownKey === 'string' && ownKey.trim().length > 0;
       const vendorUnits = estimate.calls.reduce((n, c) => n + (unitsForCall('apollo', c.subject as 'person' | 'account')?.units ?? 0), 0);
-      let omnivyraCredits: number | null = 0;
-      if (resolved?.funding === 'platform') {
-        // Priced exactly as the reservation will be: per call, by the same function.
-        omnivyraCredits = 0;
-        for (const c of estimate.calls) {
-          const u = unitsForCall('apollo', c.subject as 'person' | 'account');
-          if (!u) continue;
-          try {
-            omnivyraCredits += (await resolveVendorUnitCost({
-              provider: 'apollo', unit: u.unit, units: u.units, actionKey: PROSPECT_ENRICHMENT_ACTION, orgId: companyId,
-            })).credits;
-          } catch {
-            omnivyraCredits = null;   // no vendor cost set: central access unavailable, the run would refuse
-            break;
-          }
-        }
-      }
       return res.status(200).json({
         dataAck: { vendor_data: ack.categories.vendor_data.state, contact_data: ack.categories.contact_data.state },
         fieldGroups: groups,
-        funding: resolved?.funding === 'platform' ? 'central_apollo_access'
-          : resolved ? 'tenant_apollo_key' : 'no_apollo_access',
+        funding: hasOwnKey ? 'tenant_apollo_key' : 'no_apollo_access',
         vendorUnits,
         vendorUnit: 'Apollo credit',
-        omnivyraCredits,
         estimate,
       });
     }

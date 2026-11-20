@@ -251,12 +251,11 @@ describe('A3X — 3/7/8. authorization did not go away with billing', () => {
     });
     store[`${ORG_A}::clearbit`] = { [PROVIDER_API_KEY]: SECRET_A };
     await executeEnrichment(req(), 'clearbit', ports({ authorizeCost: gated.authorizeCost }));
-    // Mode B (2026-11-10) adds funding + subject + entity to the cost input. A
-    // tenant's OWN key (a bare-string credential) is always funding 'tenant'.
+    // The cost input carries subject + entity. No `funding`: own key only (owner 2026-11-20; mode B = PL-171).
     expect(seen).toEqual([{
       organizationId: ORG_A, providerId: 'clearbit',
       attributes: ['employee_count'], correlationId: 'corr-a3x',
-      funding: 'tenant', subject: 'account', entityId: 'account-1',
+      subject: 'account', entityId: 'account-1',
     }]);
   });
 });

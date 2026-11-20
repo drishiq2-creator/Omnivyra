@@ -1,5 +1,5 @@
 /**
- * Mode B stop-gap (PI review): a PAID vendor answer whose persistence failed
+ * User-path stop-gap (PI review): a PAID vendor answer whose persistence failed
  * must never be re-paid by the automated retry sweep.
  *
  * The recorded executor closes that case as execution_status 'platform_failed',

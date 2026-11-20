@@ -134,7 +134,6 @@ export const ACTIVITY_CLASS_MAP: Record<CreditAction, ActivityClass> = {
   recommendations_opportunities:   'INTELLIGENCE_SCAN',
   lead_qualification:              'INTELLIGENCE_SCAN',
   lead_predictive_scoring:         'INTELLIGENCE_SCAN',
-  prospect_enrichment:             'INTELLIGENCE_SCAN',
 
   // AUTOMATION — campaign builders / async orchestration
   campaign_creation:               'AUTOMATION',

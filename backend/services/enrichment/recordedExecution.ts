@@ -231,7 +231,7 @@ export async function executeEnrichmentRecorded(
   const markPending = rec.markPending ?? markProviderCallPending;
   const now = rec.now ?? (() => new Date().toISOString());
 
-  // ── the existing rule, on the user path too (mode B stop-gap) ─────────────
+  // ── the existing rule, on the user path too (user-path stop-gap) ─────────────
   // Leased (queue) execution is already governed by consumeEnrichmentWork,
   // which consults decideEnrichmentAction and may legitimately reclaim; it is
   // left exactly as it was.
@@ -465,7 +465,7 @@ export async function executeEnrichmentRecorded(
     sourceRecordId?: string | null;
     attributesReturned?: readonly string[];
     detail: string | null;
-    // Mode B usage. Undefined = not known on this path; the column stays NULL.
+    // Vendor usage. Undefined = not known on this path; the column stays NULL.
     funding?: CredentialFunding | null;
     providerCostUnits?: number | null;
     creditsCharged?: number | null;
@@ -540,17 +540,17 @@ export async function executeEnrichmentRecorded(
     // ENRICHMENT_OUTCOMES describes either what a provider said or a refusal we
     // made before reaching one. Borrowing `provider_unavailable` would blame
     // the vendor for our own persistence failure. See `CompleteAttemptInput`.
-    // Mode B usage on the throw path. The executor catches the vendor's own
+    // Vendor usage on the throw path. The executor catches the vendor's own
     // errors, so a throw with `providerCalled` set means the vendor ANSWERED and
     // something after it failed (paid, not stored): the vendor billed its units.
-    // `funding` rides on the error only once the hold was released, so its
-    // presence also proves 0 credits were charged; without it, credits are unknown.
+    // `funding` rides on the error once a credential was used.
     const thrownFunding = err && typeof err === 'object'
       ? (err as { funding?: CredentialFunding }).funding : undefined;
     const thrownUnits = providerCalled ? unitsForCall(providerId, request.subject) : null;
     await close({
       outcome: null,
       providerCalled,
+      // Own key only: no Omnivyra credits exist to charge (PL-171), so a recorded funding always carries 0.
       ...(thrownFunding ? { funding: thrownFunding, creditsCharged: 0 } : {}),
       ...(thrownUnits ? { providerCostUnits: thrownUnits.units } : {}),
       // A4Q: the process SURVIVED to run this, so the observed flag is proof
@@ -569,13 +569,12 @@ export async function executeEnrichmentRecorded(
 
   await rethrowMarkFailure();
 
-  // Mode B usage on the answered path: units only when the vendor answered with
-  // a billable verdict (the same list that decides whether credits are kept).
+  // Vendor usage on the answered path: units only when the vendor answered with a verdict it bills.
   const answeredUnits = result.providerCalled && BILLABLE_OUTCOMES.includes(result.outcome)
     ? unitsForCall(providerId, request.subject) : null;
   await close({
     outcome: result.outcome,
-    ...(result.funding ? { funding: result.funding, creditsCharged: result.creditsCharged ?? 0 } : {}),
+    ...(result.funding ? { funding: result.funding, creditsCharged: 0 } : {}),
     ...(result.providerCalled ? { providerCostUnits: answeredUnits ? answeredUnits.units : 0 } : {}),
     // The executor's own answer when it has one; it is the only thing that
     // knows whether a duplicate was suppressed before egress.

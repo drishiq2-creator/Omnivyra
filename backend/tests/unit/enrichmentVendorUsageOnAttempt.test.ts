@@ -1,7 +1,8 @@
 /**
- * Mode B usage on the attempt ledger: every closed enrichment attempt states
- * who paid the vendor (funding), what the VENDOR billed (provider_cost_units)
- * and the Omnivyra credits confirmed (credits_charged).
+ * Vendor usage on the attempt ledger (own key only, owner 2026-11-20; central access = PL-171): every closed
+ * enrichment attempt states who paid the vendor (funding: always the tenant), what the VENDOR billed
+ * (provider_cost_units) and the Omnivyra credits charged (credits_charged: always 0).
+ * Rewritten from a5f2e9647's modeBAttemptUsage.test.ts: the platform/settle cases are removed with mode B.
  *
  * PI review requirement: "a persistence failure after a paid answer must still
  * produce an attempt row with units consumed > 0 and credits_charged 0 or NULL".
@@ -18,19 +19,18 @@ const request = {
 type Close = Record<string, unknown>;
 
 async function run(opts: {
-  funding?: 'tenant' | 'platform';
   vendor?: 'enriched' | 'no_match' | 'provider_unavailable';
   persistFails?: boolean;
   credentialMissing?: boolean;
-  settleReturns?: number;
+  /** What resolveCredential returns instead of the tenant's key string. */
+  credentialOverride?: unknown;
 }) {
   const closes: Close[] = [];
   let calls = 0;
   const ports = {
     authorizeCost: async () => ({ authorized: true, holdId: 'h1', cost: { kind: 'unknown' } }),
     releaseCost: async () => undefined,
-    settleCost: async (i: { billable: boolean }) => (i.billable ? (opts.settleReturns ?? 18) : 0),
-    resolveCredential: async () => (opts.credentialMissing ? null : { value: 'k', funding: opts.funding ?? 'platform' }),
+    resolveCredential: async () => ('credentialOverride' in opts ? opts.credentialOverride : (opts.credentialMissing ? null : 'k')),
     findRecentObservation: async () => null,
     persistObservation: async () => {
       if (opts.persistFails) throw new Error('db down');
@@ -63,31 +63,36 @@ async function run(opts: {
   return { closes, calls, error };
 }
 
-it('PAID, NOT STORED (platform): the row still reports the vendor units, funding, and 0 credits', async () => {
-  const { closes, calls, error } = await run({ funding: 'platform', persistFails: true });
+it('PAID, NOT STORED (own key): the row still reports the vendor units, funding tenant, and 0 credits', async () => {
+  const { closes, calls, error } = await run({ persistFails: true });
   expect(error).toBeInstanceOf(Error);
   expect(calls).toBe(1);
   expect(closes).toHaveLength(1);
   expect(closes[0]).toMatchObject({
     outcome: null, providerCallState: 'called', executionStatus: 'platform_failed',
-    funding: 'platform', providerCostUnits: 1, creditsCharged: 0,
+    funding: 'tenant', providerCostUnits: 1, creditsCharged: 0,
   });
 });
 
-it('platform-funded answer: units 1 and the credits the settle CONFIRMED', async () => {
-  const { closes } = await run({ funding: 'platform', settleReturns: 18 });
-  expect(closes[0]).toMatchObject({ outcome: 'enriched', funding: 'platform', providerCostUnits: 1, creditsCharged: 18 });
+it('own key, enriched: units 1, funding tenant, 0 credits', async () => {
+  const { closes } = await run({});
+  expect(closes[0]).toMatchObject({ outcome: 'enriched', funding: 'tenant', providerCostUnits: 1, creditsCharged: 0 });
 });
 
-it('own key (tenant): units are recorded, credits are 0', async () => {
-  const { closes } = await run({ funding: 'tenant', vendor: 'no_match', settleReturns: 99 });
-  expect(closes[0]).toMatchObject({ outcome: 'no_match', funding: 'tenant', providerCostUnits: 1 });
-  expect(closes[0].creditsCharged).toBe(0);
+it('own key, a miss the vendor still bills (no_match): units 1, 0 credits', async () => {
+  const { closes } = await run({ vendor: 'no_match' });
+  expect(closes[0]).toMatchObject({ outcome: 'no_match', funding: 'tenant', providerCostUnits: 1, creditsCharged: 0 });
 });
 
 it('vendor error (not billable): called, 0 units, 0 credits', async () => {
-  const { closes } = await run({ funding: 'platform', vendor: 'provider_unavailable' });
+  const { closes } = await run({ vendor: 'provider_unavailable' });
   expect(closes[0]).toMatchObject({ providerCallState: 'called', providerCostUnits: 0, creditsCharged: 0 });
+});
+
+it("mode B's old object credential ({value, funding:'platform'}) is REFUSED as credential_missing - no call", async () => {
+  const { closes, calls } = await run({ credentialOverride: { value: 'k', funding: 'platform' } });
+  expect(calls).toBe(0);
+  expect(closes[0]).toMatchObject({ outcome: 'credential_missing', providerCallState: 'not_called' });
 });
 
 it('NEGATIVE CONTROL: no credential -> no call; units, funding and credits are left unstated (NULL)', async () => {

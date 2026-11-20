@@ -19,12 +19,12 @@ const T = (o: Record<string, number> = {}) => ({ runs: 0, vendorUnits: 0, vendor
 const REPORT = {
   window: { from: '2026-10-11T00:00:00.000Z', to: '2026-11-10T00:00:00.000Z' },
   ledgers: { enrichment: 'ok', discovery: 'unavailable' },
-  totals: T({ runs: 2, vendorUnits: 2, creditsCharged: 18, leadsAdded: 1 }),
-  bySource: [{ source: 'apollo', kind: 'enrichment', ...T({ runs: 2, vendorUnits: 2, creditsCharged: 18, leadsAdded: 1 }) }],
-  byUser: [{ userId: 'u1', label: 'Asha', ...T({ runs: 2, vendorUnits: 2, creditsCharged: 18 }) }],
+  totals: T({ runs: 2, vendorUnits: 2, creditsCharged: 0, leadsAdded: 1 }),
+  bySource: [{ source: 'apollo', kind: 'enrichment', ...T({ runs: 2, vendorUnits: 2, creditsCharged: 0, leadsAdded: 1 }) }],
+  byUser: [{ userId: 'u1', label: 'Asha', ...T({ runs: 2, vendorUnits: 2, creditsCharged: 0 }) }],
   byDay: [{ day: '2026-11-10', ...T({ runs: 2 }) }],
   runs: [
-    { kind: 'enrichment', source: 'apollo', runId: 'e2', at: '2026-11-10T11:00:00Z', userId: 'u1', funding: 'platform', vendorUnits: 1, creditsCharged: 0, outcome: null, leadsReceived: 0, leadsAdded: 0, heldForReview: 0, skippedDuplicates: 0 },
+    { kind: 'enrichment', source: 'apollo', runId: 'e2', at: '2026-11-10T11:00:00Z', userId: 'u1', funding: null, vendorUnits: 1, creditsCharged: 0, outcome: null, leadsReceived: 0, leadsAdded: 0, heldForReview: 0, skippedDuplicates: 0 },
     { kind: 'enrichment', source: 'apollo', runId: 'e1', at: '2026-11-10T10:00:00Z', userId: 'u1', funding: 'tenant', vendorUnits: 1, creditsCharged: 0, outcome: 'enriched', leadsReceived: 0, leadsAdded: 1, heldForReview: 0, skippedDuplicates: 0 },
   ],
 };
@@ -34,9 +34,10 @@ beforeEach(() => { mockApiFetch.mockReset(); mockCompany = 'c1'; });
 it('shows totals, the vendor name, who paid, and a ledger that is not available yet (never as zero)', async () => {
   mockApiFetch.mockResolvedValue(json(200, REPORT));
   render(<DataSourceUsagePanel />);
-  await waitFor(() => expect(screen.getByTestId('usage-totals')).toHaveTextContent('18 Omnivyra credits'));
+  await waitFor(() => expect(screen.getByTestId('usage-totals')).toHaveTextContent('0 Omnivyra credits'));
   expect(screen.getByTestId('usage-by-source')).toHaveTextContent('Apollo');
-  expect(screen.getByTestId('usage-runs')).toHaveTextContent('Omnivyra credits');
+  // Own key only: no row can say it was paid in Omnivyra credits; an unknown funding shows '-'.
+  expect(screen.getByTestId('usage-runs')).not.toHaveTextContent('Omnivyra credits');
   expect(screen.getByTestId('usage-runs')).toHaveTextContent('Your key');
   expect(screen.getByTestId('usage-gap-discovery')).toHaveTextContent('not available yet');
   expect(mockApiFetch.mock.calls[0][0]).toMatch(/^\/api\/prospect-sources\/usage\?companyId=c1&from=.+&to=.+/);
