@@ -104,6 +104,32 @@ describe('row content pointing at another tenant\'s post', () => {
   });
 });
 
+describe('the queue lock refuses: an unreadable database is NOT reported as contention (7c, CI-156)', () => {
+  const lockMock = () => require('../../scheduler/schedulerService').tryAcquireScheduledPostQueueLock as jest.Mock;
+
+  it('lock mode none (the database could not be read) -> 503 QUEUE_LOCK_STATE_UNREADABLE, nothing cancelled or written', async () => {
+    world(POST_A);
+    lockMock().mockImplementationOnce(async () => ({ acquired: false, mode: 'none', release: async () => undefined }));
+    const r = await call();
+    expect(r.status).toBe(503);
+    expect(r.headers['retry-after']).toBe('5'); // b3 standing rule (2026-11-19)
+    expect(r.body).toMatchObject({ code: 'QUEUE_LOCK_STATE_UNREADABLE', retryable: true, scheduled_post_id: POST_A });
+    expect(String(r.body.error)).toContain('nothing was changed');
+    expect(mockEvents.filter((e) => e.startsWith('queue:cancel'))).toEqual([]);
+    expect(post(POST_A).status).toBe('scheduled');
+  });
+
+  it('genuine contention (advisory lock held) -> 409 CONCURRENT_QUEUE_MUTATION, as before', async () => {
+    world(POST_A);
+    lockMock().mockImplementationOnce(async () => ({ acquired: false, mode: 'advisory', release: async () => undefined }));
+    const r = await call();
+    expect(r.status).toBe(409);
+    expect(r.body).toMatchObject({ code: 'CONCURRENT_QUEUE_MUTATION' });
+    expect(r.headers['retry-after']).toBeUndefined(); // contention is a real state, not a read failure
+    expect(post(POST_A).status).toBe('scheduled');
+  });
+});
+
 describe('legitimate unschedules are unchanged', () => {
   it('row → its own campaign post: cancels that job, marks it cancelled, verified before any side effect', async () => {
     world(POST_A);
