@@ -5,6 +5,9 @@
  *
  * Inputs: 5 posts whose tokens are expiring; each refresh takes 60 ms and returns null
  * (a timed-out refresh); budget 100 ms with a 50 ms reservation per refresh.
+ * Time is an INJECTED clock (Date.now, advanced by exactly 60 inside each refresh), never
+ * wall time: PL-83 - with a real 60 ms sleep a loaded CI runner stretched one refresh past
+ * 100 ms, so only 1 refresh started and the case failed head-only (CI-668).
  * Expected: 2 refreshes start (100 -> 40 -> -20), the other 3 are DEFERRED - not
  * attempted, nothing recorded or parked - and a deferred proactive refresh still fetches
  * with the existing token; the next cycle (fresh budget) attempts them.
@@ -38,14 +41,19 @@ jest.mock('../../db/writeOwner', () => ({
 import { ProviderRequestError } from '../../services/engagement/providerRequestError';
 import { ingestComments, createRefreshBudget, ingestRefreshBudgetMs, DEFAULT_INGEST_REFRESH_BUDGET_MS } from '../../services/engagementIngestionService';
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+/** The injected clock: the service reads time only through Date.now; a refresh advances it. */
+let clock = 0;
+const REFRESH_MS = 60;
 beforeEach(() => {
   jest.clearAllMocks();
+  clock = 1_700_000_000_000;
+  jest.spyOn(Date, 'now').mockImplementation(() => clock);
   mockGetScheduledPost.mockImplementation(async (id: string) => ({ id, platform: 'linkedin', platform_post_id: `pp-${id}`, social_account_id: `acc-${id}`, campaign_id: null, user_id: null }));
   mockGetToken.mockResolvedValue({ access_token: 'old', refresh_token: 'r', is_active: true, __expiringSoon: true });
-  mockRefresh.mockImplementation(async () => { await sleep(60); return null; }); // a refresh that timed out
+  mockRefresh.mockImplementation(async () => { clock += REFRESH_MS; return null; }); // a refresh that timed out
   mockAdapterFetch.mockResolvedValue({ elements: [] });
 });
+afterEach(() => jest.restoreAllMocks());
 
 it('the default budget is 120 s and INGEST_REFRESH_BUDGET_MS overrides it', () => {
   expect(ingestRefreshBudgetMs({})).toBe(DEFAULT_INGEST_REFRESH_BUDGET_MS);
@@ -70,10 +78,11 @@ it('N timing-out refreshes cannot push a cycle past its budget: the rest are def
   for (const id of ['1', '2', '3', '4', '5']) results.push(await ingestComments(id, { refreshBudget: budget }));
   expect(mockRefresh).toHaveBeenCalledTimes(2);
   expect(budget.deferred).toBe(3);
-  expect(budget.remainingMs).toBeLessThanOrEqual(0);
+  // Exact, because the clock is injected: 100 -50 (reserve) -> +50-60 = 40 -> -50 -> +50-60 = -20.
+  expect(budget.remainingMs).toBe(-20);
   // Refresh time spent (each refresh takes 60 ms) is bounded by the budget plus the
   // one refresh that started before it ran out: 2 x 60 = 120 <= 100 + 60.
-  expect(mockRefresh.mock.calls.length * 60).toBeLessThanOrEqual(100 + 60);
+  expect(mockRefresh.mock.calls.length * REFRESH_MS).toBeLessThanOrEqual(100 + REFRESH_MS);
   // A refresh that ran and failed reports refresh_failed (as before); deferred proactive
   // refreshes still fetch with the EXISTING token, so those posts succeed.
   expect(results.slice(0, 2).map((r) => r.failure)).toEqual(['refresh_failed', 'refresh_failed']);
