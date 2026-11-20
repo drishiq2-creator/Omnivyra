@@ -102,8 +102,29 @@ export async function createWebsite(input: CreateWebsiteInput): Promise<Website>
     .insert(payload)
     .select('*')
     .single();
-  if (error) throw new Error(error.message);
+  if (error) {
+    if (isActiveCanonicalUrlConflict(error)) throw new WebsiteAlreadyExistsError(error.message);
+    throw new Error(error.message);
+  }
   return data as Website;
+}
+
+/** The unique index that makes one live website per (company, lower(canonical_url)): a duplicate is a 409, not a 500. */
+export const WEBSITE_CANONICAL_URL_UNIQUE = 'uq_websites_company_canonical_url_active';
+
+/** Thrown by createWebsite when the company already has a live website at this address. Message unchanged for callers. */
+export class WebsiteAlreadyExistsError extends Error {
+  readonly code = 'WEBSITE_ALREADY_EXISTS';
+  constructor(message: string) {
+    super(message);
+    this.name = 'WebsiteAlreadyExistsError';
+  }
+}
+
+/** 23505 on THAT index only; any other unique violation stays a plain error. */
+export function isActiveCanonicalUrlConflict(error: { code?: string; message?: string; details?: string } | null | undefined): boolean {
+  if (!error || error.code !== '23505') return false;
+  return `${error.message ?? ''} ${error.details ?? ''}`.includes(WEBSITE_CANONICAL_URL_UNIQUE);
 }
 
 export interface UpdateWebsiteInput {
