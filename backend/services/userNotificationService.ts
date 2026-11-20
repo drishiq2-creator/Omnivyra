@@ -70,6 +70,9 @@ export type CompanyEventDelivery =
   | { delivered: number }
   | { delivered: 0; undeliverable: 'no_active_recipient' | 'membership_unreadable' | 'insert_failed' | 'invalid_input' };
 
+/** Undeliverable reasons that ARE a database failure: their durable record is never awaited (b3 standing rule). */
+const DB_FAILURE_REASONS: ReadonlySet<string> = new Set(['membership_unreadable', 'insert_failed']);
+
 async function undeliverable(
   reason: 'no_active_recipient' | 'membership_unreadable' | 'insert_failed' | 'invalid_input',
   type: unknown,
@@ -80,7 +83,12 @@ async function undeliverable(
   try { recordRawCounter('notification_undeliverable', 1, { reason, type: String(type ?? 'unknown').slice(0, 60) }); } catch { /* metrics never break delivery */ }
   // DURABLE record (b3 (B)): the in-memory counter above is per process and invisible on Vercel. Bounded by a
   // timeout, coalesced, and never rejects - delivery's answer is unchanged whatever happens here.
-  await recordNotificationFailure({ reason, type, companyId: typeof detail.company_id === 'string' ? detail.company_id : null });
+  // DB-FAILURE PATHS ARE FIRE-AND-FORGET (b3 standing rule, 2026-11-20): when the reason IS a database failure
+  // (memberships unreadable / insert failed) the record would go into the same failing database, so nothing waits on
+  // it before answering - the NOTIFICATION_UNDELIVERABLE log line and the counter above are the signal. When the
+  // database answered (no recipient / invalid input) the record is awaited, so it lands even on serverless.
+  const record = recordNotificationFailure({ reason, type, companyId: typeof detail.company_id === 'string' ? detail.company_id : null });
+  if (!DB_FAILURE_REASONS.has(reason)) await record;
   return { delivered: 0, undeliverable: reason };
 }
 
@@ -143,7 +151,9 @@ export async function reportNotificationInsertFailure(type: string, error: { mes
   if (!error) return;
   console.error('NOTIFICATION_INSERT_FAILED', JSON.stringify({ type, where, message: String(error.message ?? '').slice(0, 200) }));
   try { recordRawCounter('notification_undeliverable', 1, { reason: 'insert_failed', type: String(type).slice(0, 60) }); } catch { /* never break the caller */ }
-  // DURABLE record (b3 (B)); never rejects. Callers AWAIT it: on Vercel an un-awaited write may be cut off when the
-  // function returns. No company id here (per-user writers), so it coalesces per (type, reason).
-  await recordNotificationFailure({ reason: 'insert_failed', type });
+  // DURABLE record (b3 (B)); never rejects. This path IS a database failure (the notification insert just failed), so
+  // the record is FIRE-AND-FORGET (b3 standing rule): nothing waits on the same failing database before the caller
+  // answers. The NOTIFICATION_INSERT_FAILED log line and the counter are the signal; on serverless the record may be
+  // cut off when the function returns - stated, accepted. No company id here, so it coalesces per (type, reason).
+  void recordNotificationFailure({ reason: 'insert_failed', type });
 }
