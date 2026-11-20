@@ -15,10 +15,13 @@ import { ownedDbTable } from '../db/writeOwner';
 
 import { createCredit, makeIdempotencyKey } from './creditExecutionService';
 import { getRequestContext } from './requestContext';
+import { isProduction } from './config/productionFlags';
+import { isLiveProviderMode } from './billing/liveProviderMode';
+import { logger } from './logger';
 
 export type PurchaseResult =
   | { success: true; purchaseId: string; creditsGranted: number }
-  | { success: false; reason: 'not_found' | 'already_completed' | 'already_failed' | 'error'; detail?: string };
+  | { success: false; reason: 'not_found' | 'already_completed' | 'already_failed' | 'error' | 'test_mode_no_grant'; detail?: string };
 
 type PurchaseRow = {
   id: string;
@@ -28,6 +31,8 @@ type PurchaseRow = {
   amount_paid: number;
   currency: string;
   fulfillment_status?: 'pending' | 'event_recorded' | 'completed' | 'failed' | null;
+  /** Stamped by create-order from getActiveMode(); null on rows created before the column. */
+  provider_mode?: 'test' | 'live' | string | null;
 };
 
 export async function recordPaymentProviderEvent(input: {
@@ -119,7 +124,7 @@ export async function completePurchase(
 
   // ── 2. Fetch and validate the purchase by ID ───────────────────────────────
   const { data: purchase, error: fetchErr } = await ownedDbTable('credit_purchases')
-    .select('id, organization_id, credits, status, amount_paid, currency, fulfillment_status')
+    .select('id, organization_id, credits, status, amount_paid, currency, fulfillment_status, provider_mode')
     .eq('id', purchaseId)
     .maybeSingle();
 
@@ -132,6 +137,32 @@ export async function completePurchase(
   }
   if (purchaseRow.status === 'failed') {
     return { success: false, reason: 'already_failed' };
+  }
+
+  // ── 2b. A TEST-mode payment never grants REAL credits in production (b3 / owner, 2026-11-20) ─────────────────
+  // Prod runs on TEST provider keys today (PAYMENT_PROVIDER_MODE unset → 'test'), so a test-card payment verifies
+  // and - before this - granted paid credits. This is the chokepoint for every PURCHASE-driven grant path (verify,
+  // payment webhook, provider-first closure, staging, super-admin complete) - NOT for grants that never create a
+  // credit_purchases row (admin grants, onboarding, earned credits, the subscription monthly-allocation sweep). The purchase is closed as failed with the reason
+  // recorded (so no sweep retries it) and nothing is credited.
+  // Fail CLOSED (04, 2026-11-20; c6/7c, cb C151): only a row stamped 'live' may grant in production. 'test', NULL (rows
+  // from before the column), and any other value (checkoutSessionStore normalises unknown modes to 'unknown') are
+  // refused. C151 read: 0 completable NULL/unknown rows in prod, so this changes no real purchase.
+  if (isProduction() && !isLiveProviderMode(purchaseRow.provider_mode) && purchaseRow.fulfillment_status !== 'completed') {
+    const { error: closeErr } = await ownedDbTable('credit_purchases')
+      .update({
+        status: 'failed',
+        fulfillment_status: 'failed',
+        fulfillment_error: 'test_mode_payment_no_grant',
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', purchaseId)
+      .neq('fulfillment_status', 'completed');
+    logger.error('purchase_test_mode_payment_refused', {
+      purchaseId, organizationId: purchaseRow.organization_id, credits: purchaseRow.credits,
+      closeError: closeErr?.message ?? null,
+    });
+    return { success: false, reason: 'test_mode_no_grant', detail: 'test-mode payment in production: no credits granted' };
   }
 
   // ── 3. Grant credits (idempotent on purchaseId) ────────────────────────────

@@ -40,6 +40,7 @@ import AssetReusePicker from '@/components/creator/AssetReusePicker';
 import { splitThreadIntoSegments, buildThreadNodesFromSegments } from '@/lib/thread/threadFlow';
 import { validatePostForPlatform } from '@/lib/preview/platformLimitValidation';
 import type { CanonicalContent } from '@/lib/content/canonicalContent';
+import { BILLING_FALLBACK_NOTE, isBillingRefusalNotice, throwIfBillingRefusal } from '@/lib/billing/billingRefusalCopy';
 export function useMultiPlatformSchedulerController() {
   const router = useRouter();
   const { user, selectedCompanyId, selectedCompanyName, isLoading } = useCompanyContext();
@@ -862,6 +863,7 @@ export function useMultiPlatformSchedulerController() {
 
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
+        throwIfBillingRefusal(response.status, data);
         throw new Error(data.error || data.message || 'Failed to adapt content for the selected platform.');
       }
 
@@ -913,9 +915,12 @@ export function useMultiPlatformSchedulerController() {
           busy: false,
           adapted: true,
           manuallyEdited: false,
-          message: isAbort
-            ? `Applied ${selectedOption.label} platform rules after the full repurpose timed out.`
-            : `Applied ${selectedOption.label} platform rules.`,
+          // b3 (A): when billing refused the AI adaptation, the rules-based fallback says AI wasn't used.
+          message: isBillingRefusalNotice(error)
+            ? BILLING_FALLBACK_NOTE[error.code]
+            : isAbort
+              ? `Applied ${selectedOption.label} platform rules after the full repurpose timed out.`
+              : `Applied ${selectedOption.label} platform rules.`,
           status: 'idle',
         });
         // Wave 1 (item 5) — record the fallback adaptation as a child variant.

@@ -2,6 +2,7 @@ import React from 'react';
 import { Sparkles, Send, X, Check } from 'lucide-react';
 import { color, radius, shadow, space, fontSize, fontWeight } from '../../lib/platform/ui';
 import ChatVoiceButton from '../ChatVoiceButton';
+import { describeBillingRefusal } from '@/lib/billing/billingRefusalCopy';
 
 /**
  * "Create with AI" — a conversational brief builder. The user chats to work out
@@ -90,7 +91,9 @@ export default function CreateWithAIChat({
       });
       if (!resp.ok) {
         const d = await resp.json().catch(() => ({}));
-        throw new Error(d?.error || `Assistant failed (${resp.status})`);
+        // Billing refusals get client copy; anything else a fixed message (never the server's raw text).
+        const refusal = describeBillingRefusal(resp.status, d);
+        throw new Error(refusal ? refusal.message : 'The assistant could not answer right now. Please try again.');
       }
       const data = await resp.json();
       const reply = typeof data?.reply === 'string' ? data.reply : 'Updated your draft.';

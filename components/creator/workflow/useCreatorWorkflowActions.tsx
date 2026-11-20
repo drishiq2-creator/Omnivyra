@@ -40,6 +40,7 @@ import {
 } from '../../../lib/creator-content/creatorFieldAssistContext';
 import { useCreatorWorkflowState } from './useCreatorWorkflowState';
 import { useCreatorWorkflowLifecycle } from './useCreatorWorkflowLifecycle';
+import { billingFallbackNote, throwIfBillingRefusal } from '@/lib/billing/billingRefusalCopy';
 
 export function useCreatorWorkflowActions(
   s: ReturnType<typeof useCreatorWorkflowState>,
@@ -173,11 +174,15 @@ export function useCreatorWorkflowActions(
     });
     if (!resp.ok) {
       const detail = await resp.json().catch(() => ({}));
+      throwIfBillingRefusal(resp.status, detail);
       throw new Error(detail?.error || `AI assist failed (${resp.status})`);
     }
     const data = await resp.json();
+    // b3 (A): a billing refusal's deterministic fallback is applied, but the user is TOLD it isn't AI output.
+    const fallbackNote = billingFallbackNote(data);
+    if (fallbackNote) setNotice(fallbackNote);
     return Array.isArray(data?.updates) ? data.updates : [];
-  }, [activeTemplate, selectedCompanyId, answers.keyMessage, answers.dataPoints, writerSource?.body, buildAssistContext, slideRolesFor]);
+  }, [activeTemplate, selectedCompanyId, answers.keyMessage, answers.dataPoints, writerSource?.body, buildAssistContext, slideRolesFor, setNotice]);
 
   const handleTemplateAiAssist = React.useCallback(async (ctx: TemplateAiAssistContext) => {
     if (!activeTemplate || ctx.targets.length === 0) return;
@@ -334,11 +339,15 @@ export function useCreatorWorkflowActions(
     });
     if (!resp.ok) {
       const detail = await resp.json().catch(() => ({}));
+      throwIfBillingRefusal(resp.status, detail);
       throw new Error(detail?.error || `AI assist failed (${resp.status})`);
     }
     const data = await resp.json();
+    // b3 (A): a billing refusal's deterministic fallback is applied, but the user is TOLD it isn't AI output.
+    const fallbackNote = billingFallbackNote(data);
+    if (fallbackNote) setNotice(fallbackNote);
     return Array.isArray(data?.updates) ? data.updates : [];
-  }, [activeTemplate, selectedCompanyId, templateValues.fields, answers.keyMessage, answers.dataPoints, answers.topic, writerSource?.body, buildAssistContext]);
+  }, [activeTemplate, selectedCompanyId, templateValues.fields, answers.keyMessage, answers.dataPoints, answers.topic, writerSource?.body, buildAssistContext, setNotice]);
 
   /** Keep the AI alternatives for chips (content-grounded, per overlay role). */
   const rememberOverlayAlternatives = React.useCallback((updates: Array<{ field_key?: string; fieldKey?: string; alternatives?: string[] }>) => {

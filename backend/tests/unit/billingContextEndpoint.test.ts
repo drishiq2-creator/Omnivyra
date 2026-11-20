@@ -40,6 +40,8 @@ jest.mock('../../security/IdentityResolver', () => ({
 // path writes company_billing_profiles and NEVER billing_context.
 let __profileRow: any = null;
 let __billingContextRow: any = null;
+// c6 2026-11-20: a READ ERROR on billing_context (not an absent table) - the context is unreadable.
+let __ctxReadError: { code?: string; message: string } | null = null;
 let __upsertCalls: { table: string; payload: any }[] = [];
 
 jest.mock('@/backend/db/supabaseClient', () => ({
@@ -49,7 +51,7 @@ jest.mock('@/backend/db/supabaseClient', () => ({
       b.select = () => b;
       b.eq = () => b;
       b.maybeSingle = () => {
-        if (table === 'billing_context') return Promise.resolve({ data: __billingContextRow, error: null });
+        if (table === 'billing_context') return Promise.resolve(__ctxReadError ? { data: null, error: __ctxReadError } : { data: __billingContextRow, error: null });
         if (table === 'company_billing_profiles') return Promise.resolve({ data: __profileRow, error: null });
         return Promise.resolve({ data: null, error: null });
       };
@@ -78,7 +80,7 @@ function mockReqRes(method: string, body?: unknown) {
 
 beforeEach(() => {
   __authOk = true; __activeOrgId = 'org-1'; __sessionEmail = 'user@example.com';
-  __profileRow = null; __billingContextRow = null; __upsertCalls = [];
+  __profileRow = null; __billingContextRow = null; __upsertCalls = []; __ctxReadError = null;
 });
 
 describe('/api/billing/context — auth + method', () => {
@@ -223,5 +225,30 @@ describe('consolidation — no resolver ambiguity', () => {
     await handler(r2.req, r2.res);
     const tables = new Set(__upsertCalls.map((c) => c.table));
     expect([...tables]).toEqual(['company_billing_profiles']); // exactly one target
+  });
+});
+
+// c6 2026-11-20: an unreadable context is 503, never "geography unknown"; a SAVED profile is never reported as failed.
+describe('/api/billing/context - unreadable billing context', () => {
+  test('GET: read error -> 503 BILLING_CONTEXT_UNREADABLE (not source none)', async () => {
+    __ctxReadError = { code: '08006', message: 'connection reset' };
+    const { req, res } = mockReqRes('GET');
+    await handler(req, res);
+    expect(res._status).toBe(503);
+    expect(res._json).toEqual({ error: 'billing_context_unreadable', code: 'BILLING_CONTEXT_UNREADABLE' });
+  });
+  test('PUT: the capture WROTE, the re-read failed -> 200 captured + reread note', async () => {
+    __ctxReadError = { code: '08006', message: 'connection reset' };
+    const { req, res } = mockReqRes('PUT', { billing_country: 'IN' });
+    await handler(req, res);
+    expect(__upsertCalls.length).toBeGreaterThan(0); // PREMISE: the write happened
+    expect(res._status).toBe(200);
+    expect(res._json).toMatchObject({ captured: true, reread: 'billing_context_unreadable' });
+  });
+  test('CONTROL GET: readable, no rows -> 200 source none', async () => {
+    const { req, res } = mockReqRes('GET');
+    await handler(req, res);
+    expect(res._status).toBe(200);
+    expect(res._json).toMatchObject({ source: 'none', geography_known: false });
   });
 });

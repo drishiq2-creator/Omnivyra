@@ -9,6 +9,7 @@ import {
 } from 'lucide-react';
 import type { useCommandCenter } from '../hooks/useCommandCenter';
 import CommandCenterPreflightModal from './command-center/CommandCenterPreflightModal';
+import WebsiteLeadCaptureSection from './command-center/WebsiteLeadCaptureSection';
 import { getCardHoverMessage, toPreflightItems, withCompanyId } from './command-center/preflightHelpers';
 import CategoryFactorsPanel from './command-center/CategoryFactorsPanel';
 import { masteryLevel } from '../lib/mastery/masteryLevels';
@@ -361,6 +362,9 @@ export default function CommandCenterView({ d }: { d: S }) {
             ))}
           </div>
         </section>
+
+        {/* Owner 2026-11-20: the former header "Web & Capture" menu, for company admins, at the bottom of home. */}
+        <WebsiteLeadCaptureSection userRole={d.userRole} />
       </div>
       <CommandCenterPreflightModal
         open={Boolean(activePreflightCard && activePreflight)}
