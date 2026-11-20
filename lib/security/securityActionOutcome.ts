@@ -20,6 +20,9 @@
 
 import { ALREADY_REVOKED } from '../../shared/security/revokeCodes';
 
+/** devices/trust.ts 409 code (backend/security/devices/trustedDeviceTypes.ts). */
+export const DEVICE_ALREADY_TRUSTED = 'ALREADY_TRUSTED';
+
 /** The outcome union AS A VALUE (b3 standard); the type derives from it. */
 export const SECURITY_ACTION_OUTCOMES = ['done', 'refused', 'unknown'] as const;
 export type SecurityActionOutcome = (typeof SECURITY_ACTION_OUTCOMES)[number];
@@ -37,6 +40,9 @@ const REVOKE_KINDS: ReadonlySet<SecurityActionKind> = new Set<SecurityActionKind
 export function classifySecurityAction(kind: SecurityActionKind, status: number | null, code?: string | null): SecurityActionOutcome {
   if (status !== null && status >= 200 && status < 300) return 'done';
   if (status === 409 && REVOKE_KINDS.has(kind)) return code === ALREADY_REVOKED ? 'done' : 'unknown';
+  // Trust's 409 is unambiguous: devices/trust.ts sends it ONLY with code ALREADY_TRUSTED (the state the user asked for,
+  // 7c 2026-11-20). Any other 409 on trust stays refused.
+  if (status === 409 && kind === 'device_trust' && code === DEVICE_ALREADY_TRUSTED) return 'done';
   if (status !== null && status >= 400 && status < 500) return 'refused';
   return 'unknown';
 }

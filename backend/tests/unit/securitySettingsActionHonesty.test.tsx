@@ -172,6 +172,8 @@ describe('outcome tables (union-coverage pattern)', () => {
     expect(classifySecurityAction('passkey_revoke', 409, null)).toBe('unknown');
     expect(classifySecurityAction('passkey_revoke', 409, 'SOME_FUTURE_CODE')).toBe('unknown');
     expect(classifySecurityAction('device_trust', 409, ALREADY_REVOKED)).toBe('refused');
+    expect(classifySecurityAction('device_trust', 409, 'ALREADY_TRUSTED')).toBe('done');
+    expect(classifySecurityAction('device_trust', 409, null)).toBe('refused');
     expect(classifySecurityAction('device_trust', 409)).toBe('refused');
     expect(classifySecurityAction('recovery_regenerate', 409)).toBe('refused');
     expect(classifySecurityAction('passkey_revoke', 403)).toBe('refused');
@@ -189,6 +191,13 @@ describe('outcome tables (union-coverage pattern)', () => {
     for (const c of REVOKE_CODES) decided[c] = classifySecurityAction('passkey_revoke', 409, c);
     expect(Object.keys(decided).sort()).toEqual([...REVOKE_CODES].sort());
     expect(decided).toEqual({ ALREADY_REVOKED: 'done', REVOKE_UNCONFIRMED: 'unknown' });
+  });
+
+  it('server contract: the trust route still sends ALREADY_TRUSTED on its 409 (the client keys done on it)', () => {
+    const src = fs.readFileSync(path.resolve(__dirname, '../../../pages/api/auth/devices/trust.ts'), 'utf8');
+    const sites = src.split(/\r?\n/).filter((l) => l.includes('status(409)'));
+    expect(sites).toHaveLength(1);
+    expect(src).toMatch(/result\.reason === 'ALREADY_TRUSTED'\) \{\s*return res\.status\(409\)/);
   });
 
   it('server contract: every 409 in the three revoke routes carries a code from REVOKE_CODES', () => {
