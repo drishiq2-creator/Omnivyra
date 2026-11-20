@@ -109,8 +109,10 @@ export function aggregateUsage(
   const runs = [...events].sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : a.runId.localeCompare(b.runId)));
   return {
     window, ledgers, totals,
-    bySource: [...src.values()].sort((a, b) => b.runs - a.runs || a.source.localeCompare(b.source)),
-    byUser: [...usr.values()].sort((a, b) => b.runs - a.runs || a.label.localeCompare(b.label)),
+    // Total order (c6 2026-11-20): one row per (kind, source), so `kind` breaks a source tie (discovery:apollo vs
+    // enrichment:apollo) and `userId` breaks a label tie (several 'Former member' rows) - else the order follows input.
+    bySource: [...src.values()].sort((a, b) => b.runs - a.runs || a.source.localeCompare(b.source) || a.kind.localeCompare(b.kind)),
+    byUser: [...usr.values()].sort((a, b) => b.runs - a.runs || a.label.localeCompare(b.label) || String(a.userId ?? '').localeCompare(String(b.userId ?? ''))),
     byDay: [...day.values()].sort((a, b) => a.day.localeCompare(b.day)),
     runs: runs.slice(0, runLimit),
   };

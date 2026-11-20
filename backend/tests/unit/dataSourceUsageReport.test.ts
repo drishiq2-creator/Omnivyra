@@ -112,3 +112,13 @@ it('pure aggregation is order-independent', () => {
   const l = { enrichment: 'ok', discovery: 'ok' } as const;
   expect(aggregateUsage(ev, new Map(), W, l)).toEqual(aggregateUsage([...ev].reverse(), new Map(), W, l));
 });
+
+it('two FORMER members with equal runs sort the same whatever the input order (userId breaks the label tie)', () => {
+  const mk = (id: string, user: string) => toEvent('enrichment', { id, provider_key: 'apollo', started_at: '2026-11-02T00:00:00Z', outcome: 'enriched', provider_cost_units: 1, initiated_by: user });
+  const ev = [mk('x1', 'u-former-a'), mk('x2', 'u-former-b')];
+  const l = { enrichment: 'ok', discovery: 'ok' } as const;
+  const fwd = aggregateUsage(ev, new Map(), W, l).byUser.map((u) => u.userId);
+  const rev = aggregateUsage([...ev].reverse(), new Map(), W, l).byUser.map((u) => u.userId);
+  expect(fwd).toEqual(['u-former-a', 'u-former-b']);
+  expect(rev).toEqual(fwd);
+});
