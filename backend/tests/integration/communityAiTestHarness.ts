@@ -180,16 +180,32 @@ const resolveSelect = (table: string, state: any) => {
       const scheduled = scheduledPostStore.find((post) => post.id === row.scheduled_post_id);
       return {
         ...row,
-        // G2R: the column is `active_company_id`. Both content-kpis.ts:54 and trends.ts:44 select
-        // `users(active_company_id)` and filter on `scheduled_posts.users.active_company_id`; this
-        // double supplied and filtered `company_id`, so the recorded key never matched and the
-        // tenant filter silently never fired — surfacing as tenant-2 rows in a cross-tenant test
-        // and looking exactly like a data leak. Production filters correctly; the double did not.
-        scheduled_posts: scheduled ? { engagement_goals: scheduled.engagement_goals, users: { active_company_id: scheduled.company_id } } : null,
+        // CI-301 (2026-11-18): the routes select `scheduled_posts!inner(..., social_accounts!inner(company_id))` and
+        // filter `scheduled_posts.social_accounts.company_id` - the post's OWN company through its account. A seeded
+        // post's company_id stands for its account's company here.
+        scheduled_posts: scheduled
+          ? { engagement_goals: scheduled.engagement_goals, content: scheduled.content, social_accounts: { company_id: scheduled.company_id } }
+          : null,
       };
     });
-    const companyId = state.filters['scheduled_posts.users.active_company_id'];
-    if (companyId) rows = rows.filter((row) => row.scheduled_posts?.users?.active_company_id === companyId);
+    // FAITHFUL to PostgREST: a filter on an EMBEDDED resource only filters the TOP-LEVEL rows when the embed is
+    // !inner. This double used to drop top-level rows on the old, NON-inner `scheduled_posts.users.active_company_id`
+    // filter, which production never did - so the cross-tenant tests passed while every company's analytics leaked
+    // (CI-301). The old key is therefore NOT honoured here; only the !inner social-account filter is.
+    // 7c (2026-11-18): the OTHER half of PostgREST's embed semantics is not modelled. A NON-!inner embed filter keeps
+    // the top-level row and filters only the EMBEDDED array; this double does neither, so it must not pretend. Any
+    // embedded-resource filter other than the one !inner key it models THROWS, so a new caller has to model it here
+    // instead of silently reading unfiltered nested data (the class of mistake that hid CI-301).
+    const MODELLED_EMBED_FILTERS = new Set(['scheduled_posts.social_accounts.company_id']);
+    const unmodelled = Object.keys(state.filters).filter((k) => k.includes('.') && !MODELLED_EMBED_FILTERS.has(k));
+    if (unmodelled.length > 0) {
+      throw new Error(`communityAiTestHarness: embedded filter(s) not modelled: ${unmodelled.join(', ')} - model PostgREST's semantics (!inner vs non-inner) before using them`);
+    }
+    const companyId = state.filters['scheduled_posts.social_accounts.company_id'];
+    if (companyId) {
+      // !inner: a row with no post, or a post with no account company, is excluded; the rest must match.
+      rows = rows.filter((row) => row.scheduled_posts?.social_accounts?.company_id === companyId);
+    }
     if (state.filters.platform) rows = rows.filter((row) => row.platform === state.filters.platform);
     if (state.gteFilter?.field === 'date') rows = rows.filter((row) => row.date >= state.gteFilter.value);
     return { data: rows, error: null };
