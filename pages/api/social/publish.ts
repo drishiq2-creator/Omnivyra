@@ -257,10 +257,16 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
 
       // Patch the post row with the resolved account so publishNow and future jobs use it
       if (!post.social_account_id) {
-        await supabase
+        // publishNow and later jobs read the account from the row: publishing with it unpersisted would
+        // fail later for the wrong reason. Refused here instead (unread-error census).
+        const { error: patchError } = await supabase
           .from('scheduled_posts')
           .update({ social_account_id: socialAccountId })
           .eq('id', post.id);
+        if (patchError) {
+          console.error('[social/publish] resolved account not saved to the post; not publishing', { post_id: post.id, error: patchError.message });
+          return res.status(500).json({ error: 'Could not prepare the post for publishing. Please try again.' });
+        }
       }
 
       if (dry_run) {
@@ -296,12 +302,18 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       // 'publishing' row, a 'published' one, or the uncertain record, so
       // nothing is written.
       if (!result.suppressed) {
-        await updatePostPublishStatus({
+        // CLASS-2 D8: a mirror of what publishNow wrote, so it lands only on that status - once
+        // `failed` the post is claimable and another execution may hold it already. D5 + D8 are only
+        // correct TOGETHER (05): a superseded publishNow writes nothing and is skipped here
+        // (`suppressed`); the pin also stops this mirror making the write D5 refused.
+        const mirrored = await updatePostPublishStatus({
           post_id: post.id,
           status: result.status,
           external_post_id: result.external_post_id,
           last_error: result.status === 'PUBLISHED' ? undefined : result.message,
+          expectedFromStatus: result.status.toLowerCase(),
         });
+        if (!mirrored) console.warn('[social/publish] status mirror not written: another execution owns the post now', { post_id: post.id, status: result.status });
       }
 
       // The queued job could not be retired, so nothing was published (and the
@@ -349,10 +361,15 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     } catch (error: any) {
       console.error('[publish] error:', error);
       try {
+        // Only over the status this request READ (publishNow restores it when nothing was sent):
+        // an uncertain outcome, or another execution's claim, is not this request's to overwrite.
         await updatePostPublishStatus({
           post_id,
           status: 'FAILED',
           last_error: error?.message || 'Publish failed',
+          ...(post.status ? { expectedFromStatus: String(post.status) } : {}),
+        }).then((moved) => {
+          if (!moved) console.warn('[social/publish] failure not written: the post is no longer in the status this request read', { post_id });
         });
       } catch (_) {}
       return res.status(500).json({
