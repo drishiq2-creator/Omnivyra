@@ -52,8 +52,14 @@ export function effectiveCheckValues(dir: string): { file: string; values: strin
   return last!;
 }
 
-const union = unionMembers(SERVICE);
-const check = effectiveCheckValues(MIG_DIR);
+// Parsed in beforeAll, not at module scope, so a parse failure reports against the suite's tests with its assertion
+// message instead of "Test suite failed to run" (7c).
+let union: ReturnType<typeof unionMembers>;
+let check: ReturnType<typeof effectiveCheckValues>;
+beforeAll(() => {
+  union = unionMembers(SERVICE);
+  check = effectiveCheckValues(MIG_DIR);
+});
 
 it('the effective CHECK is 064 (the newest definition)', () => {
   expect(check.file).toBe('20270217000064_credit_alert_log_runway_3d.sql');
