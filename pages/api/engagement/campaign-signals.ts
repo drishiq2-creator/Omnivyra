@@ -67,11 +67,26 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     }
 
     if (!campaignId && !activityId) {
-      const { data: versions } = await supabase
-        .from('campaign_versions')
-        .select('campaign_id')
-        .eq('company_id', companyId)
-        .limit(500);
+      // A failed read is not "no campaigns" (unread-error census): the inbox would show no signals as the truth.
+      // b3 read-failure rule: 503 + Retry-After + a distinct code, for an error object AND a thrown rejection.
+      let versions: Array<{ campaign_id: string }> | null = null;
+      let versionsUnreadable: string | null = null;
+      try {
+        const r = await supabase
+          .from('campaign_versions')
+          .select('campaign_id')
+          .eq('company_id', companyId)
+          .limit(500);
+        if (r.error) versionsUnreadable = r.error.message;
+        else versions = r.data as Array<{ campaign_id: string }> | null;
+      } catch (e) {
+        versionsUnreadable = e instanceof Error ? e.message : String(e);
+      }
+      if (versionsUnreadable !== null) {
+        console.warn('[engagement/campaign-signals] campaign_versions unreadable', versionsUnreadable);
+        res.setHeader('Retry-After', '5');
+        return res.status(503).json({ error: 'Campaign signals are temporarily unavailable', code: 'CAMPAIGN_SIGNALS_UNREADABLE' });
+      }
       const campaignIds = (versions ?? []).map((v: { campaign_id: string }) => v.campaign_id).filter(Boolean);
       if (campaignIds.length > 0) {
         query = query.in('campaign_id', campaignIds);

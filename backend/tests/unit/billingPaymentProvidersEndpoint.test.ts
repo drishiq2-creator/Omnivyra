@@ -41,6 +41,8 @@ let __rows: any[] | null = null;
 let __throw = false;
 let __billingContextRow: any = null;
 let __companyProfileRow: any = null;
+// c6 2026-11-20: a READ ERROR on billing_context (not an absent table) - the context is unreadable.
+let __ctxReadError: { code?: string; message: string } | null = null;
 
 jest.mock('../../db/supabaseClient', () => ({
   supabase: {
@@ -56,7 +58,7 @@ jest.mock('../../db/supabaseClient', () => ({
       b.select = () => b;
       b.eq = () => b;
       b.maybeSingle = () => {
-        if (table === 'billing_context') return Promise.resolve({ data: __billingContextRow, error: null });
+        if (table === 'billing_context') return Promise.resolve(__ctxReadError ? { data: null, error: __ctxReadError } : { data: __billingContextRow, error: null });
         if (table === 'company_billing_profiles') return Promise.resolve({ data: __companyProfileRow, error: null });
         return Promise.resolve({ data: null, error: null });
       };
@@ -90,7 +92,7 @@ function mockReqRes(method: string, query: Record<string, string> = {}) {
 
 beforeEach(() => {
   __authOk = true; __rows = null; __throw = false;
-  __billingContextRow = null; __companyProfileRow = null;
+  __billingContextRow = null; __companyProfileRow = null; __ctxReadError = null;
 });
 
 describe('GET /api/billing/payment-providers — auth + method', () => {
@@ -212,5 +214,21 @@ describe('GET /api/billing/payment-providers — shape + pricing-blindness', () 
     await handler(req, res);
     expect(res._status).toBe(200);
     expect((res._json as any).source).toBe('compiled_default');
+  });
+});
+
+// c6 2026-11-20: an unreadable org context is 503 - never providers resolved for an "unknown" geography.
+describe('GET /api/billing/payment-providers - unreadable org context', () => {
+  test('read error -> 503 BILLING_CONTEXT_UNREADABLE', async () => {
+    __ctxReadError = { code: '08006', message: 'connection reset' };
+    const { req, res } = mockReqRes('GET');
+    await handler(req, res);
+    expect(res._status).toBe(503);
+    expect(res._json).toEqual({ error: 'billing_context_unreadable', code: 'BILLING_CONTEXT_UNREADABLE' });
+  });
+  test('CONTROL: readable -> 200', async () => {
+    const { req, res } = mockReqRes('GET');
+    await handler(req, res);
+    expect(res._status).toBe(200);
   });
 });

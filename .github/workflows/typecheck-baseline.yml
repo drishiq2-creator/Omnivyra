@@ -60,6 +60,12 @@ jobs:
       - name: Migration quality gate
         run: node scripts/check-migration-quality.js
 
+      # Dropped-`error` read gate (b3 class ruling 2026-11-20): a Supabase read that destructures `data`
+      # without `error` turns a failure into a legitimate-looking empty answer. Per-file count ratchet
+      # (reduce-only) against scripts/dropped-supabase-error-baseline.json; limits stated in the script header.
+      - name: Dropped-error read gate
+        run: node scripts/check-dropped-supabase-error.js
+
       # GOV-H: FK / NOT NULL / CHECK compatibility against the committed
       # schema-only dump (supabase/_schema/baseline.sql). Deterministic,
       # read-only, NO database, NO network, NO secrets — so it belongs in this

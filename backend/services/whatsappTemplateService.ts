@@ -64,13 +64,18 @@ export async function submitTemplate(input: CreateTemplateInput): Promise<string
   // a retry job, an admin tool) inherits the gate instead of assuming it (7c NB1).
   assertWhatsAppEnabled();
   // 1. Find highest existing version for this template_name + company
-  const { data: latest } = await ownedDbTable('whatsapp_templates')
+  const { data: latest, error: latestError } = await ownedDbTable('whatsapp_templates')
     .select('version')
     .eq('company_id', input.company_id)
     .eq('template_name', input.template_name)
     .order('version', { ascending: false })
     .limit(1)
     .single();
+  // A failed read is not "no versions yet" (unread-error census): that resubmitted as v1.
+  // PGRST116 (no row) is the genuine first version.
+  if (latestError && latestError.code !== 'PGRST116') {
+    throw new Error(`Template versions unreadable: ${latestError.message}`);
+  }
 
   const newVersion = (latest?.version ?? 0) + 1;
 
@@ -96,10 +101,14 @@ export async function submitTemplate(input: CreateTemplateInput): Promise<string
   // 3. Submit to Meta
   try {
     const accessToken = await getValidAccessToken(input.social_account_id);
-    const { data: account } = await ownedDbTable('social_accounts')
+    const { data: account, error: accountError } = await ownedDbTable('social_accounts')
       .select('waba_id')
       .eq('id', input.social_account_id)
       .single();
+    // The REAL cause is what the REJECTED row records: a failed read is not "waba_id not found".
+    if (accountError && accountError.code !== 'PGRST116') {
+      throw new Error(`Social account unreadable: ${accountError.message}`);
+    }
 
     if (!account?.waba_id) throw new Error('waba_id not found on social account');
 
@@ -121,14 +130,31 @@ export async function submitTemplate(input: CreateTemplateInput): Promise<string
 
     const { id: meta_template_id } = await res.json();
 
-    await ownedDbTable('whatsapp_templates')
-      .update({ meta_template_id })
-      .eq('id', inserted.id);
+    // A one-column write: retried, so only a PERSISTENT failure orphans the template (05).
+    let storeError: { message: string } | null = null;
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      ({ error: storeError } = await ownedDbTable('whatsapp_templates')
+        .update({ meta_template_id })
+        .eq('id', inserted.id));
+      if (!storeError) break;
+    }
+    if (storeError) {
+      // Meta HOLDS this template now, so it must not be marked REJECTED (Meta names are unique per
+      // WABA: a local REJECTED row beside a live Meta template would also block recreating it).
+      // And this is PERMANENT, not transient: the status webhook matches rows on meta_template_id,
+      // so it can NEVER match this row - it stays PENDING (never sendable) and will not heal when
+      // Meta approves it. Manual reconciliation from this log line is the only recovery.
+      console.error('[whatsappTemplate] Meta accepted the template but its meta_template_id was NOT stored after 3 attempts: the row is ORPHANED (the status webhook can never match it); store this meta_template_id on the row manually', {
+        template_id: inserted.id, meta_template_id, error: storeError.message,
+      });
+    }
   } catch (err) {
     // Mark as failed without deleting — preserves version history
-    await ownedDbTable('whatsapp_templates')
+    // best-effort: the submission error is re-thrown below either way; an unmarked row stays PENDING, never sendable
+    const { error: markError } = await ownedDbTable('whatsapp_templates')
       .update({ status: 'REJECTED', rejection_reason: err instanceof Error ? err.message : 'Submission failed' })
       .eq('id', inserted.id);
+    if (markError) console.warn('[whatsappTemplate] could not mark the failed submission REJECTED', { template_id: inserted.id, error: markError.message });
     throw err;
   }
 
@@ -145,18 +171,22 @@ export async function activateTemplate(templateId: string): Promise<void> {
 
   if (error || !t) throw new Error(`Template not found: ${templateId}`);
 
-  // Deprecate any currently active version for same name+company
-  await ownedDbTable('whatsapp_templates')
+  // Deprecate any currently active version for same name+company. A silent failure left TWO
+  // active versions (every send then fails to find "the" active one); it now throws, so the
+  // webhook job retries and the new version is not activated beside the old.
+  const { error: deprecateError } = await ownedDbTable('whatsapp_templates')
     .update({ is_active: false, status: 'DEPRECATED', deprecated_at: new Date().toISOString() })
     .eq('company_id', t.company_id)
     .eq('template_name', t.template_name)
     .eq('is_active', true)
     .neq('id', templateId);
+  if (deprecateError) throw new Error(`Previous template version not deprecated: ${deprecateError.message}`);
 
-  // Activate new version
-  await ownedDbTable('whatsapp_templates')
+  // Activate new version. A silent failure left NO active version while the webhook reported done.
+  const { error: activateError } = await ownedDbTable('whatsapp_templates')
     .update({ is_active: true, status: 'APPROVED', approved_at: new Date().toISOString() })
     .eq('id', templateId);
+  if (activateError) throw new Error(`Template not activated: ${activateError.message}`);
 }
 
 // ── Get active template for sending ──────────────────────────────────────────
@@ -205,24 +235,32 @@ export async function handleTemplateStatusWebhook(event: {
   event: 'APPROVED' | 'REJECTED' | 'PAUSED' | 'DISABLED';
   reason?: string;
 }): Promise<void> {
-  const { data } = await ownedDbTable('whatsapp_templates')
+  const { data, error: lookupError } = await ownedDbTable('whatsapp_templates')
     .select('id')
     .eq('meta_template_id', event.message_template_id)
     .order('version', { ascending: false })
     .limit(1)
     .single();
+  // A failed read is not "not our template": that dropped an APPROVED/PAUSED/DISABLED event.
+  // Thrown, so the webhook job retries.
+  if (lookupError && lookupError.code !== 'PGRST116') {
+    throw new Error(`Template lookup failed for Meta template ${event.message_template_id}: ${lookupError.message}`);
+  }
 
   if (!data) return; // Template not in our system — ignore
 
   if (event.event === 'APPROVED') {
     await activateTemplate(data.id);
   } else {
-    await ownedDbTable('whatsapp_templates')
+    // A silent failure here left a template Meta has PAUSED / DISABLED / REJECTED still active
+    // and APPROVED for sending. Thrown, so the webhook job retries.
+    const { error: statusError } = await ownedDbTable('whatsapp_templates')
       .update({
         status:           event.event,
         rejection_reason: event.reason ?? null,
         is_active:        false,
       })
       .eq('id', data.id);
+    if (statusError) throw new Error(`Template ${event.event} not recorded: ${statusError.message}`);
   }
 }
