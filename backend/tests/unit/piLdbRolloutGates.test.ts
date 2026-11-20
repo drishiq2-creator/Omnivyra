@@ -65,7 +65,6 @@ const lead = (over: Partial<CanonicalLead> = {}): CanonicalLead => ({
 beforeEach(() => { stores.lead_intelligence.length = 0; stores.lead_intelligence_events.length = 0; flags.throw = false; });
 
 import { isPiLdbSchemaReady } from '../../services/leadIntelligence/piLdbSchemaReady';
-import { getCanonicalLead, listCanonicalLeads } from '../../services/leadIntelligence/leadIntelligenceRepository';
 import { resolveProspectImportGate, PROSPECT_IMPORT_FLAG_KEY } from '../../services/leadIngestion/prospectImportGate';
 import { isProspectImportUiEnabled } from '../../../lib/prospects/import/prospectImportUi';
 
