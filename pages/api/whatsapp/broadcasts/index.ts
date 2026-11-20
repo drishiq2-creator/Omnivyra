@@ -30,6 +30,7 @@ import {
   type CreateBroadcastInput,
   type ContactInput,
 } from '../../../../backend/services/whatsappBroadcastService';
+import { refuseIfWhatsAppDisabled } from '../../../../backend/services/whatsappAvailability';
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
   // ── GET: list broadcasts ───────────────────────────────────────────────────
@@ -64,6 +65,9 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
 
   // ── POST: create broadcast ─────────────────────────────────────────────────
   if (req.method === 'POST') {
+    // Launch gate (b3, 11-18): no broadcast is created while WhatsApp is disabled. First, before any read or write.
+    if (refuseIfWhatsAppDisabled(res)) return;
+
     const {
       company_id,
       social_account_id,
@@ -160,8 +164,18 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
 // 404 / 409 / 503 are the sender-account refusals (senderAccountRefusalResponse): not found, sending
 // stopped / shared number / disconnected, lookup unreadable. They depend on state, not on the
 // form, so a resubmit after the condition is fixed must RUN, not replay the refusal (05).
-export default __createApiRoute(withIdempotency(handler, {
+// Launch gate (b3, 11-18; #83) OUTSIDE the idempotency wrapper (stage-0 merge, a9): withIdempotency reserves the key
+// (an api_idempotency_keys WRITE) before the handler runs, so a gate inside the handler would come second. While
+// WhatsApp is disabled a create is refused 409 WHATSAPP_NOT_AVAILABLE before ANY read or write, key included. The
+// in-handler check stays as defence in depth.
+const gateFirst = (h: (req: NextApiRequest, res: NextApiResponse) => unknown) =>
+  async (req: NextApiRequest, res: NextApiResponse) => {
+    if (req.method === 'POST' && refuseIfWhatsAppDisabled(res)) return;
+    return h(req, res);
+  };
+
+export default __createApiRoute(gateFirst(withIdempotency(handler, {
   methods: ['POST'],
   scope: 'whatsapp-broadcast-create',
   stateDependentStatuses: [404, 409, 503],
-}), { route: '/api/whatsapp/broadcasts' });
+})), { route: '/api/whatsapp/broadcasts' });

@@ -563,3 +563,13 @@ describe('CLASS-2 A11/A10: a run is `running` before batch 0 can act, and consum
     expect(rec(R3).status).toBe('pending'); // left for the next run
   });
 });
+
+// Launch gate (b3, 11-18; #83): WhatsApp is default-OFF on main (WHATSAPP_CONNECT_ENABLED === 'true' only).
+// This suite exercises the ENABLED behaviour, so it turns the gate on for this file and restores it after;
+// the OFF behaviour is pinned in whatsappConnectGate.test.ts (stage-0 merge, a9: same block as main's suites).
+const PRIOR_WA_GATE = process.env.WHATSAPP_CONNECT_ENABLED;
+beforeAll(() => { process.env.WHATSAPP_CONNECT_ENABLED = 'true'; });
+afterAll(() => {
+  if (PRIOR_WA_GATE === undefined) delete process.env.WHATSAPP_CONNECT_ENABLED;
+  else process.env.WHATSAPP_CONNECT_ENABLED = PRIOR_WA_GATE;
+});

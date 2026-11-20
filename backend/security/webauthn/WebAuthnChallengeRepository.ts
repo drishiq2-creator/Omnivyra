@@ -1,4 +1,5 @@
 import { ownedDbTable } from '../../db/writeOwner';
+import { throwOnSecurityReadError } from '../SecurityReadError';
 /**
  * Persistence for `webauthn_challenges`.
  *
@@ -78,11 +79,12 @@ export async function loadChallenge(
   challenge: string,
   ceremony: WebAuthnCeremony,
 ): Promise<StoredWebAuthnChallenge | null> {
-  const { data } = await ownedDbTable('webauthn_challenges')
+  const { data, error: secErr1 } = await ownedDbTable('webauthn_challenges')
     .select('*')
     .eq('challenge', challenge)
     .eq('ceremony', ceremony)
     .maybeSingle();
+  throwOnSecurityReadError({ error: secErr1 }, 'loadChallenge', 'webauthn_challenges');
   if (!data) return null;
   return rowToStored(data as ChallengeRow);
 }
@@ -94,11 +96,12 @@ export async function loadChallenge(
  */
 export async function consumeChallenge(challengeId: string): Promise<boolean> {
   const now = new Date().toISOString();
-  const { data } = await ownedDbTable('webauthn_challenges')
+  const { data, error: secErr2 } = await ownedDbTable('webauthn_challenges')
     .update({ consumed_at: now })
     .eq('id', challengeId)
     .is('consumed_at', null)
     .select('id');
+  throwOnSecurityReadError({ error: secErr2 }, 'consumeChallenge', 'webauthn_challenges');
   return !!data && data.length > 0;
 }
 
@@ -108,9 +111,10 @@ export async function consumeChallenge(challengeId: string): Promise<boolean> {
  * expires_at).
  */
 export async function purgeExpiredChallenges(beforeIso: string): Promise<number> {
-  const { data } = await ownedDbTable('webauthn_challenges')
+  const { data, error: secErr3 } = await ownedDbTable('webauthn_challenges')
     .delete()
     .lt('expires_at', beforeIso)
     .select('id');
+  throwOnSecurityReadError({ error: secErr3 }, 'purgeExpiredChallenges', 'webauthn_challenges');
   return data?.length ?? 0;
 }

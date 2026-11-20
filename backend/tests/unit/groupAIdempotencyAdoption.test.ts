@@ -119,7 +119,10 @@ describe('wiring — the middleware can actually take effect', () => {
   it.each(AUTHORIZED)('%s nests withIdempotency INSIDE the route factory', (rel) => {
     // __createApiRoute(withIdempotency(handler, …), …) — reversing this would
     // put the replay cache outside request-context seeding.
-    expect(read(rel)).toMatch(/__createApiRoute\(\s*withIdempotency\(handler,/);
+    // One named exception (stage-0 merge, a9): the WhatsApp create route puts its launch gate (gateFirst, #83)
+    // BETWEEN the factory and withIdempotency, so a disabled create is refused before the key is reserved. The
+    // property this pins still holds there: withIdempotency is inside the route factory.
+    expect(read(rel)).toMatch(/__createApiRoute\(\s*(?:gateFirst\(\s*)?withIdempotency\(handler,/);
   });
 
   it.each(AUTHORIZED)('%s still performs its own authorization inside the handler', (rel) => {

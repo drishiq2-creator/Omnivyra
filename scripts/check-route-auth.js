@@ -1224,7 +1224,7 @@ function analyzeRouteSource(rel, raw, allowlist, methodExemptions, orderingSecti
   // STEP 3AH-118: a primitive that runs after the side effect protects nothing.
   const ord = applyOrdering({
     rel, code, evidenceCode: executable(srcRaw, true), entry, level, ids, campaignKeyed, sections: orderingSections, callRe,
-    analyze: (verifiers) => ordering().analyze({ rel: src.rel, raw: srcRaw, imports: ctx.imports }, src.handlerName, verifiers),
+    analyze: (verifiers, opts) => ordering().analyze({ rel: src.rel, raw: srcRaw, imports: ctx.imports }, src.handlerName, verifiers, opts),
   });
   violations.push(...ord.violations);
   const order = ord.order;
@@ -1247,8 +1247,10 @@ function analyzeRouteSource(rel, raw, allowlist, methodExemptions, orderingSecti
   };
 }
 
+// Sorted: readdirSync order is filesystem-defined (NTFS vs ext4 differ), and the scan must not depend on it.
 function walk(dir, out) {
-  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+  const entries = fs.readdirSync(dir, { withFileTypes: true }).sort((x, y) => (x.name < y.name ? -1 : x.name > y.name ? 1 : 0));
+  for (const e of entries) {
     const full = path.join(dir, e.name);
     if (e.isDirectory()) walk(full, out);
     else if (/\.(ts|tsx|js)$/.test(e.name) && !/\.(test|spec)\.(ts|tsx|js)$/.test(e.name) && !/\.d\.ts$/.test(e.name)) out.push(full);
@@ -1360,5 +1362,5 @@ KNOWN OPEN (tracked findings, NOT fixed — see scripts/route-auth-allowlist.jso
   process.exit(1);
 }
 
-module.exports = { analyzeRoute, scanRepo, executable, parseImports, isRouteFile, defaultExportOf, requestIdentifiers, failOpenSecret, verifyAllowEntry, verifyMethodExemption, verifyKnownOpen, methodCoverage, PRIMITIVES, loadAllowlist, loadMethodExemptions, loadKnownOpen, loadOrderingSections: (file = ALLOWLIST_PATH) => loadOrderingSections(fs, file) };
+module.exports = { analyzeRoute, scanRepo, walk, executable, parseImports, isRouteFile, defaultExportOf, requestIdentifiers, failOpenSecret, verifyAllowEntry, verifyMethodExemption, verifyKnownOpen, methodCoverage, PRIMITIVES, loadAllowlist, loadMethodExemptions, loadKnownOpen, loadOrderingSections: (file = ALLOWLIST_PATH) => loadOrderingSections(fs, file) };
 if (require.main === module) main();

@@ -200,3 +200,13 @@ it('the flag is consulted up front AND before each send (3 recipients: create-pa
   expect(sends).toHaveLength(3);
   expect(mockFlag.calls).toBeGreaterThanOrEqual(4); // batch start (send-fitness) + one per send
 });
+
+// Launch gate (b3, 11-18; #83): WhatsApp is default-OFF on main (WHATSAPP_CONNECT_ENABLED === 'true' only).
+// This suite exercises the ENABLED behaviour, so it turns the gate on for this file and restores it after;
+// the OFF behaviour is pinned in whatsappConnectGate.test.ts (stage-0 merge, a9: same block as main's suites).
+const PRIOR_WA_GATE = process.env.WHATSAPP_CONNECT_ENABLED;
+beforeAll(() => { process.env.WHATSAPP_CONNECT_ENABLED = 'true'; });
+afterAll(() => {
+  if (PRIOR_WA_GATE === undefined) delete process.env.WHATSAPP_CONNECT_ENABLED;
+  else process.env.WHATSAPP_CONNECT_ENABLED = PRIOR_WA_GATE;
+});

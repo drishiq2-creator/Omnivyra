@@ -68,6 +68,24 @@ export interface BillingIdempotencyKey {
   source:  string;
 }
 
+/**
+ * The caller-side reference of an idempotency source, for every kind (7c, 2026-11-20): the join key a reconciliation
+ * record needs to find its ledger attempt. Total over the union, like computeRoot / describeSource; an unknown kind
+ * is a compile error and, at runtime, a throw.
+ */
+export function idempotencyReference(args: BillingIdempotencyArgs): string {
+  switch (args.kind) {
+    case 'http':    return args.referenceId;
+    case 'queue':   return args.jobId;
+    case 'webhook': return args.providerEventId;
+    case 'cron':    return `${args.cronName}:${args.bucketSeconds}`;
+    default: {
+      const unhandled: never = args;
+      throw new Error(`[billingIdempotency] unhandled kind: ${JSON.stringify(unhandled)}`);
+    }
+  }
+}
+
 export function buildBillingIdempotencyKey(args: BillingIdempotencyArgs): BillingIdempotencyKey {
   const root = computeRoot(args);
   return {

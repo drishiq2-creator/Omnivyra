@@ -98,6 +98,8 @@ async function probeSchema(): Promise<SchemaHealthResult> {
       .in('table_name', tables);
 
     if (error) {
+      // security-read-exempt: boot-time schema diagnostic, not an authorization decision; the error triggers a
+      // per-column probe FALLBACK whose own failures are reported as MISSING (conservative), never as healthy.
       // information_schema may not be queryable through PostgREST. Fall
       // back to per-column probes — try selecting each column with limit 0.
       // A missing column surfaces as PGRST204; existing columns return 200.
@@ -108,6 +110,8 @@ async function probeSchema(): Promise<SchemaHealthResult> {
           .select(exp.column)
           .limit(0);
         if (probe.error) {
+          // security-read-exempt: boot-time schema diagnostic, not an authorization decision; a real probe error is
+          // deliberately reported as the column MISSING so operators see any drift (the conservative direction).
           const msg = (probe.error.message ?? '').toLowerCase();
           if (msg.includes(`could not find the '${exp.column}' column`) || (probe.error as any).code === 'PGRST204') {
             missing.push({ table: exp.table, column: exp.column, migration: exp.migration, consumer: exp.consumer });

@@ -146,6 +146,16 @@ beforeEach(() => {
   };
 });
 
+// Launch gate (b3, 11-18): WhatsApp is default-OFF on main (WHATSAPP_CONNECT_ENABLED === 'true' only).
+// This suite exercises the ENABLED behaviour, so it turns the gate on for this file and restores it after;
+// the OFF behaviour is pinned in whatsappConnectGate.test.ts.
+const PRIOR_WA_GATE = process.env.WHATSAPP_CONNECT_ENABLED;
+beforeAll(() => { process.env.WHATSAPP_CONNECT_ENABLED = 'true'; });
+afterAll(() => {
+  if (PRIOR_WA_GATE === undefined) delete process.env.WHATSAPP_CONNECT_ENABLED;
+  else process.env.WHATSAPP_CONNECT_ENABLED = PRIOR_WA_GATE;
+});
+
 describe('W0-C — WhatsApp broadcast is governed before the external send', () => {
   it('1. a PERMITTED recipient still reaches the send path', async () => {
     seed();
@@ -332,7 +342,10 @@ describe('A2b — governance is re-read within a batch (every 30 s or 50 recipie
       return r;
     };
   };
-  const envBackup = { ...process.env };
+  // Snapshot per test, AFTER the file-level launch-gate beforeAll (stage-0 merge, a9): a snapshot taken at
+  // definition time predates the gate and its restore would switch WhatsApp off for every later test.
+  let envBackup: NodeJS.ProcessEnv = { ...process.env };
+  beforeEach(() => { envBackup = { ...process.env }; });
   afterEach(() => {
     process.env = { ...envBackup };
     jest.useRealTimers();

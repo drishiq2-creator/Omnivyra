@@ -25,6 +25,7 @@ import { requireEncryptionKey } from '../auth/credentialEncryption';
 import { withLease } from '../../lib/platform/distributedLock';
 import { resolveRolloutChecked } from '../../lib/platform/rolloutAdmin';
 import { WHATSAPP_SENDING_FLAG } from './whatsappSendingFlag';
+import { assertWhatsAppEnabled } from './whatsappAvailability';
 
 // W0-C — the canonical contact-governance evaluator, applied through
 // `evaluateGovernanceReads` (A2): each read's rows are judged at that read's own
@@ -772,6 +773,7 @@ export async function enqueueBroadcast(
   broadcastId: string,
   plan:        string,
 ): Promise<EnqueueBroadcastResult> {
+  assertWhatsAppEnabled();   // launch gate (b3, 11-18; #83), under the routes: nothing is queued while disabled
   const { data: broadcast, error } = await ownedDbTable('whatsapp_broadcasts')
     .select('*')
     .eq('id', broadcastId)
@@ -1146,6 +1148,9 @@ export async function processBatch(
   broadcastId:  string,
   recipientIds: string[],
 ): Promise<void> {
+  // Launch gate (b3, 11-18; #83) at the ONLY Meta send seam: a job queued before the flag went off sends
+  // nothing; its recipients stay `pending` (the read below never runs) and the job fails loudly.
+  assertWhatsAppEnabled();
   const { data: broadcast, error: broadcastError } = await ownedDbTable('whatsapp_broadcasts')
     .select('*')
     .eq('id', broadcastId)
@@ -1540,6 +1545,7 @@ function buildMessageBody(broadcast: any, toPhone: string, recipientId: string):
 
 /** Retry failed recipients - under the SAME lease and live-job check as an enqueue. */
 export async function retryFailed(broadcastId: string): Promise<RetryResult> {
+  assertWhatsAppEnabled();   // launch gate (b3, 11-18; #83): no row is reset to `pending` while disabled
   // The sender account must be owned AND connected before anything is reset or queued
   // (e9): processBatch would refuse at send, but only after the failed rows were reset.
   const { data: broadcast, error } = await ownedDbTable('whatsapp_broadcasts')

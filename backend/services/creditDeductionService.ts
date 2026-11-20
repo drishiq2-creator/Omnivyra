@@ -3,7 +3,7 @@
  *
  * This file provides:
  *   - CreditAction type
- *   - getCreditCost()       — DB-first cost lookup with hardcoded fallback
+ *   - getCreditCost()       — credit_cost_config lookup. NO fallback: a missing row or a read error THROWS (7c, 2026-11-20)
  *   - hasEnoughCredits()    — balance pre-check (reads category wallets)
  *   - wasRecentlyRun()      — smart-mode dedup window check
  *   - estimateCreditCost()  — cost estimation for UI display

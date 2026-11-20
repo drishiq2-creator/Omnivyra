@@ -61,6 +61,8 @@ jest.mock('../../security/IdentityResolver', () => ({
              : { ok: false, reason: 'NO_AUTH' }),
 }));
 
+// Unread-error census: a table whose next read FAILS (a transport error, not "no rows").
+let mockFailRead: string | null = null;
 jest.mock('../../db/supabaseClient', () => {
   const build = (table: string) => {
     const filters: Record<string, unknown> = {};
@@ -109,7 +111,13 @@ jest.mock('../../db/supabaseClient', () => {
       return { data: d, count: d.length, error: null };
     };
     b.maybeSingle = () => { const r = resolve(); return Promise.resolve({ data: r.data[0] ?? null, error: null }); };
-    b.single = () => { const r = resolve(); return Promise.resolve({ data: r.data[0] ?? null, error: r.data.length ? null : { message: 'no rows' } }); };
+    // PostgREST's own no-row answer carries code PGRST116; routes tell it apart from a failed read.
+    b.single = () => {
+      if (mockFailRead === table) { mockFailRead = null; return Promise.resolve({ data: null, error: { code: '08006', message: 'connection reset' } }); }
+      if (mockFailRead === `throw:${table}`) { mockFailRead = null; return Promise.reject(new Error('socket hang up')); }
+      const r = resolve();
+      return Promise.resolve({ data: r.data[0] ?? null, error: r.data.length ? null : { code: 'PGRST116', message: 'no rows' } });
+    };
     b.then = (fn: any) => Promise.resolve(resolve()).then(fn);
     return b;
   };
@@ -286,6 +294,23 @@ describe.each([
     await call(getHandler(), ADMIN_A, { method: 'POST', body: { opportunityId: OPP_A, companyId: COMPANY_A } });
     const guard = queries.filter(q => q.table === 'user_company_roles' && q.filters.company_id === COMPANY_A);
     expect(guard.length).toBeGreaterThan(0);
+  });
+
+  it.each([
+    ['an error object', 'opportunity_items'],
+    ['a thrown rejection', 'throw:opportunity_items'],
+  ])('a FAILED opportunity read (%s) is not "not found": nothing written; outreach-plans answers 503 OPPORTUNITY_UNREADABLE', async (_n, failMode) => {
+    mockFailRead = failMode;
+    // collaboration-plans (outside this slice) lets a THROWN read escape as a raw error - still nothing is written,
+    // which is the property under test here; its 503 is a separate dropped-error item.
+    const res: any = await call(getHandler(), ADMIN_A, {
+      method: 'POST', body: { opportunityId: OPP_A, companyId: COMPANY_A } }).catch((e: unknown) => ({ statusCode: 'threw', body: String(e) }));
+    if (table === 'outreach_plans') {
+      expect(res.statusCode).toBe(503);
+      expect(res.body).toMatchObject({ code: 'OPPORTUNITY_UNREADABLE' });
+    }
+    expect(writes.filter(w => w.table === table)).toEqual([]);
+    mockFailRead = null;
   });
 
   it('a nonexistent opportunity writes nothing', async () => {

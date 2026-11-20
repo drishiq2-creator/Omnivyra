@@ -1,4 +1,5 @@
 import { createApiRoute as __createApiRoute } from '../../../../lib/platform/routeFactory';
+import { ALREADY_REVOKED } from '../../../../shared/security/revokeCodes';
 /**
  * POST /api/auth/sessions/revoke
  *
@@ -10,6 +11,8 @@ import { createApiRoute as __createApiRoute } from '../../../../lib/platform/rou
  * Always emits a `session_revoked_by_user` audit event for each revoked id.
  */
 
+import { revokeAllAccessForUser } from '../../../../backend/services/lifecycleGovernance';
+import { extractAccessToken } from '../../../../backend/services/authResolver';
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { authRequestIpOrNull } from '../../../../backend/auth/requestClientIp';
 import { resolvePrincipal } from '../../../../backend/security/IdentityResolver';
@@ -52,7 +55,9 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
 
   // Revoke ALL — including current session — caller is signing out everywhere.
   if (revokeAll) {
-    const count = await revokeAllSessionsForUser(p.userId, 'user_revoked_all');
+    // Sign out EVERYWHERE (b3 2026-11-20): canonical sessions + JWT epoch + this user's refresh tokens via the
+    // caller's own token. Before: only canonical cookie sessions - a bearer-token device stayed signed in.
+    const count = (await revokeAllAccessForUser(p.userId, 'user_revoked_all', { userJwt: extractAccessToken(req) })).revokedAuthSessions;
     if (p.sessionId) await revokeForAuthSession(p.sessionId, 'auth_session_revoked');
     clearSessionCookie(res);
     await logSecurityEvent({
@@ -100,7 +105,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     return res.status(403).json({ error: 'Not your session' });
   }
   if ((target as { revoked_at: string | null }).revoked_at) {
-    return res.status(409).json({ error: 'Already revoked' });
+    return res.status(409).json({ error: 'Already revoked', code: ALREADY_REVOKED });
   }
 
   await revokeSession(id!, 'user_revoked_session');

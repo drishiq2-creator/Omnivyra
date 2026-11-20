@@ -416,7 +416,10 @@ describe('D — the look sample as a style reference', () => {
     const look = { bytes: fs.readFileSync(comicPath), mimeType: 'image/webp' };
     await generateProviderImage({ prompt: 'p', referenceImages: [user, look], referenceFidelity: 'high', referenceKind: 'user+look' });
     expect(editCalls).toHaveLength(1);
-    expect(editCalls[0].input_fidelity).toBe('high');
+    // High fidelity on the default model (gpt-image-2.6, 2026-11-19): quality raised above 'low'; input_fidelity is
+    // sent only to the gpt-image-1 family (referenceEditParams; openAIImageModelSunset covers the 1.5 override).
+    expect(editCalls[0]).not.toHaveProperty('input_fidelity');
+    expect(editCalls[0].quality).toBe('medium');
     expect((editCalls[0].image as { type: string }).type).toBe('image/png');
   });
 

@@ -94,9 +94,21 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     });
     return result.text;
   };
+  // b3 (A) 2026-11-20: a billing refusal still gets the deterministic result, but the response SAYS so
+  // (billing_refusal_code), and the client labels it "AI wasn't used"; it is never presented as AI output.
+  let billingRefusalCode: string | null = null;
+  const billedLlm: typeof llm = async (messages) => {
+    try {
+      return await llm(messages);
+    } catch (err) {
+      const { isBillingRefusalError } = await import('../../../backend/services/billing/runBilledAiCompletion');
+      if (isBillingRefusalError(err)) billingRefusalCode = err.code;
+      throw err; // the service's own fallback still runs
+    }
+  };
 
   try {
-    const { proposals, usedFallback, fallbackReason } = await runCampaignContentAssist({ request, llm });
+    const { proposals, usedFallback, fallbackReason } = await runCampaignContentAssist({ request, llm: billedLlm });
     if (usedFallback && fallbackReason) {
       try {
         const { logger } = await import('../../../backend/services/logger');
@@ -107,9 +119,11 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       proposals,
       used_fallback: usedFallback,
       ...(fallbackReason ? { fallback_reason: fallbackReason } : {}),
+      ...(usedFallback && billingRefusalCode ? { billing_refusal_code: billingRefusalCode } : {}),
     });
   } catch (error) {
-    return res.status(500).json({ error: error instanceof Error ? error.message : 'content assist failed' });
+    console.error('[pages/api/campaign-content/assist.ts] failed', error);
+    return res.status(500).json({ error: 'content assist failed' });
   }
 }
 

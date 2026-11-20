@@ -47,6 +47,7 @@ import {
   DEFAULT_INDEPENDENT_PALETTE, INDEPENDENT_PALETTE_OPTIONS, type IndependentPaletteChoice,
 } from '../../lib/creator-content/creatorPaletteMode';
 import type { AttachmentMode } from '../../lib/content/writerCreatorAttachmentContracts';
+import { billingFallbackNote, describeBillingRefusal } from '@/lib/billing/billingRefusalCopy';
 
 type Asset = 'image' | 'carousel' | 'infographic';
 const CUSTOM = 'brand-awareness';
@@ -268,8 +269,14 @@ function AssetCreationWorkspace({ asset, onNavigate, onAdvanced, launchQuery }: 
           },
         }),
       });
-      if (!resp.ok) { const d = await resp.json().catch(() => ({})); throw new Error(d?.error || `Suggestion failed (${resp.status})`); }
+      if (!resp.ok) {
+        const d = await resp.json().catch(() => ({}));
+        const refusal = describeBillingRefusal(resp.status, d);
+        throw new Error(refusal ? refusal.message : (d?.error || `Suggestion failed (${resp.status})`));
+      }
       const data = await resp.json();
+      // b3 (A): a billing refusal still returns a deterministic brief. It is applied, but the user is TOLD it isn't AI.
+      const fallbackNote = billingFallbackNote(data);
       const updates = Array.isArray(data?.updates) ? data.updates : [];
       const allowed = new Set(['freeText', 'audience', 'tone', 'cta', 'offer']);
       const patch: Record<string, string> = {};
@@ -280,6 +287,7 @@ function AssetCreationWorkspace({ asset, onNavigate, onAdvanced, launchQuery }: 
       }
       if (patch.freeText) voiceBaseRef.current = patch.freeText;
       if (Object.keys(patch).length) setBrief((b) => withMainMessage(mergeBrief(b, patch as Partial<MarketingBrief>)));
+      if (fallbackNote) setAiError(fallbackNote);
     } catch (e) {
       setAiError(e instanceof Error ? e.message : 'Suggestion failed');
     } finally {
