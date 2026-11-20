@@ -27,6 +27,7 @@
 
 import { supabase } from '../../../db/supabaseClient';
 import { logger } from '../../logger';
+import { ReconciliationReadError } from './reconciliationReadError';
 import {
   normalizeStripeBalanceExport,
   normalizeStripeWebhookLog,
@@ -74,6 +75,7 @@ async function readInternalRecords(periodStart: string, periodEnd: string): Prom
     .lt('occurred_at',  periodEnd);
   if (cp.error) {
     logger.warn('stripe_reconcile_credit_purchases_read_failed', { message: cp.error.message });
+    throw new ReconciliationReadError('stripe', 'credit_purchases', cp.error.message ?? null);
   } else {
     for (const r of (cp.data ?? []) as Array<Record<string, unknown>>) {
       const id = String(r.id ?? '');
@@ -98,6 +100,7 @@ async function readInternalRecords(periodStart: string, periodEnd: string): Prom
     .lt('occurred_at',  periodEnd);
   if (pt.error) {
     logger.warn('stripe_reconcile_payment_tx_read_failed', { message: pt.error.message });
+    throw new ReconciliationReadError('stripe', 'payment_transactions', pt.error.message ?? null);
   } else {
     for (const r of (pt.data ?? []) as Array<Record<string, unknown>>) {
       const tx = String(r.provider_transaction_id ?? '');
@@ -124,6 +127,7 @@ async function readInternalRecords(periodStart: string, periodEnd: string): Prom
     .eq('provider', 'stripe');
   if (sb.error) {
     logger.warn('stripe_reconcile_subscriptions_read_failed', { message: sb.error.message });
+    throw new ReconciliationReadError('stripe', 'billing_subscriptions', sb.error.message ?? null);
   } else {
     for (const r of (sb.data ?? []) as Array<Record<string, unknown>>) {
       const sub = String(r.provider_subscription_id ?? '');
@@ -150,6 +154,10 @@ export async function ingestStripeInvoice(args: IngestStripeArgs): Promise<Inges
   }
   const total_actual_usd = norm.events.reduce((s, e) => s + (Number.isFinite(e.net_amount_usd) ? e.net_amount_usd : 0), 0);
 
+  // 0) Reads FIRST (04, 2026-11-20): a failed read throws ReconciliationReadError BEFORE the idempotency marker below,
+  //    so nothing is written and a retry starts clean (it used to answer 'duplicate' forever).
+  const internal = await readInternalRecords(args.periodStart, args.periodEnd);
+
   // 1) Idempotent invoice import.
   const { error: insertErr } = await supabase.from('provider_invoice_imports').insert({
     provider: 'stripe',
@@ -171,7 +179,6 @@ export async function ingestStripeInvoice(args: IngestStripeArgs): Promise<Inges
   }
 
   // 2) Read internal records for the period and reconcile.
-  const internal = await readInternalRecords(args.periodStart, args.periodEnd);
   const match = reconcileStripe({
     events: norm.events,
     creditPurchases:     internal.creditPurchases,

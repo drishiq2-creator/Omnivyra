@@ -27,6 +27,7 @@
 
 import { supabase } from '../../../db/supabaseClient';
 import { logger } from '../../logger';
+import { ReconciliationReadError } from './reconciliationReadError';
 import {
   normalizeImageBillingExport,
   normalizeDalleUsageExport,
@@ -85,7 +86,7 @@ async function readUsageAggregates(
   const { data, error } = await query;
   if (error) {
     logger.warn('image_reconcile_usage_read_failed', { message: error.message, providerTag });
-    return [];
+    throw new ReconciliationReadError('image', 'usage_events', error.message ?? null);
   }
   const map: Map<string, UsageAggregate> = new Map();
   for (const r of (data || []) as Array<Record<string, unknown>>) {
@@ -129,6 +130,10 @@ export async function ingestImageInvoice(args: IngestImageArgs): Promise<IngestO
   }
   const total_actual_usd = norm.lines.reduce((s, l) => s + (Number.isFinite(l.total_usd) ? l.total_usd : 0), 0);
 
+  // 0) Reads FIRST (04, 2026-11-20): a failed read throws ReconciliationReadError BEFORE the idempotency marker below,
+  //    so nothing is written and a retry starts clean (it used to answer 'duplicate' forever).
+  const aggregates = await readUsageAggregates(args.providerTag, args.usageEventsProviderName, args.periodStart, args.periodEnd);
+
   // 1) Idempotent invoice import.
   const { error: insertErr } = await supabase.from('provider_invoice_imports').insert({
     provider: args.providerTag,
@@ -150,7 +155,6 @@ export async function ingestImageInvoice(args: IngestImageArgs): Promise<IngestO
   }
 
   // 2) Reconcile against our usage_events for the same window.
-  const aggregates = await readUsageAggregates(args.providerTag, args.usageEventsProviderName, args.periodStart, args.periodEnd);
   const match = reconcileProviderInvoice({ provider: args.providerTag, invoiceLines: norm.lines, usageAggregates: aggregates });
 
   const { data: runRow, error: runErr } = await supabase

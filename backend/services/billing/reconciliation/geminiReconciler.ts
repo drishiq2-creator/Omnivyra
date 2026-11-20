@@ -11,6 +11,7 @@
 
 import { supabase } from '../../../db/supabaseClient';
 import { logger } from '../../logger';
+import { ReconciliationReadError } from './reconciliationReadError';
 import {
   normalizeGoogleCloudBillingExport,
   normalizeGeminiUsageMetadata,
@@ -48,7 +49,7 @@ async function readUsageAggregates(periodStart: string, periodEnd: string): Prom
     .lt('created_at', periodEnd);
   if (error) {
     logger.warn('gemini_reconcile_usage_read_failed', { message: error.message });
-    return [];
+    throw new ReconciliationReadError('gemini', 'usage_events', error.message ?? null);
   }
   const map: Map<string, UsageAggregate> = new Map();
   for (const r of (data || []) as Array<Record<string, unknown>>) {
@@ -85,6 +86,10 @@ export async function ingestGeminiInvoice(args: IngestGeminiArgs): Promise<Inges
   }
   const total_actual_usd = norm.lines.reduce((s, l) => s + (Number.isFinite(l.total_usd) ? l.total_usd : 0), 0);
 
+  // 0) Reads FIRST (04, 2026-11-20): a failed read throws ReconciliationReadError BEFORE the idempotency marker below,
+  //    so nothing is written and a retry starts clean (it used to answer 'duplicate' forever).
+  const aggregates = await readUsageAggregates(args.periodStart, args.periodEnd);
+
   // 1) Idempotent invoice import.
   const { error: insertErr } = await supabase.from('provider_invoice_imports').insert({
     provider: 'gemini',
@@ -106,7 +111,6 @@ export async function ingestGeminiInvoice(args: IngestGeminiArgs): Promise<Inges
   }
 
   // 2) Reconcile against our usage_events.
-  const aggregates = await readUsageAggregates(args.periodStart, args.periodEnd);
   const match = reconcileProviderInvoice({ provider: 'gemini', invoiceLines: norm.lines, usageAggregates: aggregates });
 
   const { data: runRow, error: runErr } = await supabase
