@@ -23,6 +23,14 @@ import path from 'path';
 const REPO = path.join(__dirname, '..', '..', '..');
 const read = (rel: string) => fs.readFileSync(path.join(REPO, rel), 'utf8');
 const exists = (rel: string) => fs.existsSync(path.join(REPO, rel));
+/**
+ * PL-128 (c6 2026-11-20): an ADOPTION is a call `withIdempotency(` in code - not the word in a comment. The gate used
+ * `includes('withIdempotency')` on raw source, so two routes whose comments explain why they deliberately do NOT adopt
+ * (prospects/[id]/problems.ts, prospect-identity/erasure-requests/index.ts: a unique constraint / the ledger is their
+ * idempotency) read as unauthorized adopters and kept this suite red on main since 2026-10-30/31.
+ */
+const code = (rel: string) => read(rel).replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:'"`])\/\/[^\n]*/g, '$1');
+const adopts = (rel: string) => code(rel).includes('withIdempotency(');
 
 /** OR-08 Group A — the ONLY endpoints authorized to adopt. */
 const AUTHORIZED: Array<[string, string]> = [
@@ -38,6 +46,17 @@ const AUTHORIZED: Array<[string, string]> = [
   // replay protection by design; sanctioned here rather than stripped.
   ['pages/api/campaigns/[id]/release.ts', 'campaign-release'],
 ];
+
+/**
+ * Adoptions REVIEWED and sanctioned after OR-08 (PL-128, c6 2026-11-20). Each gets the same wiring proofs as Group A.
+ * prospect-sources/discovery (PI, 5c0e441e4 2026-10-23): POST starts a credit-consuming provider search; the key is
+ * what separates "my request was already accepted" from "a new search" (route comment). Caller scoping (OR-09) is the
+ * middleware's own; the handler authorizes via requireCapability(PROSPECT_INGEST / PROSPECT_ENRICH_EXECUTE).
+ */
+const SANCTIONED_LATER: Array<[string, string]> = [
+  ['pages/api/prospect-sources/discovery.ts', 'pi-prospect-discovery-create'],
+];
+const WIRED = [...AUTHORIZED, ...SANCTIONED_LATER];
 
 /** Blocked by OR-08 (Group B dormant) and ED-01 (billing held pending telemetry). */
 const MUST_NOT_ADOPT = [
@@ -64,8 +83,13 @@ describe('adoption gate — authorized endpoints', () => {
     expect(read(rel)).toContain(`scope: '${scope}'`);
   });
 
+  it.each(SANCTIONED_LATER)('%s (reviewed later adoption) adopts with its own scope', (rel, scope) => {
+    expect(adopts(rel)).toBe(true);
+    expect(read(rel)).toContain(`scope: '${scope}'`);
+  });
+
   it('every scope is distinct — no endpoint can replay another', () => {
-    const scopes = AUTHORIZED.map(([, s]) => s);
+    const scopes = WIRED.map(([, s]) => s);
     expect(new Set(scopes).size).toBe(scopes.length);
   });
 
@@ -78,7 +102,7 @@ describe('adoption gate — authorized endpoints', () => {
 describe('adoption gate — unauthorized endpoints must NOT adopt', () => {
   it.each(MUST_NOT_ADOPT)('%s remains unadopted', (rel) => {
     if (!exists(rel)) return; // route removed by a lifecycle decision
-    expect({ file: rel, adopted: read(rel).includes('withIdempotency') })
+    expect({ file: rel, adopted: adopts(rel) })
       .toEqual({ file: rel, adopted: false });
   });
 });
@@ -93,9 +117,9 @@ describe('adoption gate — no adoption outside the sanctioned set', () => {
     return out;
   };
 
-  it('only Group A and the 29 pre-existing adopters use the middleware', () => {
-    const adopters = walk('pages/api').filter((rel) => read(rel).includes('withIdempotency'));
-    const groupA = new Set(AUTHORIZED.map(([rel]) => rel));
+  it('only Group A, the reviewed later adoptions and the 29 pre-existing adopters use the middleware', () => {
+    const adopters = walk('pages/api').filter(adopts);
+    const groupA = new Set(WIRED.map(([rel]) => rel));
     const unexpected = adopters.filter(
       (rel) => !groupA.has(rel) && !/^pages\/api\/(admin|super-admin|team|company|credits\/claim-action)/.test(rel),
     );
@@ -104,29 +128,29 @@ describe('adoption gate — no adoption outside the sanctioned set', () => {
   });
 
   it('the pre-existing adopter count has not shrunk', () => {
-    const all = walk('pages/api').filter((rel) => read(rel).includes('withIdempotency'));
+    const all = walk('pages/api').filter(adopts);
     // 29 pre-existing + 7 Group A.
     expect(all.length).toBeGreaterThanOrEqual(36);
   });
 });
 
 describe('wiring — the middleware can actually take effect', () => {
-  it.each(AUTHORIZED)('%s nests withIdempotency INSIDE the route factory', (rel) => {
+  it.each(WIRED)('%s nests withIdempotency INSIDE the route factory', (rel) => {
     // __createApiRoute(withIdempotency(handler, …), …) — reversing this would
     // put the replay cache outside request-context seeding.
     expect(read(rel)).toMatch(/__createApiRoute\(\s*withIdempotency\(handler,/);
   });
 
-  it.each(AUTHORIZED)('%s still performs its own authorization inside the handler', (rel) => {
+  it.each(WIRED)('%s still performs its own authorization inside the handler', (rel) => {
     // Caller scoping makes replay same-caller-only; the handler must still be
     // the thing that decides tenant/role access on a cache MISS.
     const src = read(rel);
     const authorizes =
-      /getSupabaseUserFromRequest|enforceCompanyAccess|enforceRole|requireCampaignAccess|resolveAuthenticatedUser/.test(src);
+      /getSupabaseUserFromRequest|enforceCompanyAccess|enforceRole|requireCampaignAccess|resolveAuthenticatedUser|requireCapability\(/.test(src);
     expect({ file: rel, authorizes }).toEqual({ file: rel, authorizes: true });
   });
 
-  it.each(AUTHORIZED)('%s responds only via res.json, so replay can capture it', (rel) => {
+  it.each(WIRED)('%s responds only via res.json, so replay can capture it', (rel) => {
     // withIdempotency patches res.json only. An endpoint using send/end/redirect
     // would leave its record stuck in `processing` until the stale lock expires.
     const src = read(rel);
@@ -134,7 +158,7 @@ describe('wiring — the middleware can actually take effect', () => {
       .toEqual({ file: rel, unsupported: false });
   });
 
-  it.each(AUTHORIZED)('%s imports the shared middleware — no local reimplementation', (rel) => {
+  it.each(WIRED)('%s imports the shared middleware — no local reimplementation', (rel) => {
     expect(read(rel)).toMatch(/import \{ withIdempotency \} from '[^']*backend\/middleware\/withIdempotency'/);
   });
 });
