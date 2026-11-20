@@ -1,5 +1,14 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useCompanyContext } from '../components/CompanyContext';
+import ReadFailureNotice from '../components/common/ReadFailureNotice';
+import {
+  CONNECTION_SAVE_UNKNOWN,
+  PUBLISH_CHECK_NOT_RUN,
+  WEBSITE_ALREADY_SET_UP,
+  WEBSITE_SAVE_UNKNOWN,
+  WEBSITE_SETUP_LOAD_FAILED,
+  isUnknownWriteOutcome,
+} from '../lib/websiteSetup/websiteSetupCopy';
 
 /**
  * Guided website onboarding wizard.
@@ -113,6 +122,9 @@ export default function WebsiteSetupPage() {
 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  // F16: the wizard is only shown once the setup read has ANSWERED; a failure is said, never restarted at step 0.
+  const [setupLoadState, setSetupLoadState] = useState<'loading' | 'ok' | 'failed'>('loading');
+  const loadSeq = useRef(0);
   const [showDiag, setShowDiag] = useState(false);
 
   // Phase 17 — domain verification, WordPress self-service token, activation readiness.
@@ -134,9 +146,25 @@ export default function WebsiteSetupPage() {
 
   const load = useCallback(async () => {
     if (!companyId) return;
+    const seq = ++loadSeq.current;
+    // F17: nothing from a previous company (or a previous attempt) carries over; above all not its integration id.
+    setSetupLoadState('loading');
+    setWebsite(null);
+    setProgress(null);
+    setIntegrationId(null);
+    setProvider(null);
+    setValidation(null);
+    setName('');
+    setCanonicalUrl('');
     try {
       const res = await fetch(`/api/websites/setup?company_id=${encodeURIComponent(companyId)}`, { credentials: 'include' });
+      if (!res.ok) throw new Error(`website setup read failed (HTTP ${res.status})`);
       const data = await res.json();
+      // The CMS integration decides whether Connect creates or updates; an unread list is not "none".
+      const intRes = await fetch(`/api/integrations?company_id=${encodeURIComponent(companyId)}`, { credentials: 'include' });
+      if (!intRes.ok) throw new Error(`integrations read failed (HTTP ${intRes.status})`);
+      const intData = await intRes.json();
+      if (seq !== loadSeq.current) return;
       setWebsite(data.website || null);
       setProgress(data.progress || null);
       if (data.website) {
@@ -144,8 +172,6 @@ export default function WebsiteSetupPage() {
         setCanonicalUrl(data.website.canonical_url || '');
       }
       // Recover an existing CMS integration for resumability.
-      const intRes = await fetch(`/api/integrations?company_id=${encodeURIComponent(companyId)}`, { credentials: 'include' });
-      const intData = await intRes.json().catch(() => ({}));
       const cms = (intData.integrations || []).find((i: any) =>
         ['wordpress', 'shopify', 'webflow', 'ghost', 'drupal', 'joomla', 'custom_blog_api'].includes(i.type),
       );
@@ -161,8 +187,11 @@ export default function WebsiteSetupPage() {
         if (cs && done.includes(cs)) resume = i + 1;
       }
       setStepIndex(Math.min(resume, WIZARD.length - 1));
-    } catch {
-      setError('Could not load your setup progress. You can keep going — nothing is lost.');
+      setSetupLoadState('ok');
+    } catch (err) {
+      if (seq !== loadSeq.current) return;
+      console.warn('[website-setup] setup read failed:', err);
+      setSetupLoadState('failed');
     }
   }, [companyId]);
 
@@ -175,7 +204,12 @@ export default function WebsiteSetupPage() {
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ company_id: companyId, website_id: website.id, step: contractStep, state }),
+    }).catch((err) => {
+      // A lost response must not throw out of the step handler; the next setup load re-reads progress from the server.
+      console.warn('[website-setup] step mark did not complete:', err);
+      return null;
     });
+    if (!res) return;
     const data = await res.json().catch(() => ({}));
     if (res.ok) setProgress(data.progress);
   }
@@ -293,7 +327,9 @@ export default function WebsiteSetupPage() {
     setBusy(true);
     try {
       if (!website) {
-        const res = await fetch('/api/websites/setup', {
+        let res: Response;
+        try {
+          res = await fetch('/api/websites/setup', {
           method: 'POST',
           credentials: 'include',
           headers: { 'Content-Type': 'application/json' },
@@ -305,7 +341,20 @@ export default function WebsiteSetupPage() {
             cms_provider: provider ?? null,
           }),
         });
-        const data = await res.json();
+        } catch (err) {
+          // Lost connection: the site may have been created. Say so and re-read instead of "could not".
+          console.warn('[website-setup] create_website did not complete:', err);
+          setError(WEBSITE_SAVE_UNKNOWN);
+          void load();
+          return;
+        }
+        const data = await res.json().catch(() => ({}));
+        if (res.status === 409 && data.code === 'WEBSITE_ALREADY_EXISTS') {
+          setError(WEBSITE_ALREADY_SET_UP);
+          void load();
+          return;
+        }
+        if (isUnknownWriteOutcome(res.status)) { setError(WEBSITE_SAVE_UNKNOWN); void load(); return; }
         if (!res.ok) { setError(data.error || 'Could not save your website.'); return; }
         setWebsite(data.website);
         setProgress(data.progress);
@@ -342,7 +391,9 @@ export default function WebsiteSetupPage() {
     setBusy(true);
     try {
       if (!integrationId) {
-        const res = await fetch('/api/integrations', {
+        let res: Response;
+        try {
+          res = await fetch('/api/integrations', {
           method: 'POST',
           credentials: 'include',
           headers: { 'Content-Type': 'application/json' },
@@ -354,7 +405,14 @@ export default function WebsiteSetupPage() {
             website_id: website?.id ?? null,
           }),
         });
-        const data = await res.json();
+        } catch (err) {
+          console.warn('[website-setup] connection create did not complete:', err);
+          setError(CONNECTION_SAVE_UNKNOWN);
+          void load();
+          return;
+        }
+        const data = await res.json().catch(() => ({}));
+        if (isUnknownWriteOutcome(res.status)) { setError(CONNECTION_SAVE_UNKNOWN); void load(); return; }
         if (!res.ok) { setError(data.error || 'Could not save the connection.'); return; }
         setIntegrationId(data.integration?.id ?? null);
       } else {
@@ -366,8 +424,13 @@ export default function WebsiteSetupPage() {
           credentials: 'include',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ company_id: companyId, config }),
+        }).catch((err) => {
+          console.warn('[website-setup] connection update did not complete:', err);
+          return null;
         });
+        if (!res) { setError(CONNECTION_SAVE_UNKNOWN); void load(); return; }
         const data = await res.json().catch(() => ({}));
+        if (isUnknownWriteOutcome(res.status)) { setError(CONNECTION_SAVE_UNKNOWN); void load(); return; }
         if (!res.ok) { setError(data.error || 'Could not update the connection.'); return; }
       }
       // Force a fresh validation (with API rediscovery) on the next step so the
@@ -394,8 +457,18 @@ export default function WebsiteSetupPage() {
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ company_id: companyId, rediscover: forceFresh }),
+      }).catch((err) => {
+        console.warn('[website-setup] publishing check did not complete:', err);
+        return null;
       });
-      const data = await res.json().catch(() => ({}));
+      if (!res) { setValidation(null); setError(PUBLISH_CHECK_NOT_RUN); return; }
+      const data = await res.json().catch(() => null);
+      // F18: a failed REQUEST (5xx, unreadable body) is not a publishing verdict.
+      if (!res.ok && (res.status >= 500 || !data || typeof data.success !== 'boolean')) {
+        setValidation(null);
+        setError(PUBLISH_CHECK_NOT_RUN);
+        return;
+      }
       setValidation(data);
       setRevalidateFresh(false);
       if (data.success) {
@@ -470,6 +543,13 @@ export default function WebsiteSetupPage() {
           </div>
         )}
 
+        {companyId && setupLoadState === 'failed' && (
+          <ReadFailureNotice message={WEBSITE_SETUP_LOAD_FAILED} onRetry={load} />
+        )}
+        {companyId && setupLoadState === 'loading' && (
+          <p className="text-sm text-gray-500">Loading your setup…</p>
+        )}
+        {(!companyId || setupLoadState === 'ok') && (
         <section className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
           <h2 className="text-base font-semibold text-gray-900">{step.title}</h2>
           <p className="mt-1 text-sm text-gray-500">{step.subtitle}</p>
@@ -873,6 +953,7 @@ export default function WebsiteSetupPage() {
             </div>
           </div>
         </section>
+        )}
       </div>
     </main>
   );
