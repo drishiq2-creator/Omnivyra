@@ -57,7 +57,10 @@ describe('trusted-device revoke: a failed cascade is reported, and a retry finis
     expect(mockLiveSessions).toEqual(['s-1', 's-2']); // still live
 
     mockCascadeFails = false;
+    const revokedAtAfterFirst = mockDevice!.revokedAt;
     const retry = await revokeDevice();
+    // DOUBLE-APPLY (7c): the second revoke changes nothing about the device - same revocation timestamp
+    expect(mockDevice!.revokedAt).toBe(revokedAtAfterFirst);
     expect(retry.statusCode).toBe(200); // not 409
     expect(retry.body).toMatchObject({ revoked: true, alreadyRevoked: true, cascade: { authSessionsRevoked: 2 } });
     expect(mockLiveSessions).toEqual([]); // the sessions are gone
