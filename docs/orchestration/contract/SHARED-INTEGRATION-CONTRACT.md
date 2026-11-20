@@ -128,7 +128,7 @@ An engine implements `EngineAdapter`: `execute(ctx)` returns `{ engine, outcome,
 
 **Verification levels:** `mocked`, `postgres_verified`, `sandbox_provider_verified`, `production_verified`. No engine claims either of the last two.
 
-**Usage.** `ExecutionUsage` is reported, not charged. No engine charges credits today, and pricing is owner decision C-1.
+**Usage and pricing (owner, 2026-11-20).** A journey generates NO AI content today: email content is rendered deterministically from the author's step `instruction` plus merge fields (`emailContentGenerator.ts`), so a journey costs **0 credits** now. `journey_message_generation` = **4 credits per AI generation**, shared across all recipients of that generation (never per recipient; a regenerated message is a new 4), applies ONLY if AI drafting of journey steps is ever built (owner: NOT NOW; a later A9 capability, billed as one call per generation keyed on journey step + message variant, its output frozen into the version before approval). Author content and merge fields = 0. WhatsApp sends are priced by a per-country table (c6); **WhatsApp journeys stay OFF until it is set.** `ExecutionUsage` remains reported, not charged, for everything else.
 
 ## E. Events
 
@@ -256,7 +256,7 @@ Every contact step passes these whichever engine serves it. The central gate is 
 | Human approval | WS-3 task (super-admin only today) | **None exists: refuses** | Engine record | Release, not approval | No actions |
 | Deduplication | Bridge unique per task | Request ledger | Engine record | Observation only | No actions |
 | Quota | WS-3 attempts + journey quota 200/day | Journey quota 250/day (and the number's Meta tier once readable) | Journey quota 25/day | Not contact (none) | No actions |
-| Credits | **None** | **None** | **None** | **None** | **None** |
+| Credits | 0 (no AI content; see D Usage) | Per-country table; journeys OFF until set | 0 | 0 | No actions |
 | Audit | Decisions + attempts | Decisions + ledger | Decisions + engine | Decisions | Decisions |
 | Retention and erasure | **Open: B-3, B-4** | **Open** | **Open** | | |
 
