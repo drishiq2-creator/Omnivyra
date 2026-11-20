@@ -140,8 +140,9 @@ export async function completePurchase(
 
   // ── 2b. A TEST-mode payment never grants REAL credits in production (b3 / owner, 2026-11-20) ─────────────────
   // Prod runs on TEST provider keys today (PAYMENT_PROVIDER_MODE unset → 'test'), so a test-card payment verifies
-  // and - before this - granted paid credits. This is the chokepoint for EVERY grant path (verify, payment webhook,
-  // provider-first closure, staging, super-admin complete). The purchase is closed as failed with the reason
+  // and - before this - granted paid credits. This is the chokepoint for every PURCHASE-driven grant path (verify,
+  // payment webhook, provider-first closure, staging, super-admin complete) - NOT for grants that never create a
+  // credit_purchases row (admin grants, onboarding, earned credits, the subscription monthly-allocation sweep). The purchase is closed as failed with the reason
   // recorded (so no sweep retries it) and nothing is credited. Rows with no recorded mode are not affected.
   if (isProduction() && purchaseRow.provider_mode === 'test' && purchaseRow.fulfillment_status !== 'completed') {
     const { error: closeErr } = await ownedDbTable('credit_purchases')
