@@ -71,7 +71,7 @@ async function installLiveBodies(resBody: string = LIVE_RES, pcBody: string = LI
 
 // ── pre-image capture + rollback (7c/cb 2026-11-20) ─────────────────────────────────────────────────────────────────
 const MIG = fs.readFileSync(path.join(process.cwd(), 'supabase/migrations/20270217000053_credit_settle_guards_reauthor.sql'), 'utf8');
-const CAP = 'public.credit_settle_guards_053_preimage';
+const CAP = 'migration_preimage.credit_settle_guards_053';
 const RES_REG = 'public.apply_credit_reservation(uuid,text,integer,integer,integer,text,text,text,text,uuid,uuid,text)';
 const PC_REG = 'public.apply_credit_partial_confirm(uuid,uuid,integer,integer,integer,text,text,text,text,uuid)';
 const EXP_REG = 'public.expire_org_free_credits(uuid,integer,text)';
@@ -87,6 +87,12 @@ const liveMd5 = async (reg: string) =>
 const captured = async (): Promise<Record<string, string>> =>
   Object.fromEntries((await q(`SELECT fn, prosrc_md5 FROM ${CAP}`)).rows.map((r: any) => [r.fn, r.prosrc_md5]));
 const capTableExists = async () => (await q(`SELECT to_regclass('${CAP}') IS NOT NULL AS e`)).rows[0].e as boolean;
+/** The whole envelope of a function: body md5, SECURITY, proconfig, owner and the ACL as a sorted grantee:priv:grantable set. */
+const envelope = async (reg: string) => (await q(`SELECT md5(p.prosrc) AS md5, p.prosecdef AS secdef, p.proconfig AS cfg,
+    p.proowner::regrole::text AS owner,
+    ARRAY(SELECT a.grantee::regrole::text || ':' || a.privilege_type || ':' || a.is_grantable
+            FROM aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) a ORDER BY 1) AS acl
+  FROM pg_proc p WHERE p.oid = to_regprocedure($1)`, [reg])).rows[0] ?? null;
 /** A database in PRODUCTION's pre-053 shape: no capture rows yet, expire_org_free_credits present, given bodies live. */
 async function prodShape(resBody: string, pcBody: string = LIVE_PC): Promise<void> {
   await q(`DELETE FROM ${CAP}`);
@@ -202,19 +208,25 @@ describe('AFTER - 053 refuses each defect and keeps the live arithmetic', () => 
       FROM pg_class c WHERE c.oid = '${CAP}'::regclass`);
     expect(rows[0]).toEqual({ rls: true, policies: 0, grants: 0 });
     for (const r of ['anon', 'authenticated', 'service_role']) {
-      const { rows: p } = await q(`SELECT has_table_privilege($1, '${CAP}', 'SELECT') AS s, has_table_privilege($1, '${CAP}', 'INSERT') AS i`, [r]);
-      expect(p[0]).toEqual({ s: false, i: false });
+      const { rows: p } = await q(`SELECT has_table_privilege($1, '${CAP}', 'SELECT') AS s, has_table_privilege($1, '${CAP}', 'INSERT') AS i,
+        has_schema_privilege($1, 'migration_preimage', 'USAGE') AS u`, [r]);
+      expect(p[0]).toEqual({ s: false, i: false, u: false });
     }
   });
 
-  it('replay: the rollback restores EXACTLY the captured bodies and drops the capture table', async () => {
+  it('replay: the rollback restores EXACTLY the captured functions (body AND envelope) and drops the capture + schema', async () => {
     await inRollback(async () => {
-      const cap = await captured();
+      const { rows } = await q(`SELECT fn, prosrc_md5 AS md5, prosecdef AS secdef, proconfig AS cfg, proowner AS owner,
+        ARRAY(SELECT a.grantee::regrole::text || ':' || a.privilege_type || ':' || a.is_grantable FROM aclexplode(proacl) a ORDER BY 1) AS acl
+        FROM ${CAP}`);
+      expect(rows.map((r: any) => r.fn).sort()).toEqual([EXP_REG, PC_REG, RES_REG].sort());
       expect(await attempt(ROLLBACK)).toBe('ok');
-      expect(await liveMd5(RES_REG)).toBe(cap[RES_REG]);
-      expect(await liveMd5(PC_REG)).toBe(cap[PC_REG]);
-      expect(await liveMd5(EXP_REG)).toBe(cap[EXP_REG] ?? null);
+      for (const r of rows) {
+        const { fn, ...want } = r;
+        expect(await envelope(fn)).toEqual(want);
+      }
       expect(await capTableExists()).toBe(false);
+      expect((await q(`SELECT to_regnamespace('migration_preimage') IS NULL AS gone`)).rows[0].gone).toBe(true);
     });
   });
 });
@@ -288,15 +300,17 @@ describe('PROD PATH - prod body -> 20270217000001 -> 053 -> rollback (cb C128: p
   it('053 live with NO stored pre-image -> refused (its rollback could not be made correct)', async () => {
     await inRollback(async () => {
       await q(`DELETE FROM ${CAP}`);
-      expect(await attempt(MIG)).toMatch(/is already 053's body but NO pre-053 body is stored/);
+      expect(await attempt(MIG)).toMatch(/is already 053's body but NO pre-053 function is stored/);
     });
   });
 
   it('a stored pre-image that differs from the live class-1 body -> refused (insert-only, never overwritten)', async () => {
     await inRollback(async () => {
       await prodShape(LIVE_RES);
-      await q(`INSERT INTO ${CAP} (fn, prosrc, prosrc_md5) VALUES ($1, $2, md5($2))`, [RES_REG, SC_LIVE]);
-      expect(await attempt(MIG)).toMatch(/already holds a DIFFERENT pre-053 body/);
+      await q(`INSERT INTO ${CAP} (fn, prosrc, prosrc_md5, prosecdef, proconfig, proacl, proowner, functiondef)
+        SELECT $1, $2, md5($2), false, proconfig, COALESCE(proacl, acldefault('f', proowner)), proowner::regrole::text, 'x'
+          FROM pg_proc WHERE oid = to_regprocedure($1)`, [RES_REG, SC_LIVE]);
+      expect(await attempt(MIG)).toMatch(/already holds a DIFFERENT pre-053 function/);
     });
   });
 
@@ -308,10 +322,58 @@ describe('PROD PATH - prod body -> 20270217000001 -> 053 -> rollback (cb C128: p
     });
   });
 
+  // ── ENVELOPE (7c V1): 053 changes the body ONLY; any envelope difference is refused before anything changes ──
+  it.each([
+    ['SECURITY DEFINER', `ALTER FUNCTION ${RES_REG} SECURITY DEFINER`, /is SECURITY DEFINER - 053 would make it INVOKER/],
+    ['a different search_path', `ALTER FUNCTION ${PC_REG} SET search_path = public`, /proconfig is .* - 053 would install/],
+    ['EXECUTE for authenticated', `GRANT EXECUTE ON FUNCTION ${RES_REG} TO authenticated`, /PUBLIC \/ anon \/ authenticated hold a privilege/],
+    ['EXECUTE for PUBLIC', `GRANT EXECUTE ON FUNCTION ${PC_REG} TO PUBLIC`, /PUBLIC \/ anon \/ authenticated hold a privilege/],
+    ['no EXECUTE for service_role', `REVOKE EXECUTE ON FUNCTION ${RES_REG} FROM service_role`, /service_role cannot EXECUTE/],
+  ])('preflight refuses a live envelope with %s, and nothing is captured or replaced', async (_l, alter, msg) => {
+    await inRollback(async () => {
+      await prodShape(LIVE_RES);
+      const before = [await envelope(RES_REG), await envelope(PC_REG)];
+      await q(alter);
+      const altered = [await envelope(RES_REG), await envelope(PC_REG)];
+      expect(altered).not.toEqual(before);                       // the alteration took effect (control on the setup)
+      expect(await attempt(MIG)).toMatch(msg);
+      expect(await captured()).toEqual({});
+      expect([await envelope(RES_REG), await envelope(PC_REG)]).toEqual(altered);
+    });
+  });
+
+  it('an extra grantee and a non-default expire envelope survive 053 -> rollback EXACTLY (captured, not guessed)', async () => {
+    await inRollback(async () => {
+      await prodShape(LIVE_RES);
+      await q(`DO $r$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'c6_053_probe') THEN CREATE ROLE c6_053_probe NOLOGIN; END IF; END $r$`);
+      await q(`GRANT EXECUTE ON FUNCTION ${RES_REG} TO c6_053_probe`);
+      await q(`ALTER FUNCTION ${EXP_REG} SECURITY DEFINER`);
+      await q(`ALTER FUNCTION ${EXP_REG} SET search_path = public`);
+      await q(`REVOKE ALL ON FUNCTION ${EXP_REG} FROM PUBLIC`);
+      await q(`GRANT EXECUTE ON FUNCTION ${EXP_REG} TO c6_053_probe WITH GRANT OPTION`);
+      const before = { res: await envelope(RES_REG), pc: await envelope(PC_REG), exp: await envelope(EXP_REG) };
+      expect(before.exp.secdef).toBe(true);
+      expect(before.res.acl).toContain('c6_053_probe:EXECUTE:false');
+      expect(await attempt(MIG)).toBe('ok');
+      expect((await envelope(RES_REG)).acl).toContain('c6_053_probe:EXECUTE:false');  // 053 left the other grantee alone
+      expect(await envelope(EXP_REG)).toBeNull();
+      expect(await attempt(ROLLBACK)).toBe('ok');
+      const after = { res: await envelope(RES_REG), pc: await envelope(PC_REG), exp: await envelope(EXP_REG) };
+      expect(after).toEqual(before);
+    });
+  });
+
+  it('control: a capture whose envelope disagrees with what the definition restores -> the rollback refuses', async () => {
+    await inRollback(async () => {
+      await q(`UPDATE ${CAP} SET prosecdef = NOT prosecdef WHERE fn = $1`, [PC_REG]);
+      expect(await attempt(ROLLBACK)).toMatch(/restored apply_credit_partial_confirm differs from the capture/);
+    });
+  });
+
   it('control: the rollback refuses when the capture row is missing', async () => {
     await inRollback(async () => {
       await q(`DELETE FROM ${CAP} WHERE fn = $1`, [PC_REG]);
-      expect(await attempt(ROLLBACK)).toMatch(/no captured pre-053 body for apply_credit_partial_confirm/);
+      expect(await attempt(ROLLBACK)).toMatch(/no captured pre-053 function for apply_credit_partial_confirm/);
     });
   });
 });

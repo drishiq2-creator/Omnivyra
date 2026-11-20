@@ -289,7 +289,7 @@ HEADER = f"""-- 20270217000053 - credit settle guards, RE-AUTHORED ON THE LIVE B
 -- bodies ad5383bf / ff208f60, and neither 20270217000001 nor 053 has a ledger row):
 --   ORDER: 20270217000001 (single_count) BEFORE 053. ROLLBACK: 053 first, then 000001. 000001 refuses 053's body as an
 --   unknown md5, so a reversed order fails closed instead of silently mixing.
---   PREFLIGHT = an md5 ALLOWLIST ONLY, three classes per function:
+--   BODY PREFLIGHT = an md5 ALLOWLIST ONLY, three classes per function:
 --     1. a known pre-053 body: prod (ad5383bf; partial ff208f60), 000001's patch of it (03d616e6), the 20260625 bodies a
 --        full-history replay installs (c62d8dde; partial 9591e6b3) and 000001's patch of that (7799ec27) - each in its
 --        LF and CRLF form. Line endings are PER FUNCTION (a Windows checkout may have applied any one body CRLF); the
@@ -300,21 +300,36 @@ HEADER = f"""-- 20270217000053 - credit settle guards, RE-AUTHORED ON THE LIVE B
 --   There is no substring test: 'already settled by' accepted ANY body containing that text (an identity it is not).
 --   The real-schema CI replay restores supabase/_schema/baseline.sql (a prod snapshot: ad5383bf / ff208f60) and runs
 --   only versions above its ledgerMax, so it exercises the PROD class-1 path; 20260625 runs only in a full-history replay.
---   PRE-IMAGE CAPTURE: before a class-1 body is replaced, its prosrc is stored insert-only in
---   public.credit_settle_guards_053_preimage, earlier in this same migration. A capture that cannot be stored, or a
---   stored pre-image that differs from the live class-1 body, fails the migration. A 053 body that is live with NO stored
---   pre-image fails too: its rollback could not be made correct (escalate to b3/owner, do not patch around it). The
---   table has zero grants (owner only), RLS on and no policy; the postcondition asserts that posture.
+--   ENVELOPE PREFLIGHT (7c V1): md5(prosrc) carries nothing about privileges, so for both replaced functions the
+--   preflight ALSO refuses unless the live envelope already IS what 053 installs: SECURITY INVOKER, exactly the
+--   proconfig below, no EXECUTE for PUBLIC / anon / authenticated, and EXECUTE for service_role. 053 therefore changes
+--   the BODY only - its REVOKE / GRANT are no-ops on an accepted database - and any envelope difference is an
+--   escalation, never a silent rewrite. The postcondition then pins the same values.
+--   PRE-IMAGE CAPTURE: before a class-1 body is replaced (and before expire_org_free_credits is dropped), the WHOLE
+--   function is stored insert-only in migration_preimage.credit_settle_guards_053: prosrc, prosecdef, proconfig, the ACL (acldefault-expanded when NULL), the
+--   owner and pg_get_functiondef (signature, defaults, RETURNS, LANGUAGE, SECURITY and SET clauses). A capture that
+--   cannot be stored, or a stored pre-image that differs from the live function, fails the migration. A 053 body that
+--   is live with NO stored pre-image fails too: its rollback could not be made correct (escalate to b3/owner).
+--   The schema migration_preimage is not exposed through the API; the schema and the table have zero grants (owner only), the
+--   table has RLS on and no policy; the postcondition asserts that posture. END OF LIFE: the capture lives until 053 is
+--   rolled back; once 053 is permanent a later contract migration drops it (post-launch register row, owner c6).
 --   WHY THE ROLLBACK READS THE CAPTURE: 053 outputs ONE fixed body whatever it replaced, so neither the ledger nor the
 --   live md5 at rollback time can say which pre-image to restore (prod + 000001, a 20260625 replay, ...). The rollback
---   restores exactly the captured body per function, and refuses unless the live body is still 053's output.
---   PRIVILEGE: the postcondition keeps both functions SECURITY INVOKER (prosecdef = false), with their live search_path
---   and service_role-only EXECUTE. A re-authored body is exactly where a privilege change could ride in.
+--   re-creates each function from its captured definition, restores the captured ACL and owner, verifies body,
+--   SECURITY, proconfig, ACL and owner against the capture, and refuses unless the live body is still 053's output.
 """
 
-CAP = 'public.credit_settle_guards_053_preimage'
+CAP_SCHEMA = 'migration_preimage'
+CAP = f'{CAP_SCHEMA}.credit_settle_guards_053'
 RES_OUT = both_endings(res)
 PC_OUT = both_endings(pc)
+RES_CFG = "ARRAY['search_path=pg_catalog, public']"
+PC_CFG = "ARRAY['search_path=public, extensions']"
+# The comparable form of an ACL: sorted 'grantee:privilege:grantable' (grantor excluded - a restore is issued by the
+# owner, whoever granted originally). grantee 0 = PUBLIC renders as '-'.
+ACLSET = lambda acl: (f"ARRAY(SELECT a.grantee::regrole::text || ':' || a.privilege_type || ':' || a.is_grantable "
+                      f"FROM aclexplode({acl}) a ORDER BY 1)")
+LIVE_ACL = "COALESCE(p.proacl, acldefault('f', p.proowner))"
 
 PREFLIGHT = f"""
 DO $preflight$
@@ -322,6 +337,8 @@ DECLARE
   v_res text;
   v_pc  text;
   v_refs int;
+  f     record;
+  p     record;
 BEGIN
   SELECT prosrc INTO v_res FROM pg_proc WHERE oid = to_regprocedure('{RES_REG}');
   SELECT prosrc INTO v_pc  FROM pg_proc WHERE oid = to_regprocedure('{PC_REG}');
@@ -337,6 +354,26 @@ BEGIN
                        {sqlset(PC_OUT)}) THEN
     RAISE EXCEPTION '053 preflight: apply_credit_partial_confirm body is unknown (md5 %) - it moved; re-generate 053', md5(v_pc);
   END IF;
+  -- ENVELOPE: the live function must already be what 053 installs (053 then changes the body only).
+  FOR f IN SELECT * FROM (VALUES ('{RES_REG}', {RES_CFG}),
+                                 ('{PC_REG}', {PC_CFG})) AS t(fn, cfg) LOOP
+    SELECT p0.prosecdef, p0.proconfig, {LIVE_ACL.replace('p.', 'p0.')} AS acl INTO p FROM pg_proc p0 WHERE p0.oid = to_regprocedure(f.fn);
+    IF p.prosecdef THEN
+      RAISE EXCEPTION '053 preflight: % is SECURITY DEFINER - 053 would make it INVOKER; escalate, nothing changed', f.fn;
+    END IF;
+    IF p.proconfig IS DISTINCT FROM f.cfg THEN
+      RAISE EXCEPTION '053 preflight: % proconfig is % - 053 would install %; escalate, nothing changed', f.fn, p.proconfig, f.cfg;
+    END IF;
+    IF EXISTS (SELECT 1 FROM aclexplode(p.acl) a
+                WHERE a.grantee = 0 OR a.grantee IN (SELECT oid FROM pg_roles WHERE rolname IN ('anon', 'authenticated'))) THEN
+      RAISE EXCEPTION '053 preflight: PUBLIC / anon / authenticated hold a privilege on % (%) - 053 would revoke it; escalate, nothing changed',
+        f.fn, {ACLSET('p.acl')};
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM aclexplode(p.acl) a JOIN pg_roles r ON r.oid = a.grantee
+                    WHERE r.rolname = 'service_role' AND a.privilege_type = 'EXECUTE') THEN
+      RAISE EXCEPTION '053 preflight: service_role cannot EXECUTE % - 053 would grant it; escalate, nothing changed', f.fn;
+    END IF;
+  END LOOP;
   IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'credit_transactions'
                   AND column_name = 'parent_transaction_id') THEN
     RAISE EXCEPTION '053 preflight: credit_transactions.parent_transaction_id is missing';
@@ -358,24 +395,34 @@ BEGIN
 END
 $preflight$;
 
--- Pre-053 bodies, captured for the rollback (see header). Owner-only: zero grants, RLS on, no policy.
+-- Pre-053 functions, captured WHOLE for the rollback (see header). Not API-exposed; owner-only; RLS on, no policy.
+CREATE SCHEMA IF NOT EXISTS {CAP_SCHEMA};
+REVOKE ALL ON SCHEMA {CAP_SCHEMA} FROM PUBLIC;
 CREATE TABLE IF NOT EXISTS {CAP} (
   fn          text        PRIMARY KEY CHECK (fn IN ('{RES_REG}',
                                                     '{PC_REG}',
                                                     '{EXP_REG}')),
   prosrc      text        NOT NULL,
   prosrc_md5  text        NOT NULL,
+  prosecdef   boolean     NOT NULL,
+  proconfig   text[],
+  proacl      aclitem[]   NOT NULL,   -- acldefault-expanded when the catalog ACL is NULL
+  proowner    text        NOT NULL,   -- role name
+  functiondef text        NOT NULL,   -- pg_get_functiondef: signature, defaults, RETURNS, LANGUAGE, SECURITY, SET
   captured_at timestamptz NOT NULL DEFAULT now(),
-  CONSTRAINT credit_settle_guards_053_preimage_md5 CHECK (prosrc_md5 = md5(prosrc))
+  CONSTRAINT credit_settle_guards_053_md5 CHECK (prosrc_md5 = md5(prosrc))
 );
 ALTER TABLE {CAP} ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON TABLE {CAP} FROM PUBLIC;
 DO $revoke$
 DECLARE r text;
 BEGIN
-  -- every non-owner grantee, including any a default-privilege rule added (anon / authenticated / service_role / ...).
-  FOR r IN SELECT DISTINCT a.grantee::regrole::text
-             FROM pg_class c, aclexplode(c.relacl) a
+  -- every non-owner grantee on the schema and the table, including any a default-privilege rule added.
+  FOR r IN SELECT DISTINCT a.grantee::regrole::text FROM pg_namespace n, aclexplode(n.nspacl) a
+            WHERE n.nspname = '{CAP_SCHEMA}' AND a.grantee <> 0 AND a.grantee <> n.nspowner LOOP
+    EXECUTE format('REVOKE ALL ON SCHEMA {CAP_SCHEMA} FROM %s', r);
+  END LOOP;
+  FOR r IN SELECT DISTINCT a.grantee::regrole::text FROM pg_class c, aclexplode(c.relacl) a
             WHERE c.oid = '{CAP}'::regclass AND a.grantee <> 0 AND a.grantee <> c.relowner LOOP
     EXECUTE format('REVOKE ALL ON TABLE {CAP} FROM %s', r);
   END LOOP;
@@ -384,25 +431,35 @@ $revoke$;
 
 DO $capture$
 DECLARE
-  f      record;
-  v_src  text;
-  v_have text;
+  f   record;
+  liv record;
+  cap record;
 BEGIN
   FOR f IN SELECT * FROM (VALUES
-      ('{RES_REG}', ARRAY[{sqlset(RES_PRE)}]),
-      ('{PC_REG}', ARRAY[{sqlset(PC_PRE)}]),
-      ('{EXP_REG}', NULL::text[])) AS t(fn, pre) LOOP
-    SELECT prosrc INTO v_src FROM pg_proc WHERE oid = to_regprocedure(f.fn);
-    CONTINUE WHEN v_src IS NULL;                         -- only expire_org_free_credits can be absent (preflight)
-    IF f.pre IS NULL OR md5(v_src) = ANY (f.pre) THEN    -- class 1 (expire: whatever is live; 053 drops it)
-      INSERT INTO {CAP} (fn, prosrc, prosrc_md5) VALUES (f.fn, v_src, md5(v_src)) ON CONFLICT (fn) DO NOTHING;
-      SELECT prosrc_md5 INTO v_have FROM {CAP} WHERE fn = f.fn;
-      IF v_have IS DISTINCT FROM md5(v_src) THEN
-        RAISE EXCEPTION '053 capture: % already holds a DIFFERENT pre-053 body (stored %, live %) - the rollback could not be made correct; escalate',
-          f.fn, v_have, md5(v_src);
+      ('{RES_REG}', ARRAY[{sqlset(RES_PRE)}], ARRAY[{sqlset(RES_OUT)}]),
+      ('{PC_REG}', ARRAY[{sqlset(PC_PRE)}], ARRAY[{sqlset(PC_OUT)}]),
+      ('{EXP_REG}', NULL::text[], NULL::text[])) AS t(fn, pre, out) LOOP
+    SELECT p.prosrc, md5(p.prosrc) AS m, p.prosecdef, p.proconfig, {LIVE_ACL} AS acl, p.proowner::regrole::text AS owner,
+           pg_get_functiondef(p.oid) AS def
+      INTO liv FROM pg_proc p WHERE p.oid = to_regprocedure(f.fn);
+    CONTINUE WHEN liv.prosrc IS NULL;                     -- only expire_org_free_credits can be absent (preflight)
+    IF f.pre IS NULL OR liv.m = ANY (f.pre) THEN          -- class 1 (expire: whatever is live; 053 drops it)
+      INSERT INTO {CAP} (fn, prosrc, prosrc_md5, prosecdef, proconfig, proacl, proowner, functiondef)
+      VALUES (f.fn, liv.prosrc, liv.m, liv.prosecdef, liv.proconfig, liv.acl, liv.owner, liv.def)
+      ON CONFLICT (fn) DO NOTHING;
+      SELECT * INTO cap FROM {CAP} WHERE fn = f.fn;
+      IF cap.prosrc_md5 IS DISTINCT FROM liv.m OR cap.prosecdef IS DISTINCT FROM liv.prosecdef
+         OR cap.proconfig IS DISTINCT FROM liv.proconfig OR cap.proowner IS DISTINCT FROM liv.owner
+         OR {ACLSET('cap.proacl')} IS DISTINCT FROM {ACLSET('liv.acl')} THEN
+        RAISE EXCEPTION '053 capture: % already holds a DIFFERENT pre-053 function (stored md5 %, live md5 %) - the rollback could not be made correct; escalate',
+          f.fn, cap.prosrc_md5, liv.m;
       END IF;
-    ELSIF NOT EXISTS (SELECT 1 FROM {CAP} WHERE fn = f.fn) THEN
-      RAISE EXCEPTION '053 capture: % is already 053''s body but NO pre-053 body is stored - its rollback could not be made correct; escalate', f.fn;
+    ELSIF liv.m = ANY (f.out) THEN                         -- class 2: a re-run; the pre-image must already be stored
+      IF NOT EXISTS (SELECT 1 FROM {CAP} WHERE fn = f.fn) THEN
+        RAISE EXCEPTION '053 capture: % is already 053''s body but NO pre-053 function is stored - its rollback could not be made correct; escalate', f.fn;
+      END IF;
+    ELSE
+      RAISE EXCEPTION '053 capture: % is neither a known pre-053 body nor 053''s output (md5 %)', f.fn, liv.m;
     END IF;
   END LOOP;
 END
@@ -420,14 +477,14 @@ BEGIN
   IF COALESCE((SELECT md5(prosrc) FROM pg_proc WHERE oid = to_regprocedure('{PC_REG}')), '') NOT IN ({sqlset(PC_OUT)}) THEN
     RAISE EXCEPTION '053 postcondition: apply_credit_partial_confirm body is not the generated one';
   END IF;
-  -- PRIVILEGE: both stay SECURITY INVOKER (live: invoker rights).
+  -- PRIVILEGE: both stay SECURITY INVOKER, as the preflight required them to be before 053.
   IF (SELECT prosecdef FROM pg_proc WHERE oid = to_regprocedure('{RES_REG}'))
      OR (SELECT prosecdef FROM pg_proc WHERE oid = to_regprocedure('{PC_REG}')) THEN
-    RAISE EXCEPTION '053 postcondition: a credit function became SECURITY DEFINER (live: invoker rights)';
+    RAISE EXCEPTION '053 postcondition: a credit function became SECURITY DEFINER (pre-053: invoker rights)';
   END IF;
-  IF NOT (SELECT proconfig @> ARRAY['search_path=pg_catalog, public'] FROM pg_proc WHERE oid = to_regprocedure('{RES_REG}'))
-     OR NOT (SELECT proconfig @> ARRAY['search_path=public, extensions'] FROM pg_proc WHERE oid = to_regprocedure('{PC_REG}')) THEN
-    RAISE EXCEPTION '053 postcondition: a credit function lost its live search_path';
+  IF (SELECT proconfig FROM pg_proc WHERE oid = to_regprocedure('{RES_REG}')) IS DISTINCT FROM {RES_CFG}
+     OR (SELECT proconfig FROM pg_proc WHERE oid = to_regprocedure('{PC_REG}')) IS DISTINCT FROM {PC_CFG} THEN
+    RAISE EXCEPTION '053 postcondition: a credit function''s proconfig is not the pre-053 one';
   END IF;
   FOREACH r IN ARRAY ARRAY['anon', 'authenticated'] LOOP
     IF has_function_privilege(r, '{RES_REG}', 'EXECUTE') OR has_function_privilege(r, '{PC_REG}', 'EXECUTE') THEN
@@ -437,14 +494,15 @@ BEGIN
   IF to_regprocedure('{EXP_REG}') IS NOT NULL THEN
     RAISE EXCEPTION '053 postcondition: expire_org_free_credits still exists';
   END IF;
-  -- The rollback's pre-images exist for both replaced functions, and the capture table is owner-only.
+  -- The rollback's pre-images exist for both replaced functions; the capture is owner-only.
   IF (SELECT count(*) FROM {CAP} WHERE fn IN ('{RES_REG}', '{PC_REG}')) <> 2 THEN
-    RAISE EXCEPTION '053 postcondition: a pre-053 body is not captured';
+    RAISE EXCEPTION '053 postcondition: a pre-053 function is not captured';
   END IF;
   IF NOT (SELECT relrowsecurity FROM pg_class WHERE oid = '{CAP}'::regclass)
      OR EXISTS (SELECT 1 FROM pg_policy WHERE polrelid = '{CAP}'::regclass)
-     OR EXISTS (SELECT 1 FROM pg_class c, aclexplode(c.relacl) a WHERE c.oid = '{CAP}'::regclass AND a.grantee <> c.relowner) THEN
-    RAISE EXCEPTION '053 postcondition: credit_settle_guards_053_preimage is not owner-only (RLS on, no policy, zero grants)';
+     OR EXISTS (SELECT 1 FROM pg_class c, aclexplode(c.relacl) a WHERE c.oid = '{CAP}'::regclass AND a.grantee <> c.relowner)
+     OR EXISTS (SELECT 1 FROM pg_namespace n, aclexplode(n.nspacl) a WHERE n.nspname = '{CAP_SCHEMA}' AND a.grantee <> n.nspowner) THEN
+    RAISE EXCEPTION '053 postcondition: {CAP} is not owner-only (schema + table zero grants, RLS on, no policy)';
   END IF;
 END
 $verify$;
@@ -457,52 +515,72 @@ mig = (HEADER + PREFLIGHT
        + f"REVOKE ALL ON FUNCTION {PC_REG} FROM PUBLIC, anon, authenticated;\nGRANT EXECUTE ON FUNCTION {PC_REG} TO service_role;\n"
        + f"\nDROP FUNCTION IF EXISTS {EXP_REG};\n"
        + POST
-       + "\n-- ROLLBACK: supabase/migrations/rollbacks/credit_settle_guards_reauthor_rollback.sql (restores the CAPTURED pre-053 bodies)\n")
+       + "\n-- ROLLBACK: supabase/migrations/rollbacks/credit_settle_guards_reauthor_rollback.sql (re-creates the CAPTURED pre-053 functions)\n")
 
 
-def restore(sig, reg, label):
+def restore(reg, label):
     return f"""
-  SELECT prosrc, prosrc_md5 INTO v_src, v_md5 FROM {CAP} WHERE fn = '{reg}';
+  -- {label}
+  SELECT * INTO cap FROM {CAP} WHERE fn = '{reg}';
   IF NOT FOUND THEN
-    RAISE EXCEPTION '053 rollback: no captured pre-053 body for {label} - nothing restored; escalate';
+    RAISE EXCEPTION '053 rollback: no captured pre-053 function for {label} - nothing restored; escalate';
   END IF;
-  EXECUTE format($sig$CREATE OR REPLACE FUNCTION {sig}
-AS %L$sig$, v_src);
-  EXECUTE $g$REVOKE ALL ON FUNCTION {reg} FROM PUBLIC, anon, authenticated$g$;
-  EXECUTE $g$GRANT EXECUTE ON FUNCTION {reg} TO service_role$g$;
-  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid = to_regprocedure('{reg}')) IS DISTINCT FROM v_md5 THEN
-    RAISE EXCEPTION '053 rollback: restored {label} is not the captured body';
+  EXECUTE cap.functiondef;                                   -- the whole captured definition (SECURITY, SET included)
+  IF (SELECT proowner::regrole::text FROM pg_proc WHERE oid = to_regprocedure('{reg}')) IS DISTINCT FROM cap.proowner THEN
+    EXECUTE format('ALTER FUNCTION {reg} OWNER TO %s', cap.proowner);
+  END IF;
+  FOR g IN SELECT DISTINCT x.grantee FROM pg_proc p, aclexplode({LIVE_ACL}) x WHERE p.oid = to_regprocedure('{reg}') LOOP
+    EXECUTE format('REVOKE ALL ON FUNCTION {reg} FROM %s', CASE g.grantee WHEN 0 THEN 'PUBLIC' ELSE g.grantee::regrole::text END);
+  END LOOP;
+  FOR g IN SELECT * FROM aclexplode(cap.proacl) LOOP
+    EXECUTE format('GRANT %s ON FUNCTION {reg} TO %s%s', g.privilege_type,
+      CASE g.grantee WHEN 0 THEN 'PUBLIC' ELSE g.grantee::regrole::text END,
+      CASE WHEN g.is_grantable THEN ' WITH GRANT OPTION' ELSE '' END);
+  END LOOP;
+  SELECT p.prosrc, p.prosecdef, p.proconfig, p.proowner::regrole::text AS owner, {LIVE_ACL} AS acl
+    INTO liv FROM pg_proc p WHERE p.oid = to_regprocedure('{reg}');
+  IF md5(liv.prosrc) IS DISTINCT FROM cap.prosrc_md5 OR liv.prosecdef IS DISTINCT FROM cap.prosecdef
+     OR liv.proconfig IS DISTINCT FROM cap.proconfig OR liv.owner IS DISTINCT FROM cap.proowner
+     OR {ACLSET('liv.acl')} IS DISTINCT FROM {ACLSET('cap.proacl')} THEN
+    RAISE EXCEPTION '053 rollback: restored {label} differs from the capture (body, SECURITY, proconfig, owner or ACL)';
   END IF;
 """
 
 
 rb = (f"""-- Rollback of 20270217000053_credit_settle_guards_reauthor.sql (e1, c6). GENERATED by
--- scripts/migrations/gen-053-credit-settle-guards.py. Restores EXACTLY the pre-053 bodies 053 captured in
--- {CAP} (per function: prod, prod + 20270217000001, or a 20260625 replay - the live md5 cannot
--- tell which, see the 053 header), with the live search_path, invoker rights and service_role-only EXECUTE, then drops
--- the capture table. ORDER: roll back 053 BEFORE 20270217000001. One DO block: all or nothing.
+-- scripts/migrations/gen-053-credit-settle-guards.py. Re-creates EXACTLY the pre-053 functions 053 captured in
+-- {CAP} (per function: prod, prod + 20270217000001, or a 20260625 replay - the live md5 cannot tell
+-- which, see the 053 header): each from its captured pg_get_functiondef (signature, defaults, RETURNS, LANGUAGE,
+-- SECURITY and SET clauses), then the captured owner and ACL; it VERIFIES body md5, prosecdef, proconfig, owner and
+-- ACL against the capture, then drops the capture (and its schema when empty).
+-- ORDER: roll back 053 BEFORE 20270217000001. One DO block: all or nothing.
 -- It REFUSES unless both live bodies are still 053's output, so it never undoes a later change.
 DO $rollback$
 DECLARE
-  v_src text;
-  v_md5 text;
+  cap record;
+  liv record;
+  g   record;
 BEGIN
   IF to_regclass('{CAP}') IS NULL THEN
-    RAISE EXCEPTION '053 rollback: {CAP} is missing - no pre-053 body to restore; escalate';
+    RAISE EXCEPTION '053 rollback: {CAP} is missing - no pre-053 function to restore; escalate';
   END IF;
   IF COALESCE((SELECT md5(prosrc) FROM pg_proc WHERE oid = to_regprocedure('{RES_REG}')), '') <> ALL (ARRAY[{sqlset(RES_OUT)}])
      OR COALESCE((SELECT md5(prosrc) FROM pg_proc WHERE oid = to_regprocedure('{PC_REG}')), '') <> ALL (ARRAY[{sqlset(PC_OUT)}]) THEN
     RAISE EXCEPTION '053 rollback: a live credit body is not 053''s output - something changed it after 053; nothing restored';
   END IF;
-{restore(RES_SIG, RES_REG, 'apply_credit_reservation')}{restore(PC_SIG, PC_REG, 'apply_credit_partial_confirm')}
+{restore(RES_REG, 'apply_credit_reservation')}{restore(PC_REG, 'apply_credit_partial_confirm')}
   -- expire_org_free_credits: restored only if it existed when 053 ran (053 dropped it).
   IF EXISTS (SELECT 1 FROM {CAP} WHERE fn = '{EXP_REG}') THEN
     IF to_regprocedure('{EXP_REG}') IS NOT NULL THEN
       RAISE EXCEPTION '053 rollback: expire_org_free_credits exists again - something recreated it after 053; nothing restored';
     END IF;
-{restore(EXP_SIG, EXP_REG, 'expire_org_free_credits')}  END IF;
+{restore(EXP_REG, 'expire_org_free_credits')}  END IF;
 
   DROP TABLE {CAP};
+  IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relnamespace = '{CAP_SCHEMA}'::regnamespace)
+     AND NOT EXISTS (SELECT 1 FROM pg_proc WHERE pronamespace = '{CAP_SCHEMA}'::regnamespace) THEN
+    DROP SCHEMA {CAP_SCHEMA};
+  END IF;
 END
 $rollback$;
 """)

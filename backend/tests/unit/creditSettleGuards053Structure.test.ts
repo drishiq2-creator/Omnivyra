@@ -111,13 +111,38 @@ it('control: an allowlist missing one derived CRLF form is caught', () => {
   expect(short.sort()).not.toEqual(both(LIVE_RES, scLive(LIVE_RES), B625[1], sc625(B625[1]), RES).sort());
 });
 
-it('the capture list is the class-1 set (the 053 outputs are NOT captured as pre-images)', () => {
+it('the capture captures class 1 only, and tests class 2 EXPLICITLY (pre list, then out list, per function)', () => {
   const cap = SQL.slice(SQL.indexOf('DO $capture$'), SQL.indexOf('$capture$;'));
   const lists = [...cap.matchAll(/ARRAY\[([^\]]*)\]/g)].map((m) => [...m[1].matchAll(/'([0-9a-f]{32})'/g)].map((x) => x[1]).sort());
   expect(lists).toEqual([
-    both(LIVE_RES, scLive(LIVE_RES), B625[1], sc625(B625[1])).sort(),
-    both(LIVE_PC, B625[2]).sort(),
+    both(LIVE_RES, scLive(LIVE_RES), B625[1], sc625(B625[1])).sort(), both(RES).sort(),
+    both(LIVE_PC, B625[2]).sort(), both(PC).sort(),
   ]);
+  expect(cap).toContain('ELSIF liv.m = ANY (f.out) THEN');
+  expect(cap).toMatch(/is neither a known pre-053 body nor 053''s output/);
+});
+
+it('ENVELOPE (7c V1): the preflight reads prosecdef, proconfig and the ACL of both replaced functions before 053 runs', () => {
+  const pre = SQL.slice(SQL.indexOf('DO $preflight$'), SQL.indexOf('$preflight$;'));
+  expect(pre).toContain("is SECURITY DEFINER - 053 would make it INVOKER");
+  expect(pre).toContain("proconfig is % - 053 would install %");
+  expect(pre).toContain("PUBLIC / anon / authenticated hold a privilege on %");
+  expect(pre).toContain("service_role cannot EXECUTE % - 053 would grant it");
+  // the configs the preflight requires are exactly the ones the CREATE statements install
+  expect(pre).toContain("ARRAY['search_path=pg_catalog, public']");
+  expect(pre).toContain("ARRAY['search_path=public, extensions']");
+  expect(SQL).toMatch(/LANGUAGE plpgsql\nSET search_path = pg_catalog, public\nAS \$fn\$/);
+  expect(SQL).toMatch(/LANGUAGE plpgsql\nSET search_path = public, extensions\nAS \$fn\$/);
+});
+
+it('the capture stores the WHOLE function and the rollback restores + verifies all of it', () => {
+  for (const col of ['prosecdef   boolean', 'proconfig   text[]', 'proacl      aclitem[]', 'proowner    text', 'functiondef text']) {
+    expect(SQL).toContain(col);
+  }
+  const RB = fs.readFileSync(path.join(ROOT, 'supabase/migrations/rollbacks/credit_settle_guards_reauthor_rollback.sql'), 'utf8');
+  expect(RB.match(/EXECUTE cap\.functiondef;/g)).toHaveLength(3);
+  expect(RB.match(/differs from the capture \(body, SECURITY, proconfig, owner or ACL\)/g)).toHaveLength(3);
+  expect(RB).not.toMatch(/CREATE OR REPLACE FUNCTION/);   // no hardcoded (guessed) envelope left
 });
 
 it('no substring acceptance and no "already applied" short-circuit remain; prosecdef stays pinned', () => {
