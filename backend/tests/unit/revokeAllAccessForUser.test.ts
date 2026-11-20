@@ -86,6 +86,12 @@ describe('authResolver JWT epoch at whole seconds', () => {
     expect(r).toEqual(expect.objectContaining({ user: null, error: 'SESSION_REVOKED' }));
   });
 
+  it('an UNPARSEABLE epoch fails CLOSED (SESSION_REVOKED), never silently accepted (7c)', async () => {
+    mockUserRow = { ...mockUserRow, session_revoked_after: 'not-a-timestamp' };
+    const r = await resolveAuthenticatedUser(req(jwtWithIat(revokeSec + 5)));
+    expect(r).toEqual(expect.objectContaining({ user: null, error: 'SESSION_REVOKED' }));
+  });
+
   it('control: a token from long before is rejected; one from after is accepted', async () => {
     expect((await resolveAuthenticatedUser(req(jwtWithIat(revokeSec - 3600)))).error).toBe('SESSION_REVOKED');
     expect((await resolveAuthenticatedUser(req(jwtWithIat(revokeSec + 5)))).error).toBeNull();
