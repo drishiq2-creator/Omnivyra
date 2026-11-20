@@ -3,6 +3,7 @@ import { useCompanyContext } from '../components/CompanyContext';
 import { getAuthToken } from '../utils/getAuthToken';
 import { fetchWithAuth } from '../components/community-ai/fetchWithAuth';
 import { classifyApiError } from '../pages/external-apis.types';
+import { APIS_LOAD_FAILED, REQUESTS_LOAD_FAILED } from '../lib/extApis/accessLoadCopy';
 
 type ApiSource = {
   id: string;
@@ -283,6 +284,9 @@ export function useExtApisAccess() {
   const [requestForm, setRequestForm] = useState({ ...emptyRequestForm });
   const [requestMessage, setRequestMessage] = useState<string | null>(null);
   const [requests, setRequests] = useState<ApiRequest[]>([]);
+  // A failed read is not an empty list: these hold the failure so the sections show it, not "none".
+  const [requestsLoadError, setRequestsLoadError] = useState<string | null>(null);
+  const [apisLoadError, setApisLoadError] = useState<string | null>(null);
   const [isSubmittingRequest, setIsSubmittingRequest] = useState(false);
   const [selectedApiId, setSelectedApiId] = useState<string | null>(null);
   const [expandedUsageId, setExpandedUsageId] = useState<string | null>(null);
@@ -330,6 +334,7 @@ export function useExtApisAccess() {
       if (!selectedCompanyId) {
         setApis([]);
         setDrafts({});
+        setApisLoadError(null);
         return;
       }
       const response = await fetchWithAuth(
@@ -344,8 +349,14 @@ export function useExtApisAccess() {
       setDrafts(buildDrafts(available, new Set(defaults)));
       setCanManageExternalApis(!!data?.permissions?.canManageExternalApis);
       setGlobalPresets(data.global_presets || []);
+      setApisLoadError(null);
     } catch (error) {
-      setSaveMessage('Failed to load external APIs.');
+      // Clear what is shown: after a company switch it would be the PREVIOUS company's APIs.
+      setApis([]);
+      setDrafts({});
+      setCompanyDefaultApis([]);
+      setGlobalPresets([]);
+      setApisLoadError(APIS_LOAD_FAILED);
     } finally {
       setIsLoading(false);
     }
@@ -355,19 +366,19 @@ export function useExtApisAccess() {
     try {
       if (!selectedCompanyId) {
         setRequests([]);
+        setRequestsLoadError(null);
         return;
       }
       const response = await fetchWithAuth(
         `/api/external-apis/requests?companyId=${encodeURIComponent(selectedCompanyId)}`
       );
-      if (!response.ok) {
-        setRequests([]);
-        return;
-      }
+      if (!response.ok) throw new Error('Failed to load requests');
       const data = await response.json();
       setRequests(data.requests || []);
+      setRequestsLoadError(null);
     } catch {
-      // ignore
+      setRequests([]);
+      setRequestsLoadError(REQUESTS_LOAD_FAILED);
     }
   };
 
@@ -680,6 +691,7 @@ export function useExtApisAccess() {
     activeTab,
     allowedPolling,
     apis,
+    apisLoadError,
     approvalActionId,
     buildDrafts,
     canManageExternalApis,
@@ -699,6 +711,7 @@ export function useExtApisAccess() {
     requestForm,
     requestMessage,
     requests,
+    requestsLoadError,
     runApprovalAction,
     saveAccess,
     saveCompanyConfig,

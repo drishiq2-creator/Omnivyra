@@ -284,6 +284,7 @@ export function useExtApisAccessViewController({ d }: { d: S }) {
     activeTab,
     allowedPolling,
     apis,
+    apisLoadError,
     approvalActionId,
     buildDrafts,
     canManageExternalApis,
@@ -303,6 +304,7 @@ export function useExtApisAccessViewController({ d }: { d: S }) {
     requestForm,
     requestMessage,
     requests,
+    requestsLoadError,
     runApprovalAction,
     saveAccess,
     saveCompanyConfig,
@@ -338,9 +340,9 @@ export function useExtApisAccessViewController({ d }: { d: S }) {
 
   return {
     d,
-    _ef1, _ef2, activeCount, activeTab, allowedPolling, apis, approvalActionId, buildDrafts, canManageExternalApis, companyConfig,
+    _ef1, _ef2, activeCount, activeTab, allowedPolling, apis, apisLoadError, approvalActionId, buildDrafts, canManageExternalApis, companyConfig,
     companyDefaultApis, configModalApiId, drafts, expandedUsageId, fetchWithAuth, globalPresets, isLoading, isReadOnly,
-    isSubmittingRequest, loadApis, loadRequests, pendingRequestNames, requestForm, requestMessage, requests, runApprovalAction,
+    isSubmittingRequest, loadApis, loadRequests, pendingRequestNames, requestForm, requestMessage, requests, requestsLoadError, runApprovalAction,
     saveAccess, saveCompanyConfig, saveMessage, selectedApi, selectedApiId, selectedCompanyId, selectedDraft, setActiveTab,
     setAllowedPolling, setApis, setApprovalActionId, setCanManageExternalApis, setCompanyConfig, setCompanyDefaultApis,
     setConfigModalApiId, setDrafts, setExpandedUsageId, setGlobalPresets, setIsLoading, setIsSubmittingRequest, setRequestForm,

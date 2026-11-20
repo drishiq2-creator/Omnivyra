@@ -275,13 +275,14 @@ const HealthBadgeLegend = () => (
 
 import type { useExtApisAccess } from '../hooks/useExtApisAccess';
 import { useExtApisAccessViewController } from './ExtApisAccessViewController';
+import ExtApisLoadFailure from './ExtApisLoadFailure';
 
 export default function ExtApisAccessSectionsA({ f }: { f: ReturnType<typeof useExtApisAccessViewController> }) {
   const {
     d,
-    _ef1, _ef2, activeCount, activeTab, allowedPolling, apis, approvalActionId, buildDrafts, canManageExternalApis, companyConfig,
+    _ef1, _ef2, activeCount, activeTab, allowedPolling, apis, apisLoadError, approvalActionId, buildDrafts, canManageExternalApis, companyConfig,
     companyDefaultApis, configModalApiId, drafts, expandedUsageId, fetchWithAuth, globalPresets, isLoading, isReadOnly,
-    isSubmittingRequest, loadApis, loadRequests, pendingRequestNames, requestForm, requestMessage, requests, runApprovalAction,
+    isSubmittingRequest, loadApis, loadRequests, pendingRequestNames, requestForm, requestMessage, requests, requestsLoadError, runApprovalAction,
     saveAccess, saveCompanyConfig, saveMessage, selectedApi, selectedApiId, selectedCompanyId, selectedDraft, setActiveTab,
     setAllowedPolling, setApis, setApprovalActionId, setCanManageExternalApis, setCompanyConfig, setCompanyDefaultApis,
     setConfigModalApiId, setDrafts, setExpandedUsageId, setGlobalPresets, setIsLoading, setIsSubmittingRequest, setRequestForm,
@@ -295,13 +296,15 @@ export default function ExtApisAccessSectionsA({ f }: { f: ReturnType<typeof use
           <div className="flex items-center justify-between mb-4">
             <div>
               <h2 className="text-lg font-semibold text-gray-900">Available APIs</h2>
-              <p className="text-xs text-gray-500">Enabled: {activeCount}</p>
+              <p className="text-xs text-gray-500">Enabled: {apisLoadError ? '—' : activeCount}</p>
             </div>
             <HealthBadgeLegend />
           </div>
 
           {isLoading ? (
             <div className="text-sm text-gray-500">Loading...</div>
+          ) : apisLoadError ? (
+            <ExtApisLoadFailure message={apisLoadError} onRetry={loadApis} />
           ) : (
             <div className="space-y-4">
               {visibleApis.map((api) => {
@@ -668,7 +671,9 @@ export default function ExtApisAccessSectionsA({ f }: { f: ReturnType<typeof use
 
         <div className="bg-white rounded-lg shadow p-6">
           <h2 className="text-lg font-semibold text-gray-900 mb-4">Global Presets</h2>
-          {globalPresets.length === 0 ? (
+          {apisLoadError ? (
+            <ExtApisLoadFailure message={apisLoadError} onRetry={loadApis} />
+          ) : globalPresets.length === 0 ? (
             <div className="text-sm text-gray-500">No global presets are available.</div>
           ) : (
             <div className="space-y-3">
