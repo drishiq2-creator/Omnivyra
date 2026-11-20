@@ -591,6 +591,9 @@ export default function BlogAnalyticsPanel({ accountId }: Props) {
     if (!accountId) return;
     // A company switch (or Retry) starts from nothing: no previous company's numbers, errors or flags carry over,
     // and a late answer for a previous load is dropped.
+    // On /blogs/manage the panel is ALSO keyed by companyId (a remount resets everything), so for a company switch
+    // this reset is defence in depth behind the key, not dead code: it is what makes Retry and any un-keyed mount
+    // start clean. (A removed setData(null) is unobservable by design: loading shows the spinner, failure the alert.)
     let cancelled = false;
     setLoading(true);
     setError(false);
