@@ -1,4 +1,5 @@
 import { ownedDbTable } from '../../db/writeOwner';
+import { throwOnSecurityReadError } from '../SecurityReadError';
 /**
  * StepUpSessionService — mint / revoke / query elevated sessions.
  *
@@ -117,13 +118,14 @@ export async function getActiveStatus(
   userId: string,
   authSessionId: string,
 ): Promise<StepUpSessionStatus> {
-  const { data } = await ownedDbTable('stepup_sessions')
+  const { data, error: secErr1 } = await ownedDbTable('stepup_sessions')
     .select('*')
     .eq('user_id', userId)
     .eq('auth_session_id', authSessionId)
     .order('started_at', { ascending: false })
     .limit(1)
     .maybeSingle();
+  throwOnSecurityReadError({ error: secErr1 }, 'getActiveStatus', 'stepup_sessions');
 
   if (!data) return { active: false, reason: 'NO_SESSION' };
   const row = data as StepUpRow;
@@ -146,12 +148,13 @@ export async function getActiveStatus(
 // ── Revoke ───────────────────────────────────────────────────────────────────
 
 export async function revokeForAuthSession(authSessionId: string, reason: string): Promise<number> {
-  const { data } = await ownedDbTable('stepup_sessions')
+  const { data, error: secErr2 } = await ownedDbTable('stepup_sessions')
     .update({ revoked_at: new Date().toISOString() })
     .eq('auth_session_id', authSessionId)
     .is('revoked_at', null)
     .is('consumed_at', null)
     .select('id');
+  throwOnSecurityReadError({ error: secErr2 }, 'revokeForAuthSession', 'stepup_sessions');
   const count = data?.length ?? 0;
   if (count > 0) {
     logger.warn('stepup_sessions_revoked', { authSessionId, count, reason });
@@ -167,12 +170,13 @@ export async function revokeForAuthSession(authSessionId: string, reason: string
  * with the sessions that produced it.
  */
 export async function revokeForUser(userId: string, reason: string): Promise<number> {
-  const { data } = await ownedDbTable('stepup_sessions')
+  const { data, error: secErr3 } = await ownedDbTable('stepup_sessions')
     .update({ revoked_at: new Date().toISOString() })
     .eq('user_id', userId)
     .is('revoked_at', null)
     .is('consumed_at', null)
     .select('id');
+  throwOnSecurityReadError({ error: secErr3 }, 'revokeForUser', 'stepup_sessions');
   const count = data?.length ?? 0;
   if (count > 0) {
     logger.warn('stepup_sessions_revoked_for_user', { userId, count, reason });
