@@ -564,6 +564,18 @@ ALTER TABLE ONLY public.t
     expect([...actorFk.RULES].sort()).toEqual(emitted);
   });
 
+  it('POPULATION: every `rule` the detector assigns is a literal, so the RULES scan above sees all of them (7c)', () => {
+    // Comments stripped first: JSDoc prose mentioning "rule:" is not an assignment. A rule built dynamically
+    // (`rule: prefix + x`, or the shorthand `{ rule, ... }`) moves the ANY count but not the LITERAL count.
+    const src = fs.readFileSync(path.join(REPO, 'scripts/ci/check-actor-fk-compatibility.js'), 'utf8');
+    const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:'"`])\/\/.*$/gm, '$1');
+    const any = [...code.matchAll(/\brule:\s*/g)].length;
+    const literal = [...code.matchAll(/\brule:\s*'[a-z_]+'\s*[,}\n]/g)].length;
+    expect(literal).toBeGreaterThan(0);
+    expect(any).toBe(literal);
+    expect(code).not.toMatch(/[{,]\s*rule\s*[,}]/);
+  });
+
   it('every committed catalog_known entry names a valid rule (the strictness lands green, not as a surprise)', () => {
     const ids = actorFk.loadKnown().map(actorFk.knownIdentity);
     expect(ids.length).toBeGreaterThan(0);
