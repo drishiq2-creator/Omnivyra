@@ -991,11 +991,14 @@
         "effects": [
           "db-write .update() backend/auth/tokenStore.ts",
           "db-write .upsert() backend/services/engagementIngestionService.ts",
-          "external-call fetch() backend/services/omnivyraClientV1.ts",
+          "db-write .insert() backend/services/engagementEvaluationService.ts",
           "db-write .insert() backend/services/communityAiOmnivyraService.ts",
-          "db-write .insert() backend/services/communityAiAutoRuleService.ts",
-          "db-write .insert() backend/services/communityAiActionLogService.ts",
           "external-call fetch() pages/api/social/comments.ts"
+        ],
+        "effectsBeyondDepth": [
+          { "effect": "db-write .insert() backend/services/communityAiAutoRuleService.ts", "depth": 4, "reason": "ingestComments -> evaluatePostEngagement -> evaluateEngagement -> evaluateAutoRules: the auto-rule insert, same ingestion path behind authorizeSocialAccount (7c F2, 2026-11-20)." },
+          { "effect": "db-write .insert() backend/services/communityAiActionLogService.ts", "depth": 5, "reason": "one call below the auto-rule service: the action-log insert on the same ingestion path behind authorizeSocialAccount (7c F2, 2026-11-20)." },
+          { "effect": "external-call fetch() backend/services/omnivyraClientV1.ts", "depth": 5, "reason": "evaluateEngagement -> evaluateCommunityAiEngagement (4, thin exported arrow) -> module-local requestOmnivyra (5) -> fetch, behind authorizeSocialAccount (7c F2, 2026-11-20)." }
         ]
       }
     ]
