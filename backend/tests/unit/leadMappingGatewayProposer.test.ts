@@ -42,6 +42,7 @@ import {
   MappingInputTooLargeError,
   AI_MAPPING_MAX_COLUMNS,
   AI_MAPPING_MAX_INPUT_TOKENS,
+  estimateInputTokens,
   LEAD_ATTRIBUTE_MAPPING_OPERATION,
   LEAD_ATTRIBUTE_MAPPING_ACTION,
 } from '../../services/leadMapping/gatewayProposer';
@@ -417,6 +418,15 @@ describe('PI-LDB-5 · billing and gateway arguments', () => {
     const worstUsd = (AI_MAPPING_MAX_INPUT_TOKENS / 1000) * inPer1k + (1_000 / 1000) * outPer1k;
     const priceUsd = 2 * 0.007;
     expect(priceUsd / worstUsd).toBeGreaterThanOrEqual(10);
+  });
+
+  it('THE MARGIN, part 2: the input estimator OVER-counts (>= chars/3 + 600) - that is what makes the bound sound', () => {
+    // The bound is checked against an ESTIMATE. If the estimator were "improved" to the usual 4 chars/token, more real
+    // tokens would pass the same bound and the real margin would fall below 10x - while the rate/bound test above
+    // stayed green. So the over-count itself is pinned (7c, 2026-11-20).
+    for (const chars of [0, 1, 2, 3, 299, 1_000, 6_234, 6_600, 20_000]) {
+      expect(estimateInputTokens(chars)).toBeGreaterThanOrEqual(chars / 3 + 600);
+    }
   });
 
   it('(D) the AI payload carries no target description and at most 3 samples per column; the request still names every target', async () => {

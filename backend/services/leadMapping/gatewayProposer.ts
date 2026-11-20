@@ -123,11 +123,14 @@ const OUTPUT_TOKENS_CEILING = 1_000;
  * (llm_pricing_config's $0.00015 has no non-test reader - 7c 2026-11-20. Whether the live row should be OpenAI's
  * published $0.15/M is a SEPARATE money item; if it is corrected, INPUT may rise to ~5,000 at the same margin.)
  *   output <= 1,000 tokens  -> $0.00060 (max_tokens: a hard provider-side cap)
- *   input  <= 2,666 tokens  -> $0.00080
- *   worst case               $0.00140  -> 10.0x at 2 credits - the ADVERSARIAL case.
+ *   input  <= 2,600 tokens  -> $0.00078
+ *   worst case               $0.00138  -> 10.1x at 2 credits - the ADVERSARIAL case. (2,666 would sit at exactly
+ *   10.00x; 2,600 keeps headroom so a rounding or fourth-decimal rate change cannot breach the floor - 7c.)
  * Input is estimated CONSERVATIVELY at 3 chars/token (+600 headroom): ordinary prose and JSON run nearer 4, so a
  * typical request that passes has FEWER real tokens than the bound (typical margin ~13x). Over-counting is the
- * feature - do not "correct" the estimator to make more files pass.
+ * feature - do not "correct" the estimator to make more files pass: a lower estimate lets more real tokens through
+ * the same bound and breaches the margin while the rate/bound test stays green. PINNED: the margin test asserts
+ * estimateInputTokens(c) >= c/3 + 600 for every c.
  * Output: 60 tokens per header (a header's JSON entry is comfortably under 60), so 15 columns need <= 900 + wrapper
  * and max_tokens (<= 1,000) cannot cut the JSON mid-entry: a truncated-but-charged answer is structurally excluded.
  * (D) 2026-11-20: the per-call target catalog no longer carries `description`, and the AI payload carries 3 samples
@@ -136,7 +139,7 @@ const OUTPUT_TOKENS_CEILING = 1_000;
  * engine records one degraded entry, the import maps deterministically, the user is told why, nothing is charged.
  */
 export const AI_MAPPING_MAX_COLUMNS = 15;
-export const AI_MAPPING_MAX_INPUT_TOKENS = 2_666;
+export const AI_MAPPING_MAX_INPUT_TOKENS = 2_600;
 /** (D) samples per column in the AI payload (the scorer keeps all of them). */
 export const AI_MAPPING_SAMPLES_PER_COLUMN = 3;
 export const estimateInputTokens = (promptChars: number): number => Math.ceil(promptChars / 3) + 600;
