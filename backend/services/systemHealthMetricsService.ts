@@ -1,4 +1,5 @@
 import { ownedDbTable } from '../db/writeOwner';
+import { recordRawCounter } from '../observability';
 /**
  * System Health Metrics Service
  * Records operational health metrics for the engagement system.
@@ -13,8 +14,12 @@ export async function recordMetric(
   metric_unit?: string | null,
   metadata?: Record<string, unknown> | null
 ): Promise<void> {
+  // A refused insert used to be DROPPED (the returned error was never read): callers that rely on this row as a
+  // DURABLE count (e.g. billing/price_catalog_unavailable, which pages when checkout is down) would see nothing. Never
+  // throws - but a lost write is logged at error level and counted in memory (a9, 2026-11-20).
+  let message: string | null = null;
   try {
-    await ownedDbTable('system_health_metrics').insert({
+    const { error } = await ownedDbTable('system_health_metrics').insert({
       component,
       metric_name,
       metric_value,
@@ -22,8 +27,13 @@ export async function recordMetric(
       observed_at: new Date().toISOString(),
       metadata: metadata ?? null,
     });
+    if (error) message = String(error.message ?? 'insert error');
   } catch (err) {
-    console.warn('[systemHealthMetrics] recordMetric error', (err as Error)?.message);
+    message = (err as Error)?.message ?? String(err);
+  }
+  if (message !== null) {
+    console.error('SYSTEM_HEALTH_METRIC_WRITE_FAILED', JSON.stringify({ component, metric_name, message: message.slice(0, 200) }));
+    try { recordRawCounter('system_health_metric_write_failed', 1, { component, metric_name }); } catch { /* never break the caller */ }
   }
 }
 
