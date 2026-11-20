@@ -234,11 +234,6 @@ function leadWith(display: any, ref: string): CanonicalLead {
   } as unknown as CanonicalLead;
 }
 
-// c6 2026-11-20: this suite runs WITH the PI-LDB migrations applied, which is exactly when the switch is set
-// (piLdbSchemaReady.ts). Without it the repository writes no display / origin_* columns at all.
-beforeAll(() => { process.env.PI_LDB_SCHEMA_READY = 'true'; });
-afterAll(() => { delete process.env.PI_LDB_SCHEMA_READY; });
-
 describe('PI-LDB-4 — lead_intelligence.display: catalog', () => {
   it('the column exists, is jsonb, and is nullable with no default', async () => {
     const { rows } = await db.query(
@@ -462,6 +457,39 @@ describe('PI-LDB-4 — executed behaviour', () => {
     );
     expect(obj[0].t).toBe('object');
     expect(obj[0].n).toBe('Ada');
+  });
+});
+
+const POFF = '00000000-0000-4000-8000-0000000000ce';
+
+describe('PI-LDB rollout · the deploy is DECOUPLED from the switch (cb control, 2026-11-20)', () => {
+  it('switch OFF: the same write SUCCEEDS on the applied schema and writes NO PI-LDB column; ON writes them', async () => {
+    await inRollback(async () => {
+      await seedTenants();
+      const lead = {
+        ...leadWith({ name: 'Ada Lovelace', title: 'Head of Analysis', contentText: null }, POFF),
+        origin: { category: 'pi_discovery', platform: 'apollo', observedAt: '2026-11-04T00:00:00.000Z', provenance: 'asserted' },
+      } as unknown as CanonicalLead;
+      const prior = process.env.PI_LDB_SCHEMA_READY;
+      delete process.env.PI_LDB_SCHEMA_READY;
+      try {
+        const off = await upsertCanonicalLeadWithOutcome(lead);
+        expect(off.status).toBe('persisted');
+        const { rows } = await db.query(
+          `SELECT display IS NULL d, origin_category IS NULL c FROM ${TABLE} WHERE id = $1`, [off.leadId],
+        );
+        expect(rows[0]).toEqual({ d: true, c: true });
+      } finally {
+        process.env.PI_LDB_SCHEMA_READY = prior;
+      }
+      // Control, same lead, switch ON (the replay's default): both columns land.
+      const on = await upsertCanonicalLeadWithOutcome(lead);
+      expect(on.status).toBe('persisted');
+      const { rows } = await db.query(
+        `SELECT display ->> 'name' n, origin_category c FROM ${TABLE} WHERE id = $1`, [on.leadId],
+      );
+      expect(rows[0]).toEqual({ n: 'Ada Lovelace', c: 'pi_discovery' });
+    });
   });
 });
 
