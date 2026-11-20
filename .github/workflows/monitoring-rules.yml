@@ -56,10 +56,12 @@ jobs:
           ./promtool --version
 
       - name: Check every rule file parses
-        run: ./promtool check rules monitoring/notifications-alerts.yml
+        # Every alert / recording rule file in monitoring/ (not only the one this job was written for).
+        run: ./promtool check rules monitoring/*-alerts.yml monitoring/*-rules.yml
 
       - name: Rule unit tests
-        run: ./promtool test rules monitoring/notifications-alerts.test.yml
+        # Every monitoring/*.test.yml, so a rules file that gains a test is covered without editing this job.
+        run: ./promtool test rules monitoring/*.test.yml
 
       - name: CONTROL - an off-by-one credit threshold must FAIL the one-event case
         run: |
