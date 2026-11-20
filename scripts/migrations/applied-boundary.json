@@ -42,7 +42,7 @@
   "attested_from": "origin/main 5025f51d7bb1420e3d3c5ef4ed626c64b953b3b0",
   "evidence_class": "PRODUCTION_CATALOG_VERIFIED for ledger_max (2026-11-01 production inventory: 93 rows, 93 distinct versions, no duplicates, max 20270111000003); CODE_VERIFIED for every digest (hashed from the origin/main worktree at 5025f51d).",
   "ledger_rows_at_attestation": 93,
-  "files_pinned": 457,
+  "files_pinned": 451,
   "files_above_boundary": 0,
   "digests": {
     "20260319_core_bootstrap_dependencies.sql": "102eaf189f37430ba0e08e2eb7923dbb91c55797006bb2b9e1dd5b13508611e8",
@@ -343,22 +343,16 @@
     "20260714_payment_provider_config.sql": "fcd21f9290dd67b7251df94f4c54c78809bfbffb0c39f85b18e10e9b1fdd29f6",
     "20260715_billing_context.sql": "dadf41668ba0cd58dff5e661cf127fcbcf3b8069d26d3cf2f0a8005074a0ff26",
     "20260716_payment_provider_config_cashfree_phonepe.sql": "552555e0298395ef9b3b672a5526679f12d068ca9f696018ee5fce93e6a994c4",
-    "20260717_hidden_billing_catalog.sql": "3d7af4b1a78b1a991ecc8e71fd4de9ebe590fe43ccab77411c5150397cb06ccc",
     "20260718000000_canonical_content_foundation.sql": "7a9f329987c9e2da8a6d757d7ffa289a275e69acde4f713c3514ac58ab0ef230",
     "20260718000001_content_intelligence_originality.sql": "1161fa3f7d72e3e04bfb9691e100a71c5ffb5a2550893329acef55a1a099f13e",
     "20260718000002_content_quality_collaboration.sql": "34dffb69d4c500d0ed827ad9114778a1235ad79df3c022643decb3c55711a49d",
     "20260718000003_content_learning_performance.sql": "525b9d0d3051762f95003d46b28e2bf8b3f608141b5a0425f3c74383c1fbb4f9",
     "20260718_harden_fn_search_path.sql": "78d594429de8bf542ab38bb85e29f98dcaa53665e901b4d366c0be99532936c6",
-    "20260718_hidden_billing_audit_and_checkout_sessions.sql": "1fabff3620fc34218020c799204bc1806a052784637874be2f5b8806182881e2",
-    "20260719_settlement_lifecycle_foundation.sql": "d0f5429333ab402b9a7eb18ff83c12618ff23126f369849f8c5014593f9df50a",
     "20260720120000_communication_coordination_registry.sql": "4a563b8dd859506427c94b6198e53b8c93c9172527e0fca16b8bfaf94bec30ae",
     "20260720123000_semantic_continuity_lineage.sql": "1234bb62b3afb4a59429a7fa163c2c8d91c9a32b3a7fadfa80904feb20cf1bfe",
     "20260720126000_communication_registry_idempotency.sql": "f7a77e01f6606d3708016dd89c34f71697ff80f4b31dac6f8530722e5e852431",
     "20260720_founding_member_program.sql": "30656ed6e9f7f649cc587f1d8c7ecc9a8976bd96ac5b1675a30aa71e50d0c39f",
-    "20260720_settlement_locks_and_metrics.sql": "d638b2b7b06233e89c8f3cd971f67555c2b05d0bca5b30ff1ae69805d48d42fe",
     "20260721_seed_topup_credit_packages.sql": "51ea4d5d9f649d9e7f511f0b8c2e28e89a206ed93af8d3b68a7fed1eec7f6153",
-    "20260721_settlement_metrics_rollup.sql": "160e67a7e79e0827152e88efdc387ef9a87d5bf62c9d16cae2ce134814b18366",
-    "20260722_settlement_metrics_prune.sql": "afa60b7ba1a221f0cf591d7c7489a057be2ceda2d401df3c09184b52bdaf7edf",
     "20260723000000_customer_readiness_snapshots.sql": "a0bbfae6f03e0538911628835371922334ec2dbf50e21f9c320fe5dde8f33bdf",
     "20260723_content_publish_snapshots.sql": "945379efa4fbd9126e1068491d69291b36078aaa4373f30c776289601879e6c4",
     "20260723_pricing_config_and_canonical_packages.sql": "3754333ea946968c1290ca5bda1aab10c4bba2b36305aa0871f0bdd897eb5537",
@@ -502,5 +496,17 @@
     "20270111000001_pi_opportunity_trigger_fn_hardening.sql": "54c7aa8a32f2cb2b1a6fe77c80e09ea70e29e33b499cd5b77cf1824699bca312",
     "20270111000002_tenant_tables_client_privileges_revoked.sql": "616cec9904d779583d609fa0283c85cbabfa9cb6fa55df93e092bc4dca4658ff",
     "20270111000003_function_execute_classwide_hardening.sql": "f9e5c95a7498078c4c8234c1357eb9ffc314c629e76481a760221a2e195c1eca"
+  },
+  "retired_unapplied": {
+    "$comment": "Files removed from the repo because they were NEVER applied in production (the pin above assumed every file at or below the boundary was applied; for 8-digit versions the ledger proves nothing). Retirement of the hidden-billing line, owner ruling 2026-11-20 via b3.",
+    "evidence": "C146 (2026-11-20T07:30Z, read-only): every object these files create is ABSENT in prod (to_regclass null for hidden_billing_catalog, hidden_billing_catalog_audit, billing_checkout_sessions, billing_settlement_events, settlement_operational_metrics, settlement_runtime_locks, settlement_metrics_rollup; functions raise_settlement_metrics_delete_guard, settlement_metrics_prune_rolled absent).",
+    "removed_digests": {
+      "20260717_hidden_billing_catalog.sql": "3d7af4b1a78b1a991ecc8e71fd4de9ebe590fe43ccab77411c5150397cb06ccc",
+      "20260718_hidden_billing_audit_and_checkout_sessions.sql": "1fabff3620fc34218020c799204bc1806a052784637874be2f5b8806182881e2",
+      "20260719_settlement_lifecycle_foundation.sql": "d0f5429333ab402b9a7eb18ff83c12618ff23126f369849f8c5014593f9df50a",
+      "20260720_settlement_locks_and_metrics.sql": "d638b2b7b06233e89c8f3cd971f67555c2b05d0bca5b30ff1ae69805d48d42fe",
+      "20260721_settlement_metrics_rollup.sql": "160e67a7e79e0827152e88efdc387ef9a87d5bf62c9d16cae2ce134814b18366",
+      "20260722_settlement_metrics_prune.sql": "afa60b7ba1a221f0cf591d7c7489a057be2ceda2d401df3c09184b52bdaf7edf"
+    }
   }
 }
