@@ -172,16 +172,13 @@ describe('A3X — 1. a tenant-funded call creates no Omnivyra charge', () => {
 
 // ───────────────────────────────────────────────────────────────────────────
 describe('A3X — 2. no unrelated monetization action can be billed', () => {
-  // MODE B (owner, 2026-11-10) REGISTERED prospect_enrichment for PLATFORM-funded
-  // vendor calls only. BYOK (tenant-funded) enrichment still never reaches it.
-  it('prospect_enrichment is now a registered credit action that resolves to ITSELF', () => {
-    expect(CREDIT_ACTIONS as readonly string[]).toContain(PROSPECT_ENRICHMENT_ACTION);
-    expect(resolveMonetizationFeature({ action_key: PROSPECT_ENRICHMENT_ACTION })?.action_key).toBe(PROSPECT_ENRICHMENT_ACTION);
+  it('prospect_enrichment is still not a registered credit action', () => {
+    expect(CREDIT_ACTIONS as readonly string[]).not.toContain(PROSPECT_ENRICHMENT_ACTION);
   });
 
-  it('the registry answers NULL for an UNREGISTERED action - the report fallback no longer runs without report fields (hazard closed, 89/b3 2026-11-20)', () => {
+  it('the registry answers NULL for it - the report fallback no longer runs without report fields (hazard closed, 89/b3 2026-11-20)', () => {
     // Was: resolved by fallback to another, credit-holding action (website_audit). Fixed in featureRegistry.ts.
-    expect(resolveMonetizationFeature({ action_key: 'not_a_registered_enrichment_action' })).toBeNull();
+    expect(resolveMonetizationFeature({ action_key: PROSPECT_ENRICHMENT_ACTION })).toBeNull();
   });
 
   it('the credit port still refuses that fallback, naming the wrong cost centre', async () => {
@@ -251,11 +248,9 @@ describe('A3X — 3/7/8. authorization did not go away with billing', () => {
     });
     store[`${ORG_A}::clearbit`] = { [PROVIDER_API_KEY]: SECRET_A };
     await executeEnrichment(req(), 'clearbit', ports({ authorizeCost: gated.authorizeCost }));
-    // The cost input carries subject + entity. No `funding`: own key only (owner 2026-11-20; mode B = PL-171).
     expect(seen).toEqual([{
       organizationId: ORG_A, providerId: 'clearbit',
       attributes: ['employee_count'], correlationId: 'corr-a3x',
-      subject: 'account', entityId: 'account-1',
     }]);
   });
 });
@@ -360,11 +355,8 @@ describe('A3X — 9. explicit provider selection cannot be substituted', () => {
 
 // ───────────────────────────────────────────────────────────────────────────
 describe('A3X — 10. Omnivyra billing outside PI is untouched', () => {
-  // MODE B (owner, 2026-11-10) REGISTERED prospect_enrichment for PLATFORM-funded
-  // vendor calls only. BYOK (tenant-funded) enrichment still never reaches it.
-  it('the ONLY credit action added is prospect_enrichment, and BYOK never reserves against it', async () => {
-    expect(CREDIT_ACTIONS as readonly string[]).toContain(PROSPECT_ENRICHMENT_ACTION);
-    expect((await tenantFundedExecutionPort.authorizeCost(costInput) as { holdId: string | null }).holdId).toBeNull();
+  it('the credit registry itself is unchanged — no action was registered', () => {
+    expect(CREDIT_ACTIONS as readonly string[]).not.toContain(PROSPECT_ENRICHMENT_ACTION);
   });
 
   it('a genuine Omnivyra action still resolves to itself, exactly as before', () => {
