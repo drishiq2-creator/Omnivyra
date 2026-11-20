@@ -1,14 +1,26 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/router';
 import { ArrowLeft, Shield, UserPlus, Users, RefreshCw } from 'lucide-react';
 import { getAuthToken } from '../utils/getAuthToken';
 import { useCompanyContext } from '../components/CompanyContext';
 import { fetchWithAuth } from '../components/community-ai/fetchWithAuth';
 import { emitSetupChanged } from '../lib/setup/setupEvents';
+import {
+  HeldIdempotencyKeys,
+  classifyTeamMutation,
+  teamLoadFailureMessage,
+  submissionSignature,
+  unknownOutcomeMessage,
+  type TeamMutationKind,
+  type TeamMutationOutcome,
+} from '../lib/team/teamMutationOutcome';
 
 // /api/company/users is guarded by withIdempotency (POST/PUT/DELETE) and 400s
-// without this header. A fresh key per user action makes each mutation safely
-// retryable without duplicating it.
+// without this header. It replays the stored response only for a key it has
+// already completed, so a key is minted once per SUBMISSION and held until the
+// server has answered (HeldIdempotencyKeys, lib/team/teamMutationOutcome.ts).
+// That avoids a second run when a lost response is followed by the same
+// submission; it is not a promise that a re-send is harmless (see that file).
 function newIdempotencyKey(): string {
   try {
     if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
@@ -47,6 +59,11 @@ export default function TeamManagement() {
   });
   const [roleNotice, setRoleNotice] = useState('');
   const [toastMessage, setToastMessage] = useState('');
+  // F23: a failed roster read is shown as a failure (persistent, with Retry), never as "No users yet".
+  const [usersLoadError, setUsersLoadError] = useState<string | null>(null);
+  // F25: an unknown mutation outcome stays on screen until the user acts (the toast auto-dismisses in 4s).
+  const [outcomeNotice, setOutcomeNotice] = useState('');
+  const heldKeys = useRef(new HeldIdempotencyKeys(newIdempotencyKey));
 
   const { selectedCompanyId, selectedCompanyName, userRole, isAuthenticated, refreshCompanies } = useCompanyContext();
   const canManage =
@@ -63,25 +80,19 @@ export default function TeamManagement() {
         `/api/company/users?companyId=${selectedCompanyId}&ts=${Date.now()}`,
         { cache: 'no-store' }
       );
-      const data = await response.json();
-      if (!response.ok) {
-        console.error(data.error || 'FAILED_TO_LIST_USERS');
-        const errorCode = data.error || 'FAILED_TO_LIST_USERS';
-        const friendlyMessage =
-          errorCode === 'FORBIDDEN_ROLE'
-            ? "You don't have permission to view this company's team. If you were invited, accept the invite first. Otherwise select a company you belong to or contact your admin."
-            : errorCode === 'COMPANY_ACCESS_DENIED'
-            ? "You don't have access to this company. Please select a company you belong to from the dropdown."
-            : errorCode === 'UNAUTHORIZED'
-            ? 'Please log in again to view team members.'
-            : errorCode;
-        setToastMessage(friendlyMessage);
+      const data = await response.json().catch(() => null);
+      if (!response.ok || !data) {
+        const errorCode = data?.error || 'FAILED_TO_LIST_USERS';
+        console.error('[team-management] roster read failed:', response.status, errorCode);
+        // Cleared so another company's roster can't stay on screen; the error (not "No users yet") is what renders.
         setTeamMembers([]);
+        setUsersLoadError(teamLoadFailureMessage(response.status, data));
         if (errorCode === 'FORBIDDEN_ROLE' || errorCode === 'COMPANY_ACCESS_DENIED') {
           refreshCompanies?.();
         }
         return;
       }
+      setUsersLoadError(null);
       const users = (data.users || []).map((row: any) => ({
         user_id: row.user_id,
         name: row.name || '',
@@ -96,8 +107,8 @@ export default function TeamManagement() {
       emitSetupChanged('team-changed');
     } catch (error: any) {
       console.error('Error loading users:', error);
-      setToastMessage(error?.message || 'Failed to load users');
       setTeamMembers([]);
+      setUsersLoadError(teamLoadFailureMessage(null, null));
     } finally {
       setIsLoading(false);
     }
@@ -112,6 +123,9 @@ export default function TeamManagement() {
   }, [toastMessage]);
 
   useEffect(() => {
+    // A notice or load error belongs to the company it was about.
+    setOutcomeNotice('');
+    setUsersLoadError(null);
     if (!isAuthenticated) {
       setTeamMembers([]);
       setRoleNotice('');
@@ -125,32 +139,61 @@ export default function TeamManagement() {
     loadUsers();
   }, [isAuthenticated, selectedCompanyId]);
 
+  /**
+   * Every team mutation goes through here (F24/F25). The key is held per submission until the server has answered;
+   * an unknown outcome claims nothing, re-reads the team list and leaves a notice that does not auto-dismiss.
+   */
+  const runTeamMutation = async (
+    kind: TeamMutationKind,
+    method: 'POST' | 'PUT' | 'DELETE',
+    body: Record<string, unknown>,
+  ): Promise<TeamMutationOutcome> => {
+    const signature = submissionSignature(method, body);
+    let status: number | null = null;
+    let payload: unknown = null;
+    try {
+      const response = await fetchWithAuth('/api/company/users', {
+        method,
+        headers: { 'Content-Type': 'application/json', 'Idempotency-Key': heldKeys.current.keyFor(signature) },
+        body: JSON.stringify(body),
+      });
+      status = response.status;
+      payload = await response.json().catch(() => null);
+    } catch (error) {
+      console.error(`[team-management] ${kind} request did not complete:`, error);
+      status = null;
+    }
+    const outcome = classifyTeamMutation(kind, status, payload);
+    heldKeys.current.record(signature, outcome);
+    if (outcome.kind === 'refused') setToastMessage(outcome.message);
+    if (outcome.kind === 'unknown') {
+      setOutcomeNotice(unknownOutcomeMessage(kind, outcome));
+      loadUsers();
+    }
+    return outcome;
+  };
+
   const sendInvitation = async () => {
     if (!inviteForm.email || !inviteForm.role || !selectedCompanyId) return;
     setIsLoading(true);
     try {
-      const response = await fetchWithAuth('/api/company/users', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Idempotency-Key': newIdempotencyKey() },
-        body: JSON.stringify({
-          name: inviteForm.name,
-          email: inviteForm.email,
-          role: inviteForm.role,
-          companyId: selectedCompanyId,
-        }),
+      const outcome = await runTeamMutation('invite', 'POST', {
+        name: inviteForm.name,
+        email: inviteForm.email,
+        role: inviteForm.role,
+        companyId: selectedCompanyId,
       });
-      const result = await response.json();
-      if (!response.ok) {
-        setToastMessage(result.error || 'Failed to invite user');
-        return;
+      if (outcome.kind === 'done') {
+        setInviteForm({ name: '', email: '', role: 'CONTENT_CREATOR' });
+        setShowInviteModal(false);
+        setOutcomeNotice('');
+        setToastMessage(typeof outcome.body.message === 'string' ? outcome.body.message : 'Invitation sent');
+        loadUsers();
+      } else if (outcome.kind === 'unknown') {
+        // Close so the notice and the re-read list are visible; the form is KEPT, so sending it again
+        // carries the same body and therefore the same held key.
+        setShowInviteModal(false);
       }
-      setInviteForm({ name: '', email: '', role: 'CONTENT_CREATOR' });
-      setShowInviteModal(false);
-      setToastMessage(result.message || 'Invitation sent');
-      loadUsers();
-    } catch (error: any) {
-      console.error('Error sending invitation:', error);
-      setToastMessage(error?.message || 'Failed to invite user');
     } finally {
       setIsLoading(false);
     }
@@ -160,20 +203,8 @@ export default function TeamManagement() {
     if (!selectedCompanyId) return;
     setIsLoading(true);
     try {
-      const response = await fetchWithAuth('/api/company/users', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json', 'Idempotency-Key': newIdempotencyKey() },
-        body: JSON.stringify({ companyId: selectedCompanyId, role, userId }),
-      });
-      if (!response.ok) {
-        const result = await response.json();
-        setToastMessage(result.error || 'Failed to update role');
-        return;
-      }
-      loadUsers();
-    } catch (error: any) {
-      console.error('Error updating role:', error);
-      setToastMessage(error?.message || 'Failed to update role');
+      const outcome = await runTeamMutation('role', 'PUT', { companyId: selectedCompanyId, role, userId });
+      if (outcome.kind === 'done') loadUsers();
     } finally {
       setIsLoading(false);
     }
@@ -183,21 +214,11 @@ export default function TeamManagement() {
     if (!selectedCompanyId) return;
     setIsLoading(true);
     try {
-      const response = await fetchWithAuth('/api/company/users', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Idempotency-Key': newIdempotencyKey() },
-        body: JSON.stringify({ email, role, name, companyId: selectedCompanyId }),
-      });
-      const result = await response.json();
-      if (!response.ok) {
-        setToastMessage(result.error || 'Failed to reinvite user');
-        return;
+      const outcome = await runTeamMutation('reinvite', 'POST', { email, role, name, companyId: selectedCompanyId });
+      if (outcome.kind === 'done') {
+        setToastMessage(typeof outcome.body.message === 'string' ? outcome.body.message : 'Reinvite sent');
+        loadUsers();
       }
-      setToastMessage(result.message || 'Reinvite sent');
-      loadUsers();
-    } catch (error: any) {
-      console.error('Error reinviting user:', error);
-      setToastMessage(error?.message || 'Failed to reinvite user');
     } finally {
       setIsLoading(false);
     }
@@ -207,21 +228,13 @@ export default function TeamManagement() {
     if (!selectedCompanyId) return;
     setIsLoading(true);
     try {
-      const response = await fetchWithAuth('/api/company/users', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json', 'Idempotency-Key': newIdempotencyKey() },
-        body: JSON.stringify({ companyId: selectedCompanyId, role, userId, status: 'inactive' }),
+      const outcome = await runTeamMutation('deactivate', 'PUT', {
+        companyId: selectedCompanyId, role, userId, status: 'inactive',
       });
-      const result = await response.json();
-      if (!response.ok) {
-        setToastMessage(result.error || 'Failed to deactivate user');
-        return;
+      if (outcome.kind === 'done') {
+        setToastMessage('User deactivated');
+        loadUsers();
       }
-      setToastMessage('User deactivated');
-      loadUsers();
-    } catch (error: any) {
-      console.error('Error deactivating user:', error);
-      setToastMessage(error?.message || 'Failed to deactivate user');
     } finally {
       setIsLoading(false);
     }
@@ -232,21 +245,11 @@ export default function TeamManagement() {
     if (!window.confirm('Remove this user from the company?')) return;
     setIsLoading(true);
     try {
-      const response = await fetchWithAuth('/api/company/users', {
-        method: 'DELETE',
-        headers: { 'Content-Type': 'application/json', 'Idempotency-Key': newIdempotencyKey() },
-        body: JSON.stringify({ companyId: selectedCompanyId, userId }),
-      });
-      const result = await response.json();
-      if (!response.ok) {
-        setToastMessage(result.error || 'Failed to remove user');
-        return;
+      const outcome = await runTeamMutation('remove', 'DELETE', { companyId: selectedCompanyId, userId });
+      if (outcome.kind === 'done') {
+        setToastMessage('User removed');
+        loadUsers();
       }
-      setToastMessage('User removed');
-      loadUsers();
-    } catch (error: any) {
-      console.error('Error removing user:', error);
-      setToastMessage(error?.message || 'Failed to remove user');
     } finally {
       setIsLoading(false);
     }
@@ -347,18 +350,38 @@ export default function TeamManagement() {
           </div>
         )}
 
+        {outcomeNotice && (
+          <div role="status" className="mb-6 flex items-start justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+            <span>{outcomeNotice}</span>
+            <button type="button" onClick={() => setOutcomeNotice('')} className="text-xs font-medium underline">
+              Dismiss
+            </button>
+          </div>
+        )}
+
         {activeTab === 'members' && isAuthenticated && (
           <div className="space-y-6">
             <div className="bg-white/70 backdrop-blur-sm rounded-2xl shadow-lg border border-gray-200/50 p-6">
               <div className="flex items-center justify-between mb-2">
                 <h2 className="text-xl font-bold text-gray-900">
-                  Team Members ({teamMembers.length})
+                  Team Members ({usersLoadError ? '—' : teamMembers.length})
                 </h2>
                 <span className="text-xs text-gray-500">
                   Use the Role dropdown to assign roles
                 </span>
               </div>
-              {teamMembers.length === 0 ? (
+              {usersLoadError ? (
+                <div role="alert" className="flex flex-wrap items-center gap-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+                  <span>{usersLoadError}</span>
+                  <button
+                    type="button"
+                    onClick={() => loadUsers()}
+                    className="rounded border border-amber-300 bg-white px-2 py-1 text-xs font-medium hover:bg-amber-100"
+                  >
+                    Retry
+                  </button>
+                </div>
+              ) : teamMembers.length === 0 ? (
                 <p className="text-gray-600">No users yet. Invite your first team member.</p>
               ) : (
                 <div className="overflow-x-auto">
