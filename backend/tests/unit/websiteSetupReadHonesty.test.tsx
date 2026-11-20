@@ -205,12 +205,15 @@ describe('F17 / connection writes / F18', () => {
     await waitFor(() => expect(calls('GET', '/api/websites/setup').length).toBe(reads + 1));
   });
 
-  it('F18: a 5xx publishing check is "couldn\'t run", not "We could not publish yet."', async () => {
+  it.each<[string, Answer]>([
+    ['a 502 with no body', { status: 502, body: {} }],
+    ["the route's own 500 { success: false } (carries a boolean, so status must decide)", { status: 500, body: { success: false, message: 'crash' } }],
+  ])('F18: %s is "couldn\'t run", not "We could not publish yet."', async (_n, testAnswer) => {
     routes = {
       'GET /api/websites/setup': [AT_CONNECT],
       'GET /api/integrations?': [{ status: 200, body: { integrations: [{ id: 'int-a', type: 'wordpress' }] } }],
       'PUT /api/integrations/int-a': [{ status: 200, body: {} }],
-      'POST /api/integrations/int-a/test': [{ status: 502, body: {} }],
+      'POST /api/integrations/int-a/test': [testAnswer],
     };
     render(<WebsiteSetupPage />);
     await waitFor(() => screen.getByLabelText(/WordPress username/));

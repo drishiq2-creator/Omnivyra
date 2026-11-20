@@ -463,7 +463,9 @@ export default function WebsiteSetupPage() {
       });
       if (!res) { setValidation(null); setError(PUBLISH_CHECK_NOT_RUN); return; }
       const data = await res.json().catch(() => null);
-      // F18: a failed REQUEST (5xx, unreadable body) is not a publishing verdict.
+      // F18: a failed REQUEST (5xx, unreadable body) is not a publishing verdict. The `>= 500` clause is load-bearing:
+      // /api/integrations/[id]/test answers its own crash as 500 { success: false, … }, which carries a boolean `success`,
+      // so a shape check alone would render that crash as "We could not publish yet." (7c). Keep both clauses.
       if (!res.ok && (res.status >= 500 || !data || typeof data.success !== 'boolean')) {
         setValidation(null);
         setError(PUBLISH_CHECK_NOT_RUN);
