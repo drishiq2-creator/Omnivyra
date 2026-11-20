@@ -15,6 +15,11 @@ import React, { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useCompanyContext } from '@/components/CompanyContext';
 import { Sparkles, ArrowRight } from 'lucide-react';
+import ReadFailureNotice from '@/components/common/ReadFailureNotice';
+
+/** U2 (2026-11-20): a failed read said "Set up creator attribution" to people who already had it. */
+export const CREATOR_CONVERSION_LOAD_FAILED =
+  "We couldn't load creator conversion, so we can't show which creator work is generating leads.";
 
 type Category = { available: boolean; total_conversions: number; items: Array<{ id: string; conversions: number }> };
 type Payload = { attribution_available: boolean; strategies: Category; variants: Category; assets: Category };
@@ -38,8 +43,13 @@ export default function CreatorConversionSummary({ className = '' }: { className
       if (!res.ok) throw new Error(res.statusText);
       const json = await res.json();
       if (json.error) throw new Error(json.error);
+      // An unrecognised body is not an answer either (the card reads all three categories).
+      if (typeof json.attribution_available !== 'boolean' || !json.strategies || !json.variants || !json.assets) {
+        throw new Error('creator-conversion: unrecognised response shape');
+      }
       setPayload(json as Payload);
-    } catch {
+    } catch (err) {
+      console.warn('[creator-conversion] read failed:', err);
       setFailed(true);
       setPayload(null);
     } finally {
@@ -85,8 +95,21 @@ export default function CreatorConversionSummary({ className = '' }: { className
     );
   }
 
+  if (failed) {
+    // Not inside Shell: Shell is a Link, and Retry must re-read, not navigate.
+    return (
+      <div className={`rounded-2xl border border-emerald-100 bg-white p-4 shadow-sm ${className}`}>
+        <p className="mb-2 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-emerald-600">
+          <Sparkles className="h-3.5 w-3.5" />
+          Creator Conversion
+        </p>
+        <ReadFailureNotice message={CREATOR_CONVERSION_LOAD_FAILED} onRetry={fetchData} />
+      </div>
+    );
+  }
+
   if (!ready) {
-    // Never hide — invite setup (usage-based: feature always visible).
+    // Never hide — invite setup (usage-based: feature always visible). Only for a read that ANSWERED "not live".
     return (
       <Shell>
         <p className="text-sm font-semibold text-slate-800">See which creator work generates leads</p>
