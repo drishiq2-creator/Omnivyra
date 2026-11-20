@@ -678,16 +678,16 @@ const BASE_FEATURES: MonetizationFeatureRegistryEntry[] = [
   pricedAction('chat_theme_refine', 'campaigns.chat_theme_refine', 'campaigns', 'Theme Refinement', 'Campaigns', 'bg-violet-500'), // 1
   pricedAction('content_repurpose', 'creator_content.content_repurpose', 'creator_content', 'Content Repurpose', 'Content Generation', 'bg-blue-400'), // 5
   pricedAction('content_suggestions', 'creator_content.content_suggestions', 'creator_content', 'Content Suggestions', 'Content Generation', 'bg-blue-400'), // 3
-  pricedAction('creator_content', 'creator_content.creator_content', 'creator_content', 'Creator Content', 'Content Generation', 'bg-blue-400'), // NO OWNER PRICE - no row, fails closed
+  pricedAction('creator_content', 'creator_content.creator_content', 'creator_content', 'Creator Content', 'Content Generation', 'bg-blue-400'), // 5 (owner confirmed 2026-11-20; seeded 20260665:35 + 20261024000001:122)
   pricedAction('engagement_refine', 'engagement.engagement_refine', 'engagement_center', 'Reply Refinement', 'AI Replies', 'bg-emerald-400'), // 1
-  pricedAction('image_generation', 'ai_generation.image_generation', 'ai_generation', 'Image Generation', 'Images', 'bg-violet-400'), // owner 55/95 by tier - split in A8 step 1; no single row, fails closed
+  pricedAction('image_generation', 'ai_generation.image_generation', 'ai_generation', 'Image Generation', 'Images', 'bg-violet-400'), // owner 55/95 by tier - split in A8 step 1. No credit_cost_config row: priced by amountOverride (creator/assetActivityEconomics); a getCreditCost call would throw
   pricedAction('quick_platform_adapt', 'creator_content.quick_platform_adapt', 'creator_content', 'Quick Platform Adapt', 'Content Generation', 'bg-blue-400'), // 3
   pricedAction('recommendations_generate', 'intelligence.recommendations_generate', 'intelligence', 'Recommendations', 'Recommendations', 'bg-blue-500'), // owner 10
   pricedAction('recommendations_group_preview', 'intelligence.recommendations_group_preview', 'intelligence', 'Recommendation Grouping Preview', 'Recommendations', 'bg-blue-500'), // 1
   pricedAction('recommendations_opportunities', 'intelligence.recommendations_opportunities', 'intelligence', 'Detected Opportunities', 'Recommendations', 'bg-blue-500'), // owner 10
   pricedAction('recommendations_preview_strategy', 'intelligence.recommendations_preview_strategy', 'intelligence', 'Strategy Preview', 'Recommendations', 'bg-blue-500'), // 1
   pricedAction('skeleton_command', 'campaigns.skeleton_command', 'campaigns', 'Plan Skeleton Command', 'Campaigns', 'bg-violet-500'), // 5
-  pricedAction('video_generation', 'ai_generation.video_generation', 'ai_generation', 'Video Generation', 'Video', 'bg-violet-400'), // NO OWNER PRICE - no row, fails closed
+  pricedAction('video_generation', 'ai_generation.video_generation', 'ai_generation', 'Video Generation', 'Video', 'bg-violet-400'), // no credit_cost_config row: priced by amountOverride (creator/assetActivityEconomics); a getCreditCost call would throw
 ];
 
 const SIMPLE_CREDIT_FEATURES: Record<CreditAction, Omit<MonetizationFeatureRegistryEntry, 'pricing_keys'>> = {
