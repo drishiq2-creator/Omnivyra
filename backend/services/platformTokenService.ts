@@ -135,8 +135,7 @@ export const saveToken = async (
  * Read tokens for an (org, platform) connection. Sources tokens from
  * social_accounts via tokenStore; refreshes in-flight if near expiry. Returns
  * the same shape callers expected from the old dual-table getToken so this
- * change is transparent to communityAiActionExecutor / communityAiScheduler
- * etc.
+ * change is transparent to communityAiActionExecutor etc.
  */
 export const getToken = async (
   tenant_id: string,

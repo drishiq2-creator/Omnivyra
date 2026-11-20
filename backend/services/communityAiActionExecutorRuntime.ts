@@ -289,6 +289,10 @@ export const executeAction = async (
   options?: {
     notify?: boolean;
     webhook?: boolean;
+    /** NO non-interactive source here. 'scheduler' was retired 2026-11-20 (owner ruling); while it existed, a run with
+     *  no human present required an APPROVAL OF RECORD (action.approved_at set by the approve route; refused otherwise
+     *  with reason HUMAN_APPROVAL_REQUIRED, policy_flag 'approval_of_record'). Re-adding any non-interactive source to
+     *  this union MUST bring that guard back in executeAction - widening the union alone compiles WITHOUT it (7c). */
     source?: 'manual' | 'auto' | 'bulk';
     /** If true, executeAction takes full responsibility for writing the
      *  terminal row state; callers must NOT write status/execution_mode/
@@ -450,6 +454,7 @@ export const executeAction = async (
 const runExecution = async (
   action: CommunityAiAction,
   approved: boolean,
+  // source: no non-interactive value without an approval-of-record guard - see executeAction's options.source note.
   options?: { notify?: boolean; webhook?: boolean; source?: 'manual' | 'auto' | 'bulk'; auto?: boolean }
 ): Promise<ExecutionResult> => {
   const policy = await getCommunityAiPlatformPolicy();
