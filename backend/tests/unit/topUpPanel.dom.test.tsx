@@ -34,11 +34,17 @@ const apiFetchMock = jest.fn();
 jest.mock('@/lib/apiFetch', () => ({ apiFetch: (...a: unknown[]) => apiFetchMock(...a) }));
 
 import TopUpPanel from '../../../components/billing/TopUpPanel';
+import { TOPUP_NOT_CHARGED, TOPUP_UNCONFIRMED } from '../../../lib/billing/topUpOutcome';
 
 const PACK = { id: 'pack_250', credits: 250, price: 2520, currency: 'INR', label: '250 credits' };
 
-function jsonRes(body: unknown, ok = true) {
-  return Promise.resolve({ ok, json: async () => body });
+/**
+ * Mock fidelity (2026-11-20): real apiFetch answers are Responses and ALWAYS carry `status`. The verify/close outcome
+ * now keys on the status (lib/billing/topUpOutcome.ts classifyVerify/classifyClose), so a status-less mock would be
+ * classified as "no answer". Default: 200 when ok, 400 when not.
+ */
+function jsonRes(body: unknown, ok = true, status = ok ? 200 : 400) {
+  return Promise.resolve({ ok, status, json: async () => body });
 }
 
 /** Captured request bodies, keyed by URL, so we can assert what the CLIENT sent. */
@@ -57,7 +63,9 @@ function installRoutes(over: Record<string, () => Promise<any>> = {}) {
       key_id: 'rzp_test_x', provider_order_id: 'order_1', amount_subunits: 252000, currency: 'INR',
     }),
     '/api/billing/checkout/verify': () => jsonRes({ ok: true, credits_granted: 250 }),
-    '/api/billing/checkout/close': () => jsonRes({ ok: true }),
+    // close.ts on origin/main ALWAYS answers 200 { ok:true, purchase_id, action, detail } (or 404). The action is the
+    // provider-first verdict the panel now reads (classifyClose); the default is the common case, provider says unpaid.
+    '/api/billing/checkout/close': () => jsonRes({ ok: true, purchase_id: 'pur_1', action: 'closed', detail: null }),
     ...over,
   };
 }
@@ -165,7 +173,10 @@ describe('P2-D — TopUpPanel consumes the certified payment contract', () => {
     await renderPanel();
     fireEvent.click(screen.getByRole('button', { name: /buy/i }));
 
-    expect(await screen.findByText('package_not_available')).toBeInTheDocument();
+    // UPDATED (b3 2026-11-20, codes -> copy, never raw): this used to pin the raw code 'package_not_available' on
+    // screen. The copy comes from CREATE_ORDER_COPY; the raw code must NOT appear.
+    expect(await screen.findByText("This credit pack isn't available right now.")).toBeInTheDocument();
+    expect(screen.queryByText('package_not_available')).not.toBeInTheDocument();
     expect(screen.queryByText(/credits added/i)).not.toBeInTheDocument();
     // Loading cleared and recovery offered.
     expect(screen.getByRole('button', { name: /^retry$/i })).toBeInTheDocument();
@@ -212,8 +223,12 @@ describe('P2-D — TopUpPanel consumes the certified payment contract', () => {
   });
 
   it('UI-8 — a rejected verification never grants UI credit and offers recovery', async () => {
+    // UPDATED (7c/b3 2026-11-20). The old mock { ok:false, error:'signature_invalid' } is not a body verify.ts sends:
+    // a rejected signature goes through the provider-first closure (verify.ts:81-97) and answers
+    // 400 { ok:false, status:'failed', action }. Only action closed/already_closed proves "not charged"; that case
+    // offers a new purchase (Retry). The non-definitive actions are pinned in topUpVerifyHonesty.test.tsx.
     installRoutes({
-      '/api/billing/checkout/verify': () => jsonRes({ ok: false, error: 'signature_invalid' }),
+      '/api/billing/checkout/verify': () => jsonRes({ ok: false, purchase_id: 'pur_1', status: 'failed', provider: 'razorpay', action: 'closed' }, false, 400),
     });
     await renderPanel();
     fireEvent.click(screen.getByRole('button', { name: /buy/i }));
@@ -223,15 +238,17 @@ describe('P2-D — TopUpPanel consumes the certified payment contract', () => {
       rzpHandler!({ razorpay_order_id: 'order_1', razorpay_payment_id: 'pay_1', razorpay_signature: 'bad' });
     });
 
-    expect(await screen.findByText('signature_invalid')).toBeInTheDocument();
+    expect(await screen.findByText(TOPUP_NOT_CHARGED)).toBeInTheDocument();
     expect(screen.queryByText(/credits added/i)).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: /^retry$/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /buy/i })).not.toBeDisabled();
   });
 
   it('UI-9 — an unreadable verify response is surfaced, not silently treated as success', async () => {
-    // Pins the ESTABLISHED contract: anything without `ok` renders the failure
-    // banner. It is deliberately NOT converted into a success, which is the only
-    // financially dangerous direction.
+    // INVERTED (b3 2026-11-20, BLOCKING money). This used to pin "anything without `ok` renders the failure banner"
+    // ("Verification failed"). After payment, an unreadable answer does NOT prove failure either: the user may have
+    // paid. It is now "couldn't confirm" + Check again with Buy DISABLED, so no second payment is invited. Kept: it is
+    // never converted into success, the financially dangerous direction this test was written for.
     installRoutes({ '/api/billing/checkout/verify': () => jsonRes({}) });
     await renderPanel();
     fireEvent.click(screen.getByRole('button', { name: /buy/i }));
@@ -241,8 +258,11 @@ describe('P2-D — TopUpPanel consumes the certified payment contract', () => {
       rzpHandler!({ razorpay_order_id: 'order_1', razorpay_payment_id: 'pay_1', razorpay_signature: 'sig' });
     });
 
-    expect(await screen.findByText('Verification failed')).toBeInTheDocument();
+    expect(await screen.findByText(TOPUP_UNCONFIRMED)).toBeInTheDocument();
+    expect(screen.queryByText('Verification failed')).not.toBeInTheDocument();
     expect(screen.queryByText(/credits added/i)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Check again' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /buy/i })).toBeDisabled();
   });
 
   it('UI-12 — cancelling reports a closure request and never claims credit', async () => {
@@ -252,6 +272,8 @@ describe('P2-D — TopUpPanel consumes the certified payment contract', () => {
 
     await act(async () => { rzpOndismiss!(); });
 
+    // UPDATED (7c 2026-11-20): "Payment cancelled" is now shown only once close's provider-first answer says closed
+    // (the default route above). The browser's dismissal alone proves nothing about the charge.
     expect(await screen.findByText('Payment cancelled')).toBeInTheDocument();
     await waitFor(() => expect(callsTo('checkout/close')).toHaveLength(1));
     // A close is a REQUEST — the client states a reason, never an outcome, and

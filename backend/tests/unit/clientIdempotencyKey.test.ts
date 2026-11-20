@@ -109,9 +109,11 @@ describe('adopted call sites — complete in-scope inventory', () => {
     const src = read('components/billing/TopUpPanel.tsx');
     expect(src).toMatch(/createIdempotentOperation\(`checkout-verify-\$\{orderId\}-\$\{paymentId\}`\)/);
     expect(src).toMatch(/createIdempotentOperation\(`checkout-create-order-/);
-    // TopUpPanel routes both calls through its local postJson helper, so the
-    // key headers are passed POSITIONALLY rather than spread into a literal.
-    expect(src).toContain('}, verifyOp.headers)');
+    // TopUpPanel routes both calls through its local helpers, so the key headers are passed POSITIONALLY rather
+    // than spread into a literal. UPDATED (04 2026-11-20): verify's key is held in `verifyHeaders` so "Check again"
+    // re-sends the FIRST call's key (reuseHeaders); a fresh key is minted only when none is being reused.
+    expect(src).toMatch(/const verifyHeaders = reuseHeaders \?\? createIdempotentOperation\(`checkout-verify-/);
+    expect(src).toContain('}, verifyHeaders)');
     expect(src).toContain('orderOp.headers)');
     // postJson forwards a caller-supplied key; it must not generate one.
     expect(src).toMatch(/async function postJson\([^)]*extraHeaders/);
