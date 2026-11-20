@@ -180,11 +180,17 @@ export default function TeamManagement() {
   /**
    * Invite lock (b3, 2026-11-20). After an UNKNOWN outcome the exact submitted body is kept in `pendingInvite` and
    * the form is read-only: the only action is "Check and send", which re-sends THAT body with the held key. The
-   * server then replays (completed row) or re-runs; createInvitation and the email job are both keyed off the
-   * request key (invitationService findExistingByIdempotencyKey, emailJobsService `${key}:email:magic_link`), so a
-   * keyed re-run does not send a second email. Only a definitive answer (2xx done, 4xx refused) unlocks. Editing
-   * would change the body, mint a new key, and run normalizeInvitationState + a second email, so it is impossible
-   * while locked. Cancel closes the modal and keeps the lock.
+   * server then replays (completed row) or re-runs. A keyed re-run does not send a second email because of two
+   * UNIQUE partial indexes (supabase/migrations/20260420_lockdown_idempotency.sql), which are the GUARANTEE:
+   *   - invitations_idempotency_key_unique: one invitation per request key;
+   *   - email_jobs_idempotency_key_unique: one email job per `${key}:email:magic_link`.
+   * The pre-flight lookups (invitationService findExistingByIdempotencyKey, emailJobsService's replay check) are
+   * only the fast path that turns a duplicate into a clean replay; never drop an index as "redundant" with them.
+   * Only a definitive answer (2xx done, 4xx refused) unlocks. Editing would change the body, mint a new key, and run
+   * normalizeInvitationState + a second email (email_jobs_pending_payload_unique does NOT stop it: its payload_hash
+   * includes the invitation id, which is new), so editing is impossible while locked. Cancel keeps the lock.
+   * LIMIT: pendingInvite and the held key live in component state; a reload or navigation loses both, and the next
+   * submission is a new key. The lock protects within this page session only.
    */
   const sendInvitation = async () => {
     const body = pendingInvite ?? (inviteForm.email && inviteForm.role && selectedCompanyId
