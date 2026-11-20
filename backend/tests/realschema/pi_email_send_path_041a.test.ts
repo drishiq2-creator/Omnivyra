@@ -1024,12 +1024,12 @@ describe('041-A/T2 — what is not sendable is not sent', () => {
     });
   });
 
-  // REPLACED 2026-11-20 (c6; b3 BLOCKING correct-sending finding). The skipped original asserted PI-041-A-H's
-  // behaviour (an autonomous step SENDS with no human). H was never ported (a25abddce; open owner decision), so the
-  // intended behaviour on this line is the opposite and is asserted here: an AUTONOMOUS step with no approval is held
-  // by the approval gate, nothing is sent, no evidence is written and no approval is fabricated. If H is ruled in,
-  // this test is rewritten with it - it must never silently pass for both behaviours.
-  it('AUTONOMY IS NOT PERMISSION (H not ported) — an unapproved autonomous step is held for a human', async () => {
+  // PERMANENT RULE (owner ruling 2026-11-20: PI-041-A-H autonomous dispatch = NO; every outreach email needs human
+  // approval). Replaced 2026-11-20 (c6; b3 BLOCKING correct-sending finding): the skipped original asserted H's
+  // behaviour (an autonomous step SENDS with no human). This is the intended behaviour, not a placeholder: an
+  // AUTONOMOUS step with no approval is held by the approval gate, nothing is sent, no evidence is written and no
+  // approval is fabricated.
+  it('AUTONOMY IS NOT PERMISSION — every outreach email needs human approval (owner 2026-11-20)', async () => {
     await inRollback(async () => {
       const r = await bridged({ mode: 'autonomous' });
 
@@ -1324,10 +1324,10 @@ describe('041-A-E/T2 — the Workflow email caller', () => {
 
 describe('041-A-E/T2 — legacy operator email is retired', () => {
   // REPLACED 2026-11-20 (c6; b3 BLOCKING correct-sending finding). The skipped original asserted PI-041-A-E (the
-  // legacy path refuses ALL email - "retired"). E was never ported (a25abddce) and is an OPEN OWNER DECISION, so on
-  // this line the legacy operator path still dispatches email for an APPROVED task. What must hold regardless, and is
-  // asserted here: it never sends email for a task nobody approved. When E is ruled in, the retirement assertion
-  // comes back alongside this one.
+  // legacy path refuses ALL email - "retired"). Owner ruling 2026-11-20: E = YES, RETIRE (one sending route); it is
+  // planned as its own item after the reconcile merge. Until the legacy path is gone it still dispatches email for an
+  // APPROVED task, so what must hold meanwhile, and is asserted here: it never sends email for a task nobody approved.
+  // The retirement assertion (the legacy entry point refuses or no longer exists) is added by that item.
   it('THE LEGACY PATH NEVER SENDS AN UNAPPROVED EMAIL, even when the operator asks for it (E not ported)', async () => {
     await inRollback(async () => {
       const r = await bridged();   // autonomous step -> `pending`: no approval exists
