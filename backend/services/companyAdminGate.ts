@@ -8,6 +8,11 @@
  * (`error` is kept, so anything already matching enforceRole's FORBIDDEN_ROLE still matches.)
  *
  * Callers run enforceCompanyAccess FIRST, so a member of another company is refused as a non-member before this runs.
+ *
+ * DELIBERATELY NOT GATED, and why (7c NB2): GET /api/integrations and GET /api/integrations/[id] stay member-readable
+ * because member pages use them (blogs/new, /leads). That is safe ONLY because their credentials are redacted for
+ * non-admins (backend/services/integrationSecretRedaction.ts, hotfix #82). If that redaction is reverted or narrowed,
+ * this decision is wrong and those GETs must be gated here.
  */
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { enforceRole, Role } from './rbacService';

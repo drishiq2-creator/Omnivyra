@@ -61,7 +61,7 @@ describe('/leads form delete is honest', () => {
     stubFetch((url, init) => (init?.method === 'DELETE' ? answer() : undefined));
     const { result } = renderHook(() => useLeadsPage());
     await waitFor(() => expect(result.current.formsAccess).toBe('admin'));
-    act(() => { result.current.setDeleteConfirm({ kind: 'form', id: 'f1', name: 'Contact' }); });
+    act(() => { result.current.setDeleteConfirm({ id: 'f1', name: 'Contact' }); });
     await act(async () => { await result.current.confirmDelete(); });
     return result;
   }

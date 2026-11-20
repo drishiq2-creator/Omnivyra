@@ -328,7 +328,7 @@ export function useLeadsPage() {
 
   // Only forms can be deleted here: nothing in the UI ever opened a 'lead' delete (it pointed at a route that does not
   // exist), so that dead variant is gone rather than kept as a 404 waiting to be wired (04, 2026-11-20).
-  const [deleteConfirm, setDeleteConfirm] = useState<{ kind: 'form'; id: string; name: string } | null>(null);
+  const [deleteConfirm, setDeleteConfirm] = useState<{ id: string; name: string } | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   // Forms management is admin-only (owner ruling 2026-11-20); the server answers, never the client's role guess.

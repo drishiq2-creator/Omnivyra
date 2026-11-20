@@ -356,7 +356,7 @@ export default function LeadsView({ d }: { d: S }) {
                                 <button onClick={() => openEditForm(form)} className="p-1.5 rounded-lg text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 transition-colors" title="Edit form">
                                   <Edit2 className="h-3.5 w-3.5" />
                                 </button>
-                                <button onClick={() => setDeleteConfirm({ kind: 'form', id: form.id, name: form.name })} className="p-1.5 rounded-lg text-gray-400 hover:text-red-600 hover:bg-red-50 transition-colors" title="Delete form">
+                                <button onClick={() => setDeleteConfirm({ id: form.id, name: form.name })} className="p-1.5 rounded-lg text-gray-400 hover:text-red-600 hover:bg-red-50 transition-colors" title="Delete form">
                                   <Trash2 className="h-3.5 w-3.5" />
                                 </button>
                               </div>
