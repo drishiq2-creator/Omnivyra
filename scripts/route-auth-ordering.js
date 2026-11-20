@@ -35,14 +35,20 @@ const SAFE_SEAMS = [
   // Append-only security audit trail: recording an unauthenticated / denied attempt IS the purpose.
   { name: 'logSecurityEvent', from: /^backend\/security\/audit\/SecurityAuditService$/ },
 ];
-const SUMMARY_DEPTH = 3;
+const { SUMMARY_DEPTH } = require('./route-auth-ordering-policy');
 const INLINE_DEPTH = 6;
 
 function createOrderingAnalyzer({ PRIMITIVES, AUTHZ_HELPERS, DELEGATION_ROOTS, resolveSpec, loadModule, parseImports }) {
   const sfCache = new Map();
-  const summaryCache = new Map();
+  // Per parsed source (sfCache is content-addressed, so a fixture or mutant at the same path never shares an entry),
+  // then keyed by function position AND depth: summarize() is a pure function of (function, depth), so a result
+  // computed for one route is exactly the result for every other route - the scan order cannot change a finding.
+  const summaryCache = new WeakMap();
   // Verifier names that authenticate for the route being analysed (machine-token / webhook-signature entries).
   let extraAuth = new Set();
+  // The summary depth cut for the analysis in progress: SUMMARY_DEPTH, except when the policy verifies an
+  // orderingPatterns effectsBeyondDepth declaration (analyze(..., { summaryDepth })). Part of the cache key.
+  let summaryLimit = SUMMARY_DEPTH;
 
   function parsed(mod) {
     // Content-addressed: two sources at the same path (fixtures, mutants) never share a parse.
@@ -62,11 +68,15 @@ function createOrderingAnalyzer({ PRIMITIVES, AUTHZ_HELPERS, DELEGATION_ROOTS, r
   }
 
   const line = (m, node) => m.sf.getLineAndCharacterOfPosition(node.getStart(m.sf)).line + 1;
-  /** An imported approved primitive / authz helper invoked by this call (provenance-checked). */
-  function authOf(call, m) {
+  /**
+   * An imported approved primitive / authz helper invoked by this call (provenance-checked).
+   * withRouteVerifiers=false skips this ROUTE's extraAuth verifiers: summarize() must, because its result is
+   * cached across routes and a verifier of route A says nothing about what a shared function reaches for route B.
+   */
+  function authOf(call, m, withRouteVerifiers = true) {
     const c = unwrap(call.expression);
     const nm = calleeName(call);
-    if (nm && extraAuth.has(nm)) return { level: 'machine', name: nm, helper: false };
+    if (withRouteVerifiers && nm && extraAuth.has(nm)) return { level: 'machine', name: nm, helper: false };
     if (!ts.isIdentifier(c)) return null;
     const imp = m.imports.get(c.text);
     if (!imp) return null;
@@ -153,20 +163,28 @@ function createOrderingAnalyzer({ PRIMITIVES, AUTHZ_HELPERS, DELEGATION_ROOTS, r
     return { fn: unwrap(fn), m: { ...mm, rel: mod.rel }, name: imp.imported, delegated: DELEGATION_ROOTS.some((r) => r.test(target)) };
   }
 
-  /** Unordered side effects a (non-delegation) function can reach. */
-  function summarize(fn, m, depth, seen) {
-    const key = `${m.rel}#${fn.pos}`;
-    if (summaryCache.has(key)) return summaryCache.get(key);
-    if (depth > SUMMARY_DEPTH || seen.has(key)) return [];
-    seen.add(key);
+  /**
+   * Unordered side effects a (non-delegation) function can reach within SUMMARY_DEPTH calls.
+   * DETERMINISM: the result depends only on (function, depth) - never on the route being analysed: it does not
+   * consult the route's extraAuth verifiers (authOf(..., false)). There is no shared visited set (it made the
+   * result depend on which caller reached a function first, and the cache then served that truncated result
+   * to every later route - the gate's findings changed with the directory order). Recursion and cycles are
+   * bounded by the depth cut alone; memoising by (function, depth) keeps the cost linear.
+   */
+  function summarize(fn, m, depth) {
+    if (depth > summaryLimit) return [];
+    let bySf = summaryCache.get(m.sf);
+    if (!bySf) { bySf = new Map(); summaryCache.set(m.sf, bySf); }
+    const key = `${fn.pos}@${depth}/${summaryLimit}`;
+    if (bySf.has(key)) return bySf.get(key);
     const out = [];
     const visit = (n) => {
       if (ts.isCallExpression(n)) {
         const s = sinkOf(n, m);
         if (s) out.push({ ...s, at: `${m.rel}:${line(m, n)}` });
-        else if (!authOf(n, m)) {
+        else if (!authOf(n, m, false)) {
           const r = resolveCallee(n, m, null);
-          if (r) for (const e of summarize(r.fn, r.m, depth + 1, seen)) out.push({ ...e, via: [r.name, ...(e.via || [])] });
+          if (r) for (const e of summarize(r.fn, r.m, depth + 1)) out.push({ ...e, via: [r.name, ...(e.via || [])] });
         }
       }
       ts.forEachChild(n, visit);
@@ -175,7 +193,7 @@ function createOrderingAnalyzer({ PRIMITIVES, AUTHZ_HELPERS, DELEGATION_ROOTS, r
     const uniq = [];
     const k = new Set();
     for (const e of out) { const id = `${e.kind}|${e.at}`; if (!k.has(id)) { k.add(id); uniq.push(e); } }
-    summaryCache.set(key, uniq);
+    bySf.set(key, uniq);
     return uniq;
   }
 
@@ -315,7 +333,7 @@ function createOrderingAnalyzer({ PRIMITIVES, AUTHZ_HELPERS, DELEGATION_ROOTS, r
         cx.stack.pop(); cx.depth -= 1;
         return { ...st, id: st.id || out.st.id, tenant: st.tenant || out.st.tenant };
       }
-      if (r) for (const e of summarize(r.fn, r.m, 1, new Set())) record(cx, m, n, e, st, [r.name, ...(e.via || [])]);
+      if (r) for (const e of summarize(r.fn, r.m, 1)) record(cx, m, n, e, st, [r.name, ...(e.via || [])]);
       return st;
     }
     let out = st;
@@ -358,7 +376,7 @@ function createOrderingAnalyzer({ PRIMITIVES, AUTHZ_HELPERS, DELEGATION_ROOTS, r
    * selects a named default. `authEvents` names extra verifier calls that count
    * as authentication (machine-token / webhook-signature allowlist verifiers).
    */
-  function analyze(mod, handlerName, authEvents = []) {
+  function analyze(mod, handlerName, authEvents = [], { summaryDepth = SUMMARY_DEPTH } = {}) {
     const m = { ...parsed(mod), rel: mod.rel };
     let target = null;
     if (handlerName) target = m.top.get(handlerName) || null;
@@ -372,10 +390,12 @@ function createOrderingAnalyzer({ PRIMITIVES, AUTHZ_HELPERS, DELEGATION_ROOTS, r
     if (!h) return { shape: 'unresolved', events: [], auth: [] };
     const cx = { events: [], auth: [], depth: 0, stack: [] };
     extraAuth = new Set(authEvents);
+    summaryLimit = summaryDepth;
     try {
       interpretFunction(h.fn, h.m, { ...h.pre }, cx, null);
     } finally {
       extraAuth = new Set();
+      summaryLimit = SUMMARY_DEPTH;
     }
     return { shape: 'resolved', events: cx.events, auth: cx.auth, pre: h.pre };
   }

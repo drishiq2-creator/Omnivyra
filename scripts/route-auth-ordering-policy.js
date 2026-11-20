@@ -18,6 +18,12 @@
  *       is never a pattern), only the listed `effects` (`kind detail file`
  *       signatures — a NEW effect still fails), and `evidence` must match the
  *       served module's executable code AND the pattern's required shape.
+ *       Optional `effectsBeyondDepth: [{ effect, depth, reason }]` (b3 2026-11-20): an effect the route REALLY
+ *       reaches, but past the summary depth cut (SUMMARY_DEPTH), so the normal run cannot observe it. Kept on the
+ *       reviewed record instead of being deleted as "unused" (a deletion would record a false absence). Verified
+ *       on every run by re-analysing the route at that depth: the effect must be covered at EXACTLY `depth` -
+ *       not reached at `depth` = deleted from the code or depth UNDERSTATED; already reached at `depth - 1` =
+ *       depth OVERSTATED (or, at SUMMARY_DEPTH, it belongs in `effects`).
  *
  *   authFirst          { route: { reason } }
  *       The route's contract requires authentication before ANY read (anti-
@@ -59,9 +65,28 @@ function verifyOrderingVerifier(v, code, callRe) {
   return errs;
 }
 
+// The ordering analyzer's summary depth cut (route-auth-ordering.js imports it from here).
+const SUMMARY_DEPTH = 3;
+const BEYOND_DEPTH_MAX = 8;
+
+function verifyBeyondDepth(p) {
+  const errs = [];
+  if (p.effectsBeyondDepth === undefined) return errs;
+  if (!Array.isArray(p.effectsBeyondDepth) || p.effectsBeyondDepth.length === 0) return [`ordering pattern ${p.pattern}: effectsBeyondDepth must be a non-empty list when present`];
+  for (const b of p.effectsBeyondDepth) {
+    const label = `ordering pattern ${p.pattern}: effectsBeyondDepth ${b && b.effect}`;
+    if (!b || typeof b.effect !== 'string' || !b.effect.trim()) { errs.push(`ordering pattern ${p.pattern}: effectsBeyondDepth entry must name an effect`); continue; }
+    if (!Number.isInteger(b.depth) || b.depth <= SUMMARY_DEPTH || b.depth > BEYOND_DEPTH_MAX) errs.push(`${label}: depth must be an integer in ${SUMMARY_DEPTH + 1}..${BEYOND_DEPTH_MAX}`);
+    if (!b.reason || String(b.reason).trim().length < 20) errs.push(`${label}: reason missing or too short`);
+    if (Array.isArray(p.effects) && p.effects.includes(b.effect)) errs.push(`${label}: listed in effects too - an effect is either within the summary depth or beyond it`);
+  }
+  return errs;
+}
+
 function verifyOrderingPattern(p, code) {
   const errs = [];
   if (!p || p.rule !== 'R6-ORDER') return ['ordering pattern may only narrow R6-ORDER'];
+  errs.push(...verifyBeyondDepth(p));
   if (!Object.prototype.hasOwnProperty.call(ORDERING_PATTERNS, p.pattern)) return [`unrecognised ordering pattern "${p.pattern}"`];
   if (!p.reason || String(p.reason).trim().length < 20) errs.push(`ordering pattern ${p.pattern}: reason missing or too short`);
   if (!Array.isArray(p.effects) || p.effects.length === 0) errs.push(`ordering pattern ${p.pattern}: must list the effects it covers`);
@@ -139,6 +164,28 @@ function applyOrdering({ rel, code, evidenceCode, entry, level, ids, campaignKey
   const r = orderingViolations(order, { entry, level, ids, campaignKeyed, patterns, authFirst: af });
   violations.push(...r.violations);
   const unused = patterns.flatMap((p) => p.effects).filter((s) => !r.patterned.includes(s));
+  // effectsBeyondDepth: re-analyse at the stated depth (and one less) and require EXACT reach.
+  const beyond = patterns.flatMap((p) => p.effectsBeyondDepth || []);
+  if (beyond.length) {
+    const byDepth = new Map();
+    const coveredAt = (depth) => {
+      if (!byDepth.has(depth)) {
+        const o = depth === SUMMARY_DEPTH ? order : analyze(verifierNames, { summaryDepth: depth });
+        const rr = orderingViolations(o, { entry, level, ids, campaignKeyed, patterns: [{ effects: beyond.map((b) => b.effect) }], authFirst: af });
+        byDepth.set(depth, new Set(rr.patterned));
+      }
+      return byDepth.get(depth);
+    };
+    for (const b of beyond) {
+      if (!coveredAt(b.depth).has(b.effect)) {
+        violations.push({ rule: 'ALLOWLIST', msg: `effectsBeyondDepth ${b.effect}: not reached at the stated depth ${b.depth} (removed from the code, or the depth is understated)` });
+      } else if (coveredAt(b.depth - 1).has(b.effect)) {
+        violations.push({ rule: 'ALLOWLIST', msg: b.depth - 1 === SUMMARY_DEPTH
+          ? `effectsBeyondDepth ${b.effect}: reached within SUMMARY_DEPTH (${SUMMARY_DEPTH}) - list it under effects`
+          : `effectsBeyondDepth ${b.effect}: already reached at depth ${b.depth - 1} (the stated depth ${b.depth} is overstated)` });
+      }
+    }
+  }
   return { order, violations, preAuthReads: r.preAuthReads, patterned: r.patterned, flagged: r.flagged, unusedPatternEffects: unused };
 }
 
@@ -160,4 +207,6 @@ module.exports = {
   applyOrdering,
   loadOrderingSections,
   signature,
+  SUMMARY_DEPTH,
+  BEYOND_DEPTH_MAX,
 };

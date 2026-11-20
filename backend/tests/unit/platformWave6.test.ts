@@ -97,7 +97,9 @@ describe('W6-1/W6-3 timer safety', () => {
 describe('W6-2 cron service separation', () => {
   test('worker-only mode skips startCron and reports healthy external cron', () => {
     expect(mainSrc).toContain("cronServiceMode === 'worker-only'");
-    expect(mainSrc).toContain("setCronStatus('ok', 'external cron service");
+    // BEHAVIOUR, not the reason text: in worker-only mode the worker reports cron healthy (status only - the
+    // health endpoint is public and carries no reason string; a9 / 7c 2026-11-20).
+    expect(mainSrc).toMatch(/cronServiceMode === 'worker-only'\) \{[\s\S]{0,300}setCronStatus\('ok'\)/);
     // Standalone scheduler entry exists (Dockerfile.cron path).
     expect(cronSrc).toContain('require.main === module');
     expect(read('package.json')).toContain('"worker:cron"');

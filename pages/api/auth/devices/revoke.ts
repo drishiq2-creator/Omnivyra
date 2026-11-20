@@ -8,6 +8,7 @@ import { createApiRoute as __createApiRoute } from '../../../../lib/platform/rou
  * owner — revoking a stolen device must be possible without elevation.
  */
 
+import { logger } from '../../../../backend/services/logger';
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { authRequestIpOrNull } from '../../../../backend/auth/requestClientIp';
 import { resolvePrincipal } from '../../../../backend/security/IdentityResolver';
@@ -15,6 +16,9 @@ import { revoke } from '../../../../backend/security/devices/TrustedDeviceServic
 import { revokeSessionsForDevice } from '../../../../backend/security/SessionAuthorityService';
 import { revokeForAuthSession } from '../../../../backend/security/stepup/StepUpSessionService';
 import { logSecurityEvent } from '../../../../backend/security/audit/SecurityAuditService';
+
+/** 200 with cascade.failed: the device is revoked, but its live sessions could not be - retry the revoke. */
+export const DEVICE_SESSIONS_NOT_REVOKED = 'DEVICE_SESSIONS_NOT_REVOKED';
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'POST') {
@@ -47,24 +51,31 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (result.ok !== true) {
     if (result.reason === 'NOT_FOUND') return res.status(404).json({ error: 'Device not found', code: result.reason });
     if (result.reason === 'NOT_OWNER') return res.status(403).json({ error: 'Not your device', code: result.reason });
-    if (result.reason === 'ALREADY_REVOKED') return res.status(409).json({ error: 'Already revoked', code: result.reason });
+    return res.status(500).json({ error: 'Unexpected revoke result' });
   }
 
   // ── Cascade: revoke any live auth_sessions bound to this trusted
   //    device, plus the stepup_sessions chained off them. Without this
   //    cascade, the live cookie on the revoked device continues to
   //    authenticate until natural session TTL.
-  // Fail-soft — the device revoke already succeeded; cascade failure is
-  // logged but not surfaced as an error to the client.
+  // The cascade ALSO runs when the device was already revoked (b3 ruling 3): a retry after a failed cascade finishes
+  // it. A cascade failure is REPORTED (200 + cascade.failed + code; the device revoke itself stands) - before, it was
+  // swallowed and the response said 0 sessions revoked while the device's live cookie kept authenticating.
   let revokedSessionIds: string[] = [];
   let revokedStepUpCount = 0;
+  let cascadeFailed = false;
   try {
     revokedSessionIds = await revokeSessionsForDevice(p.userId, id, `device_revoked:${reason}`);
     for (const sid of revokedSessionIds) {
       revokedStepUpCount += await revokeForAuthSession(sid, `device_revoked:${reason}`);
     }
-  } catch {
-    /* non-fatal */
+  } catch (err) {
+    cascadeFailed = true;
+    logger.error('trusted_device_revoke_cascade_failed', {
+      userId: p.userId,
+      deviceId: id,
+      message: err instanceof Error ? err.message : String(err),
+    });
   }
 
   void logSecurityEvent({
@@ -80,10 +91,10 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
 
   return res.status(200).json({
     revoked: true,
-    cascade: {
-      authSessionsRevoked: revokedSessionIds.length,
-      stepUpSessionsRevoked: revokedStepUpCount,
-    },
+    alreadyRevoked: result.alreadyRevoked,
+    cascade: cascadeFailed
+      ? { failed: true, code: DEVICE_SESSIONS_NOT_REVOKED }
+      : { authSessionsRevoked: revokedSessionIds.length, stepUpSessionsRevoked: revokedStepUpCount },
   });
 }
 

@@ -1,4 +1,5 @@
 import { ownedDbTable } from '../../db/writeOwner';
+import { throwOnSecurityReadError } from '../SecurityReadError';
 /**
  * Persistence for `trusted_devices`.
  *
@@ -53,7 +54,7 @@ export async function findActiveByFingerprint(
   userId: string,
   fingerprint: string,
 ): Promise<StoredTrustedDevice | null> {
-  const { data } = await ownedDbTable('trusted_devices')
+  const { data, error: secErr1 } = await ownedDbTable('trusted_devices')
     .select('*')
     .eq('user_id', userId)
     .eq('fingerprint', fingerprint)
@@ -61,17 +62,19 @@ export async function findActiveByFingerprint(
     .order('last_seen_at', { ascending: false })
     .limit(1)
     .maybeSingle();
+  throwOnSecurityReadError({ error: secErr1 }, 'findActiveByFingerprint', 'trusted_devices');
   if (!data) return null;
   const stored = rowToStored(data as DeviceRow);
   return isLive(stored) ? stored : null;
 }
 
 export async function listForUser(userId: string): Promise<ReadonlyArray<StoredTrustedDevice>> {
-  const { data } = await ownedDbTable('trusted_devices')
+  const { data, error: secErr2 } = await ownedDbTable('trusted_devices')
     .select('*')
     .eq('user_id', userId)
     .is('revoked_at', null)
     .order('last_seen_at', { ascending: false });
+  throwOnSecurityReadError({ error: secErr2 }, 'listForUser', 'trusted_devices');
   return (data ?? [])
     .map((r) => rowToStored(r as DeviceRow))
     .filter((r) => r.expiresAt.getTime() > Date.now());
@@ -81,11 +84,12 @@ export async function findByIdForUser(
   id: string,
   userId: string,
 ): Promise<StoredTrustedDevice | null> {
-  const { data } = await ownedDbTable('trusted_devices')
+  const { data, error: secErr3 } = await ownedDbTable('trusted_devices')
     .select('*')
     .eq('id', id)
     .eq('user_id', userId)
     .maybeSingle();
+  throwOnSecurityReadError({ error: secErr3 }, 'findByIdForUser', 'trusted_devices');
   if (!data) return null;
   return rowToStored(data as DeviceRow);
 }
@@ -133,11 +137,12 @@ export async function insertTrustedDevice(
  * when the row changed since it was read.
  */
 export async function reviveDormantTrustedDevice(input: InsertTrustedDeviceInput): Promise<StoredTrustedDevice | null> {
-  const { data: found } = await ownedDbTable('trusted_devices')
+  const { data: found, error: secErr4 } = await ownedDbTable('trusted_devices')
     .select('*')
     .eq('user_id', input.userId)
     .eq('fingerprint', input.fingerprint)
     .maybeSingle();
+  throwOnSecurityReadError({ error: secErr4 }, 'reviveDormantTrustedDevice', 'trusted_devices');
   if (!found) return null;
   const row = found as DeviceRow;
   if (isLive(rowToStored(row))) return null; // live: not dormant (the caller reports ALREADY_TRUSTED)
@@ -165,9 +170,13 @@ export async function reviveDormantTrustedDevice(input: InsertTrustedDeviceInput
 }
 
 export async function touchLastSeen(id: string): Promise<void> {
-  await ownedDbTable('trusted_devices')
+  const { error: secErr5 } = await ownedDbTable('trusted_devices')
     .update({ last_seen_at: new Date().toISOString() })
     .eq('id', id);
+  if (secErr5) {
+    // security-read-exempt: best-effort timestamp touch - a failure is logged, never thrown (it must not block a login).
+    logger.warn('security_touch_failed', { table: 'trusted_devices', op: 'touchLastSeen', message: secErr5.message });
+  }
 }
 
 export async function revokeDevice(
@@ -175,11 +184,12 @@ export async function revokeDevice(
   userId: string,
   reason: string,
 ): Promise<boolean> {
-  const { data } = await ownedDbTable('trusted_devices')
+  const { data, error: secErr6 } = await ownedDbTable('trusted_devices')
     .update({ revoked_at: new Date().toISOString(), revocation_reason: reason })
     .eq('id', id)
     .eq('user_id', userId)
     .is('revoked_at', null)
     .select('id');
+  throwOnSecurityReadError({ error: secErr6 }, 'revokeDevice', 'trusted_devices');
   return !!data && data.length > 0;
 }

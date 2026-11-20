@@ -145,14 +145,18 @@ export interface RevokeTrustedDeviceInput {
 
 export async function revoke(
   input: RevokeTrustedDeviceInput,
-): Promise<{ ok: true } | { ok: false; reason: 'NOT_FOUND' | 'NOT_OWNER' | 'ALREADY_REVOKED' }> {
+): Promise<{ ok: true; alreadyRevoked: boolean } | { ok: false; reason: 'NOT_FOUND' | 'NOT_OWNER' }> {
   const existing = await findByIdForUser(input.id, input.userId);
   if (!existing) return { ok: false, reason: 'NOT_FOUND' };
   if (existing.userId !== input.userId) return { ok: false, reason: 'NOT_OWNER' };
-  if (existing.revokedAt) return { ok: false, reason: 'ALREADY_REVOKED' };
+  // IDEMPOTENT (b3 ruling 3, 2026-11-20): revoking an already-revoked device is a success, so the caller re-runs the
+  // session cascade - a retry after a failed cascade then fixes it, instead of a 409 that left the device's live
+  // sessions authenticating forever.
+  if (existing.revokedAt) return { ok: true, alreadyRevoked: true };
 
   const ok = await revokeDevice(input.id, input.userId, input.reason);
-  if (!ok) return { ok: false, reason: 'ALREADY_REVOKED' };
+  // 0 rows: revoked concurrently between the read and the conditional update - same outcome, idempotent.
+  if (!ok) return { ok: true, alreadyRevoked: true };
 
   await logSecurityEvent({
     capability: 'mfa.revoke',
@@ -165,7 +169,7 @@ export async function revoke(
     userAgent: input.userAgent,
   });
 
-  return { ok: true };
+  return { ok: true, alreadyRevoked: false };
 }
 
 // ── Suspicious-device hooks ─────────────────────────────────────────────────

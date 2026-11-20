@@ -103,31 +103,44 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     });
   }
 
-  // ── 4. Verify + consume the recovery code ───────────────────────────────
-  const verification = await verifyRecoveryCode({ userId, code, ip, userAgent: ua });
+  // ── 4+5. Verify the code, REVOKE every session, THEN consume the code, then mint (b3 ruling 2026-11-20) ──
+  // Recovery login implies suspicion: either the user lost every other factor (a fresh start) or an attacker is
+  // compromising the account (kick them off). The revoke runs AFTER the code matched and BEFORE it is consumed
+  // (verifyAndConsume's beforeConsume hook). If the revoke FAILS: 503 SESSIONS_NOT_REVOKED - nothing consumed (the
+  // code stays usable), nothing minted. Before: the revoke failure was swallowed ("non-fatal") and a fresh session
+  // was minted while the old - possibly attacker - sessions stayed live. Revoking sessions for someone who holds a
+  // valid code is harmless. A lost consume race refuses (no mint).
+  let revoked = 0;
+  let revokeFailed = false;
+  let verification: Awaited<ReturnType<typeof verifyRecoveryCode>>;
+  try {
+    verification = await verifyRecoveryCode({ userId, code, ip, userAgent: ua }, {
+      beforeConsume: async () => {
+        try {
+          // Canonical sessions + the JWT epoch (bearer tokens) - the hotfix's revoke-all; refresh tokens: step 2.
+          revoked = (await revokeAllAccessForUser(userId, 'recovery_code_login_revoke_all')).revokedAuthSessions;
+        } catch (err) {
+          revokeFailed = true;
+          throw err;
+        }
+      },
+    });
+  } catch (err) {
+    logger.error(revokeFailed ? 'recovery_login_revoke_all_failed' : 'recovery_login_verify_failed', {
+      userId,
+      message: err instanceof Error ? err.message : String(err),
+    });
+    res.setHeader('Retry-After', '5');
+    return revokeFailed
+      ? res.status(503).json({ error: 'Could not sign out your other sessions. Nothing was used - try again.', code: 'SESSIONS_NOT_REVOKED' })
+      : res.status(503).json({ error: 'Recovery is temporarily unavailable. Nothing was used - try again.', code: 'RECOVERY_UNAVAILABLE' });
+  }
   if (verification.ok !== true) {
     mfaRecordFailure({ factor: 'recovery_code', userId, ip });
     return res.status(401).json({ error: 'Recovery rejected', code: 'RECOVERY_INVALID' });
   }
 
   mfaReset({ factor: 'recovery_code', userId, ip });
-
-  // ── 5. Recovery login implies suspicion: revoke all OTHER sessions ──────
-  // Recovery code use means either the user lost all other factors (so
-  // they want a fresh start) OR an attacker is compromising the account
-  // (so we want to kick them off). Revoke every existing live session,
-  // then mint the new one. Step-up sessions cascade.
-  let revoked = 0;
-  try {
-    // Canonical sessions + the JWT epoch (b3 2026-11-20). Refresh tokens survive until step 2 (no user JWT here).
-    revoked = (await revokeAllAccessForUser(userId, 'recovery_code_login_revoke_all')).revokedAuthSessions;
-  } catch (err) {
-    logger.warn('recovery_login_revoke_all_failed', {
-      userId,
-      message: err instanceof Error ? err.message : String(err),
-    });
-    // Non-fatal — continue with mint.
-  }
 
   // Stale MFA intent must not survive a recovery login.
   clearMfaIntent(res);
@@ -153,7 +166,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
 
   // Cascade step-up revocation against the new session id is a no-op
   // (no step-up sessions are bound to a session that was just created).
-  // The revokeAllSessionsForUser above already covered the old ones; the
+  // The revokeAllAccessForUser in the beforeConsume hook already covered the old ones; the
   // helper below makes the cleanup explicit for any straggler bound to
   // the new session id.
   void revokeForAuthSession(sessionId, 'recovery_code_login_cascade');
