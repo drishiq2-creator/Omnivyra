@@ -47,6 +47,28 @@ tests:
         alertname: CanonicalGroundingMetricsMissing
         exp_alerts: []
 
+  # A DEAD WORKER is visible even while the APP job emits everything (7c): only app series for 27h -> the
+  # worker-specific absence rule fires; the unscoped MetricsMissing stays quiet (someone IS emitting).
+  - interval: 1h
+    input_series:
+      - series: 'canonical_grounding_call{job="omnivyra-app",instance="www",mode="shadow"}'
+        values: '0+10x30'
+    alert_rule_test:
+      - eval_time: 27h
+        alertname: CanonicalGroundingWorkerMetricsMissing
+        exp_alerts:
+          - exp_labels: { severity: warning, component: canonical_grounding, category: observability, job: omnivyra-worker }
+            exp_annotations:
+              summary: "No worker-side canonical grounding calls for 26h"
+              description: "The worker has emitted no canonical_grounding_call series for 26 hours: worker grounding (daily intelligence / BOLT) has stopped, or the worker is not scraped. The app job's series does not satisfy this check."
+      - eval_time: 27h
+        alertname: CanonicalGroundingMetricsMissing
+        exp_alerts: []
+      # inside the window (a quiet restart): not yet
+      - eval_time: 20h
+        alertname: CanonicalGroundingWorkerMetricsMissing
+        exp_alerts: []
+
   # WORKER job: the same slow p95 alerts (the scoped rules still fire where they can be trusted).
   - interval: 1m
     input_series:
@@ -62,3 +84,6 @@ tests:
             exp_annotations:
               summary: "Canonical grounding p95 total latency 2000ms (>1500ms)"
               description: "Grounded read latency budget breached. Check assembly_ms p95 and cache hit rate."
+      - eval_time: 15m
+        alertname: CanonicalGroundingWorkerMetricsMissing
+        exp_alerts: []

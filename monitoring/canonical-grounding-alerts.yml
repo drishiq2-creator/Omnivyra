@@ -114,6 +114,19 @@ groups:
           summary: "Canonical grounding metrics ABSENT (>10m)"
           description: "No canonical_grounding_call series scraped. Metrics endpoint down, scrape misconfigured, or app not serving. Shadow decisions are blind until restored."
 
+      # WORKER-specific absence (7c, 2026-11-20). The five value rules read the worker only, and the unscoped
+      # MetricsMissing above is satisfied by the APP job's series - so a worker that stopped grounding would be
+      # invisible to both. This asks a different question ("is the WORKER emitting?") on a different window: the worker
+      # series exists only after its first grounding call (daily intelligence, BOLT), so 26h rides out a restart plus
+      # one quiet daily cycle without flapping. Warning, not a page: it means grounding stopped, not that data is wrong.
+      - alert: CanonicalGroundingWorkerMetricsMissing
+        expr: absent(canonical_grounding_call{job="omnivyra-worker"})
+        for: 26h
+        labels: { severity: warning, component: canonical_grounding, category: observability }
+        annotations:
+          summary: "No worker-side canonical grounding calls for 26h"
+          description: "The worker has emitted no canonical_grounding_call series for 26 hours: worker grounding (daily intelligence / BOLT) has stopped, or the worker is not scraped. The app job's series does not satisfy this check."
+
       - alert: OmnivyraWorkerMetricsMissing
         # The Railway worker exposes its own registry (worker grounding runs there).
         # Alert if the worker scrape target is down/absent.
