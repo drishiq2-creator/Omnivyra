@@ -116,3 +116,24 @@ jobs:
             echo "::error::CONTROL PASSED: the tests cannot tell a paging read failure from none"; exit 1
           fi
           echo "control failed as required"
+
+      - name: CONTROL - the top-up signal's ABSENCE rule must FAIL when it watches the wrong job
+        # If the exporter stops producing the billing series entirely, that must page - not read as "no outages".
+        # Pointing the absence check at the APP job (whose series IS present in the fixture) must make the
+        # "worker not reporting" case fail.
+        run: |
+          set -uo pipefail
+          d="$(mktemp -d)"
+          cp monitoring/billing-alerts.test.yml "$d/"
+          python3 - monitoring/billing-alerts.yml "$d/billing-alerts.yml" <<'PY'
+          import sys
+          s = open(sys.argv[1], encoding='utf-8').read()
+          old = 'absent(billing_price_config_unavailable_unreadable{job="omnivyra-worker"})'
+          assert s.count(old) == 1, s.count(old)
+          open(sys.argv[2], 'w', encoding='utf-8').write(s.replace(old, 'absent(billing_price_config_unavailable_unreadable{job="omnivyra-app"})'))
+          PY
+          grep -n -A1 'alert: BillingConfigExporterMissing' "$d/billing-alerts.yml"
+          if ./promtool test rules "$d/billing-alerts.test.yml"; then
+            echo "::error::CONTROL PASSED: the tests cannot tell a silent exporter from a reporting one"; exit 1
+          fi
+          echo "control failed as required"
