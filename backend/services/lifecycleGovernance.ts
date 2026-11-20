@@ -33,6 +33,9 @@ async function revokeGoTrueSessionsById(userId: string, op: string): Promise<voi
   // 070 answers user_found:false for an id no users row has (7c/b3 2026-11-20). That is NOT "done, nothing to
   // revoke": whoever was meant may still hold live sessions. Thrown by name so force-logout / revoke-all report it.
   // An answer without user_found at all is equally unproven - only an explicit true is a found user.
+  // THIS IS THE ONLY CALLER of revoke_user_gotrue_sessions and the gate lives HERE, not in the function: the RPC
+  // answers {user_found:false, sessions_deleted:0} benignly by design. Any new caller must apply the same !== true
+  // gate (or call this helper), or the "0 revoked, done" reading is back (7c 2026-11-20).
   if ((data as { user_found?: unknown } | null)?.user_found !== true) {
     throw new Error(`${REVOKE_USER_NOT_FOUND}:${op}`);
   }
