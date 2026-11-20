@@ -20,7 +20,9 @@
  * branches.
  */
 
-const counters: Record<string, number> = {
+// The registry is a CLOSED set (83 2026-11-13): `satisfies` keeps the literal keys, so BillingCounter is the union of
+// the names below and incrCounter('unregistered') fails to COMPILE. (Typed Record<string, number> it was `string`.)
+const COUNTER_REGISTRY = {
   billing_operations_total:        0,
   billing_operations_confirmed:    0,
   billing_operations_settle_pending: 0,
@@ -72,9 +74,28 @@ const counters: Record<string, number> = {
   // Phase 8E — credit-economy shadow adoption (telemetry only; dark by default).
   credit_economy_shadow_would_allow:    0,
   credit_economy_shadow_would_block:    0,
-};
+  // c6 2026-11-18 (b3/7c): billed result recovery - terminal replays, owed refunds and their completer.
+  billed_result_replay_terminal_total:  0,
+  credit_refund_unrecorded_total:       0,
+  owed_refund_granted_total:            0,
+  owed_refund_grant_failed_total:       0,
+  owed_refund_stuck_total:              0,
+  // e1 2026-11-13 - billed-route identity + reclaim telemetry (phase2RouteWiring). Registered here so the names
+  // type-check against BillingCounter AND appear in snapshotBillingMetrics (the exported metrics).
+  phase2_route_without_idempotency_key_total: 0,
+  phase2_route_reclaim_cap_exhausted_total:   0,
+  // c6 2026-11-18 (b3/7c): settlementPending on every route; persist-before-settle + replay.
+  phase2_route_settlement_pending_total:      0,
+  settlement_pending_unsurfaced_total:        0,
+  phase2_route_replayed_total:                0,
+  phase2_route_result_unpersisted_total:      0,
+  // c6 2026-11-18 (b3): campaign-content assist answered with its deterministic fallback (uncharged, flagged).
+  assist_ai_fallback_total:                   0,
+} satisfies Record<string, number>;
 
-export type BillingCounter = keyof typeof counters;
+const counters: Record<keyof typeof COUNTER_REGISTRY, number> = { ...COUNTER_REGISTRY };
+
+export type BillingCounter = keyof typeof COUNTER_REGISTRY;
 
 export function incrCounter(name: BillingCounter, by = 1): void {
   counters[name] = (counters[name] ?? 0) + by;

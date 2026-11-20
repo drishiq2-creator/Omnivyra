@@ -44,7 +44,23 @@ const creditHandleScope = new AsyncLocalStorage<CreditHandle>();
 
 /** Run `fn` with `handle` visible to every AI billing-guard check inside it. */
 export function runWithCreditHandle<T>(handle: CreditHandle, fn: () => T): T {
+  // e1 2026-11-13 (05): the same-org property is ENFORCED, not merely observed. Nesting a handle for a DIFFERENT
+  // organization inside a billed execution would silently rebind which org the inner AI calls are billed to - a
+  // cross-tenant money error. A same-org nested handle (e.g. an adopter's own wrap inside the engine's) is fine.
+  const outer = creditHandleScope.getStore();
+  if (outer && outer.orgId !== handle.orgId) {
+    throw new CreditHandleOrgConflictError(outer.orgId, handle.orgId);
+  }
   return creditHandleScope.run(handle, fn);
+}
+
+/** A nested credit handle for a different organization than the enclosing billed execution. */
+export class CreditHandleOrgConflictError extends Error {
+  readonly code = 'CREDIT_HANDLE_ORG_CONFLICT' as const;
+  constructor(public readonly outerOrgId: string, public readonly innerOrgId: string) {
+    super(`[aiBillingGuard] refusing to nest a credit handle for org ${innerOrgId} inside org ${outerOrgId}`);
+    this.name = 'CreditHandleOrgConflictError';
+  }
 }
 
 /** The credit handle of the enclosing billed execution, if any. */
@@ -61,6 +77,11 @@ export interface CreditHandle {
   action:         string;
   source:         'orchestrator' | 'queue_middleware' | 'http';
   amountReserved?: number;
+  /**
+   * Called once per request that is actually DISPATCHED to an AI provider inside this scope (not for cache hits or
+   * coalesced duplicates). Lets a fixed-price feature settle a stopped run by work done (owner 2026-11-18: blogs).
+   */
+  onProviderCall?: () => void;
 }
 
 export interface AiBillingGuardResult {

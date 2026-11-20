@@ -16,7 +16,7 @@ import { logger } from '../logger';
 
 export interface FinancialAuditEvent {
   actorUserId:           string;
-  actionType:            'admin_grant' | 'admin_adjust' | 'admin_refund' | 'admin_rate_change' | 'admin_revoke' | 'system_correction';
+  actionType:            'admin_grant' | 'admin_adjust' | 'admin_refund' | 'admin_rate_change' | 'admin_revoke' | 'system_correction' | 'system_refund';   // system_refund: owed-refund completion (owedRefunds; text column, no CHECK)
   organizationId:        string;
   amountCredits?:        number;
   usdEquivalent?:        number;
@@ -31,7 +31,7 @@ export interface FinancialAuditEvent {
 
 export interface AnomalyEvent {
   organizationId?: string;
-  kind:            'double_deduct_prevented' | 'untracked_ai_call_blocked' | 'queue_replay_blocked' | 'reservation_orphan_reaped' | 'approval_self_signature_attempt' | 'underfunded_settlement';
+  kind:            'double_deduct_prevented' | 'untracked_ai_call_blocked' | 'queue_replay_blocked' | 'reservation_orphan_reaped' | 'approval_self_signature_attempt' | 'underfunded_settlement' | 'owed_refund_stuck' | 'reclaim_cap_exhausted' | 'billed_result_lost' | 'blog_kill_switch_row_absent' | 'blog_result_lost';
   severity:        'info' | 'warn' | 'critical';
   message:         string;
   correlationId?:  string;

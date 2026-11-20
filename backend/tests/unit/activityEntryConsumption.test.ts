@@ -75,6 +75,7 @@ import {
   planEntryConsumptionSettlement,
   isEntryConsumptionEnabled,
   confirmCreditReservationToActual,
+  entryFeeOnFailure,
 } from '../../services/creditExecutionService';
 import { resolveActivityEconomics } from '../../services/activityEconomyCatalog';
 import { recordProviderUsage, recordAssetCredits } from '../../services/aiUsageCollector';
@@ -364,17 +365,83 @@ describe('executeWithEntryConsumption — Phase 12E first-consumable entry trigg
     expect(repo.callCreditPartialConfirm).not.toHaveBeenCalled();
   });
 
-  it('C. abandonment AFTER a provider call → entry KEPT, exposure released', async () => {
+  // OWNER RULING 2026-11-18 (via b3) replaces the old "C. abandonment AFTER a provider call -> entry KEPT": a run that
+  // fails on our side with nothing delivered is charged NOTHING. The entry is HELD at the first provider call and
+  // RELEASED on failure - never confirmed.
+  it('C. abandonment AFTER a provider call → entry HELD then RELEASED (never confirmed), exposure released, 0 charged', async () => {
     const executor = jest.fn(async () => { recordProviderUsage(300, 100); throw new Error('boom after provider'); });
     await expect(executeWithEntryConsumption({
       userId: USER, orgId: ORG, action: ACTION as any, referenceType: 'content', referenceId: REF,
       idempotencyKey: IDEM, validateMembership: false, llmPricing: LLM, collectViaCollector: true, executor,
     })).rejects.toThrow('boom after provider');
     const calls = repo.callCreditReservation.mock.calls.map((c) => c[0]);
-    expect(calls.some((r) => r.idempotencyKey === `${IDEM}:entry:confirm` && r.phase === 'confirm')).toBe(true); // entry kept
-    expect(calls.some((r) => r.idempotencyKey === `${IDEM}:entry:release`)).toBe(false);
+    expect(calls.some((r) => r.idempotencyKey === `${IDEM}:entry:hold` && r.phase === 'hold')).toBe(true);
+    expect(calls.some((r) => r.phase === 'confirm')).toBe(false);                     // nothing confirmed at all
+    expect(calls.some((r) => r.idempotencyKey === `${IDEM}:entry:release` && r.phase === 'release')).toBe(true);
     expect(calls.some((r) => r.idempotencyKey === `${IDEM}:exposure:release`)).toBe(true);
     expect(repo.callCreditPartialConfirm).not.toHaveBeenCalled();
+  });
+
+  it('C2. success after a provider call → the held entry is CONFIRMED once, at completion', async () => {
+    pricing.resolveLlmCost.mockResolvedValue({ credits: 9 });
+    const executor = jest.fn(async () => {
+      recordProviderUsage(300, 100);
+      for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));   // let any fired consumer finish
+      // mid-run: the entry is only HELD - no confirm yet
+      expect(repo.callCreditReservation.mock.calls.some((c) => c[0].phase === 'confirm')).toBe(false);
+      return 'OK';
+    });
+    const res = await executeWithEntryConsumption({
+      userId: USER, orgId: ORG, action: ACTION as any, referenceType: 'content', referenceId: REF,
+      idempotencyKey: IDEM, validateMembership: false, llmPricing: LLM, collectViaCollector: true, executor,
+    });
+    expect(res.status).toBe('executed');
+    const calls = repo.callCreditReservation.mock.calls.map((c) => c[0]);
+    expect(calls.filter((r) => r.idempotencyKey === `${IDEM}:entry:confirm` && r.phase === 'confirm')).toHaveLength(1);
+    expect(calls.some((r) => r.idempotencyKey === `${IDEM}:entry:release`)).toBe(false);
+  });
+
+  it('C3. the reclaim-cap path: 20 attempts that each fail after a provider call → 0 net charge across all 20', async () => {
+    for (let i = 0; i < 20; i++) {
+      const key = i === 0 ? IDEM : `${IDEM}:r${i}`;
+      await executeWithEntryConsumption({
+        userId: USER, orgId: ORG, action: ACTION as any, referenceType: 'content', referenceId: REF,
+        idempotencyKey: key, validateMembership: false, llmPricing: LLM, collectViaCollector: true,
+        executor: async () => { recordProviderUsage(300, 100); throw new Error('provider 500'); },
+      }).catch(() => undefined);
+    }
+    const calls = repo.callCreditReservation.mock.calls.map((c) => c[0]);
+    const holds = calls.filter((r) => r.phase === 'hold' && /:entry:hold$/.test(r.idempotencyKey)).map((r) => r.idempotencyKey.replace(/:hold$/, ''));
+    const released = calls.filter((r) => r.phase === 'release' && /:entry:release$/.test(r.idempotencyKey)).map((r) => r.idempotencyKey.replace(/:release$/, ''));
+    expect(holds).toHaveLength(20);                       // every attempt really reached a provider call
+    expect(released.sort()).toEqual(holds.sort());       // every entry hold released
+    expect(calls.filter((r) => r.phase === 'confirm')).toEqual([]);
+    expect(repo.callCreditPartialConfirm).not.toHaveBeenCalled();
+  });
+
+  it('C4 (7c, money). the entry CONFIRM throws AFTER the work succeeded -> executed + settlementPending, never a rejection', async () => {
+    pricing.resolveLlmCost.mockResolvedValue({ credits: 9 });
+    repo.callCreditReservation.mockImplementation(async (cmd: any) => {
+      if (cmd.phase === 'confirm' && /:entry:confirm$/.test(cmd.idempotencyKey)) throw new Error('socket hang up');
+      return { error: null, transactionId: `${cmd.phase}:${cmd.idempotencyKey}` };
+    });
+    const res = await executeWithEntryConsumption({
+      userId: USER, orgId: ORG, action: ACTION as any, referenceType: 'content', referenceId: REF,
+      idempotencyKey: IDEM, validateMembership: false, llmPricing: LLM, collectViaCollector: true,
+      executor: async () => { recordProviderUsage(300, 100); return 'DONE'; },
+    });
+    expect(res.status).toBe('executed');
+    if (res.status !== 'executed') throw new Error('unreachable');
+    expect(res.result).toBe('DONE');
+    expect(res.settlementPending).toMatchObject({ code: 'CREDIT_SETTLE_AMBIGUOUS' });
+    // nothing released on doubt: no entry release, no exposure release, no exposure settle
+    const calls = repo.callCreditReservation.mock.calls.map((c) => c[0]);
+    expect(calls.some((r) => r.phase === 'release')).toBe(false);
+    expect(repo.callCreditPartialConfirm).not.toHaveBeenCalled();
+  });
+
+  it('entryFeeOnFailure() is exactly 0 (the value the failure path returns; pinned by dependent clients)', () => {
+    expect(entryFeeOnFailure()).toBe(0);
   });
 
   it('D. replay (exposure already settled) → no re-execution, no duplicate charge', async () => {
@@ -441,5 +508,23 @@ describe('executeWithEntryConsumption — admission control (Phase 8 TASK 2)', (
     if (res.status === 'insufficient_credits') expect(res.required).toBe(15);
     expect(executor).not.toHaveBeenCalled();
     expect(repo.callCreditReservation).not.toHaveBeenCalled();
+  });
+});
+
+// e1 2026-11-13 (55 finding A, BLOCKING for the BILLING_REQUIRE_AI_HANDLE flip): the executor runs inside THIS
+// execution's credit handle, so the AI billing guard vouches for its gateway calls (same org only).
+describe('executeWithEntryConsumption runs the executor inside its credit handle', () => {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { getActiveCreditHandle } = require('../../services/billing/aiGatewayBillingGuard');
+  it('inside the executor the active handle is this execution (org, action, key); outside there is none', async () => {
+    let seen: any = 'unset';
+    const r = await executeWithEntryConsumption<string>({
+      userId: USER, orgId: ORG, action: ACTION as any, referenceType: 'content', referenceId: REF,
+      idempotencyKey: IDEM, validateMembership: false, amountOverride: 5,
+      executor: async () => { seen = getActiveCreditHandle(); return 'ok'; },
+    });
+    expect(r.status).toBe('executed');
+    expect(seen).toMatchObject({ orgId: ORG, action: ACTION, idempotencyKey: IDEM, source: 'orchestrator' });
+    expect(getActiveCreditHandle()).toBeUndefined();
   });
 });

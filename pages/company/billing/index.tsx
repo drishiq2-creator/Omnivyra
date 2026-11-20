@@ -34,14 +34,16 @@ const VIEW_OPTIONS: { key: BillingView; label: string; icon: React.ReactNode; bl
 ];
 
 // Representative activities surfaced in the cost-reference card. Token-priced
-// ones (campaign/content/blog) render a min–max band with a "may rise"
-// provisional flag; fixed-fee ones render a flat number.
+// ones (campaign/content) render a min–max band with a "may rise"
+// provisional flag; fixed-fee ones render a flat number. A blog is the FIXED
+// 'blog_post' fee (40, owner 2026-11-18) - the key the blog routes charge, never
+// 'blog_generation' (7c: price shown must equal price charged).
 const COST_REFERENCE_ACTIONS = [
   'campaign_generation',
   'campaign_creation',
   'content_generation',
   'content_basic',
-  'blog_generation',
+  'blog_post',
   'full_strategy',
   'deep_analysis',
   'trend_analysis',
@@ -51,7 +53,7 @@ const COST_REFERENCE_LABELS: Record<string, string> = {
   campaign_creation: 'Campaign creation',
   content_generation: 'Master content (token-priced)',
   content_basic: 'Basic content / post',
-  blog_generation: 'Blog article',
+  blog_post: 'Blog article',
   full_strategy: 'Full campaign strategy',
   deep_analysis: 'Deep analysis',
   trend_analysis: 'Trend analysis',
