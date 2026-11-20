@@ -1,6 +1,6 @@
 # Omnivyra shared integration contract, v0.4.0
 
-**Status: proposed.** 0.4.0 (X-3: `response.received`, see `API-AND-EVENT-SCHEMAS.md`, "From 0.3.0 to 0.4.0") is implemented on the local branch `orch/c5-b` (Orchestration Prompt 5), uncommitted. 0.3.0 is implemented on the local branch `orch/c4-a-contract` (Orchestration Prompt 4, on `7f2ca186f`), uncommitted; earlier versions on `feat/orchestration-recovery`. Not merged, not deployed, and `WORKFLOW_ORCHESTRATION_ENABLED` stays off. The PI lead has not reviewed sections A and B. The Outreach lead has agreed the ownership split in section D, and its branch has merged an earlier commit of this contract (0.1.0, at `30a421c2`). It has not yet merged 0.2.0.
+**Status: RATIFIED on paper for ownership and sections C-G (2026-11-20): Outreach (virality-a9) ratified ownership and D; Orchestration (virality-89, contract owner) ratified ownership and C-G. Sections A and B await the PI lead (virality-c6).** Canonical ref: `fix/s-wa-combined` @ `409764959` (the stage-0 line; the older push `integration/s-wa-combined` @ `456a6ab35` is NOT canonical). 0.3.0 is commit `0ffc4a403` and 0.4.0 is commit `80555dc3d`, both on `409764959`. Not merged to main, not deployed, and `WORKFLOW_ORCHESTRATION_ENABLED` stays off; enablement is gated on section A's actor rule and the open owner decisions in `DECISION-REGISTER.md`.
 
 Code of record: `backend/services/orchestration/executionContract.ts`, `engineCapabilities.ts`, `journeyEvents.ts`, `journeyGovernance.ts`, `journeyExit.ts`.
 
@@ -144,7 +144,7 @@ An engine implements `EngineAdapter`: `execute(ctx)` returns `{ engine, outcome,
 
 **Types:** `prospect.lifecycle_changed`; `journey.enrolled`, `.terminated`, `.completed`; `decision.recorded`; `approval.requested`, `.granted`, `.rejected`, `.revoked` (0.3.0); `execution.requested`, `.started`, `.accepted`, `.failed`, `.cancelled`; `delivery.confirmed`, `.failed`, `.bounced`, `.complained`; `response.replied`, `.unsubscribed`, `.rejected`, `.other`; `outcome.recorded`; and, added in 0.3.0, `journey.suspended` and `record.unmapped`.
 
-`JOURNEY_EVENT_VERSION` is bumped when a field's meaning changes, not when an optional field or a new type is added. It is still 1 at 0.3.0, although 0.3.0 re-maps four delivery statuses: the reasoning is in `API-AND-EVENT-SCHEMAS.md`, "From 0.2.0 to 0.3.0", and the owner decision EV-1 is open. Only `response.replied` is positive engagement. A STOP, an unsubscribe, a bounce, a complaint, every approval event (`approval.revoked` included), `journey.suspended` and `record.unmapped` never are.
+`JOURNEY_EVENT_VERSION` is bumped when a field's meaning changes, not when an optional field or a new type is added. It is still 1 at 0.3.0, although 0.3.0 re-maps four delivery statuses: the reasoning is in `API-AND-EVENT-SCHEMAS.md`, "From 0.2.0 to 0.3.0", and the owner decided EV-1 on 2026-11-06: it stays 1, also for 0.4.0. Only `response.replied` is positive engagement. A STOP, an unsubscribe, a bounce, a complaint, every approval event (`approval.revoked` included), `journey.suspended` and `record.unmapped` never are.
 
 ### E.1 Event rules (written down in 0.3.0; unchanged in behaviour)
 
@@ -232,7 +232,7 @@ The rule is one exported function, `isComplaintInferredEvidence(row: { delivery_
 - **`response.replied` is not terminal.** A reply is positive engagement, and its consequence is decided by the journey's rules, not by the event.
 - **A journey ends only with `journey.terminated`** (or `journey.completed` when its plan finishes). `journey.suspended` is never an end.
 - **Still terminal:** a WhatsApp STOP; a recorded `unsubscribed`, `rejected`, `converted` or `meeting_booked`; and now a complaint (owner decision Q-C1, 2026-11-05; the exit is Agent B's, through `isComplaintInferredEvidence`).
-- **Open: an unclassified WhatsApp inbound is still positive (DF-6; X-3 in the decision register).** The view still emits `response.replied` with `positiveEngagement: true` for every WhatsApp inbound that is not an opt-out keyword, and `feedWhatsAppReplyToLifecycle` still moves PI to `engaged`. Prompt 4 does not change that. It waits for SC7-R or a PI decision.
+- **Resolved in 0.4.0 (X-3 / DF-6; PI ruling virality-b6, Outreach agreement virality-52, 2026-11-06):** an unclassified WhatsApp inbound is labelled `inbound_unclassified`, reads as `response.received` (code `unclassified`, NOT positive engagement), still suspends the run, and is not fed to PI. A STOP stays `response.unsubscribed`. A human-confirmed WhatsApp engagement reaching PI remains a documented gap (P-1 = (a)).
 - **No `journey.resumed` event.** Resuming writes no durable row of its own today, and the view emits only what a row records. A consumer sees the next decision or execution event of the run instead.
 
 **Mandate events with no separate type.** `prospect discovered`, `qualified` and `updated` appear as `prospect.lifecycle_changed` from enrollment on; before enrollment they belong to PI. `approval.requested` is declared but not emitted yet: approvals expose only decisions. `execution.failed` is declared and not emitted: a failed step surfaces as `decision.recorded` with a code. `execution.cancelled` is emitted since 0.3.0 for `suppressed` and `expired` evidence only; a cancelled or skipped step still surfaces as `decision.recorded`.
@@ -297,7 +297,7 @@ Each layer is read from the store its owner already writes. No layer is stored t
 | Any | a stored code with no mapping | as stored | `record.unmapped`, original code | **none** |
 | WhatsApp | Meta `sent` | recipient `sent` | `execution.accepted`, through the `executed` decision | step completed |
 | WhatsApp | inbound opt-out keyword (STOP) | inbound message, plus governance on WhatsApp | `response.unsubscribed` | the run ends |
-| WhatsApp | any other inbound | inbound message | `response.replied` | the run is suspended for a person (Agent B) until SC-7 is ratified |
+| WhatsApp | any other inbound | inbound message, `inbound_unclassified` | `response.received`, code `unclassified` (0.4.0, X-3; not positive) | the run is suspended for a person until SC-7 is ratified; not fed to PI |
 | SMS, voice | none | none | none | the channel is unsupported |
 | Social publish | post status | `scheduled_posts` | `execution.accepted` or `decision.recorded` | completed, or needs a person; no per-person outcome |
 | Community | action `executed` / `sent_unverified` | `community_ai_actions.status` | `execution.accepted` | step completed |
@@ -317,7 +317,7 @@ Each layer is read from the store its owner already writes. No layer is stored t
 
 | Contract | Version | Consumers | Status |
 |---|---|---|---|
-| Execution contract | 0.3.0 | Five adapters | Implemented locally, uncommitted. Outreach merged 0.2.0 (`d682ab13`); 0.3.0 is not merged by Outreach yet |
+| Execution contract | 0.4.0 | Five adapters | Implemented on `409764959` (0.3.0 `0ffc4a403`, 0.4.0 `80555dc3d`). Outreach merged 0.2.0 (`d682ab13`) and ratified ownership and D at 0.4.0 on 2026-11-20 |
 | Event view | event version 1 | `events` route | Implemented. 0.3.0 adds `approval.revoked`, `journey.suspended`, `record.unmapped` and the optional `actor`, and re-maps four delivery statuses (E.3) |
 | Capability declarations | 0.3.0 | `checkCapabilityDeclaration`, Outreach fixtures | Implemented. A 0.2.0 or 0.1.0 declaration still passes: only the major is compared |
 | PI lifecycle writer | Unversioned | Sweeper feed, opener | In use; actor validation pending |
@@ -328,6 +328,7 @@ Each layer is read from the store its owner already writes. No layer is stored t
 |---|---|---|
 | 0.1.0 | `77e90518` | First version |
 | 0.2.0 | `019b6de5` | Optional `holdOnly` on `EngineStepContext`; outcomes `not_begun`, `broadcast_unreadable`, `facts_unreadable` |
-| 0.3.0 | Uncommitted, `orch/c4-a-contract` | Event types `approval.revoked`, `journey.suspended`, `record.unmapped`; optional `actor` on approval events; delivery re-mapping and the complaint marker (E.3); suspension and end rules (E.4); the event rules (E.1) written down; section G. Event version stays 1 (EV-1 open) |
+| 0.3.0 | `0ffc4a403` | Event types `approval.revoked`, `journey.suspended`, `record.unmapped`; optional `actor` on approval events; delivery re-mapping and the complaint marker (E.3); suspension and end rules (E.4); the event rules (E.1) written down; section G. Event version stays 1 (EV-1, decided 2026-11-06) |
+| 0.4.0 | `80555dc3d` | X-3: an unclassified WhatsApp inbound is `response.received` (code `unclassified`, not positive), still suspends the run, and is not fed to PI (see `API-AND-EVENT-SCHEMAS.md`, "From 0.3.0 to 0.4.0"). Event version stays 1 (EV-1) |
 
 Outreach's `CONTRACT-V0.2-PROPOSALS.md` (provider availability, webhook verification) was named before this version existed. It is undecided, unbuilt, and not part of 0.2.0.
