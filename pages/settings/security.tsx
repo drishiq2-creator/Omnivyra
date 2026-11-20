@@ -23,6 +23,9 @@ import {
 } from '@/lib/security/sessionClient';
 import { withStepUp, triggerWebAuthnStepUp, STEP_UP_ELEVATED_EVENT } from '@/lib/security/stepUpClient';
 import { startRegistration } from '@simplewebauthn/browser';
+import {
+  SECURITY_ACTION_COPY, classifySecurityAction, loadFailedCopy, type SecurityActionKind,
+} from '@/lib/security/securityActionOutcome';
 
 // ── Shared types (mirror server route shapes) ────────────────────────────────
 
@@ -65,13 +68,24 @@ async function jsonOrThrow<T>(r: Response): Promise<T> {
   // an HTML body (rare but possible from upstream interceptors).
   const contentType = r.headers.get('content-type') ?? '';
   const isJson = /\bapplication\/(?:json|problem\+json)\b/i.test(contentType);
+  // 04 (2026-11-20, b3 (ii)): raw status codes and response bodies go to the CONSOLE, never the screen. A JSON body's
+  // own human `error` string (e.g. "Invalid code" on TOTP activation) is still shown, because the user needs it.
   if (!r.ok) {
     const detail = await r.text().catch(() => '');
-    throw new Error(`Request failed: ${r.status} ${isJson ? detail : `(${contentType || 'no content-type'}) ${detail.slice(0, 200)}`}`);
+    console.warn('[security] request failed', { status: r.status, contentType, detail: detail.slice(0, 500) });
+    let serverMessage: string | null = null;
+    if (isJson) {
+      try {
+        const b = JSON.parse(detail) as { error?: unknown };
+        if (typeof b.error === 'string' && b.error.trim() && !/^[A-Z0-9_]+$/.test(b.error.trim())) serverMessage = b.error.trim();
+      } catch { /* not JSON after all */ }
+    }
+    throw new Error(serverMessage ?? 'Something went wrong. Please try again.');
   }
   if (!isJson) {
     const snippet = await r.text().catch(() => '');
-    throw new Error(`Expected JSON response, got ${contentType || 'no content-type'} (status ${r.status}): ${snippet.slice(0, 200)}`);
+    console.warn('[security] expected JSON', { status: r.status, contentType, snippet: snippet.slice(0, 500) });
+    throw new Error('Something went wrong. Please try again.');
   }
   return await r.json() as T;
 }
@@ -103,7 +117,8 @@ export default function SecuritySettingsPage() {
       setSession(s);
       setCapabilities(c);
     } catch (err) {
-      setGlobalError(err instanceof Error ? err.message : String(err));
+      console.warn('[security] auth state load failed', err);
+      setGlobalError(loadFailedCopy('security settings'));
     }
   }, [session]);
 
@@ -136,6 +151,22 @@ export default function SecuritySettingsPage() {
   if (loading) {
     return <div style={{ padding: 24 }}>Loading security settings…</div>;
   }
+  // Rule 1 (04, 2026-11-20): a FAILED first load is not "not signed in". Before, a thrown load left session null and
+  // this page told a signed-in user "You must be signed in", with no way to retry.
+  if (!session && globalError) {
+    return (
+      <div role="alert" style={{ padding: 24 }}>
+        {globalError}
+        <button
+          type="button"
+          onClick={() => { setGlobalError(null); setLoading(true); void reloadAuthState().finally(() => setLoading(false)); }}
+          style={{ marginLeft: 8, textDecoration: 'underline' }}
+        >
+          Retry
+        </button>
+      </div>
+    );
+  }
   if (!session) {
     return <div style={{ padding: 24 }}>You must be signed in to view security settings.</div>;
   }
@@ -165,6 +196,7 @@ export default function SecuritySettingsPage() {
             borderRadius: 6, marginBottom: 16, color: '#991b1b',
           }}>
             {globalError}
+            <button type="button" onClick={() => { setGlobalError(null); void reloadAuthState(); }} style={{ marginLeft: 8, textDecoration: 'underline' }}>Retry</button>
           </div>
         ) : null}
 
@@ -209,14 +241,17 @@ function PasskeysSection({ onChanged }: { onChanged: () => Promise<void> }) {
   const [passkeys, setPasskeys] = useState<PasskeyRow[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [loadErr, setLoadErr] = useState<string | null>(null);
 
   const reload = useCallback(async () => {
     try {
       const r = await fetch('/api/auth/passkeys', { credentials: 'same-origin' });
       const data = await jsonOrThrow<{ credentials: PasskeyRow[] }>(r);
       setPasskeys(data.credentials);
+      setLoadErr(null);
     } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e));
+      console.warn('[security] passkeys load failed', e);
+      setLoadErr(loadFailedCopy("passkeys"));
     }
   }, []);
 
@@ -250,26 +285,23 @@ function PasskeysSection({ onChanged }: { onChanged: () => Promise<void> }) {
 
   async function revoke(id: string) {
     setBusy(true); setErr(null);
-    try {
-      // mfa.revoke is step-up-required; withStepUp handles the challenge.
-      const r = await withStepUp(() => fetch('/api/auth/passkeys/revoke', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'same-origin',
-        body: JSON.stringify({ id, reason: 'user_initiated_via_settings' }),
-      }));
-      if (!r.ok) throw new Error(`Revoke failed: ${r.status}`);
-      await reload();
-      await onChanged();
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
+    // mfa.revoke is step-up-required; withStepUp handles the challenge.
+    const { message } = await runSecurityAction('passkey_revoke', () => withStepUp(() => fetch('/api/auth/passkeys/revoke', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify({ id, reason: 'user_initiated_via_settings' }),
+    })));
+    if (message) setErr(message);
+    // Always re-read: whatever the outcome, the list shows the true current state.
+    await reload();
+    await onChanged().catch(() => undefined);
+    setBusy(false);
   }
 
   return (
     <Card title="Passkeys">
+      {loadErr ? <ErrorRow message={loadErr} onRetry={() => { void reload(); }} /> : null}
       {err ? <ErrorRow message={err} /> : null}
       <div style={{ marginBottom: 12 }}>
         <button onClick={enroll} disabled={busy} style={btn}>
@@ -349,18 +381,16 @@ function TotpSection({ session, onChanged }: { session: FrontendSessionSnapshot;
 
   async function revoke() {
     setBusy(true); setErr(null);
-    try {
-      const r = await withStepUp(() => fetch('/api/auth/totp/revoke', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'same-origin',
-        body: JSON.stringify({ reason: 'user_initiated_via_settings' }),
-      }));
-      if (!r.ok) throw new Error(`Revoke failed: ${r.status}`);
-      await onChanged();
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e));
-    } finally { setBusy(false); }
+    const { message } = await runSecurityAction('totp_revoke', () => withStepUp(() => fetch('/api/auth/totp/revoke', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify({ reason: 'user_initiated_via_settings' }),
+    })));
+    if (message) setErr(message);
+    // Always re-read the auth state: it shows whether TOTP is still enrolled.
+    await onChanged().catch(() => undefined);
+    setBusy(false);
   }
 
   return (
@@ -415,22 +445,24 @@ function RecoveryCodesSection() {
 
   async function regenerate() {
     setBusy(true); setErr(null);
-    try {
-      // Wave 2C-C: standalone regenerate endpoint. Gated on mfa.revoke +
-      // phishing-resistant step-up. withStepUp launches a WebAuthn
-      // challenge on 401 STEP_UP_REQUIRED and retries once.
-      const r = await withStepUp(() => fetch('/api/auth/totp/recovery/regenerate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'same-origin',
-        body: JSON.stringify({}),
-      }));
-      if (!r.ok) throw new Error(`Regenerate failed: ${r.status}`);
-      const data = await r.json() as { codes: ReadonlyArray<string>; batchId: string };
-      setCodes(data.codes);
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e));
-    } finally { setBusy(false); }
+    // Wave 2C-C: standalone regenerate endpoint. Gated on mfa.revoke +
+    // phishing-resistant step-up. withStepUp launches a WebAuthn
+    // challenge on 401 STEP_UP_REQUIRED and retries once.
+    const { outcome, response, message } = await runSecurityAction('recovery_regenerate', () => withStepUp(() => fetch('/api/auth/totp/recovery/regenerate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify({}),
+    })));
+    if (outcome === 'done' && response) {
+      const data = await response.json().catch(() => null) as { codes?: ReadonlyArray<string> } | null;
+      if (data && Array.isArray(data.codes) && data.codes.length) setCodes(data.codes);
+      // 2xx but the codes did not arrive: the new batch may exist unseen, so this is the 'unknown' case.
+      else setErr(SECURITY_ACTION_COPY.recovery_regenerate.unknown);
+    } else if (message) {
+      setErr(message);
+    }
+    setBusy(false);
   }
 
   return (
@@ -461,14 +493,17 @@ function TrustedDevicesSection({ onChanged }: { onChanged: () => Promise<void> }
   const [devices, setDevices] = useState<DeviceRow[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [loadErr, setLoadErr] = useState<string | null>(null);
 
   const reload = useCallback(async () => {
     try {
       const r = await fetch('/api/auth/devices', { credentials: 'same-origin' });
       const data = await jsonOrThrow<{ devices: DeviceRow[] }>(r);
       setDevices(data.devices);
+      setLoadErr(null);
     } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e));
+      console.warn('[security] trusted devices load failed', e);
+      setLoadErr(loadFailedCopy("trusted devices"));
     }
   }, []);
 
@@ -476,43 +511,40 @@ function TrustedDevicesSection({ onChanged }: { onChanged: () => Promise<void> }
 
   async function trustCurrent() {
     setBusy(true); setErr(null);
-    try {
-      // Trusting a device requires step-up — withStepUp handles the challenge.
-      const r = await withStepUp(() => fetch('/api/auth/devices/trust', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'same-origin',
-        body: JSON.stringify({ label: 'this browser' }),
-      }));
-      if (!r.ok) throw new Error(`Trust failed: ${r.status}`);
-      await reload();
-      await onChanged();
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e));
-    } finally { setBusy(false); }
+    // Trusting a device requires step-up — withStepUp handles the challenge.
+    const { message } = await runSecurityAction('device_trust', () => withStepUp(() => fetch('/api/auth/devices/trust', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify({ label: 'this browser' }),
+    })));
+    if (message) setErr(message);
+    // Always re-read: whatever the outcome, the list shows the true current state.
+    await reload();
+    await onChanged().catch(() => undefined);
+    setBusy(false);
   }
 
   async function revoke(id: string) {
     setBusy(true); setErr(null);
-    try {
-      const r = await fetch('/api/auth/devices/revoke', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'same-origin',
-        body: JSON.stringify({ id, reason: 'user_initiated_via_settings' }),
-      });
-      if (!r.ok) throw new Error(`Revoke failed: ${r.status}`);
-      await reload();
-      await onChanged();
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e));
-    } finally { setBusy(false); }
+    const { message } = await runSecurityAction('device_revoke', () => fetch('/api/auth/devices/revoke', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify({ id, reason: 'user_initiated_via_settings' }),
+    }));
+    if (message) setErr(message);
+    // Always re-read: whatever the outcome, the list shows the true current state.
+    await reload();
+    await onChanged().catch(() => undefined);
+    setBusy(false);
   }
 
   const currentTrusted = devices?.some((d) => d.isCurrent) ?? false;
 
   return (
     <Card title="Trusted devices">
+      {loadErr ? <ErrorRow message={loadErr} onRetry={() => { void reload(); }} /> : null}
       {err ? <ErrorRow message={err} /> : null}
       {!currentTrusted ? (
         <div style={{ marginBottom: 12 }}>
@@ -553,14 +585,17 @@ function ActiveSessionsSection({ onChanged }: { onChanged: () => Promise<void> }
   const [sessions, setSessions] = useState<SessionRow[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [loadErr, setLoadErr] = useState<string | null>(null);
 
   const reload = useCallback(async () => {
     try {
       const r = await fetch('/api/auth/sessions/list', { credentials: 'same-origin' });
       const data = await jsonOrThrow<{ sessions: SessionRow[] }>(r);
       setSessions(data.sessions);
+      setLoadErr(null);
     } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e));
+      console.warn('[security] sessions load failed', e);
+      setLoadErr(loadFailedCopy("sessions"));
     }
   }, []);
 
@@ -568,48 +603,45 @@ function ActiveSessionsSection({ onChanged }: { onChanged: () => Promise<void> }
 
   async function revokeOne(id: string, isCurrent: boolean) {
     setBusy(true); setErr(null);
-    try {
-      const r = await fetch('/api/auth/sessions/revoke', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'same-origin',
-        body: JSON.stringify({ id }),
-      });
-      if (!r.ok) throw new Error(`Revoke failed: ${r.status}`);
-      if (isCurrent) {
-        // Revoked own session — sign-out client-side too.
-        await logoutCurrentSession().catch(() => undefined);
-        window.location.href = '/login';
-        return;
-      }
-      await reload();
-      await onChanged();
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e));
-    } finally { setBusy(false); }
+    const { outcome, message } = await runSecurityAction('session_revoke', () => fetch('/api/auth/sessions/revoke', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify({ id }),
+    }));
+    if (outcome === 'done' && isCurrent) {
+      // Revoked own session — sign-out client-side too.
+      await logoutCurrentSession().catch(() => undefined);
+      window.location.href = '/login';
+      return;
+    }
+    if (message) setErr(message);
+    // Always re-read: whatever the outcome, the list shows the true current state.
+    await reload();
+    await onChanged().catch(() => undefined);
+    setBusy(false);
   }
 
   async function revokeOthers() {
     setBusy(true); setErr(null);
-    try {
-      const r = await fetch('/api/auth/sessions/revoke', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'same-origin',
-        body: JSON.stringify({ revokeOthers: true }),
-      });
-      if (!r.ok) throw new Error(`Revoke failed: ${r.status}`);
-      await reload();
-      await onChanged();
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e));
-    } finally { setBusy(false); }
+    const { message } = await runSecurityAction('sessions_revoke_others', () => fetch('/api/auth/sessions/revoke', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify({ revokeOthers: true }),
+    }));
+    if (message) setErr(message);
+    // Always re-read: whatever the outcome, the list shows the true current state.
+    await reload();
+    await onChanged().catch(() => undefined);
+    setBusy(false);
   }
 
   const otherCount = (sessions ?? []).filter((s) => !s.isCurrent).length;
 
   return (
     <Card title="Active sessions">
+      {loadErr ? <ErrorRow message={loadErr} onRetry={() => { void reload(); }} /> : null}
       {err ? <ErrorRow message={err} /> : null}
       {otherCount > 0 ? (
         <div style={{ marginBottom: 12 }}>
@@ -667,13 +699,36 @@ function KV({ label, value }: { label: string; value: string }) {
   );
 }
 
-function ErrorRow({ message }: { message: string }) {
+function ErrorRow({ message, onRetry }: { message: string; onRetry?: () => void }) {
   return (
-    <div style={{
+    <div role="alert" style={{
       background: '#fee2e2', border: '1px solid #ef4444',
       padding: 8, borderRadius: 4, marginBottom: 12, color: '#991b1b',
-    }}>{message}</div>
+    }}>
+      {message}
+      {onRetry ? <button type="button" onClick={onRetry} style={{ marginLeft: 8, textDecoration: 'underline' }}>Retry</button> : null}
+    </div>
   );
+}
+
+/**
+ * Runs one security action and classifies its answer (lib/security/securityActionOutcome.ts). Never throws.
+ * Returns the outcome, the Response when there was one, and the copy to show when it was not 'done'.
+ */
+async function runSecurityAction(
+  kind: SecurityActionKind,
+  send: () => Promise<Response>,
+): Promise<{ outcome: 'done' | 'refused' | 'unknown'; response: Response | null; message: string | null }> {
+  let response: Response | null = null;
+  try {
+    response = await send();
+  } catch (e) {
+    // No answer (network, or a cancelled step-up): unknown, never "failed".
+    console.warn('[security] action did not complete', { kind, error: e instanceof Error ? e.message : String(e) });
+  }
+  const outcome = classifySecurityAction(kind, response ? response.status : null);
+  if (outcome !== 'done') console.warn('[security] action outcome', { kind, outcome, status: response?.status ?? null });
+  return { outcome, response, message: outcome === 'done' ? null : SECURITY_ACTION_COPY[kind][outcome] };
 }
 
 const muted: React.CSSProperties = { color: '#6b7280' };
