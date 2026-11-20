@@ -1,0 +1,63 @@
+/**
+ * Credit top-up (components/billing/TopUpPanel.tsx) outcomes, 2026-11-20 (b3: BLOCKING, money; c6 traced the server).
+ *
+ * POST /api/billing/checkout/verify runs AFTER the user has paid at the provider. Before this, any non-ok answer (a
+ * lost connection, a 5xx, even "paid but fulfilment failed") showed "failed" with a raw code and re-enabled Buy, so a
+ * user who had paid was invited to pay again.
+ *
+ * verify outcomes (c6, pages/api/billing/checkout/verify.ts on origin/main):
+ *   200 { ok:true } (incl. recovered:true)                -> credited
+ *   400 { ok:false, status:'failed' }                     -> DEFINITIVE: the provider found no capture; not charged
+ *   500 { ok:false, status:'paid', fulfillment_status:'failed' } -> PAID: payment taken, credits still being applied
+ *   404 purchase_not_found                                -> NOT definitive today (a DB read failure lands here too)
+ *   lost response / other 5xx / 400 missing ids           -> unknown
+ * Re-calling verify is SAFE (c6): it re-asks the provider; completePurchase is a CAS with a UNIQUE credit key, so it
+ * can never double-grant. So "Check again" re-calls verify.
+ *
+ * Copy makes NO promise of automatic crediting: a provider webhook also grants (webhooks/payments/[provider].ts), but
+ * whether it is registered at the providers in prod is unconfirmed (c6/cb). Switch the copy only when it is.
+ */
+export type VerifyOutcome =
+  | { kind: 'credited'; credits: number | null }
+  | { kind: 'not_charged'; message: string }
+  | { kind: 'paid_pending'; message: string }
+  | { kind: 'unconfirmed'; message: string };
+
+export const TOPUP_NOT_CHARGED = "Your payment didn't go through, and you weren't charged.";
+export const TOPUP_PAID_PENDING =
+  "Payment received; your credits are being applied. Please don't pay again. Click 'Check again' to confirm your credits.";
+export const TOPUP_UNCONFIRMED =
+  "We couldn't confirm your payment yet. Please don't pay again. Click 'Check again' to confirm your credits.";
+
+/** `status` null = the request threw. apiFetch answers a lost connection with a non-2xx (503 today, 599 after #17). */
+export function classifyVerify(status: number | null, body: unknown): VerifyOutcome {
+  const b = (body && typeof body === 'object' ? body : {}) as Record<string, unknown>;
+  if (status !== null && status >= 200 && status < 300 && b.ok === true) {
+    const n = Number(b.credits_granted);
+    return { kind: 'credited', credits: Number.isFinite(n) && n > 0 ? n : null };
+  }
+  if (b.status === 'paid') return { kind: 'paid_pending', message: TOPUP_PAID_PENDING };
+  if (status === 400 && b.ok === false && b.status === 'failed') return { kind: 'not_charged', message: TOPUP_NOT_CHARGED };
+  return { kind: 'unconfirmed', message: TOPUP_UNCONFIRMED };
+}
+
+/** A verify outcome during which no NEW purchase may be started (the user may already have paid). */
+export function blocksNewPurchase(outcome: VerifyOutcome): boolean {
+  return outcome.kind === 'paid_pending' || outcome.kind === 'unconfirmed';
+}
+
+/** create-order runs BEFORE any payment: nothing can have been charged yet. Codes -> copy, never raw. */
+const CREATE_ORDER_COPY: Record<string, string> = {
+  package_not_available: "This credit pack isn't available right now.",
+  currency_not_available_for_package: "This credit pack can't be bought in your currency.",
+  package_invalid: "This credit pack can't be bought right now.",
+  purchase_record_failed: "We couldn't start checkout. You weren't charged.",
+  order_creation_failed: "We couldn't reach the payment provider. You weren't charged.",
+};
+export const CREATE_ORDER_FALLBACK = "We couldn't start checkout. You weren't charged.";
+
+export function createOrderMessage(body: unknown): string {
+  const b = (body && typeof body === 'object' ? body : {}) as Record<string, unknown>;
+  const code = typeof b.error === 'string' ? b.error.split(':')[0] : '';
+  return CREATE_ORDER_COPY[code] ?? CREATE_ORDER_FALLBACK;
+}

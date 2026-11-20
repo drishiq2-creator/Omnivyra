@@ -6,11 +6,12 @@
  * Reuses /api/billing/topup/{catalog,create-order,verify,history}. No live mode.
  */
 
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { apiFetch } from '@/lib/apiFetch';
 import { createIdempotentOperation } from '@/lib/idempotency';
 import { resolvePrice, currencySymbol, CURRENCIES, type Currency } from '@/lib/billing/currency';
 import { TOPUPS } from '@/lib/billing/commercialPlans';
+import { TOPUP_UNCONFIRMED, blocksNewPurchase, classifyVerify, createOrderMessage } from '@/lib/billing/topUpOutcome';
 
 const RAZORPAY_JS = 'https://checkout.razorpay.com/v1/checkout.js';
 const CASHFREE_JS = 'https://sdk.cashfree.com/js/v3/cashfree.js';
@@ -20,7 +21,9 @@ interface Purchase {
   id: string; credits: number; amount_paid: number | null; currency: string | null;
   status: string | null; fulfillment_status: string | null; provider_order_id: string | null; created_at: string;
 }
-type Status = { kind: 'idle' | 'creating' | 'paying' | 'verifying' | 'success' | 'failed' | 'cancelled'; msg?: string };
+// 'unconfirmed' / 'paid_pending': the user may have PAID, and their credits are not confirmed. No new purchase is offered
+// (b3 2026-11-20, BLOCKING: a lost verify used to show "failed" and re-enable Buy, inviting a second payment).
+type Status = { kind: 'idle' | 'creating' | 'paying' | 'verifying' | 'success' | 'failed' | 'cancelled' | 'unconfirmed' | 'paid_pending'; msg?: string };
 
 function loadScript(src: string, ready: () => boolean): Promise<boolean> {
   return new Promise((resolve) => {
@@ -60,6 +63,21 @@ async function postJson(url: string, body: unknown, extraHeaders?: Record<string
   return res.json();
 }
 
+/** Like postJson but keeps the HTTP status (verify outcomes depend on it). Never throws: status null = no answer. */
+async function postJsonWithStatus(url: string, body: unknown, extraHeaders?: Record<string, string>): Promise<{ status: number | null; body: any }> {
+  try {
+    const res = await apiFetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(extraHeaders ?? {}) },
+      body: JSON.stringify(body),
+    });
+    return { status: res.status, body: await res.json().catch(() => null) };
+  } catch (err) {
+    console.warn('[top-up] request did not complete:', url, err);
+    return { status: null, body: null };
+  }
+}
+
 interface Bucket {
   key: 'plan' | 'bonus' | 'topup';
   label: string;
@@ -74,6 +92,9 @@ export default function TopUpPanel({ orgId }: { orgId: string | null | undefined
   const [history, setHistory] = useState<Purchase[]>([]);
   const [status, setStatus] = useState<Status>({ kind: 'idle' });
   const [lastPackId, setLastPackId] = useState<string | null>(null);
+  // The last verify call, so "Check again" re-verifies THE SAME payment (safe: verify re-asks the provider and the
+  // grant is a CAS with a unique credit key, so it can never double-grant; c6).
+  const lastVerify = useRef<null | { order: any; orderId: string; paymentId: string; signature: string; headers: Record<string, string> }>(null);
   const [buckets, setBuckets] = useState<Bucket[]>([]);
   const [preselectId, setPreselectId] = useState<string | null>(null);
   const [currency, setCurrency] = useState<Currency>('INR');
@@ -143,30 +164,40 @@ export default function TopUpPanel({ orgId }: { orgId: string | null | undefined
     } catch { /* the server-side expiry sweep will close it */ }
   }, [orgId, refreshHistory]);
 
-  const runVerify = useCallback(async (order: any, orderId: string, paymentId: string, signature: string) => {
+  const runVerify = useCallback(async (
+    order: any, orderId: string, paymentId: string, signature: string, reuseHeaders?: Record<string, string>,
+  ) => {
     setStatus({ kind: 'verifying' });
-    // OR-07 Action 1: verification is naturally idempotent on the provider's
-    // (order, payment) pair — retrying verification of the SAME payment must
-    // reuse the key, so it is derived rather than random.
-    const verifyOp = createIdempotentOperation(`checkout-verify-${orderId}-${paymentId}`);
-    const v = await postJson('/api/billing/checkout/verify', {
+    // Re-verifying the SAME payment is safe because verify re-asks the PROVIDER and the grant is a CAS with a UNIQUE
+    // credit key (c6, 2026-11-20); /checkout/verify has no withIdempotency, so the key is NOT what makes it safe.
+    // (The old comment said the key was "derived rather than random"; createIdempotentOperation adds a random
+    // suffix.) "Check again" still re-sends the first call's key, so the request is the same request.
+    const verifyHeaders = reuseHeaders ?? createIdempotentOperation(`checkout-verify-${orderId}-${paymentId}`).headers;
+    lastVerify.current = { order, orderId, paymentId, signature, headers: verifyHeaders };
+    const { status: httpStatus, body: v } = await postJsonWithStatus('/api/billing/checkout/verify', {
       org_id: orgId, purchase_id: order.purchase_id, provider: order.provider,
       order_id: orderId, payment_id: paymentId, signature,
-    }, verifyOp.headers);
-    if (v?.ok) {
-      const n = v?.credits_granted;
-      setStatus({ kind: 'success', msg: n ? `${Number(n).toLocaleString()} credits added` : 'Credits added' });
-      refreshHistory();
-      refreshBreakdown(); // top-up (paid) pool grew
+    }, verifyHeaders);
+    const outcome = classifyVerify(httpStatus, v);
+    if (outcome.kind === 'credited') {
+      lastVerify.current = null;
+      setStatus({ kind: 'success', msg: outcome.credits ? `${outcome.credits.toLocaleString()} credits added` : 'Credits added' });
+    } else if (outcome.kind === 'not_charged') {
+      lastVerify.current = null;
+      setStatus({ kind: 'failed', msg: outcome.message });
     } else {
-      setStatus({ kind: 'failed', msg: v?.status ?? v?.error ?? 'Verification failed' });
+      // Paid or unknown: never "failed", no new purchase; the user re-checks the SAME payment.
+      setStatus({ kind: outcome.kind, msg: outcome.message });
     }
+    refreshHistory();
+    refreshBreakdown(); // top-up (paid) pool may have grown
   }, [orgId, refreshHistory, refreshBreakdown]);
 
   const buy = useCallback(async (pack: Pack) => {
     if (!orgId) return;
     setLastPackId(pack.id);
     setStatus({ kind: 'creating' });
+    let paymentStarted = false;
     try {
       // Order via the Payment Orchestrator (internal routing: Razorpay → Cashfree).
       // OR-07 Action 1: one key per buy attempt. No order id exists yet, so the
@@ -174,9 +205,11 @@ export default function TopUpPanel({ orgId }: { orgId: string | null | undefined
       // of the same pack is a new operation and correctly gets a new key.
       const orderOp = createIdempotentOperation(`checkout-create-order-${orgId}-${pack.id}`);
       const order = await postJson('/api/billing/checkout/create-order', { org_id: orgId, package_id: pack.id, currency }, orderOp.headers);
-      if (!order?.ok) { setStatus({ kind: 'failed', msg: order?.error ?? 'Could not create order' }); return; }
+      // Before any payment: nothing can have been charged. Codes -> copy, never raw.
+      if (!order?.ok) { setStatus({ kind: 'failed', msg: createOrderMessage(order) }); return; }
 
       setStatus({ kind: 'paying' });
+      paymentStarted = true;
       if (order.provider === 'razorpay') {
         if (!(await loadRazorpay())) { setStatus({ kind: 'failed', msg: 'Could not load Razorpay Checkout' }); return; }
         const rzp = new (window as any).Razorpay({
@@ -214,11 +247,21 @@ export default function TopUpPanel({ orgId }: { orgId: string | null | undefined
         setStatus({ kind: 'failed', msg: `Unsupported provider: ${order.provider}` });
       }
     } catch (err: any) {
-      setStatus({ kind: 'failed', msg: err?.message ?? 'Something went wrong' });
+      console.warn('[top-up] buy did not complete:', err);
+      // Once the provider checkout has opened, the user may have paid: never "failed", never a new purchase.
+      setStatus(paymentStarted
+        ? { kind: 'unconfirmed', msg: TOPUP_UNCONFIRMED }
+        : { kind: 'failed', msg: createOrderMessage(null) });
     }
   }, [orgId, runVerify, currency, reportClosure]);
 
   const busy = status.kind === 'creating' || status.kind === 'paying' || status.kind === 'verifying';
+  const purchaseBlocked = blocksNewPurchase({ kind: status.kind } as any);
+  const checkAgain = () => {
+    const last = lastVerify.current;
+    if (last) void runVerify(last.order, last.orderId, last.paymentId, last.signature, last.headers);
+    else { refreshHistory(); refreshBreakdown(); }
+  };
 
   return (
     <div className="space-y-6">
@@ -280,7 +323,7 @@ export default function TopUpPanel({ orgId }: { orgId: string | null | undefined
             <div className="mt-2 text-sm font-semibold text-slate-700">{priceLabel(p)}</div>
             <button
               onClick={() => buy(p)}
-              disabled={busy || !orgId}
+              disabled={busy || purchaseBlocked || !orgId}
               className="mt-4 w-full rounded-lg bg-indigo-600 px-4 py-2 text-sm font-bold text-white disabled:opacity-50"
             >
               {busy && lastPackId === p.id ? 'Processing…' : 'Buy'}
@@ -297,6 +340,11 @@ export default function TopUpPanel({ orgId }: { orgId: string | null | undefined
           : status.kind === 'cancelled' ? 'border-amber-200 bg-amber-50 text-amber-800'
           : 'border-slate-200 bg-slate-50 text-slate-700'}`}>
           {status.msg ?? status.kind}
+          {(status.kind === 'unconfirmed' || status.kind === 'paid_pending') && (
+            <button onClick={checkAgain} className="ml-3 font-semibold underline">
+              Check again
+            </button>
+          )}
           {(status.kind === 'failed' || status.kind === 'cancelled') && lastPackId && (
             <button onClick={() => { const p = packs.find((x) => x.id === lastPackId); if (p) buy(p); }} className="ml-3 font-semibold underline">
               Retry
