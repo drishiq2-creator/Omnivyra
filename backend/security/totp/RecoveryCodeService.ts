@@ -183,6 +183,14 @@ export interface VerifyRecoveryCodeInput {
  */
 export async function verifyAndConsume(
   input: VerifyRecoveryCodeInput,
+  opts: {
+    /**
+     * Runs AFTER a code matched and BEFORE it is consumed (b3 2026-11-20, recovery-login). If it throws, NOTHING is
+     * consumed and the error propagates - so a step that must precede consumption (revoking every session) can fail
+     * without burning the user's code.
+     */
+    beforeConsume?: () => Promise<void>;
+  } = {},
 ): Promise<RecoveryCodeVerifyResult> {
   // Per-user + per-IP brute-force gate. argon2.verify is intentionally
   // expensive; the gate ensures the cost is bounded under a guessing
@@ -226,6 +234,8 @@ export async function verifyAndConsume(
       continue;
     }
     if (!matched) continue;
+
+    if (opts.beforeConsume) await opts.beforeConsume();
 
     // Atomic single-flight consume.
     const now = new Date().toISOString();
