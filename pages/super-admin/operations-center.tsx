@@ -143,7 +143,6 @@ const NAV_MAP: { group: string; links: NavLink[] }[] = [
   ] },
   { group: 'Billing & Settlement', links: [
     { label: 'Billing Forensics', href: '/api/super-admin/billing-forensics/timeline', api: true },
-    { label: 'Settlement Ops', href: '/api/super-admin/settlement-ops', api: true },
     { label: 'Credit Reconciliation', href: '/api/super-admin/credit-reconciliation', api: true },
     { label: 'Credits & Billing (dashboard)', href: '/super-admin/dashboard' },
     { label: 'Free Credits', href: '/super-admin/free-credits' },
