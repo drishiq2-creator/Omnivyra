@@ -99,8 +99,13 @@ BEGIN
     IF p.proconfig IS DISTINCT FROM f.cfg THEN
       RAISE EXCEPTION '053 preflight: % proconfig is % - 053 would install %; escalate, nothing changed', f.fn, p.proconfig, f.cfg;
     END IF;
+    -- ACL ENTRIES and EFFECTIVE privilege (7c M1): a privilege anon / authenticated hold through role membership is not
+    -- an ACL entry, cannot be removed by 053's REVOKE, and would only fail the postcondition AFTER the replace.
     IF EXISTS (SELECT 1 FROM aclexplode(p.acl) a
-                WHERE a.grantee = 0 OR a.grantee IN (SELECT oid FROM pg_roles WHERE rolname IN ('anon', 'authenticated'))) THEN
+                WHERE a.grantee = 0 OR a.grantee IN (SELECT oid FROM pg_roles WHERE rolname IN ('anon', 'authenticated')))
+       OR has_function_privilege('public', to_regprocedure(f.fn), 'EXECUTE')
+       OR EXISTS (SELECT 1 FROM pg_roles r WHERE r.rolname IN ('anon', 'authenticated')
+                   AND has_function_privilege(r.oid, to_regprocedure(f.fn), 'EXECUTE')) THEN
       RAISE EXCEPTION '053 preflight: PUBLIC / anon / authenticated hold a privilege on % (%) - 053 would revoke it; escalate, nothing changed',
         f.fn, ARRAY(SELECT a.grantee::regrole::text || ':' || a.privilege_type || ':' || a.is_grantable FROM aclexplode(p.acl) a ORDER BY 1);
     END IF;
@@ -491,6 +496,9 @@ EXCEPTION
     RETURN row_to_json(v_tx_row)::jsonb;
 END;
 $fn$;
+-- ASSERTED NO-OP (7c M2): the ENVELOPE preflight above refused unless PUBLIC / anon / authenticated hold nothing and
+-- service_role holds EXECUTE, so the next two statements change nothing on any database 053 accepts. They state the
+-- intended end state. Narrowing or widening them is a live ACL rewrite: change the preflight clause with them.
 REVOKE ALL ON FUNCTION public.apply_credit_reservation(uuid,text,integer,integer,integer,text,text,text,text,uuid,uuid,text) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.apply_credit_reservation(uuid,text,integer,integer,integer,text,text,text,text,uuid,uuid,text) TO service_role;
 
@@ -748,6 +756,9 @@ EXCEPTION
     RETURN row_to_json(v_tx_row)::jsonb;
 END;
 $fn$;
+-- ASSERTED NO-OP (7c M2): the ENVELOPE preflight above refused unless PUBLIC / anon / authenticated hold nothing and
+-- service_role holds EXECUTE, so the next two statements change nothing on any database 053 accepts. They state the
+-- intended end state. Narrowing or widening them is a live ACL rewrite: change the preflight clause with them.
 REVOKE ALL ON FUNCTION public.apply_credit_partial_confirm(uuid,uuid,integer,integer,integer,text,text,text,text,uuid) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.apply_credit_partial_confirm(uuid,uuid,integer,integer,integer,text,text,text,text,uuid) TO service_role;
 

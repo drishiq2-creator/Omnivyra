@@ -329,11 +329,23 @@ describe('PROD PATH - prod body -> 20270217000001 -> 053 -> rollback (cb C128: p
     ['EXECUTE for authenticated', `GRANT EXECUTE ON FUNCTION ${RES_REG} TO authenticated`, /PUBLIC \/ anon \/ authenticated hold a privilege/],
     ['EXECUTE for PUBLIC', `GRANT EXECUTE ON FUNCTION ${PC_REG} TO PUBLIC`, /PUBLIC \/ anon \/ authenticated hold a privilege/],
     ['no EXECUTE for service_role', `REVOKE EXECUTE ON FUNCTION ${RES_REG} FROM service_role`, /service_role cannot EXECUTE/],
+    // 7c M1: EXECUTE held by anon only through role MEMBERSHIP - no ACL entry names anon, so only the effective check sees it.
+    // anon is NOINHERIT (Supabase), so a plain membership grants nothing; a PG16+ per-grant WITH INHERIT TRUE does
+    // (the setup control below proved the plain form inert first).
+    ['EXECUTE for anon through role membership',
+      `CREATE ROLE c6_053_inh NOLOGIN; GRANT EXECUTE ON FUNCTION ${RES_REG} TO c6_053_inh; GRANT c6_053_inh TO anon WITH INHERIT TRUE`,
+      /PUBLIC \/ anon \/ authenticated hold a privilege/],
   ])('preflight refuses a live envelope with %s, and nothing is captured or replaced', async (_l, alter, msg) => {
     await inRollback(async () => {
       await prodShape(LIVE_RES);
       const before = [await envelope(RES_REG), await envelope(PC_REG)];
       await q(alter);
+      if (/membership/.test(_l)) {
+        // control on the setup: anon really can execute, and no ACL entry names anon
+        const { rows } = await q(`SELECT has_function_privilege('anon', '${RES_REG}', 'EXECUTE') AS eff`);
+        expect(rows[0].eff).toBe(true);
+        expect((await envelope(RES_REG)).acl.some((e: string) => e.startsWith('anon:'))).toBe(false);
+      }
       const altered = [await envelope(RES_REG), await envelope(PC_REG)];
       expect(altered).not.toEqual(before);                       // the alteration took effect (control on the setup)
       expect(await attempt(MIG)).toMatch(msg);

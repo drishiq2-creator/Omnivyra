@@ -364,8 +364,13 @@ BEGIN
     IF p.proconfig IS DISTINCT FROM f.cfg THEN
       RAISE EXCEPTION '053 preflight: % proconfig is % - 053 would install %; escalate, nothing changed', f.fn, p.proconfig, f.cfg;
     END IF;
+    -- ACL ENTRIES and EFFECTIVE privilege (7c M1): a privilege anon / authenticated hold through role membership is not
+    -- an ACL entry, cannot be removed by 053's REVOKE, and would only fail the postcondition AFTER the replace.
     IF EXISTS (SELECT 1 FROM aclexplode(p.acl) a
-                WHERE a.grantee = 0 OR a.grantee IN (SELECT oid FROM pg_roles WHERE rolname IN ('anon', 'authenticated'))) THEN
+                WHERE a.grantee = 0 OR a.grantee IN (SELECT oid FROM pg_roles WHERE rolname IN ('anon', 'authenticated')))
+       OR has_function_privilege('public', to_regprocedure(f.fn), 'EXECUTE')
+       OR EXISTS (SELECT 1 FROM pg_roles r WHERE r.rolname IN ('anon', 'authenticated')
+                   AND has_function_privilege(r.oid, to_regprocedure(f.fn), 'EXECUTE')) THEN
       RAISE EXCEPTION '053 preflight: PUBLIC / anon / authenticated hold a privilege on % (%) - 053 would revoke it; escalate, nothing changed',
         f.fn, {ACLSET('p.acl')};
     END IF;
@@ -510,8 +515,10 @@ $verify$;
 
 mig = (HEADER + PREFLIGHT
        + f"\nCREATE OR REPLACE FUNCTION {RES_SIG}\nAS $fn${res}$fn$;\n"
+       + "-- ASSERTED NO-OP (7c M2): the ENVELOPE preflight above refused unless PUBLIC / anon / authenticated hold nothing and\n-- service_role holds EXECUTE, so the next two statements change nothing on any database 053 accepts. They state the\n-- intended end state. Narrowing or widening them is a live ACL rewrite: change the preflight clause with them.\n"
        + f"REVOKE ALL ON FUNCTION {RES_REG} FROM PUBLIC, anon, authenticated;\nGRANT EXECUTE ON FUNCTION {RES_REG} TO service_role;\n"
        + f"\nCREATE OR REPLACE FUNCTION {PC_SIG}\nAS $fn${pc}$fn$;\n"
+       + "-- ASSERTED NO-OP (7c M2): the ENVELOPE preflight above refused unless PUBLIC / anon / authenticated hold nothing and\n-- service_role holds EXECUTE, so the next two statements change nothing on any database 053 accepts. They state the\n-- intended end state. Narrowing or widening them is a live ACL rewrite: change the preflight clause with them.\n"
        + f"REVOKE ALL ON FUNCTION {PC_REG} FROM PUBLIC, anon, authenticated;\nGRANT EXECUTE ON FUNCTION {PC_REG} TO service_role;\n"
        + f"\nDROP FUNCTION IF EXISTS {EXP_REG};\n"
        + POST

@@ -131,6 +131,13 @@ it('ENVELOPE (7c V1): the preflight reads prosecdef, proconfig and the ACL of bo
   // the configs the preflight requires are exactly the ones the CREATE statements install
   expect(pre).toContain("ARRAY['search_path=pg_catalog, public']");
   expect(pre).toContain("ARRAY['search_path=public, extensions']");
+  // 7c M1: the effective-privilege form too (membership), not only ACL entries
+  expect(pre).toContain("has_function_privilege('public', to_regprocedure(f.fn), 'EXECUTE')");
+  expect(pre).toContain("AND has_function_privilege(r.oid, to_regprocedure(f.fn), 'EXECUTE')");
+  // 7c M2: every forward REVOKE/GRANT pair sits directly under the ASSERTED NO-OP label
+  const pairs = [...SQL.matchAll(/(.*)\nREVOKE ALL ON FUNCTION public\.apply_credit_\w+\([^)]*\) FROM PUBLIC, anon, authenticated;\nGRANT EXECUTE/g)];
+  expect(pairs).toHaveLength(2);
+  for (const m of pairs) expect(m[1]).toMatch(/change the preflight clause with them\.$/);
   expect(SQL).toMatch(/LANGUAGE plpgsql\nSET search_path = pg_catalog, public\nAS \$fn\$/);
   expect(SQL).toMatch(/LANGUAGE plpgsql\nSET search_path = public, extensions\nAS \$fn\$/);
 });
