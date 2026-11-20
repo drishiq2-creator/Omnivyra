@@ -11,8 +11,13 @@
 -- presented, and keeping the row preserves its reuse-detection history). refresh_tokens.user_id is VARCHAR - compared
 -- as text. The access JWTs already issued are NOT touched here: the epoch bump (invalidate_user_sessions) covers them.
 --
--- Takes the PUBLIC users.id (what every caller has) and resolves the GoTrue uid (users.supabase_uid). A user with no
--- auth identity revokes nothing and says so.
+-- Takes the PUBLIC users.id (what every caller has) and resolves the GoTrue uid (users.supabase_uid). THREE distinct
+-- outcomes (7c finding / b3 ruling 2026-11-20 - never one benign answer for two states):
+--   { user_found:false, ... }                       - no public.users row has this id (stale / mistyped id: the
+--                                                     caller must say "user not found", never "done, 0 revoked");
+--   { user_found:true, auth_identity:false, ... }   - the user exists but has no GoTrue identity: nothing to revoke;
+--   { user_found:true, auth_identity:true, sessions_deleted:n, legacy_refresh_tokens_revoked:m }.
+-- FOUND (not v_uid IS NULL) separates the first two: both leave v_uid NULL.
 --
 -- ENVELOPE (053 pattern): SECURITY DEFINER, search_path pinned, EXECUTE for service_role only; the preflight REFUSES
 -- (never adopts) if the function already exists or if the auth schema differs from C138, or if the owner cannot
@@ -68,8 +73,11 @@ BEGIN
     RAISE EXCEPTION 'REVOKE_USER_GOTRUE_SESSIONS_NULL_USER';
   END IF;
   SELECT u.supabase_uid INTO v_uid FROM public.users u WHERE u.id = p_user_id;
+  IF NOT FOUND THEN
+    RETURN jsonb_build_object('user_found', false, 'auth_identity', false, 'sessions_deleted', 0, 'legacy_refresh_tokens_revoked', 0);
+  END IF;
   IF v_uid IS NULL THEN
-    RETURN jsonb_build_object('auth_identity', false, 'sessions_deleted', 0, 'legacy_refresh_tokens_revoked', 0);
+    RETURN jsonb_build_object('user_found', true, 'auth_identity', false, 'sessions_deleted', 0, 'legacy_refresh_tokens_revoked', 0);
   END IF;
   WITH d AS (DELETE FROM auth.sessions s WHERE s.user_id = v_uid RETURNING 1)
   SELECT count(*) INTO v_sessions FROM d;
@@ -78,7 +86,7 @@ BEGIN
      WHERE t.user_id = v_uid::text AND t.session_id IS NULL AND t.revoked IS DISTINCT FROM true
     RETURNING 1)
   SELECT count(*) INTO v_legacy FROM r;
-  RETURN jsonb_build_object('auth_identity', true, 'sessions_deleted', v_sessions, 'legacy_refresh_tokens_revoked', v_legacy);
+  RETURN jsonb_build_object('user_found', true, 'auth_identity', true, 'sessions_deleted', v_sessions, 'legacy_refresh_tokens_revoked', v_legacy);
 END
 $fn$;
 

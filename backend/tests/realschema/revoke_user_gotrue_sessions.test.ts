@@ -4,7 +4,7 @@
  *   - the user's GoTrue sessions are deleted and their refresh tokens go with them (FK cascade);
  *   - a legacy refresh token (session_id NULL) is marked revoked (user_id VARCHAR compared as text);
  *   - ANOTHER user's sessions and tokens are untouched (control); a non-uuid user_id string never errors;
- *   - a user with no auth identity revokes nothing and says so;
+ *   - THREE distinct outcomes: no such user (user_found:false) vs a user without an auth identity vs revoked;
  *   - envelope: SECURITY DEFINER, exact pinned search_path, EXECUTE for service_role only;
  *   - the migration's $pre$ refuses a differing schema / an existing function, and $post$ can fail.
  * A green run concerns a disposable database built from the committed baseline plus replayed migrations.
@@ -51,7 +51,7 @@ describe('revoke_user_gotrue_sessions', () => {
       await seedSession(UB, 'b0000000-0000-4000-8000-00000000000b', 2);
       await db.query("INSERT INTO auth.refresh_tokens (token, user_id, revoked, session_id) VALUES ('legacy-a', $1, false, NULL), ('legacy-b', $2, false, NULL), ('junk', 'not-a-uuid', false, NULL)", [UA, UB]);
       const { rows } = await db.query('SELECT public.revoke_user_gotrue_sessions($1) AS r', [a]);
-      expect(rows[0].r).toEqual({ auth_identity: true, sessions_deleted: 2, legacy_refresh_tokens_revoked: 1 });
+      expect(rows[0].r).toEqual({ user_found: true, auth_identity: true, sessions_deleted: 2, legacy_refresh_tokens_revoked: 1 });
       expect(await count('SELECT count(*) n FROM auth.sessions WHERE user_id = $1', [UA])).toBe(0);
       expect(await count("SELECT count(*) n FROM auth.refresh_tokens WHERE user_id = $1 AND session_id IS NOT NULL", [UA])).toBe(0);
       expect(await count("SELECT count(*) n FROM auth.refresh_tokens WHERE token = 'legacy-a' AND revoked", [])).toBe(1);
@@ -68,10 +68,35 @@ describe('revoke_user_gotrue_sessions', () => {
       await seedSession(UA, 'a0000000-0000-4000-8000-0000000000c1', 1);
       await db.query('SELECT public.revoke_user_gotrue_sessions($1)', [a]);
       const again = await db.query('SELECT public.revoke_user_gotrue_sessions($1) AS r', [a]);
-      expect(again.rows[0].r).toEqual({ auth_identity: true, sessions_deleted: 0, legacy_refresh_tokens_revoked: 0 });
+      expect(again.rows[0].r).toEqual({ user_found: true, auth_identity: true, sessions_deleted: 0, legacy_refresh_tokens_revoked: 0 });
       const n = await seedUser('noauth@gotrue.test', null);
       expect((await db.query('SELECT public.revoke_user_gotrue_sessions($1) AS r', [n])).rows[0].r)
-        .toEqual({ auth_identity: false, sessions_deleted: 0, legacy_refresh_tokens_revoked: 0 });
+        .toEqual({ user_found: true, auth_identity: false, sessions_deleted: 0, legacy_refresh_tokens_revoked: 0 });
+    });
+  });
+
+  it('an UNKNOWN user id is user_found:false - distinct from a user without an auth identity; nothing touched', async () => {
+    await inRollback(async () => {
+      await seedUser('c@gotrue.test', UA);
+      await seedSession(UA, 'a0000000-0000-4000-8000-0000000000d1', 1);
+      const ghost = 'dead0000-0000-4000-8000-00000000dead'; // no public.users row has this id
+      expect((await db.query('SELECT public.revoke_user_gotrue_sessions($1) AS r', [ghost])).rows[0].r)
+        .toEqual({ user_found: false, auth_identity: false, sessions_deleted: 0, legacy_refresh_tokens_revoked: 0 });
+      expect(await count('SELECT count(*) n FROM auth.sessions WHERE user_id = $1', [UA])).toBe(1); // control: untouched
+    });
+  });
+
+  it('UNION COVERAGE: the three outcomes are pairwise distinct and the key set is fixed', async () => {
+    await inRollback(async () => {
+      const withAuth = await seedUser('u1@gotrue.test', UA);
+      const noAuth = await seedUser('u2@gotrue.test', null);
+      const call = async (id: string) => (await db.query('SELECT public.revoke_user_gotrue_sessions($1) AS r', [id])).rows[0].r;
+      const outcomes = [await call('dead0000-0000-4000-8000-00000000beef'), await call(noAuth), await call(withAuth)];
+      const KEYS = ['auth_identity', 'legacy_refresh_tokens_revoked', 'sessions_deleted', 'user_found'];
+      for (const o of outcomes) expect(Object.keys(o).sort()).toEqual(KEYS);
+      // (user_found, auth_identity) identifies the outcome: no two states share an answer.
+      const tags = outcomes.map((o) => `${o.user_found}/${o.auth_identity}`);
+      expect(tags).toEqual(['false/false', 'true/false', 'true/true']);
     });
   });
 
