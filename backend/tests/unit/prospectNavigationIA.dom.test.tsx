@@ -48,24 +48,20 @@ describe('2 — Prospects sits beneath Prospect and points at /prospects', () =>
   });
 });
 
-describe('2b — PI-LDB: Import is reachable from the Prospect menu', () => {
-  // `/prospects/[id]` was reachable only by typing a URL until WS-10 added a
-  // list page that linked to it. An import flow nothing links to would be the
-  // same defect, so reachability is asserted rather than assumed.
-  it('is a child of Prospect', () => {
-    expect(childLabels('prospect')).toContain('Import');
+describe('2b — PI-LDB: Import is NOT placed in the header by this branch', () => {
+  // c6 2026-11-20, CHANGED CONTRACT (b3 ruling 4): 04 is restructuring the header (owner-approved) and places the
+  // Import entry in the new Prospect menu behind the default-OFF flag (lib/prospects/import/prospectImportUi.ts).
+  // This branch must not add one: a menu item to a default-off page is a link to a 404. The former "is a Prospect
+  // action" case is removed rather than kept - with no Import child it would pass vacuously.
+  it('the Prospect menu has no Import child', () => {
+    expect(childLabels('prospect')).not.toContain('Import');
   });
 
-  it('points at the import route', () => {
-    expect(childHref('prospect', 'Import')).toBe('/prospects/import');
+  it('control: the Prospect menu itself is present with its children', () => {
+    expect(childLabels('prospect').length).toBeGreaterThan(0);
   });
 
-  it('is a Prospect action, not a Lead Intelligence lens', () => {
-    const importItem = prospect().children.find((c) => c.label === 'Import');
-    expect(importItem?.group).toBeUndefined();
-  });
-
-  it('activates exactly the Prospect group and nothing else', () => {
+  it('a /prospects/import URL still activates exactly the Prospect group', () => {
     expect(activeGroups('/prospects/import')).toEqual(['Prospect']);
   });
 });
