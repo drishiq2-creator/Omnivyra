@@ -20,12 +20,16 @@ jest.mock('../../services/authResolver', () => ({
       ? { user: { id, supabaseUid: `sb-${id}`, email: 'invitee@example.test', status: 'active' }, error: null }
       : { user: null, error: 'NO_TOKEN' };
   },
+  extractAccessToken: () => 'test-user-jwt',
 }));
 const mockRevokeAll = jest.fn();
 const mockClearCookie = jest.fn();
 jest.mock('../../security/SessionAuthorityService', () => ({
   clearSessionCookie: (...a: unknown[]) => mockClearCookie(...a),
-  revokeAllSessionsForUser: (...a: unknown[]) => mockRevokeAll(...a),
+}));
+jest.mock('../../services/lifecycleGovernance', () => ({
+  // the hotfix's revoke-all (JWT epoch + canonical sessions + refresh tokens via the caller's JWT) - what set-password calls
+  revokeAllAccessForUser: async (...a: unknown[]) => ({ revokedAuthSessions: await mockRevokeAll(...a), refreshTokensRevoked: true }),
 }));
 jest.mock('../../security/stepup/StepUpSessionService', () => ({ revokeForUser: jest.fn(async () => 0) }));
 const mockAudit = jest.fn();
@@ -67,6 +71,7 @@ describe('set-password: a failed session revoke is reported, never silent', () =
     const r = await post();
     expect(r.status).toBe(200);
     expect(r.body).toEqual({ success: true, route: expect.any(String) });
+    expect(mockRevokeAll).toHaveBeenCalledWith(USER, 'credential_rotation:signup', { userJwt: 'test-user-jwt' });
     expect(mockClearCookie).toHaveBeenCalledTimes(1);
     expect(mockAudit).not.toHaveBeenCalledWith(expect.objectContaining({ decision: 'auth_session_revoke_failed' }));
   });
