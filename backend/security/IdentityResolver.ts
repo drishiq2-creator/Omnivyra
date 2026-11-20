@@ -20,6 +20,7 @@
  */
 
 import type { NextApiRequest } from 'next';
+import { throwOnSecurityReadError } from './SecurityReadError';
 import { resolveAuthenticatedUser } from '../services/authResolver';
 import { supabase as db } from '../db/supabaseClient';
 import { logger } from '../services/logger';
@@ -71,10 +72,11 @@ interface RoleRow {
 }
 
 async function fetchOrgMemberships(userId: string): Promise<PrincipalOrgMembership[]> {
-  const { data } = await db
+  const { data, error: secErr1 } = await db
     .from('user_company_roles')
     .select('company_id, role, status')
     .eq('user_id', userId);
+  throwOnSecurityReadError({ error: secErr1 }, 'fetchOrgMemberships', 'user_company_roles');
   const rows = (data ?? []) as RoleRow[];
   return rows
     .filter((r): r is RoleRow & { company_id: string; role: string; status: string } =>
@@ -92,11 +94,12 @@ async function fetchOrgMemberships(userId: string): Promise<PrincipalOrgMembersh
 }
 
 async function fetchActiveCompanyId(userId: string): Promise<string | null> {
-  const { data } = await db
+  const { data, error: secErr2 } = await db
     .from('users')
     .select('active_company_id')
     .eq('id', userId)
     .maybeSingle();
+  throwOnSecurityReadError({ error: secErr2 }, 'fetchActiveCompanyId', 'users');
   return ((data as any)?.active_company_id as string | null) ?? null;
 }
 
@@ -167,7 +170,7 @@ async function fetchStepUpState(
   if (!authSessionId) {
     return { active: false, expiresAt: null, factor: null, sessionId: null };
   }
-  const { data } = await db
+  const { data, error: secErr3 } = await db
     .from('stepup_sessions')
     .select('id, factor, expires_at, consumed_at, revoked_at')
     .eq('user_id', userId)
@@ -177,6 +180,7 @@ async function fetchStepUpState(
     .order('started_at', { ascending: false })
     .limit(1)
     .maybeSingle();
+  throwOnSecurityReadError({ error: secErr3 }, 'fetchStepUpState', 'stepup_sessions');
   if (!data) return { active: false, expiresAt: null, factor: null, sessionId: null };
   const expiresAt = new Date((data as any).expires_at);
   if (expiresAt.getTime() <= Date.now()) {
@@ -217,7 +221,7 @@ async function fetchDeviceState(
   userId: string,
   fingerprint: string,
 ): Promise<PrincipalDeviceState> {
-  const { data } = await db
+  const { data, error: secErr4 } = await db
     .from('trusted_devices')
     .select('id, expires_at, revoked_at')
     .eq('user_id', userId)
@@ -226,6 +230,7 @@ async function fetchDeviceState(
     .order('last_seen_at', { ascending: false })
     .limit(1)
     .maybeSingle();
+  throwOnSecurityReadError({ error: secErr4 }, 'fetchDeviceState', 'trusted_devices');
   if (!data) return { deviceId: null, trusted: false, fingerprint };
   const expiresAt = new Date((data as any).expires_at);
   if (expiresAt.getTime() <= Date.now()) {

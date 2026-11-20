@@ -38,6 +38,7 @@
  */
 
 import { ownedDbTable } from '../db/writeOwner';
+import { throwOnSecurityReadError } from './SecurityReadError';
 import { revokeFactor as revokeTotpFactor, findActiveForUser as findActiveTotpFactor } from './totp/TotpFactorRepository';
 import { listForUser as listWebAuthnForUser, revokeCredential as revokeWebAuthnCredential } from './webauthn/WebAuthnCredentialRepository';
 import { revokeAllSessionsForUser } from './SessionAuthorityService';
@@ -108,11 +109,12 @@ export async function adminResetMfa(input: AdminResetMfaInput): Promise<AdminRes
   let recoveryCodesRevoked = 0;
   if (input.alsoRevokeRecoveryCodes !== false) {
     try {
-      const { data: claimed } = await ownedDbTable('recovery_codes')
+      const { data: claimed, error: secErr1 } = await ownedDbTable('recovery_codes')
         .update({ used_at: new Date().toISOString(), used_ip: null })
         .eq('user_id', input.userId)
         .is('used_at', null)
         .select('id');
+      throwOnSecurityReadError({ error: secErr1 }, 'adminResetMfa', 'recovery_codes');
       recoveryCodesRevoked = claimed?.length ?? 0;
     } catch (err) {
       logger.warn('admin_mfa_reset_recovery_revoke_failed', {
