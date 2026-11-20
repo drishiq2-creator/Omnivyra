@@ -108,3 +108,24 @@ describe('payment webhook - a rejected signature is counted, with WHY', () => {
     expect(mockMetrics[0][4]).toEqual({ provider: 'razorpay', reason: 'signature_mismatch' });
   });
 });
+
+describe('payment webhook - an invalid mode is its own reason (7c)', () => {
+  it('getProviderCredentials throws (invalid PAYMENT_PROVIDER_MODE) -> reason mode_invalid at ERROR, counted', async () => {
+    const orch = jest.requireMock('../../services/payments/orchestrator');
+    const orig = orch.getProviderCredentials;
+    orch.getProviderCredentials = () => { throw new Error("PAYMENT_PROVIDER_MODE must be 'test' or 'live'"); };
+    try {
+      const req: any = new EventEmitter();
+      Object.assign(req, { method: 'POST', query: { provider: 'razorpay' }, headers: {} });
+      const r = res();
+      const p = (webhook as any)(req, r);
+      req.emit('data', '{}'); req.emit('end');
+      await p; await flush();
+      expect(r.statusCode).toBe(401);
+      expect(mockLog.error).toHaveBeenCalledWith('payment_webhook_rejected', { provider: 'razorpay', reason: 'mode_invalid' });
+      expect(mockMetrics[0][4]).toEqual({ provider: 'razorpay', reason: 'mode_invalid' });
+    } finally {
+      orch.getProviderCredentials = orig;
+    }
+  });
+});

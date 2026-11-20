@@ -29,3 +29,22 @@ export function checkPaymentReadiness(): PaymentReadiness {
   const v = validateConfiguredProviders(PROVIDER_REGISTRY, mode);
   return v.ok ? { ok: true, mode } : { ok: false, code: 'PAYMENT_CONFIG_INVALID', detail: v.errors.join('; ') };
 }
+
+/**
+ * Why a payment webhook's signature was rejected (b3/7c 2026-11-20) - so an operator fixes the right thing:
+ *   secret_unset       - no webhook secret for the active mode (configure it)
+ *   mode_invalid       - PAYMENT_PROVIDER_MODE is invalid, so which secret applies is undeterminable (fix the env var)
+ *   signature_mismatch - a secret exists but this delivery did not verify (wrong secret, or not the provider)
+ */
+export const WEBHOOK_REJECT_REASONS = ['secret_unset', 'mode_invalid', 'signature_mismatch'] as const;
+export type WebhookRejectReason = (typeof WEBHOOK_REJECT_REASONS)[number];
+
+export function classifyWebhookRejection(readWebhookSecret: () => string | undefined): WebhookRejectReason {
+  let secret: string | undefined;
+  try {
+    secret = readWebhookSecret();
+  } catch {
+    return 'mode_invalid';
+  }
+  return secret ? 'signature_mismatch' : 'secret_unset';
+}

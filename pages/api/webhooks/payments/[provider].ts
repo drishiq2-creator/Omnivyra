@@ -32,6 +32,7 @@ import { createApiRoute as __createApiRoute } from '../../../../lib/platform/rou
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { handleWebhook, getProviderCredentials } from '@/backend/services/payments/orchestrator';
 import { recordMetric } from '@/backend/services/systemHealthMetricsService';
+import { classifyWebhookRejection } from '@/backend/services/payments/paymentReadiness';
 import type { PaymentProviderId } from '@/backend/services/payments/orchestrator';
 import { logger } from '@/backend/services/logger';
 import { supabase } from '@/backend/db/supabaseClient';
@@ -115,9 +116,10 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       // Counted durably, with WHY (b3 2026-11-20): C144 could not tell "webhook not configured" from "signature always
       // invalid". secret_unset = no webhook secret for the active mode (a configuration error, error level);
       // signature_mismatch = a secret exists but this delivery did not verify (wrong secret, or not the provider).
-      let reason: 'secret_unset' | 'signature_mismatch' = 'signature_mismatch';
-      try { if (!getProviderCredentials(provider).webhookSecret) reason = 'secret_unset'; } catch { /* mode invalid: keep mismatch */ }
-      if (reason === 'secret_unset') logger.error('payment_webhook_rejected', { provider, reason });
+      // mode_invalid (7c): PAYMENT_PROVIDER_MODE is invalid, so WHICH secret applies cannot be determined - an env var to
+      // fix, not a wrong secret to chase. Classification lives in paymentReadiness (WEBHOOK_REJECT_REASONS).
+      const reason = classifyWebhookRejection(() => getProviderCredentials(provider).webhookSecret);
+      if (reason !== 'signature_mismatch') logger.error('payment_webhook_rejected', { provider, reason });
       else logger.warn('payment_webhook_rejected', { provider, reason });
       void recordMetric('payments', 'webhook_signature_rejected', 1, 'count', { provider, reason });
       return res.status(401).json({ ok: false, error: 'signature_invalid' });

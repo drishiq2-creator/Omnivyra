@@ -88,3 +88,21 @@ describe('predeploy-check carries the same live name list as the code', () => {
     expect(inScript.length).toBeGreaterThan(0); // not vacuous
   });
 });
+
+// b3/7c 2026-11-20: every webhook rejection reason, driven from the union (WEBHOOK_REJECT_REASONS as a value).
+describe('classifyWebhookRejection - every reason in the union', () => {
+  const { WEBHOOK_REJECT_REASONS, classifyWebhookRejection } = jest.requireActual('../../services/payments/paymentReadiness');
+  const INPUT: Record<string, () => string | undefined> = {
+    secret_unset: () => undefined,
+    mode_invalid: () => { throw new PaymentModeInvalidError('production'); },
+    signature_mismatch: () => 'whsec_x',
+  };
+  it('the input table covers EXACTLY the union', () => {
+    expect(Object.keys(INPUT).sort()).toEqual([...WEBHOOK_REJECT_REASONS].sort());
+  });
+  it.each([...(jest.requireActual('../../services/payments/paymentReadiness').WEBHOOK_REJECT_REASONS as string[])])(
+    '%s', (reason) => { expect(classifyWebhookRejection(INPUT[reason])).toBe(reason); });
+  it('an empty-string secret is unset, not a mismatch', () => {
+    expect(classifyWebhookRejection(() => '')).toBe('secret_unset');
+  });
+});

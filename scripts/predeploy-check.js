@@ -156,6 +156,9 @@ if (fs.existsSync(envPath)) {
 // enabled provider's live names must be present. NAMES ONLY - values are never
 // printed; the mode value itself is not a secret. This list is pinned to
 // providerConfig.requiredEnvNames(*, 'live') by paymentLiveReadiness.test.ts.
+// AUTHORITY: when .env.local exists it is the ONLY source read (in this repo .env.local IS production). A mode set
+// only in the hosting provider's environment is invisible here: the gate would print "test (unset)" and pass while
+// production runs live. A green gate is proof of what .env.local says, not of what production runs.
 const PAYMENT_LIVE_REQUIRED = [
   'RAZORPAY_LIVE_KEY_ID', 'RAZORPAY_LIVE_KEY_SECRET', 'RAZORPAY_LIVE_WEBHOOK_SECRET',
   'CASHFREE_PROD_APP_ID', 'CASHFREE_PROD_SECRET_KEY',
@@ -186,8 +189,15 @@ const PAYMENT_LIVE_REQUIRED = [
     process.stdout.write(`  payment mode: live, ${PAYMENT_LIVE_REQUIRED.length} live names present
 `);
   } else {
-    process.stdout.write(`  payment mode: ${mode || 'test (unset)'}
-`);
+    // b3/7c: .env.local is the only source read here; live payment vars may live in the HOSTING env (Vercel production).
+    // So this gate never claims the production mode: it says what it read and that the hosting env is unverified.
+    // The runtime create-order gate (checkPaymentReadiness) stays the authoritative guard.
+    process.stdout.write(
+      `  payment mode: ${mode ? `'${mode}' in .env.local` : 'not set in .env.local'} — ` +
+      `NOT VERIFIED against the hosting environment (run the value-free name/mode check there before a live purchase)
+`,
+    );
+    unverified.push('payment mode not verified against hosting env');
   }
 }
 
