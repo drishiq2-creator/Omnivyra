@@ -102,7 +102,7 @@ describe('a PRICE that cannot be resolved is PRICING_UNAVAILABLE (503 + Retry-Af
     const line = errSpy.mock.calls.find((c) => String(c[0]).includes('billed_ai_settlement_unpriced'));
     expect(line).toBeDefined(); // reconciliation signal
     // NB-A: it carries the JOIN KEYS, so it can be reconciled against the request and its ledger attempt.
-    expect(JSON.parse(String(line![1]))).toMatchObject({ referenceId: 'r', idempotencyReferenceId: 'r', orgId: 'o', action: 'content_rewrite' });
+    expect(JSON.parse(String(line![1]))).toMatchObject({ referenceId: 'r', idempotencyKind: 'http', idempotencyReference: 'r', orgId: 'o', action: 'content_rewrite' });
     errSpy.mockRestore();
   });
 

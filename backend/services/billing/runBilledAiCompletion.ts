@@ -48,7 +48,7 @@
 
 import { runCompletionWithOperation } from '../aiGateway';
 import { runBilledOperation, type OrchestratorResult } from './enterpriseBillingOrchestrator';
-import type { BillingIdempotencyArgs } from './billingIdempotencyService';
+import { idempotencyReference, type BillingIdempotencyArgs } from './billingIdempotencyService';
 import type { CreditAction, LlmExecutorResult } from '../creditExecutionService';
 import { checkAiBillingGuard, runWithCreditHandle, type CreditHandle } from './aiGatewayBillingGuard';
 import {
@@ -224,7 +224,10 @@ export async function runBilledAiCompletion(
         console.error('[runBilledAiCompletion] billed_ai_settlement_unpriced', JSON.stringify({
           module: args.module, orgId: args.orgId, userId: args.userId, action: args.action,
           referenceType: args.referenceType, referenceId: args.referenceId,
-          idempotencyReferenceId: args.idempotency?.referenceId ?? null,
+          // BillingIdempotencyArgs is a union (CI-798 typecheck): every kind has its own reference (7c's total helper),
+          // so a queue- or cron-driven call still logs its ledger join key, never null.
+          idempotencyKind: args.idempotency.kind,
+          idempotencyReference: idempotencyReference(args.idempotency),
           provider: args.llmPricing.provider, model: args.llmPricing.model,
           error: err instanceof Error ? err.message : String(err),
         }));
