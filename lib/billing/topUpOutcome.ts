@@ -25,6 +25,19 @@
  * again" stays the fast path. The provider webhook also grants, but its prod registration is unconfirmed (PL-120), so
  * the copy promises no timing.
  */
+/** The outcome union AS A VALUE (b3 standard 2026-11-20): the type derives from it, and the tests check every table
+ * against it in both directions. */
+export const VERIFY_OUTCOME_KINDS = ['credited', 'not_charged', 'paid_pending', 'unconfirmed'] as const;
+export type VerifyOutcomeKind = (typeof VERIFY_OUTCOME_KINDS)[number];
+
+export function isVerifyOutcomeKind(kind: string): kind is VerifyOutcomeKind {
+  return (VERIFY_OUTCOME_KINDS as readonly string[]).includes(kind);
+}
+
+/** Closure actions (verify 400 status:'failed') after which the payer was definitively NOT charged. Any other action,
+ * known today or added later, is unconfirmed. */
+export const NOT_CHARGED_ACTIONS = ['closed', 'already_closed'] as const;
+
 export type VerifyOutcome =
   | { kind: 'credited'; credits: number | null }
   | { kind: 'not_charged'; message: string }
@@ -47,14 +60,22 @@ export function classifyVerify(status: number | null, body: unknown): VerifyOutc
   if (b.status === 'paid') return { kind: 'paid_pending', message: TOPUP_PAID_PENDING };
   const action = typeof b.action === 'string' ? b.action : '';
   if (status === 400 && b.ok === false && b.status === 'failed') {
-    if (action === 'closed' || action === 'already_closed') return { kind: 'not_charged', message: TOPUP_NOT_CHARGED };
+    if ((NOT_CHARGED_ACTIONS as readonly string[]).includes(action)) return { kind: 'not_charged', message: TOPUP_NOT_CHARGED };
   }
   return { kind: 'unconfirmed', message: TOPUP_UNCONFIRMED };
 }
 
-/** A verify outcome during which no NEW purchase may be started (the user may already have paid). */
-export function blocksNewPurchase(outcome: VerifyOutcome): boolean {
-  return outcome.kind === 'paid_pending' || outcome.kind === 'unconfirmed';
+/** Per outcome: may a NEW purchase start? false only where we KNOW no payment is pending (credited / not charged). */
+export const BLOCKS_NEW_PURCHASE: Record<VerifyOutcomeKind, boolean> = {
+  credited: false,
+  not_charged: false,
+  paid_pending: true,
+  unconfirmed: true,
+};
+
+/** An outcome kind outside the union blocks: the safe default is "the user may already have paid". */
+export function blocksNewPurchase(kind: string): boolean {
+  return isVerifyOutcomeKind(kind) ? BLOCKS_NEW_PURCHASE[kind] : true;
 }
 
 /** create-order runs BEFORE any payment: nothing can have been charged yet. Codes -> copy, never raw. */

@@ -17,7 +17,10 @@ const apiFetch = jest.fn();
 jest.mock('@/lib/apiFetch', () => ({ apiFetch: (...a: unknown[]) => apiFetch(...a) }));
 
 import TopUpPanel from '../../../components/billing/TopUpPanel';
-import { TOPUP_NOT_CHARGED, TOPUP_PAID_PENDING, TOPUP_UNCONFIRMED, classifyVerify, createOrderMessage } from '../../../lib/billing/topUpOutcome';
+import {
+  BLOCKS_NEW_PURCHASE, NOT_CHARGED_ACTIONS, TOPUP_NOT_CHARGED, TOPUP_PAID_PENDING, TOPUP_UNCONFIRMED, VERIFY_OUTCOME_KINDS,
+  blocksNewPurchase, classifyVerify, createOrderMessage,
+} from '../../../lib/billing/topUpOutcome';
 
 type Answer = { status: number; body?: unknown } | 'throw';
 const res = (a: Answer) =>
@@ -99,7 +102,7 @@ describe('top-up verify after payment', () => {
     expect(buyButton().disabled).toBe(false);
   });
 
-  it.each(['deferred_unknown', 'already_completed', 'errored', 'not_found', undefined])('400 status:failed with NON-definitive action %s -> unconfirmed, Buy DISABLED (never "not charged")', async (action) => {
+  it.each(['deferred_unknown', 'already_completed', 'errored', 'not_found', 'some_future_action', undefined])('400 status:failed with NON-definitive action %s -> unconfirmed, Buy DISABLED (never "not charged")', async (action) => {
     verifyAnswers = [{ status: 400, body: { ok: false, status: 'failed', ...(action ? { action } : {}) } }];
     render(<TopUpPanel orgId="co-a" />);
     await buy();
@@ -128,6 +131,27 @@ describe('create-order failures (before any payment)', () => {
     await waitFor(() => expect(screen.getByText(/You weren't charged/)).toBeTruthy());
     expect(screen.queryByText(/purchase_record_failed|order_creation_failed|Network unreachable/)).toBeNull();
     expect(verifyCalls()).toHaveLength(0);
+  });
+
+  it('outcome union: BLOCKS_NEW_PURCHASE covers VERIFY_OUTCOME_KINDS in both directions', () => {
+    expect(Object.keys(BLOCKS_NEW_PURCHASE).sort()).toEqual([...VERIFY_OUTCOME_KINDS].sort());
+  });
+
+  it('outcome union: every kind classifyVerify produces is a member, and every member is producible', () => {
+    const produced = new Set([
+      classifyVerify(200, { ok: true }),
+      ...NOT_CHARGED_ACTIONS.map((action) => classifyVerify(400, { ok: false, status: 'failed', action })),
+      classifyVerify(500, { ok: false, status: 'paid' }),
+      classifyVerify(null, undefined),
+    ].map((o) => o.kind));
+    expect([...produced].sort()).toEqual([...VERIFY_OUTCOME_KINDS].sort());
+  });
+
+  it('unknown member: an outcome kind outside the union BLOCKS a new purchase (safe default)', () => {
+    expect(blocksNewPurchase('some_future_kind')).toBe(true);
+    // Control: the known non-blocking kinds really are false, so the line above is not vacuous.
+    expect(blocksNewPurchase('credited')).toBe(false);
+    expect(blocksNewPurchase('not_charged')).toBe(false);
   });
 
   it('classifier tables', () => {

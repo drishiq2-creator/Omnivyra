@@ -11,7 +11,7 @@ import { apiFetch } from '@/lib/apiFetch';
 import { createIdempotentOperation } from '@/lib/idempotency';
 import { resolvePrice, currencySymbol, CURRENCIES, type Currency } from '@/lib/billing/currency';
 import { TOPUPS } from '@/lib/billing/commercialPlans';
-import { TOPUP_UNCONFIRMED, blocksNewPurchase, classifyVerify, createOrderMessage } from '@/lib/billing/topUpOutcome';
+import { TOPUP_UNCONFIRMED, blocksNewPurchase, classifyVerify, createOrderMessage, isVerifyOutcomeKind } from '@/lib/billing/topUpOutcome';
 
 const RAZORPAY_JS = 'https://checkout.razorpay.com/v1/checkout.js';
 const CASHFREE_JS = 'https://sdk.cashfree.com/js/v3/cashfree.js';
@@ -256,7 +256,9 @@ export default function TopUpPanel({ orgId }: { orgId: string | null | undefined
   }, [orgId, runVerify, currency, reportClosure]);
 
   const busy = status.kind === 'creating' || status.kind === 'paying' || status.kind === 'verifying';
-  const purchaseBlocked = blocksNewPurchase({ kind: status.kind } as any);
+  // Only a panel status that IS a verify outcome (unconfirmed / paid_pending) consults the table; idle, success, failed
+  // etc. are the panel's own states and never block.
+  const purchaseBlocked = isVerifyOutcomeKind(status.kind) && blocksNewPurchase(status.kind);
   const checkAgain = () => {
     const last = lastVerify.current;
     if (last) void runVerify(last.order, last.orderId, last.paymentId, last.signature, last.headers);
