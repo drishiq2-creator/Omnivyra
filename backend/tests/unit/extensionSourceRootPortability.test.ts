@@ -65,6 +65,16 @@ describe('root resolution', () => {
     expect(() => extensionFilePath('C:\\r', ['core\\apiClient.js'], path.win32)).toThrow(/separator/);
   });
 
+  // CODE only: main's vendored suites (PL-18) carry a COMMENT recording the old Desktop path as history; a
+  // comment loads nothing, so it is stripped before the check (stage-0e merge, a9). A real path in code still fails.
+  const MACHINE_PATH = /OneDrive|Users[\\/]Admin|omnivyra chrome ext/;
+  const codeOnly = (src: string) => src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:'"\x60])\/\/.*$/gm, '$1');
+
+  it('CONTROL: a machine path in CODE is caught; the same path in a comment is not', () => {
+    expect(codeOnly("const ROOT = 'C:/Users/Admin/OneDrive/omnivyra chrome ext';")).toMatch(MACHINE_PATH);
+    expect(codeOnly('// was C:/Users/Admin/OneDrive/... (history)\nconst ok = 1;')).not.toMatch(MACHINE_PATH);
+  });
+
   it('no test or helper hard-codes a machine-specific extension path', () => {
     const files = [
       'backend/tests/unit/extensionDispatchLeaseRenewal.test.ts',
@@ -73,7 +83,7 @@ describe('root resolution', () => {
     ];
     for (const f of files) {
       const src = fs.readFileSync(path.join(process.cwd(), ...f.split('/')), 'utf8');
-      expect(src).not.toMatch(/OneDrive|Users[\\/]Admin|omnivyra chrome ext/);
+      expect(codeOnly(src)).not.toMatch(MACHINE_PATH);
     }
   });
 });
