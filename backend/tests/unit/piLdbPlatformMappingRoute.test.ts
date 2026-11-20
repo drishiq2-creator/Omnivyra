@@ -65,11 +65,30 @@ const call = async (r: Partial<NextApiRequest>) => {
 };
 
 beforeEach(() => {
+  // c6 2026-11-20: the route is gated (ingestion on + PI-LDB schema applied); these cases describe it OPEN.
+  process.env.ENABLE_LEAD_INGESTION = 'true';
+  process.env.PI_LDB_SCHEMA_READY = 'true';
   superAdmin = { id: SUPER };
   requireCapability.mockClear();
   savePlatformProfileVersion.mockReset();
   savePlatformProfileVersion.mockResolvedValue({ profileId: 'plat-1', version: 1 });
   loadPlatformProfile.mockReset();
+});
+
+afterAll(() => { delete process.env.ENABLE_LEAD_INGESTION; delete process.env.PI_LDB_SCHEMA_READY; });
+
+describe('default OFF (b3 2026-11-20): the route does not exist until ingestion is on AND the schema is applied', () => {
+  it.each([
+    ['ingestion off', 'ENABLE_LEAD_INGESTION'],
+    ['schema not applied', 'PI_LDB_SCHEMA_READY'],
+  ])('%s -> 404 PROSPECT_IMPORT_DISABLED, before any authority check or store call', async (_l, name) => {
+    delete process.env[name];
+    const res = await call({});
+    expect(res._status).toBe(404);
+    expect(res._json.code).toBe('PROSPECT_IMPORT_DISABLED');
+    expect(requireCapability).not.toHaveBeenCalled();
+    expect(savePlatformProfileVersion).not.toHaveBeenCalled();
+  });
 });
 
 describe('who can approve a vendor mapping', () => {

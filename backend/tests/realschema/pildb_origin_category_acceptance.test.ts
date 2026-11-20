@@ -61,6 +61,11 @@ async function stored(org: string, key: string): Promise<{ category: string | nu
   return { category: rows[0].origin_category ?? null, observed: rows[0].observed ?? null };
 }
 
+// c6 2026-11-20: this suite runs WITH the PI-LDB migrations applied, which is exactly when the switch is set
+// (piLdbSchemaReady.ts). Without it the repository writes no display / origin_* columns at all.
+beforeAll(() => { process.env.PI_LDB_SCHEMA_READY = 'true'; });
+afterAll(() => { delete process.env.PI_LDB_SCHEMA_READY; });
+
 describe('PI-LDB 2F · the vocabulary is the provenance contract', () => {
   it('accepts every member of SOURCE_CATEGORIES', async () => {
     await inRollback(async () => {

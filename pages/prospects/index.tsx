@@ -29,6 +29,7 @@
 import React from 'react';
 import Head from 'next/head';
 import Link from 'next/link';
+import { isProspectImportUiEnabled } from '@/lib/prospects/import/prospectImportUi';
 import useSWR from 'swr';
 import { useCompanyContext } from '@/components/CompanyContext';
 import { apiFetch } from '@/lib/apiFetch';
@@ -129,12 +130,14 @@ export default function ProspectListPage() {
                 {/* PI-LDB — the empty state now names an action the operator
                     can take. Describing where prospects come from without
                     saying how to add any left this screen a dead end. */}
-                <Link
-                  href="/prospects/import"
-                  className="mt-4 inline-block rounded-lg bg-purple-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-purple-700"
-                >
-                  Import prospects from a file
-                </Link>
+                {isProspectImportUiEnabled() ? (
+                  <Link
+                    href="/prospects/import"
+                    className="mt-4 inline-block rounded-lg bg-purple-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-purple-700"
+                  >
+                    Import prospects from a file
+                  </Link>
+                ) : null}
               </div>
             ) : (
               <>

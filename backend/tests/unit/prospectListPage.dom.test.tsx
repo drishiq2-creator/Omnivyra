@@ -110,6 +110,27 @@ describe('C — empty state', () => {
     await waitFor(() => expect(screen.getByText('No prospects yet')).toBeInTheDocument());
     expect(screen.queryByText(/unavailable/i)).not.toBeInTheDocument();
   });
+
+  // c6 2026-11-20 (b3 ruling 2): the import link appears only when the default-OFF UI flag is on.
+  it('DEFAULT: no import link (the import page does not exist while the flag is off)', async () => {
+    delete process.env.NEXT_PUBLIC_PROSPECT_IMPORT_ENABLED;
+    respond(result([]));
+    render(withSwr(<ProspectListPage />));
+    await waitFor(() => expect(screen.getByText('No prospects yet')).toBeInTheDocument());
+    expect(screen.queryByText('Import prospects from a file')).not.toBeInTheDocument();
+  });
+
+  it('control: with the flag on, the empty state links to the import page', async () => {
+    process.env.NEXT_PUBLIC_PROSPECT_IMPORT_ENABLED = 'true';
+    try {
+      respond(result([]));
+      render(withSwr(<ProspectListPage />));
+      await waitFor(() => expect(screen.getByText('Import prospects from a file')).toBeInTheDocument());
+      expect(screen.getByText('Import prospects from a file').closest('a')).toHaveAttribute('href', '/prospects/import');
+    } finally {
+      delete process.env.NEXT_PUBLIC_PROSPECT_IMPORT_ENABLED;
+    }
+  });
 });
 
 describe('D — failure states', () => {

@@ -1,7 +1,8 @@
 import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeFactory';
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { enforceCompanyAccess } from '../../../backend/services/userContextService';
-import { isLeadIngestionEnabled, resolveLeadIngestionGate } from '../../../backend/services/leadIngestion/orchestrator';
+import { isLeadIngestionEnabled } from '../../../backend/services/leadIngestion/orchestrator';
+import { resolveProspectImportGate } from '../../../backend/services/leadIngestion/prospectImportGate';
 import { requireCapability } from '../../../backend/security/requireCapability';
 import { PROSPECT_INGEST } from '../../../shared/contracts/security';
 import { withIdempotency } from '../../../backend/middleware/withIdempotency';
@@ -116,11 +117,13 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   });
   if (guard.ok !== true) return;
 
-  const gate = await resolveLeadIngestionGate(companyId);
+  // The IMPORT WIZARD gate (prospectImportGate.ts): the ingestion gate + PI-LDB schema applied + this tenant's own
+  // `prospect_import` flag. Default OFF; fails closed.
+  const gate = await resolveProspectImportGate(companyId);
   if (!gate.allowed) {
     return res.status(404).json({
-      error: 'Lead ingestion is not enabled.',
-      code: 'LEAD_INGESTION_DISABLED',
+      error: 'Prospect import is not enabled.',
+      code: 'PROSPECT_IMPORT_DISABLED',
       reason: gate.reason,
     });
   }
