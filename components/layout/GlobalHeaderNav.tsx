@@ -201,9 +201,8 @@ export const HEADER_NAV_ITEMS: HeaderNavItem[] = [
     href: '/prospects',
     icon: Radar,
     description: 'The canonical prospect record and the lead intelligence read over it.',
-    // Website capture routes moved to Web & Capture, so '/integrations' and
-    // '/leads' are no longer claimed here — they were the only source of a
-    // double-active state between the two groups.
+    // '/integrations' and '/leads' are deliberately not claimed here: they were the only source of a double-active
+    // state with the former Web & Capture group, and they now belong to the Command Center's website section.
     // Owner 2026-11-20: Prospect is where a user sees their LEADS and the ACTIVITY on them (open a lead for its
     // timeline, status, notes and tasks). Active Leads lives here only. ICP is added once its 403-safe page lands
     // (c6 feat/pi-icp-menu-link-20261120); main's ICP page mis-renders a 403 today.
@@ -215,9 +214,10 @@ export const HEADER_NAV_ITEMS: HeaderNavItem[] = [
       { label: 'Active Leads', href: '/command-center/active-leads', group: 'Work your leads', description: 'Lead review and action workspace.' },
     ],
   },
-  // "Web & Capture" was removed from the header (owner 2026-11-20). Its five destinations live in the admin-only
-  // "Website & lead capture" section at the bottom of the Command Center (lib/nav/websiteLeadCapture.ts). Every
-  // route still resolves.
+  // "Web & Capture" was removed from the header (owner 2026-11-20). Its five destinations are now LINKED from the
+  // "Website & lead capture" section at the bottom of the Command Center (lib/nav/websiteLeadCapture.ts), which is
+  // shown to company admins only. Every route still resolves. No header item claims these five routes any more, so
+  // while a user is on one of them, no header item is highlighted (by design, not a missing matcher).
 ];
 
 export function getRoleLabel(role: string | null | undefined): string | null {

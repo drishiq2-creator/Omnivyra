@@ -1,7 +1,9 @@
 /**
  * Website & lead-capture destinations (owner request 2026-11-20, via b3). They used to be the header's
  * "Web & Capture" menu. They now live in a "Website & lead capture" section at the BOTTOM of the Command Center,
- * for company admins only. Routes are unchanged: every old deep link still resolves. One list, used by that section
+ * shown to company admins only. That is VISIBILITY, not access control: the pages and their APIs are not gated by
+ * it. (Owner ruling 2026-11-20, via b3: they become admin-only server-side, built on a separate branch.)
+ * Routes are unchanged: every old deep link still resolves. One list, used by that section
  * (and by any future Integrations page), so the destinations can't drift.
  */
 export interface WebsiteLeadCaptureLink {

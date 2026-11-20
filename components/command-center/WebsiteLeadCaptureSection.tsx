@@ -1,7 +1,7 @@
 /**
  * "Website & lead capture": the bottom section of the Command Center (owner request 2026-11-20, via b3).
- * It replaces the header's former "Web & Capture" menu. Company ADMINS only; non-admins don't see admin-only
- * setup. Every link goes to the same route the menu used (lib/nav/websiteLeadCapture.ts), so old deep links still
+ * It replaces the header's former "Web & Capture" menu. It is shown to company admins only. That hides the links;
+ * it does NOT protect the pages (a server-side admin gate is a separate branch, per the owner ruling 2026-11-20). Every link goes to the same route the menu used (lib/nav/websiteLeadCapture.ts), so old deep links still
  * resolve.
  */
 import React from 'react';
