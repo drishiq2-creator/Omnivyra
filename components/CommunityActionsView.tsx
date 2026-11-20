@@ -10,9 +10,11 @@ import {
   type PlaybookValidationInput,
 } from '../backend/services/playbooks/playbookValidator';
 
-const tabs = ['Pending', 'Scheduled', 'Completed', 'Skipped'];
+// Scheduling is retired (owner ruling 2026-11-20): no Scheduled tab. Rows already scheduled show under Pending.
+const tabs = ['Pending', 'Completed', 'Skipped'];
 
 import type { useCommunityActions } from '../hooks/useCommunityActions';
+import { SEND_NOW_LABEL, scheduledNotSentCopy } from '../lib/communityAi/scheduledRetiredCopy';
 type S = ReturnType<typeof useCommunityActions>;
 export default function CommunityActionsView({ d }: { d: S }) {
   const {
@@ -31,7 +33,6 @@ export default function CommunityActionsView({ d }: { d: S }) {
     handleExecute,
     handleManualExecute,
     handlePlatformReplyLog,
-    handleSchedule,
     handleSkip,
     handleViewHistory,
     historyActionId,
@@ -74,7 +75,6 @@ export default function CommunityActionsView({ d }: { d: S }) {
     platformViolation,
     riskFilter,
     router,
-    scheduleDrafts,
     selectedCompanyId,
     setActions,
     setActiveTab,
@@ -95,7 +95,6 @@ export default function CommunityActionsView({ d }: { d: S }) {
     setPlatformReplyError,
     setPlatformReplySending,
     setPlatformViewAction,
-    setScheduleDrafts,
     statusFilter,
     tenantId,
     validatePlaybookReply,
@@ -196,7 +195,10 @@ export default function CommunityActionsView({ d }: { d: S }) {
                 );
                 const manualAllowedByPlaybook = manualExecutionCheck.allowed;
                 const hasManualConfig = Boolean(executionConfig);
-                const isApproved = status === 'approved';
+                // A retired-schedule row was approved when it was scheduled; the server executes from 'scheduled' and
+                // still enforces approved_at, so it gets the normal execute path (labelled Send now).
+                const isScheduledNotSent = status === 'scheduled';
+                const isApproved = status === 'approved' || isScheduledNotSent;
                 const isPending = status === 'pending';
                 const showApprove =
                   requiresApproval &&
@@ -213,14 +215,12 @@ export default function CommunityActionsView({ d }: { d: S }) {
                 const showAutoExecute =
                   !requiresApproval && !isTerminal && permissions.canExecute;
                 const showPlatformView = !isTerminal && isManualExecution;
-                const showSchedule = !isTerminal && permissions.canSchedule;
                 const showSkip = !isTerminal && permissions.canSkip;
                 const showNoPermission =
                   !showApprove &&
                   !showManualExecute &&
                   !showAutoExecute &&
                   !showPlatformView &&
-                  !showSchedule &&
                   !showSkip &&
                   !isTerminal;
                 const autoExecuted =
@@ -285,7 +285,15 @@ export default function CommunityActionsView({ d }: { d: S }) {
                         )}
                       </div>
                     </td>
-                    <td className="px-3 py-2">{action.scheduled_at || '-'}</td>
+                    <td className="px-3 py-2">
+                      {action.status.toLowerCase() === 'scheduled' ? (
+                        <span className="text-xs text-amber-800">
+                          {scheduledNotSentCopy(action.scheduled_at)}
+                        </span>
+                      ) : (
+                        '-'
+                      )}
+                    </td>
                     <td className="px-3 py-2">
                       {action.last_event
                         ? `${action.last_event.event_type} • ${action.last_event.created_at}`
@@ -336,30 +344,8 @@ export default function CommunityActionsView({ d }: { d: S }) {
                                 : 'Blocked by Playbook execution mode'
                             }
                           >
-                            {isExecuting ? 'Executing...' : 'Execute'}
+                            {isExecuting ? 'Executing...' : isScheduledNotSent ? SEND_NOW_LABEL : 'Execute'}
                           </button>
-                        )}
-                        {showSchedule && (
-                          <div className="flex items-center gap-2">
-                            <input
-                              type="datetime-local"
-                              className="px-2 py-1 text-xs border rounded"
-                              value={scheduleDrafts[action.action_id] || ''}
-                              onChange={(event) =>
-                                setScheduleDrafts((prev) => ({
-                                  ...prev,
-                                  [action.action_id]: event.target.value,
-                                }))
-                              }
-                            />
-                            <button
-                              className="px-2 py-1 text-xs rounded border border-blue-500 text-blue-600"
-                              onClick={() => handleSchedule(action)}
-                              disabled={isExecuting}
-                            >
-                              {isExecuting ? 'Scheduling...' : 'Schedule'}
-                            </button>
-                          </div>
                         )}
                         {showSkip && (
                           <button

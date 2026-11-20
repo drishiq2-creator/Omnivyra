@@ -163,7 +163,6 @@ export default function CommunityAiAutoRules() {
               <option value="like">Like</option>
               <option value="reply">Reply</option>
               <option value="share">Share</option>
-              <option value="schedule">Schedule</option>
             </select>
           </div>
           <div className="flex flex-col gap-2">
@@ -221,7 +220,10 @@ export default function CommunityAiAutoRules() {
                     <td className="py-2 pr-3 text-xs text-gray-600">
                       {JSON.stringify(rule.condition)}
                     </td>
-                    <td className="py-2 pr-3">{rule.action_type}</td>
+                    <td className="py-2 pr-3">
+                      {/* Scheduling is retired and 'schedule' rules never had an executor: say so, don't imply it runs. */}
+                      {rule.action_type === 'schedule' ? 'schedule (retired — this rule never runs)' : rule.action_type}
+                    </td>
                     <td className="py-2 pr-3">{rule.max_risk_level}</td>
                     <td className="py-2 pr-3">
                       <button

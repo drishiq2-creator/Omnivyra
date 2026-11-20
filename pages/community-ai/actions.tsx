@@ -10,7 +10,7 @@ import {
   type PlaybookValidationInput,
 } from '../../backend/services/playbooks/playbookValidator';
 
-const tabs = ['Pending', 'Scheduled', 'Completed', 'Skipped'];
+
 
 import { useCommunityActions } from '../../hooks/useCommunityActions';
 import CommunityActionsView from '../../components/CommunityActionsView';

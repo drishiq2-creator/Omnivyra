@@ -10,7 +10,8 @@ import {
   type PlaybookValidationInput,
 } from '../backend/services/playbooks/playbookValidator';
 
-const tabs = ['Pending', 'Scheduled', 'Completed', 'Skipped'];
+// Scheduling is retired (owner ruling 2026-11-20): no Scheduled tab. Rows already scheduled show under Pending.
+const tabs = ['Pending', 'Completed', 'Skipped'];
 
 
 export function useCommunityActions() {
@@ -22,11 +23,9 @@ export function useCommunityActions() {
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [executingActionId, setExecutingActionId] = useState<string | null>(null);
-  const [scheduleDrafts, setScheduleDrafts] = useState<Record<string, string>>({});
   const [permissions, setPermissions] = useState({
     canApprove: false,
     canExecute: false,
-    canSchedule: false,
     canSkip: false,
     canManageConnectors: false,
   });
@@ -114,7 +113,6 @@ export function useCommunityActions() {
       setPermissions({
         canApprove: !!data?.permissions?.canApprove,
         canExecute: !!data?.permissions?.canExecute,
-        canSchedule: !!data?.permissions?.canSchedule,
         canSkip: !!data?.permissions?.canSkip,
         canManageConnectors: !!data?.permissions?.canManageConnectors,
       });
@@ -149,7 +147,8 @@ export function useCommunityActions() {
       return;
     }
     if (statusFilter === 'scheduled') {
-      setActiveTab('Scheduled');
+      // Old links to the retired Scheduled tab land on Pending, narrowed to those rows.
+      setActiveTab('Pending');
       return;
     }
     if (statusFilter === 'skipped') {
@@ -162,11 +161,16 @@ export function useCommunityActions() {
   }, [statusFilter]);
 
   const filteredActions = useMemo(() => {
-    const tabMatches = actions.filter(
-      (action) => action.status.toLowerCase() === activeTab.toLowerCase()
-    );
+    const tabMatches = actions.filter((action) => {
+      const status = action.status.toLowerCase();
+      // A row that was scheduled never ran (the scheduler never ran in prod): it is still pending a decision.
+      if (activeTab === 'Pending' && status === 'scheduled') return true;
+      return status === activeTab.toLowerCase();
+    });
     const statusFiltered =
-      statusFilter === 'failed'
+      statusFilter === 'scheduled'
+        ? tabMatches.filter((action) => action.status.toLowerCase() === 'scheduled')
+        : statusFilter === 'failed'
         ? tabMatches.filter((action) => action.status.toLowerCase() === 'failed')
         : statusFilter === 'executed'
           ? tabMatches.filter((action) => action.status.toLowerCase() === 'executed')
@@ -461,47 +465,6 @@ export function useCommunityActions() {
       });
   };
 
-  const handleSchedule = async (action: PendingAction) => {
-    if (!tenantId || executingActionId) return;
-    const scheduledAt = scheduleDrafts[action.action_id];
-    if (!scheduledAt) {
-      setErrorMessage('Select a schedule date/time first.');
-      return;
-    }
-    setExecutingActionId(action.action_id);
-    setErrorMessage(null);
-    try {
-      const response = await fetchWithAuth('/api/community-ai/actions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          tenant_id: tenantId,
-          organization_id: tenantId,
-          action_id: action.action_id,
-          status: 'scheduled',
-          scheduled_at: new Date(scheduledAt).toISOString(),
-          approved: true,
-        }),
-      });
-      const data = await response.json().catch(() => null);
-      if (!response.ok) {
-        throw new Error(data?.error || 'Schedule failed');
-      }
-      setActions((prev) =>
-        prev.map((entry) =>
-          entry.action_id === action.action_id
-            ? { ...entry, status: 'scheduled', scheduled_at: data?.scheduled_at || scheduledAt }
-            : entry
-        )
-      );
-      await loadActions();
-    } catch (error: any) {
-      setErrorMessage(error?.message || 'Schedule failed');
-    } finally {
-      setExecutingActionId(null);
-    }
-  };
-
   const handleViewHistory = async (action: PendingAction) => {
     if (!tenantId) return;
     setHistoryActionId(action.action_id);
@@ -622,7 +585,6 @@ export function useCommunityActions() {
     handleExecute,
     handleManualExecute,
     handlePlatformReplyLog,
-    handleSchedule,
     handleSkip,
     handleViewHistory,
     historyActionId,
@@ -665,7 +627,6 @@ export function useCommunityActions() {
     platformViolation,
     riskFilter,
     router,
-    scheduleDrafts,
     selectedCompanyId,
     setActions,
     setActiveTab,
@@ -686,7 +647,6 @@ export function useCommunityActions() {
     setPlatformReplyError,
     setPlatformReplySending,
     setPlatformViewAction,
-    setScheduleDrafts,
     statusFilter,
     tenantId,
     validatePlaybookReply,

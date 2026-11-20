@@ -28,7 +28,7 @@ export default function CommunityAiTab({
               <p className="font-semibold text-yellow-800">Engagement Center Execution Paused</p>
               <p className="text-sm text-yellow-700">
                 Engagement Center execution is currently paused at the platform level.
-                All tenants and all Engagement Center actions (manual, scheduled, and automated) are affected.
+                All tenants and all Engagement Center actions (manual and automated) are affected.
               </p>
             </div>
           </div>
