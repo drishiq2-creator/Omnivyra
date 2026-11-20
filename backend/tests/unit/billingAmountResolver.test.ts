@@ -1,9 +1,8 @@
 /**
  * billingAmountResolver — DB-backed hidden amount-resolution tests.
  *
- * Covers: DB-backed resolution, minor→major conversion, compiled-fallback
- * default-preserving behavior, malformed/unknown/disabled rejection,
- * determinism, never-throws, and hidden-pricing preservation.
+ * Covers: DB-backed resolution, minor→major conversion, fail-closed on an unreadable catalog (PL-114),
+ * malformed/unknown/disabled rejection, determinism, and hidden-pricing preservation.
  */
 
 // Controlled supabase mock: the resolver awaits
@@ -23,10 +22,15 @@ jest.mock('../../db/supabaseClient', () => {
   return { supabase: { from: () => builder } };
 });
 
-import { resolveBillingAmount } from '../../services/billing/payments/billingAmountResolver';
+const mockMetrics: unknown[][] = [];
+jest.mock('../../services/systemHealthMetricsService', () => ({
+  recordMetric: async (c: string, n: string, v: number) => { mockMetrics.push([c, n, v]); },
+}));
+
+import { resolveBillingAmount, AmountSourceUnavailableError } from '../../services/billing/payments/billingAmountResolver';
 import * as resolverModule from '../../services/billing/payments/billingAmountResolver';
 
-function reset() { __row = null; __error = null; __throw = false; }
+function reset() { __row = null; __error = null; __throw = false; mockMetrics.length = 0; }
 beforeEach(reset);
 
 describe('billingAmountResolver — DB-backed resolution', () => {
@@ -84,39 +88,28 @@ describe('billingAmountResolver — rejection behavior', () => {
   });
 });
 
-describe('billingAmountResolver — compiled-fallback (default-preserving)', () => {
-  test('table absent (query throws) → resolves from COMPILED_FALLBACK', async () => {
-    __throw = true;
-    const r = await resolveBillingAmount({ intentType: 'topup', reference: 'topup_credits_500' });
-    expect(r.ok).toBe(true);
-    if (r.ok) expect(r.amount).toEqual({ amount: 500, currency: 'INR' });
-  });
-
-  test('DB error → resolves from COMPILED_FALLBACK', async () => {
+// PL-114 (b3 2026-11-20): fail closed. An unreadable catalog never prices a checkout.
+describe('billingAmountResolver — unreadable catalog fails closed', () => {
+  test('DB error -> throws AmountSourceUnavailableError, counted durably', async () => {
     __error = { message: 'permission denied' };
-    const r = await resolveBillingAmount({ intentType: 'subscription', reference: 'plan_pro_monthly' });
-    expect(r.ok).toBe(true);
-    if (r.ok) expect(r.amount).toEqual({ amount: 1999, currency: 'INR' });
+    await expect(resolveBillingAmount({ intentType: 'subscription', reference: 'plan_pro_monthly' }))
+      .rejects.toMatchObject({ name: 'AmountSourceUnavailableError', code: 'PRICE_CATALOG_UNAVAILABLE' });
+    expect(mockMetrics).toEqual([['billing', 'price_catalog_unavailable', 1]]);
   });
-
-  test('fallback preserves disabled rejection (retired entry)', async () => {
-    __throw = true;
-    const r = await resolveBillingAmount({ intentType: 'topup', reference: 'topup_legacy_pack' });
-    expect(r.ok).toBe(false);
-    if (r.ok === false) expect(r.code).toBe('disabled_reference');
-  });
-
-  test('fallback preserves unknown rejection (no fallback entry)', async () => {
-    __throw = true;
-    const r = await resolveBillingAmount({ intentType: 'topup', reference: 'topup_not_in_fallback' });
-    expect(r.ok).toBe(false);
-    if (r.ok === false) expect(r.code).toBe('unknown_reference');
-  });
-
-  test('never throws even when the DB read rejects', async () => {
+  test('table absent / client throws -> throws (no compiled price)', async () => {
     __throw = true;
     await expect(resolveBillingAmount({ intentType: 'topup', reference: 'topup_credits_500' }))
-      .resolves.toBeDefined();
+      .rejects.toBeInstanceOf(AmountSourceUnavailableError);
+  });
+  test('CONTROL: a readable row -> the catalog price, nothing counted', async () => {
+    __row = { kind: 'topup', amount_minor: 50000, currency: 'INR', enabled: true };
+    await expect(resolveBillingAmount({ intentType: 'topup', reference: 'topup_credits_500' }))
+      .resolves.toEqual({ ok: true, amount: { amount: 500, currency: 'INR' } });
+    expect(mockMetrics).toEqual([]);
+  });
+  test('CONTROL: a readable catalog WITHOUT the row -> unknown_reference (absence only after a successful read)', async () => {
+    await expect(resolveBillingAmount({ intentType: 'topup', reference: 'topup_credits_500' }))
+      .resolves.toMatchObject({ ok: false, code: 'unknown_reference' });
   });
 });
 

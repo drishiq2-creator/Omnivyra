@@ -1,28 +1,23 @@
 /**
- * hidden_billing_catalog — seed ↔ COMPILED_FALLBACK parity guard.
+ * hidden_billing_catalog — 20260717 seed rows resolve through the REAL catalog read.
  *
- * COMPILED_FALLBACK is intentionally module-private (hidden-pricing), so this
- * guard verifies parity BEHAVIORALLY: with the DB read forced to fail, the
- * resolver uses COMPILED_FALLBACK — and for every entry parsed from the
- * 20260717 seed, the resolver's fallback output must match the seed exactly.
- *
- * Drift in either direction is caught:
- *   - a seed amount/currency change → resolved value mismatches the seed,
- *   - a seed entry missing from the fallback → resolver returns
- *     unknown_reference instead of the expected ok/disabled.
- *
- * Also asserts migration idempotency + non-destructiveness.
+ * c6 2026-11-20 (PL-114, b3: fail closed): this was the seed <-> COMPILED_FALLBACK parity guard. The compiled fallback
+ * is DELETED - an unreadable catalog now refuses checkout - so parity with it is moot. The seed is now served AS the
+ * catalog rows (parsed from the migration), so every seed entry is driven through readCatalogEntry's kind / enabled /
+ * minor->major logic. Also asserts migration idempotency + non-destructiveness (unchanged).
  */
 
 import * as fs from 'fs';
 import * as path from 'path';
 
-// Force the resolver's DB read to FAIL → exercises the COMPILED_FALLBACK path.
+// The catalog read answers the parsed seed rows (filled in beforeAll).
+const mockCatalog: Record<string, Record<string, unknown>> = {};
 jest.mock('../../db/supabaseClient', () => {
   const builder: any = {};
+  let ref = '';
   builder.select = () => builder;
-  builder.eq = () => builder;
-  builder.maybeSingle = () => Promise.reject(new Error('relation "hidden_billing_catalog" does not exist'));
+  builder.eq = (_c: string, v: string) => { ref = v; return builder; };
+  builder.maybeSingle = () => Promise.resolve({ data: mockCatalog[ref] ?? null, error: null });
   return { supabase: { from: () => builder } };
 });
 
@@ -120,9 +115,14 @@ describe('20260717 migration — idempotency', () => {
   });
 });
 
-// ── seed ↔ COMPILED_FALLBACK behavioral parity ──────────────────────────────
+// ── seed rows resolve through the real catalog read ─────────────────────────
 
-describe('hidden_billing_catalog — seed ↔ COMPILED_FALLBACK parity', () => {
+describe('hidden_billing_catalog — seed rows resolve through the catalog read', () => {
+  beforeAll(() => {
+    for (const r of parseSeed(readMigration())) {
+      mockCatalog[r.reference_key] = { kind: r.kind, amount_minor: r.amount_minor, currency: r.currency, enabled: r.enabled };
+    }
+  });
   test('the seed registers exactly the six known references', () => {
     const seed = parseSeed(readMigration());
     expect(seed.map((r) => r.reference_key).sort()).toEqual([
@@ -131,10 +131,10 @@ describe('hidden_billing_catalog — seed ↔ COMPILED_FALLBACK parity', () => {
     ]);
   });
 
-  test('every ENABLED seed entry resolves via the fallback to the seed amount/currency', async () => {
+  test('every ENABLED seed entry resolves to the seed amount/currency', async () => {
     for (const entry of parseSeed(readMigration()).filter((r) => r.enabled)) {
       const r = await resolveBillingAmount({ intentType: entry.kind, reference: entry.reference_key });
-      expect(r.ok).toBe(true); // would be unknown_reference if the fallback lacked it
+      expect(r.ok).toBe(true);
       if (r.ok) {
         expect(r.amount.currency).toBe(entry.currency);
         expect(r.amount.amount).toBe(minorToMajor(entry.amount_minor, entry.currency));
@@ -142,7 +142,7 @@ describe('hidden_billing_catalog — seed ↔ COMPILED_FALLBACK parity', () => {
     }
   });
 
-  test('every DISABLED seed entry is rejected via the fallback (disabled_reference)', async () => {
+  test('every DISABLED seed entry is rejected (disabled_reference)', async () => {
     for (const entry of parseSeed(readMigration()).filter((r) => !r.enabled)) {
       const r = await resolveBillingAmount({ intentType: entry.kind, reference: entry.reference_key });
       expect(r.ok).toBe(false);

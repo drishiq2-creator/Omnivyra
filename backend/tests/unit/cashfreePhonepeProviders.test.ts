@@ -10,7 +10,7 @@
 // supabase mock. c6 2026-11-20: was `from: () => ({})`, described as "never used" - but the real replay lookup and the
 // catalog resolver DID call it; their catches swallowed the TypeError into "no session" / compiled fallback, so these
 // cases were green for the wrong reason. Now explicit per table (same as checkoutSessionOrchestrator.test.ts):
-// billing_checkout_sessions = genuinely none; hidden_billing_catalog = the documented absent-table fallback.
+// billing_checkout_sessions = genuinely none; hidden_billing_catalog = seed rows (PL-114: no fallback any more).
 jest.mock('../../db/supabaseClient', () => {
   const make = (single: () => Promise<any>) => {
     const chain: any = {};
@@ -25,7 +25,19 @@ jest.mock('../../db/supabaseClient', () => {
       from: (table: string) => {
         if (table === 'billing_checkout_sessions') return make(async () => ({ data: null, error: null }));
         if (table === 'hidden_billing_catalog') {
-          return make(async () => ({ data: null, error: { message: 'relation "hidden_billing_catalog" does not exist' } }));
+          // PL-114: the catalog is READ (an unreadable catalog now fails closed). Rows = the 20260717 seed.
+          const SEED: Record<string, any> = {
+            topup_credits_500: { kind: 'topup', amount_minor: 50000, currency: 'INR', enabled: true },
+            topup_credits_2000: { kind: 'topup', amount_minor: 180000, currency: 'INR', enabled: true },
+            plan_starter_monthly: { kind: 'subscription', amount_minor: 49900, currency: 'INR', enabled: true },
+            plan_pro_monthly: { kind: 'subscription', amount_minor: 199900, currency: 'INR', enabled: true },
+            plan_legacy_v1: { kind: 'subscription', amount_minor: 99900, currency: 'INR', enabled: false },
+            topup_legacy_pack: { kind: 'topup', amount_minor: 70000, currency: 'INR', enabled: false },
+          };
+          let ref = '';
+          const c = make(async () => ({ data: SEED[ref] ?? null, error: null }));
+          c.eq = (_col: string, v: string) => { ref = v; return c; };
+          return c;
         }
         throw new Error(`cashfreePhonepeProviders.test: unexpected table ${table}`);
       },

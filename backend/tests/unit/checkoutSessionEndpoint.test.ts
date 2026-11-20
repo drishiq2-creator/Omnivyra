@@ -233,3 +233,18 @@ describe('checkout-session endpoint - unreadable checkout state', () => {
     expect(res._status).toBe(200);
   });
 });
+
+// PL-114 (b3 2026-11-20): an unreadable price catalog fails CLOSED - 503 PRICE_CATALOG_UNAVAILABLE + Retry-After.
+describe('checkout-session endpoint - unreadable price catalog', () => {
+  const { AmountSourceUnavailableError } = jest.requireActual('../../services/billing/payments/billingAmountResolver');
+  const BODY = { provider: 'razorpay', intent_type: 'topup', topup_reference: 'topup_credits_500' };
+  test('AmountSourceUnavailableError -> 503 PRICE_CATALOG_UNAVAILABLE with Retry-After, state only', async () => {
+    __orchestratorThrow = new AmountSourceUnavailableError('permission denied');
+    const { req, res } = mockReqRes('POST', BODY);
+    await handler(req, res);
+    expect(res._status).toBe(503);
+    expect(res._json).toEqual({ error: 'price_catalog_unavailable', code: 'PRICE_CATALOG_UNAVAILABLE' });
+    expect(res._headers['Retry-After']).toBe('60');
+    expect(JSON.stringify(res._json)).not.toMatch(/amount|price"|\d{3,}/);
+  });
+});

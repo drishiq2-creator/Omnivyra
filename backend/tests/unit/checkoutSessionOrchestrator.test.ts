@@ -13,8 +13,8 @@
 // c6 2026-11-20: was `from: () => ({})` - the replay lookup threw a TypeError that findPersistedCheckoutSession's catch
 // SWALLOWED into "no session", so every case here passed through a swallowed error (green for the wrong reason). Now a
 // real chain per table: billing_checkout_sessions answers "genuinely no persisted session" (insert succeeds), since a
-// failed lookup now throws. hidden_billing_catalog answers the DOCUMENTED absent-table error, so billingAmountResolver
-// takes its compiled-fallback path EXPLICITLY (before, it got there through the same swallowed TypeError).
+// failed lookup now throws. hidden_billing_catalog answers seed rows (before, the resolver reached its - now deleted -
+// compiled fallback through the same swallowed TypeError).
 jest.mock('../../db/supabaseClient', () => {
   const make = (single: () => Promise<any>) => {
     const chain: any = {};
@@ -29,7 +29,19 @@ jest.mock('../../db/supabaseClient', () => {
       from: (table: string) => {
         if (table === 'billing_checkout_sessions') return make(async () => ({ data: null, error: null }));
         if (table === 'hidden_billing_catalog') {
-          return make(async () => ({ data: null, error: { message: 'relation "hidden_billing_catalog" does not exist' } }));
+          // PL-114: the catalog is READ (an unreadable catalog now fails closed). Rows = the 20260717 seed.
+          const SEED: Record<string, any> = {
+            topup_credits_500: { kind: 'topup', amount_minor: 50000, currency: 'INR', enabled: true },
+            topup_credits_2000: { kind: 'topup', amount_minor: 180000, currency: 'INR', enabled: true },
+            plan_starter_monthly: { kind: 'subscription', amount_minor: 49900, currency: 'INR', enabled: true },
+            plan_pro_monthly: { kind: 'subscription', amount_minor: 199900, currency: 'INR', enabled: true },
+            plan_legacy_v1: { kind: 'subscription', amount_minor: 99900, currency: 'INR', enabled: false },
+            topup_legacy_pack: { kind: 'topup', amount_minor: 70000, currency: 'INR', enabled: false },
+          };
+          let ref = '';
+          const c = make(async () => ({ data: SEED[ref] ?? null, error: null }));
+          c.eq = (_col: string, v: string) => { ref = v; return c; };
+          return c;
         }
         throw new Error(`checkoutSessionOrchestrator.test: unexpected table ${table}`);
       },

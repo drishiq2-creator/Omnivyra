@@ -30,6 +30,7 @@ import {
 } from '../../../backend/services/billing/payments/checkoutSessionOrchestrator';
 import type { SupportedProvider } from '../../../backend/services/billing/payments/paymentProviderAdapter';
 import { CheckoutSessionStoreReadError } from '../../../backend/services/billing/payments/checkoutSessionStore';
+import { AmountSourceUnavailableError } from '../../../backend/services/billing/payments/billingAmountResolver';
 
 // Rejection codes that are the caller's fault (4xx) vs a provider fault (502).
 const CLIENT_REJECTIONS = new Set([
@@ -123,6 +124,11 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     // session for the same key is what "not found" used to cause. State only; the client decides whether to retry.
     if (err instanceof CheckoutSessionStoreReadError) {
       return res.status(503).json({ error: 'checkout_state_unreadable', code: err.code });
+    }
+    // PL-114 (b3): the price catalog could not be read - no provider session was created, no price was guessed.
+    if (err instanceof AmountSourceUnavailableError) {
+      res.setHeader('Retry-After', '60');
+      return res.status(503).json({ error: 'price_catalog_unavailable', code: err.code });
     }
     throw err;
   }

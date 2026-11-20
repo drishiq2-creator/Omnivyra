@@ -301,3 +301,39 @@ describe('expiry sweeper - an existing expiry anchor does not strand a still-sta
     expect(h.f.writes).toEqual(['expired']);
   });
 });
+
+// ── PL-114 (b3 2026-11-20): an unreadable price catalog creates NO provider session ─────────────────────────────────
+describe('checkout orchestrator - unreadable price catalog fails closed (real resolver)', () => {
+  const { AmountSourceUnavailableError } = jest.requireActual('../../services/billing/payments/billingAmountResolver');
+  const ARGS = {
+    organizationId: 'org-1', initiatedByUserId: 'user-1', provider: 'razorpay' as const,
+    intentType: 'topup' as const, reference: 'topup_credits_500',
+  };
+  // Replay lookup + catalog both go through mockDb.single: 1st call = replay lookup (none), 2nd = catalog.
+  const governed = () => ({
+    findPersistedCheckoutSession: async () => null,
+    resolveOrgBillingContext: async () => ({ country: 'IN', currency: 'INR', region: null, source: 'none' }),
+    resolveAvailableProviders: async () => ({
+      available: [{ provider: 'razorpay', visible_in_checkout: true, subscriptions_enabled: false, topups_enabled: true,
+        supported_payment_methods: ['card'], supported_countries: [], supported_currencies: [], priority: 1, sandbox_mode: true }],
+      visible: [], supported_methods: [], recommended: null, source: 'db',
+    }),
+    dispatchCheckout: jest.fn(async (req: any) => ({ ok: true, sessionId: 'order_1', redirectUrl: 'https://x', _amount: req.amount })),
+    getProviderAdapter: () => null,
+    persistCheckoutSession: async () => undefined,
+  });
+  test('catalog read error -> rejects AmountSourceUnavailableError; dispatchCheckout never called', async () => {
+    mockDb.single = async () => ({ data: null, error: READ_ERROR });
+    const d = governed();
+    await expect(orchestrateCheckoutSession(ARGS, d as any)).rejects.toBeInstanceOf(AmountSourceUnavailableError);
+    expect(d.dispatchCheckout).not.toHaveBeenCalled();
+  });
+  test('CONTROL: readable catalog -> dispatched at the catalog price', async () => {
+    mockDb.single = async () => ({ data: { kind: 'topup', amount_minor: 50000, currency: 'INR', enabled: true }, error: null });
+    const d = governed();
+    const r = await orchestrateCheckoutSession(ARGS, d as any);
+    expect(r.ok).toBe(true);
+    expect(d.dispatchCheckout).toHaveBeenCalledTimes(1);
+    expect(d.dispatchCheckout.mock.calls[0][0]).toMatchObject({ amount: 500, currency: 'INR' });
+  });
+});
