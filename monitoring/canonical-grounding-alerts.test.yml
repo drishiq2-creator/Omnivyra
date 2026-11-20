@@ -49,10 +49,12 @@ tests:
 
   # A DEAD WORKER is visible even while the APP job emits everything (7c): only app series for 27h -> the
   # worker-specific absence rule fires; the unscoped MetricsMissing stays quiet (someone IS emitting).
-  - interval: 1h
+  # 1m samples (not 1h): an hourly series is stale between samples (5m lookback), which would let the global
+  # absence check pass or fail by coincidence of the eval time.
+  - interval: 1m
     input_series:
       - series: 'canonical_grounding_call{job="omnivyra-app",instance="www",mode="shadow"}'
-        values: '0+10x30'
+        values: '0+10x1700'
     alert_rule_test:
       - eval_time: 27h
         alertname: CanonicalGroundingWorkerMetricsMissing
