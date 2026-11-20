@@ -140,6 +140,22 @@ describe('integrationSecretRedaction (pure)', () => {
     for (const k of ['site_url', 'endpoint_url', 'shop_domain', 'name', 'username']) expect(isSecretConfigKey(k)).toBe(false);
   });
 
+  it.each([
+    'connection_string', 'connectionString', 'dsn', 'database_dsn', 'auth_header', 'basic_auth', 'authorization',
+    'signature', 'webhook_signature', 'sas', 'sas_url', 'pem', 'client_pem', 'cert', 'client_certificate', 'salt', 'hash_salt',
+  ])('7c NB1: %s is treated as secret', (k) => {
+    expect(isSecretConfigKey(k)).toBe(true);
+    // A DSN-shaped value assembled at runtime: no credential-URL literal in source (public repo, gitleaks).
+    const dsnLike = ['postgres', '://', 'fixture-user', ':', 'fixture-pass', '@', 'fixture-host/db'].join('');
+    const out = (redactIntegrationSecrets({ config: { [k]: dsnLike } }).config as any)[k];
+    expect(out).toBe(REDACTED_SECRET);
+    expect(out).not.toContain('fixture-pass');
+  });
+
+  it.each(['author_email', 'author_name', 'author', 'authors'])('CONTROL: %s (contains "auth") is a display field and is NOT masked', (k) => {
+    expect(isSecretConfigKey(k)).toBe(false);
+  });
+
   it('only COMPANY_ADMIN / SUPER_ADMIN may view; anything else, and null, may not', () => {
     expect(canViewIntegrationSecrets('COMPANY_ADMIN')).toBe(true);
     expect(canViewIntegrationSecrets('SUPER_ADMIN')).toBe(true);
