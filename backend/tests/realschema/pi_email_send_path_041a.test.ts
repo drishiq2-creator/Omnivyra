@@ -972,8 +972,11 @@ describe('041-A/T2 — what is not sendable is not sent', () => {
     });
   });
 
-  // NOT PORTED: PI-041-A-H (autonomous dispatch, the specific awaiting_approval reason) is an open owner decision.
-  it.skip('APPROVAL IS AUTHORITATIVE — a human step is not sent', async () => {
+  // UN-SKIPPED 2026-11-20 (c6; b3 BLOCKING correct-sending finding). Skipped in a25abddce only because PI-041-A-H
+  // (which made the reason the specific `eligibility.awaiting_approval`) was not ported. Without H the SAME approval
+  // gate holds it with the generic `eligibility.not_approved` (governance.ts evaluateEligibility). Every no-send
+  // assertion is kept; the control at the end proves the hold is the approval gate and that this harness CAN send.
+  it('APPROVAL IS AUTHORITATIVE — a human step is not sent', async () => {
     await inRollback(async () => {
       const r = await bridged({ mode: 'human' });
       // The bridge put it in `awaiting_approval`; no approval has been granted.
@@ -995,10 +998,17 @@ describe('041-A/T2 — what is not sendable is not sent', () => {
       // 041-A added no second path and did not move that gate.
       expect(dispatch.outcome).toBe('blocked_governance');
       expect(dispatch.governance?.blockedBy).toBe('approval');
-      expect(dispatch.governance?.blockingCondition).toBe('eligibility.awaiting_approval');
+      expect(dispatch.governance?.blockingCondition).toBe('eligibility.not_approved');
       expect(sent).toEqual([]);
       const { rows: e } = await db.query(`SELECT count(*)::int n FROM ${EV}`);
       expect(e[0].n).toBe(0);
+
+      // CONTROL: the same task, once a human approves it, IS sent - so the hold above was the approval gate and not
+      // a harness that can never send.
+      expect((await approveWithPasskey(ORG_A, r.outreachTaskId, 'u-approver')).ok).toBe(true);
+      const after = await sendEmailForOutreachTask({ organizationId: ORG_A, outreachTaskId: r.outreachTaskId, now: AT });
+      expect(after.dispatch.outcome).toBe('sent');
+      expect(sent).toHaveLength(1);
     });
   });
 
@@ -1014,16 +1024,12 @@ describe('041-A/T2 — what is not sendable is not sent', () => {
     });
   });
 
-  // NOT PORTED: PI-041-A-H. On main every WS-3 action needs a human; see engineAdapters.ts.
-  it.skip('AUTONOMY SKIPS ONLY THE APPROVAL GATE — every other gate still applies', async () => {
-    // REWRITTEN by PI-041-A-H. This test used to assert that an autonomous step was
-    // held at the approval gate until a human approved it. That was not a policy —
-    // it was the defect 041-A-G found: 040 creates an autonomous task as `pending`,
-    // `pending → approved` is not a legal transition, and the only route to
-    // `approved` needs a named approver, so AUTONOMOUS could never send at all.
-    //
-    // What "autonomy is not permission" correctly means is asserted here instead:
-    // the approval gate no longer holds it, and NOTHING ELSE was relaxed.
+  // REPLACED 2026-11-20 (c6; b3 BLOCKING correct-sending finding). The skipped original asserted PI-041-A-H's
+  // behaviour (an autonomous step SENDS with no human). H was never ported (a25abddce; open owner decision), so the
+  // intended behaviour on this line is the opposite and is asserted here: an AUTONOMOUS step with no approval is held
+  // by the approval gate, nothing is sent, no evidence is written and no approval is fabricated. If H is ruled in,
+  // this test is rewritten with it - it must never silently pass for both behaviours.
+  it('AUTONOMY IS NOT PERMISSION (H not ported) — an unapproved autonomous step is held for a human', async () => {
     await inRollback(async () => {
       const r = await bridged({ mode: 'autonomous' });
 
@@ -1031,13 +1037,23 @@ describe('041-A/T2 — what is not sendable is not sent', () => {
         organizationId: ORG_A, outreachTaskId: r.outreachTaskId, now: AT,
       });
 
-      // It sends with no human in the loop, and no approval was fabricated.
-      expect(out.dispatch.outcome).toBe('sent');
-      expect(sent).toHaveLength(1);
+      expect(out.dispatch.outcome).toBe('blocked_governance');
+      expect(out.dispatch.governance?.blockedBy).toBe('approval');
+      expect(out.dispatch.governance?.blockingCondition).toBe('eligibility.not_approved');
+      expect(sent).toEqual([]);
+      const { rows: e } = await db.query(`SELECT count(*)::int n FROM ${EV}`);
+      expect(e[0].n).toBe(0);
       const { rows } = await db.query(
         `SELECT count(*)::int n FROM public.outreach_approvals WHERE task_id=$1`,
         [r.outreachTaskId]);
       expect(rows[0].n).toBe(0);
+
+      // CONTROL: the same autonomous task, approved by a human through the one approval path, IS sent - so the hold
+      // is the approval gate alone, and a regression letting autonomy skip it would turn the assertions above red.
+      await approve(ORG_A, r.outreachTaskId);
+      const after = await sendEmailForOutreachTask({ organizationId: ORG_A, outreachTaskId: r.outreachTaskId, now: AT });
+      expect(after.dispatch.outcome).toBe('sent');
+      expect(sent).toHaveLength(1);
     });
   });
 
@@ -1307,29 +1323,36 @@ describe('041-A-E/T2 — the Workflow email caller', () => {
 });
 
 describe('041-A-E/T2 — legacy operator email is retired', () => {
-  // NOT PORTED: PI-041-A-E retiring legacy operator email is an open owner decision.
-  it.skip('THE LEGACY PATH REFUSES EMAIL even when the operator asks for it', async () => {
+  // REPLACED 2026-11-20 (c6; b3 BLOCKING correct-sending finding). The skipped original asserted PI-041-A-E (the
+  // legacy path refuses ALL email - "retired"). E was never ported (a25abddce) and is an OPEN OWNER DECISION, so on
+  // this line the legacy operator path still dispatches email for an APPROVED task. What must hold regardless, and is
+  // asserted here: it never sends email for a task nobody approved. When E is ruled in, the retirement assertion
+  // comes back alongside this one.
+  it('THE LEGACY PATH NEVER SENDS AN UNAPPROVED EMAIL, even when the operator asks for it (E not ported)', async () => {
     await inRollback(async () => {
-      const r = await bridged();
-      await approve(ORG_A, r.outreachTaskId);
+      const r = await bridged();   // autonomous step -> `pending`: no approval exists
 
-      // The legacy service, with email explicitly requested and a recipient
-      // supplied — exactly the shape the operator route would produce.
       const reports = await dispatchApprovedOutreachForLead(ORG_A, r.subjectId, {
         channels: ['email', 'internal'], now: AT, recipient: 'operator@example.test',
       });
 
       expect(reports).toHaveLength(1);
       expect(reports[0].channel).toBe('email');
-      expect(reports[0].action).toBe('channel_retired');
-      expect(reports[0].reason).toContain('retired');
-
-      // No provider call, no attempt, no evidence — it stopped before dispatch.
+      expect(reports[0].action).toBe('not_approved');
       expect(sent).toEqual([]);
       const { rows } = await db.query(
         `SELECT (SELECT count(*)::int FROM public.outreach_attempts WHERE task_id=$1) attempts,
                 (SELECT count(*)::int FROM ${EV}) ev`, [r.outreachTaskId]);
       expect(rows[0]).toEqual({ attempts: 0, ev: 0 });
+
+      // CONTROL: once approved, the same request reaches dispatch - so the refusal above is the approval status,
+      // not a legacy path that can never act.
+      await approve(ORG_A, r.outreachTaskId);
+      const after = await dispatchApprovedOutreachForLead(ORG_A, r.subjectId, {
+        channels: ['email', 'internal'], now: AT, recipient: 'operator@example.test',
+      });
+      expect(after).toHaveLength(1);
+      expect(after[0].action).toBe('dispatched');
     });
   });
 
