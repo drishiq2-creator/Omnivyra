@@ -128,20 +128,26 @@ async function handler(
   // Returns true when the caller should short-circuit with mfa_required.
   const gateOnMfa = async (
     userId: string,
-  ): Promise<{ required: false } | { required: true; factors: ReadonlyArray<'totp' | 'webauthn'> }> => {
+  ): Promise<
+    | { required: false }
+    | { required: true; factors: ReadonlyArray<'totp' | 'webauthn'> }
+    | { required: 'unavailable' }
+  > => {
     let state: Awaited<ReturnType<typeof userHasVerifiedMfaFactor>>;
     try {
       state = await userHasVerifiedMfaFactor(userId);
     } catch (err) {
       // Fail-CLOSED on the MFA-detection path — if we can't determine
       // whether MFA is enrolled, we must NOT mint a session and let an
-      // attacker who suppressed the read bypass MFA. Surface as 503 so
-      // the client retries.
+      // attacker who suppressed the read bypass MFA. The caller answers 503
+      // (PROFILE_LOAD_FAILED: transient, keep the session, retry).
+      // TRUE since 2026-11-20: before, the factor repositories dropped the postgrest error and returned "no factor",
+      // so this catch never ran and a failed read logged the user in WITHOUT MFA. They now throw SecurityReadError.
       logger.error('auth_sync_mfa_detection_failed', {
         userId,
         message: err instanceof Error ? err.message : String(err),
       });
-      throw err;
+      return { required: 'unavailable' };
     }
     if (!state.hasMfa) return { required: false };
     issueMfaIntent(res, {
@@ -164,6 +170,10 @@ async function handler(
     if (state.webauthnCount > 0) factors.push('webauthn');
     return { required: true, factors };
   };
+
+  // MFA state could not be read: NO session is minted; transient 503 the client retries (never a login without MFA).
+  const mfaUnavailable = () =>
+    sendAuthError(res, AUTH_ERROR_CODE.PROFILE_LOAD_FAILED, { statusOverride: 503, retryAfterMs: 2000 });
 
   // ── 2. Work-email validation (skip for invited users — they may use any domain) ──
   // Don't block social logins with personal emails if they were explicitly invited.
@@ -268,6 +278,7 @@ async function handler(
     // BLOCKING money: the initial credits come via onboarding, after its eligibility checks).
     void reconcileInitialFreeCreditForUser(existingUserId, normalizedEmail);
     const gate = await gateOnMfa(existingUserId);
+    if (gate.required === 'unavailable') return mfaUnavailable();
     if (gate.required) {
       return res.status(200).json({ ok: true, mfa_required: true, factors: gate.factors });
     }
@@ -313,6 +324,7 @@ async function handler(
     // wallet, claim row, and company stamp on every login. Best-effort.
     void reconcileInitialFreeCreditForUser(existingUserIdByEmail, normalizedEmail);
     const gateEmail = await gateOnMfa(existingUserIdByEmail);
+    if (gateEmail.required === 'unavailable') return mfaUnavailable();
     if (gateEmail.required) {
       return res.status(200).json({ ok: true, mfa_required: true, factors: gateEmail.factors });
     }

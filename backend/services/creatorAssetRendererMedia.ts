@@ -13,6 +13,7 @@ import { brandRuntimeToCreatorBrandKit } from './brand/brandRuntimeAdapter';
 import { captureImageProviderCost } from './billing/blackHoleCostCapture';
 import { recordAssetCredits } from './aiUsageCollector';
 import { resolveCostProfile } from './creator/costProfiles';
+import { imageUsageForLog, openAIImageModelCandidates } from './creator/openAIImageModel';
 import { fitSlideArcToCount } from './creator/purposeStrategyRegistry';
 import { resolveTemplateStyle } from '../../lib/creator-outcomes/creatorVisualStyleRegistry';
 import { isBetaAiRenderMode, createBetaMockImage, BETA_MOCK_MODEL } from './creator/rendering/providers/betaMockRenderProvider';
@@ -177,13 +178,10 @@ export async function generateProviderImage(input: {
   // AbortSignal that is aborted as soon as the race settles, which also stops
   // any pending SDK retry. In-budget 429/5xx retries are unaffected.
   const client = new OpenAI({ apiKey });
-  // Env-selectable model (OPENAI_IMAGE_MODEL), then gpt-image-1.5, then gpt-image-1.
-  // 2026-10-25: the production OpenAI account answers "The model 'gpt-image-1' does
-  // not exist" on generation while gpt-image-1.5 works and also accepts
-  // input_fidelity 'high' (gpt-image-2 rejects that parameter), so 1.5 leads.
-  const modelCandidates = Array.from(new Set(
-    [process.env.OPENAI_IMAGE_MODEL, 'gpt-image-1.5', 'gpt-image-1'].filter((m): m is string => Boolean(m && m.trim())),
-  ));
+  // Env-selectable model (OPENAI_IMAGE_MODEL) first, then the supported defaults
+  // (creator/openAIImageModel.ts: gpt-image-1.5 leaves the API on 2026-12-01).
+  // input_fidelity is sent only to the gpt-image-1 family (referenceEditParams).
+  const modelCandidates = openAIImageModelCandidates();
   const failures: string[] = [];
   // The most serious classified failure across every provider call below, so a
   // configuration problem (model not available to this account, bad key, no quota)
@@ -299,6 +297,7 @@ export async function generateProviderImage(input: {
         creatorType: input.eventContext?.creatorType ?? null,
         attachmentMode: input.eventContext?.attachmentMode ?? null,
       });
+      console.log('[creator-asset-renderer][provider-image-usage]', imageUsageForLog(`${editModel}:edit`, editResp));
       const first = getFirstImageResult(editResp);
       if (first?.b64_json || first?.url) {
         recordAssetCredits(resolveCostProfile('image').expected_credits_per_asset);
@@ -382,6 +381,7 @@ export async function generateProviderImage(input: {
         creatorType: input.eventContext?.creatorType ?? null,
         attachmentMode: input.eventContext?.attachmentMode ?? null,
       });
+      console.log('[creator-asset-renderer][provider-image-usage]', imageUsageForLog(`${editModel}:edit`, editResp));
       const firstEdit = getFirstImageResult(editResp);
       if (firstEdit?.b64_json || firstEdit?.url) {
         if (input.attribution?.organizationId) {
@@ -455,6 +455,7 @@ export async function generateProviderImage(input: {
         creatorType: input.eventContext?.creatorType ?? null,
         attachmentMode: input.eventContext?.attachmentMode ?? null,
       });
+      console.log('[creator-asset-renderer][provider-image-usage]', imageUsageForLog(model, response));
       const first = getFirstImageResult(response);
       if (first?.b64_json || first?.url) {
         // Phase 4.1 Task 1: best-effort image provider-cost capture
