@@ -43,6 +43,7 @@ import { requireAdminRateLimit } from '../../../../backend/services/requestAcces
 import { requirePlatformWriteAuthority } from '../../../../backend/security/platformWriteAuthority';
 import { OUTREACH_PLATFORM_MANAGE } from '../../../../shared/contracts/security/SecurityCapabilities';
 import { runOutreachActivation } from '../../../../backend/services/leadOutreachActivation';
+import { isEmailTransportEnabled } from '../../../../backend/services/leadOutreachExecution/emailTransport';
 
 const str = (v: unknown): string | null => (typeof v === 'string' && v.trim() !== '' ? v.trim() : null);
 
@@ -85,7 +86,10 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     region: str(body.region),
   });
 
-  return res.status(200).json({ ok: true, report });
+  // emailEnabled: the LEAD_OUTREACH_EMAIL_ENABLED switch as the email transport reads it (default OFF), so the operator
+  // screen can show it and refuse to offer the email channel while it is off. Descriptive only - the transport still
+  // decides (emailTransport.ts refuses every send while the switch is off).
+  return res.status(200).json({ ok: true, report, emailEnabled: isEmailTransportEnabled() });
 }
 
 export default __createApiRoute(handler, { route: '/api/super-admin/outreach/activate' });

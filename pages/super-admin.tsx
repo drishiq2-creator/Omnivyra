@@ -49,6 +49,10 @@ const ActivityCostBreakdown = dynamic(() => import('../components/super-admin/Ac
   ssr: false,
   loading: SuperAdminTabLoader,
 });
+const OutreachOperatorTab = dynamic(() => import('../components/super-admin/tabs/OutreachOperatorTab'), {
+  ssr: false,
+  loading: SuperAdminTabLoader,
+});
 const ApisPlatformsTab = dynamic(() => import('../components/super-admin/tabs/ApisPlatformsTab'), {
   ssr: false,
   loading: SuperAdminTabLoader,
@@ -449,6 +453,7 @@ export default function SuperAdminPanel() {
             { id: 'credits-billing', label: 'Credits & Billing', icon: Coins      },
             { id: 'monetization-ops', label: 'Monetization Ops',  icon: Coins      },
             { id: 'community-ai',   label: 'Engagement',         icon: Activity   },
+            { id: 'outreach',       label: 'Outreach',           icon: Activity   },
             { id: 'source-catalog',  label: 'Source Catalog',     icon: Compass    },
             { id: 'cost-analysis',  label: 'Cost Analysis',      icon: DollarSign },
             { id: 'audit',          label: 'Audit Logs',         icon: Eye        },
@@ -544,6 +549,10 @@ export default function SuperAdminPanel() {
 
         {activeTab === 'monetization-ops' && (
           <MonetizationOpsTab />
+        )}
+
+        {activeTab === 'outreach' && (
+          <OutreachOperatorTab />
         )}
 
         {activeTab === 'social-platforms' && (
