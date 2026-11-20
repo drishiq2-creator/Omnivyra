@@ -4,6 +4,10 @@ import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeF
  * GET /api/track/clusters?account_id=xxx&days=30
  *
  * Content clustering: groups blog performance by tag/category.
+ *
+ * UNREADABLE != EMPTY (b3 standing rule, 2026-11-19): every read's error is read. A failed read - error
+ * object OR thrown - answers 503 + Retry-After CLUSTERS_UNAVAILABLE. It used to read `data ?? []`, so a
+ * failed read rendered as "no clusters" and was sent to AI insights as real data.
  * Joins blog metadata with analytics data to surface topic-level intelligence.
  *
  * Response:
@@ -24,6 +28,7 @@ import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeF
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { supabase } from '../../../backend/db/supabaseClient';
 import { enforceCompanyAccess } from '../../../backend/services/userContextService';
+import { AnalyticsReadError, rowsOf, settled } from '../../../backend/services/blog/blogAnalyticsRead';
 
 interface ClusterResult {
   name:         string;
@@ -48,6 +53,17 @@ function slugMatches(urlSlug: string, blogSlug: string): boolean {
 }
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
+  try {
+    return await clustersHandler(req, res);
+  } catch (err) {
+    if (!(err instanceof AnalyticsReadError)) throw err;
+    console.error('[track/clusters] read failed', { account_id: req.query.account_id, read: err.what, error: err.message });
+    res.setHeader('Retry-After', '5');
+    return res.status(503).json({ code: 'CLUSTERS_UNAVAILABLE', error: 'Content clusters are temporarily unavailable.' });
+  }
+}
+
+async function clustersHandler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
 
   const accountId = typeof req.query.account_id === 'string' ? req.query.account_id.trim() : null;
@@ -60,26 +76,27 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   const since = new Date(Date.now() - days * 86_400_000).toISOString();
 
   // ── Fetch blog metadata ────────────────────────────────────────────────
-  const { data: blogs } = await supabase
+  const blogs = rowsOf(await settled('published blogs', supabase
     .from('blogs')
     .select('id, slug, tags, category')
     .eq('company_id', accountId)
-    .eq('status', 'published');
+    .eq('status', 'published')), 'published blogs');
 
-  if (!blogs || blogs.length === 0) {
+  // A READ that succeeded with no published posts is genuinely empty - not a failure.
+  if (blogs.length === 0) {
     return res.status(200).json({ clusters: [], top_cluster: null, bottom_cluster: null });
   }
 
   // ── Fetch analytics data ───────────────────────────────────────────────
   const [pvRes, lvRes, intentRes] = await Promise.all([
-    supabase.from('blog_analytics').select('url_slug').eq('account_id', accountId).eq('event_type', 'pageview').gte('created_at', since),
-    supabase.from('blog_analytics').select('url_slug, time_on_page, scroll_depth').eq('account_id', accountId).eq('event_type', 'pageleave').gte('created_at', since),
-    supabase.from('blog_analytics').select('url_slug').eq('account_id', accountId).in('event_type', ['cta_click', 'copy', 'form_interaction']).gte('created_at', since),
+    settled('cluster pageviews', supabase.from('blog_analytics').select('url_slug').eq('account_id', accountId).eq('event_type', 'pageview').gte('created_at', since)),
+    settled('cluster pageleaves', supabase.from('blog_analytics').select('url_slug, time_on_page, scroll_depth').eq('account_id', accountId).eq('event_type', 'pageleave').gte('created_at', since)),
+    settled('cluster intent events', supabase.from('blog_analytics').select('url_slug').eq('account_id', accountId).in('event_type', ['cta_click', 'copy', 'form_interaction']).gte('created_at', since)),
   ]);
 
-  const pv     = (pvRes.data     ?? []) as any[];
-  const lv     = (lvRes.data     ?? []) as any[];
-  const intent = (intentRes.data ?? []) as any[];
+  const pv     = rowsOf(pvRes, 'cluster pageviews') as any[];
+  const lv     = rowsOf(lvRes, 'cluster pageleaves') as any[];
+  const intent = rowsOf(intentRes, 'cluster intent events') as any[];
 
   // Build per-slug stats
   const slugViews  = new Map<string, number>();
