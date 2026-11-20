@@ -2,7 +2,7 @@ import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeF
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { enforceCompanyAccess } from '../../../backend/services/userContextService';
 import { enforceRole, Role } from '../../../backend/services/rbacService';
-import { createWebsite, getWebsites } from '../../../backend/services/websiteService';
+import { WebsiteAlreadyExistsError, createWebsite, getWebsites } from '../../../backend/services/websiteService';
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
   const companyId =
@@ -45,6 +45,10 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       });
       return res.status(201).json({ website });
     } catch (err) {
+      // Same condition as POST /api/websites/setup create_website: a clean 409, not a 500 leaking the constraint name.
+      if (err instanceof WebsiteAlreadyExistsError) {
+        return res.status(409).json({ code: 'WEBSITE_ALREADY_EXISTS', error: 'This company already has a website set up at this address.' });
+      }
       return res.status(500).json({ error: err instanceof Error ? err.message : 'Failed to create website' });
     }
   }

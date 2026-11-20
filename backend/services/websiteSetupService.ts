@@ -15,6 +15,19 @@ export type WebsiteSetupStep =
 
 const STEP_ORDER: WebsiteSetupStep[] = ['create_website', 'verify_domain', 'select_cms', 'connect_cms', 'install_tracking', 'connect_forms', 'summary'];
 
+/**
+ * A setup READ failed (dropped-error rows websiteSetupService:25/:48, 2026-11-20). Before, a failed read answered
+ * 200 { website: null, progress: null }, which the wizard can't tell from a brand-new site. The route maps this to
+ * 503 WEBSITE_SETUP_UNAVAILABLE.
+ */
+export class WebsiteSetupReadError extends Error {
+  readonly code = 'WEBSITE_SETUP_UNAVAILABLE';
+  constructor(message: string) {
+    super(message);
+    this.name = 'WebsiteSetupReadError';
+  }
+}
+
 export async function getOrCreateWebsiteSetup(input: {
   companyId: string;
   userId?: string | null;
@@ -22,10 +35,16 @@ export async function getOrCreateWebsiteSetup(input: {
 }): Promise<{ website: Website | null; progress: Record<string, unknown> | null }> {
   let website: Website | null = null;
   if (input.websiteId) {
-    const { data } = await ownedDbTable('websites').select('*').eq('id', input.websiteId).eq('company_id', input.companyId).maybeSingle();
+    const { data, error } = await ownedDbTable('websites').select('*').eq('id', input.websiteId).eq('company_id', input.companyId).maybeSingle();
+    if (error) throw new WebsiteSetupReadError(`website read failed: ${error.message}`);
     website = data as Website | null;
   } else {
-    const websites = await getWebsites(input.companyId);
+    let websites: Website[];
+    try {
+      websites = await getWebsites(input.companyId);
+    } catch (err) {
+      throw new WebsiteSetupReadError(`websites read failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
     website = websites[0] ?? null;
   }
 
@@ -35,6 +54,8 @@ export async function getOrCreateWebsiteSetup(input: {
     .select('*')
     .eq('website_id', website.id)
     .maybeSingle();
+  // A failed read is not "no progress yet": inserting a fresh row would reset the wizard to step 1.
+  if (existing.error) throw new WebsiteSetupReadError(`setup progress read failed: ${existing.error.message}`);
   if (existing.data) {
     await ownedDbTable('website_setup_progress')
       .update({
@@ -45,7 +66,7 @@ export async function getOrCreateWebsiteSetup(input: {
     return { website, progress: existing.data as Record<string, unknown> };
   }
 
-  const { data } = await ownedDbTable('website_setup_progress')
+  const { data, error: insertError } = await ownedDbTable('website_setup_progress')
     .insert({
       company_id: input.companyId,
       website_id: website.id,
@@ -56,6 +77,7 @@ export async function getOrCreateWebsiteSetup(input: {
     })
     .select('*')
     .single();
+  if (insertError) throw new Error(`setup progress create failed: ${insertError.message}`);
 
   return { website, progress: data as Record<string, unknown> };
 }

@@ -2,7 +2,7 @@ import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeF
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { enforceCompanyAccess } from '../../../backend/services/userContextService';
 import { requireCompanyAdmin } from '../../../backend/services/companyAdminGate';
-import { createWebsiteFromSetup, getOrCreateWebsiteSetup, markWebsiteSetupStep, type WebsiteSetupStep } from '../../../backend/services/websiteSetupService';
+import { WebsiteSetupReadError, createWebsiteFromSetup, getOrCreateWebsiteSetup, markWebsiteSetupStep, type WebsiteSetupStep } from '../../../backend/services/websiteSetupService';
 import { WebsiteAlreadyExistsError } from '../../../backend/services/websiteService';
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
@@ -18,11 +18,19 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (!roleGate) return;
 
   if (req.method === 'GET') {
-    const result = await getOrCreateWebsiteSetup({
-      companyId,
-      websiteId: typeof req.query.website_id === 'string' ? req.query.website_id : null,
-    });
-    return res.status(200).json(result);
+    try {
+      const result = await getOrCreateWebsiteSetup({
+        companyId,
+        websiteId: typeof req.query.website_id === 'string' ? req.query.website_id : null,
+      });
+      return res.status(200).json(result);
+    } catch (err) {
+      // A failed read is never 200 { website: null } (= "brand-new site" to the wizard). State only.
+      if (err instanceof WebsiteSetupReadError) {
+        return res.status(503).json({ code: 'WEBSITE_SETUP_UNAVAILABLE', error: 'Website setup could not be loaded.' });
+      }
+      throw err;
+    }
   }
 
   if (req.method === 'POST') {
