@@ -177,8 +177,10 @@ describe('F0 · previously-mapped operations are unchanged', () => {
   // Regression guard: F0 must not move any existing operation to a different
   // billable capability.
   const UNCHANGED: Array<[string, string]> = [
-    ['generateCampaignPlan', 'campaign_generation'],
-    ['parsePlanToWeeks', 'campaign_generation'],
+    // DELIBERATELY MOVED (c6 2026-11-20): the month's-plan calls belong to the PLAN job (async_campaign_planning),
+    // not the autonomous campaign agent (campaign_generation) - planning usage was attributed to the wrong feature.
+    ['generateCampaignPlan', 'async_campaign_planning'],
+    ['parsePlanToWeeks', 'async_campaign_planning'],
     ['generateMasterContent', 'content_generation'],
     ['generateContentVariant', 'content_generation'],
     ['regenerateContent', 'content_rewrite'],

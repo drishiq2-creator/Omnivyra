@@ -19,26 +19,38 @@ const { CREDIT_ACTIONS, getCreditCost } = require('../../services/creditDeductio
  * fails CLOSED in executeWithCredits until c6 adds its entry. REMOVE an action from this list when its entry lands;
  * the test fails if the list is not exactly the unmapped set (a new unmapped action, or a stale name).
  */
-const KNOWN_UNMAPPED = [
-  'async_campaign_planning', 'blog_brief_suggestions', 'blog_generation', 'blog_rewrite_hook', 'campaign_chat',
-  'campaign_preplanning', 'campaign_suggest_duration', 'campaign_suggest_update', 'chat_theme_refine',
-  'content_repurpose', 'content_suggestions', 'creator_content', 'engagement_refine', 'image_generation',
-  'quick_platform_adapt', 'recommendations_generate', 'recommendations_group_preview',
-  'recommendations_opportunities', 'recommendations_preview_strategy', 'skeleton_command', 'video_generation',
-];
+const KNOWN_UNMAPPED: string[] = []; // all 21 got entries (c6 shape, 2026-11-20) - keep it EMPTY
 
 beforeEach(() => { mockKeys.length = 0; });
 
 describe('no report fallback without report fields', () => {
-  it('an action with NO registry entry resolves to null (fails closed), never to another product', () => {
-    expect(resolveMonetizationFeature({ action_key: 'blog_brief_suggestions' })).toBeNull();
+  it('an UNKNOWN action resolves to null (fails closed), never to another product', () => {
+    expect(resolveMonetizationFeature({ action_key: 'zz_unknown_action_test' })).toBeNull();
     expect(resolveMonetizationFeature({})).toBeNull();
   });
 
-  it('getCreditCost prices an unmapped action from its OWN row - never website_audit', async () => {
+  it('EVERY CreditAction has exactly ONE entry, priced from its OWN key (credit_cost_config = the action; no token path)', () => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { MONETIZATION_FEATURE_REGISTRY } = require('../../../shared/monetization/featureRegistry');
+    for (const a of CREDIT_ACTIONS as string[]) {
+      const owners = (MONETIZATION_FEATURE_REGISTRY as any[]).filter((e) => e.pricing_keys?.action_key === a);
+      expect({ a, owners: owners.length }).toEqual({ a, owners: 1 });
+      expect({ a, key: resolveMonetizationFeature({ action_key: a })?.feature.pricing_keys.credit_cost_config ?? a }).toEqual({ a, key: a });
+    }
+  });
+
+  it('the month-plan gateway calls are attributed to the PLAN job, not the autonomous campaign agent (c6)', () => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { resolveFeatureFromProcessType } = require('../../../shared/monetization/featureRegistry');
+    expect(resolveFeatureFromProcessType('generateCampaignPlan')?.pricing_keys.action_key).toBe('async_campaign_planning');
+    expect(resolveFeatureFromProcessType('parsePlanToWeeks')?.pricing_keys.action_key).toBe('async_campaign_planning');
+  });
+
+  it('getCreditCost prices each formerly-unmapped action from its OWN row - never website_audit', async () => {
     await getCreditCost('blog_brief_suggestions');
     await getCreditCost('recommendations_generate');
-    expect(mockKeys).toEqual(['blog_brief_suggestions', 'recommendations_generate']);
+    await getCreditCost('async_campaign_planning');
+    expect(mockKeys).toEqual(['blog_brief_suggestions', 'recommendations_generate', 'async_campaign_planning']);
   });
 
   it('CONTROL: a REPORT lookup still resolves through the report fallback', () => {

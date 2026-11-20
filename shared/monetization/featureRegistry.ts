@@ -75,6 +75,29 @@ export interface MonetizationFeatureRegistryEntry {
   };
 }
 
+/** A fixed-price credit action priced from its OWN credit_cost_config row (c6 shape, 2026-11-20). */
+function pricedAction(
+  key: string,
+  feature_key: string,
+  category: MonetizationFeatureRegistryEntry['category'],
+  display_name: string,
+  display_group: string,
+  display_color: string,
+): MonetizationFeatureRegistryEntry {
+  return {
+    feature_key, category, display_name, display_group, display_color,
+    charge_mode: 'fixed_credits',
+    pricing_strategy: 'credit_cost_config',
+    usage_metering_enabled: true,
+    requires_credit_hold: true,
+    plan_eligible: true,
+    enforcement_eligible: true,
+    visible_to_customer: true,
+    internal_only: false,
+    pricing_keys: { action_key: key, credit_cost_config: key, usage_action_key: key },
+  };
+}
+
 const BASE_FEATURES: MonetizationFeatureRegistryEntry[] = [
   {
     feature_key: 'reports.snapshot',
@@ -218,7 +241,8 @@ const BASE_FEATURES: MonetizationFeatureRegistryEntry[] = [
     enforcement_eligible: true,
     visible_to_customer: true,
     internal_only: false,
-    process_type_mapping: ['generateCampaignPlan', 'parsePlanToWeeks'],
+    // process_type_mapping ['generateCampaignPlan','parsePlanToWeeks'] MOVED to campaigns.async_campaign_planning (c6
+    // 2026-11-20): those are the month's-plan calls; this entry is the autonomous campaign agent.
     pricing_keys: {
       action_key: 'campaign_generation',
       credit_cost_config: 'campaign_generation',
@@ -635,7 +659,34 @@ const BASE_FEATURES: MonetizationFeatureRegistryEntry[] = [
       action_pricing_config: 'profile_extraction',
       usage_action_key: 'profile_extraction',
     },
-  },
+  },  // ── Fixed-price actions that had NO entry (b3/c6 2026-11-20, BLOCKING money) ───────────────────────────────
+  // Before this, these keys fell through to the report fallback and were priced as website_audit. ONE entry per
+  // key (c6 shape): pricing_strategy credit_cost_config, pricing_keys {action_key, credit_cost_config,
+  // usage_action_key} = the key itself, NO action_pricing_config (token path), NO process_type_mapping (except the
+  // plan job, moved from campaigns.creation). Price = that key's credit_cost_config row (owner table, cb write).
+  { ...pricedAction('async_campaign_planning', 'campaigns.async_campaign_planning', 'campaigns', 'Campaign Planning', 'Campaigns', 'bg-violet-500'),
+    process_type_mapping: ['generateCampaignPlan', 'parsePlanToWeeks'], // moved from campaigns.creation (c6): the month's-plan calls belong to the plan job
+  }, // owner 40, basic model
+  pricedAction('blog_generation', 'creator_content.blog_generation', 'creator_content', 'Blog Generation', 'Blogs', 'bg-blue-400'), // owner 40
+  pricedAction('blog_brief_suggestions', 'creator_content.blog_brief_suggestions', 'creator_content', 'Blog Brief Suggestions', 'Blogs', 'bg-blue-400'), // 1
+  pricedAction('blog_rewrite_hook', 'creator_content.blog_rewrite_hook', 'creator_content', 'Blog Hook Rewrite', 'Blogs', 'bg-blue-400'), // 3
+  pricedAction('campaign_chat', 'campaigns.campaign_chat', 'campaigns', 'Campaign Chat', 'Campaigns', 'bg-violet-500'), // 1
+  pricedAction('campaign_preplanning', 'campaigns.campaign_preplanning', 'campaigns', 'Campaign Pre-planning', 'Campaigns', 'bg-violet-500'), // 1
+  pricedAction('campaign_suggest_duration', 'campaigns.campaign_suggest_duration', 'campaigns', 'Campaign Duration Suggestion', 'Campaigns', 'bg-violet-500'), // 1
+  pricedAction('campaign_suggest_update', 'campaigns.campaign_suggest_update', 'campaigns', 'Campaign Update Suggestion', 'Campaigns', 'bg-violet-500'), // 1
+  pricedAction('chat_theme_refine', 'campaigns.chat_theme_refine', 'campaigns', 'Theme Refinement', 'Campaigns', 'bg-violet-500'), // 1
+  pricedAction('content_repurpose', 'creator_content.content_repurpose', 'creator_content', 'Content Repurpose', 'Content Generation', 'bg-blue-400'), // 5
+  pricedAction('content_suggestions', 'creator_content.content_suggestions', 'creator_content', 'Content Suggestions', 'Content Generation', 'bg-blue-400'), // 3
+  pricedAction('creator_content', 'creator_content.creator_content', 'creator_content', 'Creator Content', 'Content Generation', 'bg-blue-400'), // NO OWNER PRICE - no row, fails closed
+  pricedAction('engagement_refine', 'engagement.engagement_refine', 'engagement_center', 'Reply Refinement', 'AI Replies', 'bg-emerald-400'), // 1
+  pricedAction('image_generation', 'ai_generation.image_generation', 'ai_generation', 'Image Generation', 'Images', 'bg-violet-400'), // owner 55/95 by tier - split in A8 step 1; no single row, fails closed
+  pricedAction('quick_platform_adapt', 'creator_content.quick_platform_adapt', 'creator_content', 'Quick Platform Adapt', 'Content Generation', 'bg-blue-400'), // 3
+  pricedAction('recommendations_generate', 'intelligence.recommendations_generate', 'intelligence', 'Recommendations', 'Recommendations', 'bg-blue-500'), // owner 10
+  pricedAction('recommendations_group_preview', 'intelligence.recommendations_group_preview', 'intelligence', 'Recommendation Grouping Preview', 'Recommendations', 'bg-blue-500'), // 1
+  pricedAction('recommendations_opportunities', 'intelligence.recommendations_opportunities', 'intelligence', 'Detected Opportunities', 'Recommendations', 'bg-blue-500'), // owner 10
+  pricedAction('recommendations_preview_strategy', 'intelligence.recommendations_preview_strategy', 'intelligence', 'Strategy Preview', 'Recommendations', 'bg-blue-500'), // 1
+  pricedAction('skeleton_command', 'campaigns.skeleton_command', 'campaigns', 'Plan Skeleton Command', 'Campaigns', 'bg-violet-500'), // 5
+  pricedAction('video_generation', 'ai_generation.video_generation', 'ai_generation', 'Video Generation', 'Video', 'bg-violet-400'), // NO OWNER PRICE - no row, fails closed
 ];
 
 const SIMPLE_CREDIT_FEATURES: Record<CreditAction, Omit<MonetizationFeatureRegistryEntry, 'pricing_keys'>> = {
