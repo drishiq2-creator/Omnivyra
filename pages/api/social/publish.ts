@@ -8,6 +8,7 @@ import { updatePostPublishStatus } from '../../../backend/db/scheduledPostsStore
 import { publishNow } from '../../../backend/services/publishNowService';
 import { authorizePostPublish } from '../../../lib/campaign/publishAuthorization';
 import { supabase } from '../../../backend/db/supabaseClient';
+import { resolvePostSocialAccount } from '../../../backend/services/postSocialAccountResolver';
 import { resolveEngagementCapability } from '../../../backend/services/engagementCapabilityMap';
 import { logAuditEvent } from '../../../backend/services/auditLoggingService';
 import {
@@ -236,33 +237,36 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
         }
       }
 
-      // Resolve social_account_id — fall back to user's connected account for this platform
+      // Resolve social_account_id when the post carries none. CROSS-TENANT FIX (BLOCKING): this used to take
+      // "the user's active account for the platform" in ANY company, so company A's post could be published
+      // through company B's account. The shared resolver takes it from the post's CAMPAIGN company only (a
+      // standalone post: only when the user's matching accounts are all in one company).
       let socialAccountId: string | null = post.social_account_id || null;
       if (!socialAccountId) {
         const platformNorm = post.platform === 'x' ? 'twitter' : post.platform;
-        const { data: acct } = await supabase
-          .from('social_accounts')
-          .select('id')
-          .eq('user_id', post.user_id)
-          .eq('is_active', true)
-          .in('platform', [post.platform, platformNorm])
-          .limit(1)
-          .maybeSingle();
-        socialAccountId = acct?.id ?? null;
-      }
-
-      if (!socialAccountId) {
-        return res.status(422).json({
-          error: `No connected ${post.platform} account found. Please connect your account in Settings → Social Accounts.`,
+        const resolved = await resolvePostSocialAccount({
+          userId: post.user_id,
+          platforms: [post.platform, platformNorm],
+          campaignId: post.campaign_id ?? null,
         });
+        if (!resolved.ok) {
+          return res.status(resolved.retryable ? 503 : 422).json({ error: resolved.message, code: resolved.code });
+        }
+        socialAccountId = resolved.socialAccountId;
       }
 
       // Patch the post row with the resolved account so publishNow and future jobs use it
       if (!post.social_account_id) {
-        await supabase
+        // publishNow and later jobs read the account from the row: publishing with it unpersisted would
+        // fail later for the wrong reason. Refused here instead (unread-error census).
+        const { error: patchError } = await supabase
           .from('scheduled_posts')
           .update({ social_account_id: socialAccountId })
           .eq('id', post.id);
+        if (patchError) {
+          console.error('[social/publish] resolved account not saved to the post; not publishing', { post_id: post.id, error: patchError.message });
+          return res.status(500).json({ error: 'Could not prepare the post for publishing. Please try again.' });
+        }
       }
 
       if (dry_run) {
@@ -279,10 +283,17 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
         });
       }
 
+      // An explicit publish-now SUPERSEDES the post's queued publish job
+      // (ruling 2026-11-18): "Post Now" stages its row with a delayed job, and
+      // a job left behind would publish a post this request reports as failed,
+      // or duplicate it. publishNow retires it after taking the post-level
+      // claim and before the platform call; this route is the only caller
+      // that asks (never the cron or the queue worker).
       const result = await publishNow({
         scheduled_post_id: post.id,
         social_account_id: socialAccountId,
         user_id: post.user_id,
+        supersede_queued_jobs: true,
       });
 
       // A suppressed result means the post's status belongs to someone else —
@@ -291,11 +302,35 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       // 'publishing' row, a 'published' one, or the uncertain record, so
       // nothing is written.
       if (!result.suppressed) {
-        await updatePostPublishStatus({
+        // CLASS-2 D8: a mirror of what publishNow wrote, so it lands only on that status - once
+        // `failed` the post is claimable and another execution may hold it already. D5 + D8 are only
+        // correct TOGETHER (05): a superseded publishNow writes nothing and is skipped here
+        // (`suppressed`); the pin also stops this mirror making the write D5 refused.
+        const mirrored = await updatePostPublishStatus({
           post_id: post.id,
           status: result.status,
           external_post_id: result.external_post_id,
           last_error: result.status === 'PUBLISHED' ? undefined : result.message,
+          expectedFromStatus: result.status.toLowerCase(),
+        });
+        if (!mirrored) console.warn('[social/publish] status mirror not written: another execution owns the post now', { post_id: post.id, status: result.status });
+      }
+
+      // The queued job could not be retired, so nothing was published (and the
+      // row was taken out of every publisher's reach). Not a 200: the client
+      // must show it as not posted.
+      // (A literal, not the imported constant: suites that stub publishNowService
+      // with only `publishNow` would otherwise compare against undefined.)
+      if (result.code === 'PRIOR_JOB_CANCEL_FAILED') {
+        return res.status(503).json({
+          status: result.status,
+          code: result.code,
+          error: result.message,
+          message: result.message,
+          platform: post.platform,
+          post_fenced: result.post_fenced === true,
+          retryable: true,
+          timestamp: result.timestamp,
         });
       }
 
@@ -326,10 +361,15 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     } catch (error: any) {
       console.error('[publish] error:', error);
       try {
+        // Only over the status this request READ (publishNow restores it when nothing was sent):
+        // an uncertain outcome, or another execution's claim, is not this request's to overwrite.
         await updatePostPublishStatus({
           post_id,
           status: 'FAILED',
           last_error: error?.message || 'Publish failed',
+          ...(post.status ? { expectedFromStatus: String(post.status) } : {}),
+        }).then((moved) => {
+          if (!moved) console.warn('[social/publish] failure not written: the post is no longer in the status this request read', { post_id });
         });
       } catch (_) {}
       return res.status(500).json({

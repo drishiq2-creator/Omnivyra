@@ -20,9 +20,24 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 import { supabase } from '../../../backend/db/supabaseClient';
 import { publishNow } from '../../../backend/services/publishNowService';
 import { updatePostPublishStatus } from '../../../backend/db/scheduledPostsStore';
+
+/**
+ * A status write that names the status it expects (CLASS-2 D8). Its answer is NOT ignored (05): a
+ * write that moved nothing means another execution owns the post now - logged, so a lost race is
+ * visible rather than reported as handled. The protection itself is the filter in the statement.
+ */
+async function recordStatus(input: Parameters<typeof updatePostPublishStatus>[0]): Promise<void> {
+  const moved = await updatePostPublishStatus(input);
+  if (!moved) {
+    console.warn('[cron/process-scheduled-posts] status not written: the post is no longer in the expected status (another execution owns it)', {
+      post_id: input.post_id, status: input.status, expected: input.expectedFromStatus,
+    });
+  }
+}
 import { runJob } from '../../../backend/services/jobRunner';
 import { bearerTokenMatches } from '../../../backend/security/constantTimeEqual';
 import { authorizePostPublish } from '../../../lib/campaign/publishAuthorization';
+import { resolvePostSocialAccount } from '../../../backend/services/postSocialAccountResolver';
 
 const BATCH_SIZE = 20; // Max posts to process per invocation
 // A refused post stays 'scheduled' and due, so it comes back on every run. The
@@ -148,26 +163,39 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       let socialAccountId: string | null = post.social_account_id || null;
       let resolvedOrgId: string | null = joinedAccts[0]?.company_id ?? null;
 
+      // CROSS-TENANT FIX (BLOCKING): a post without an account used to get "the user's active account for
+      // the platform" in ANY company, so company A's post could be PUBLISHED through company B's account.
+      // The shared resolver takes the account from the post's CAMPAIGN company only (a standalone post: only
+      // when the user's matching accounts are all in one company). A read failure is retried next run.
+      let accountFailure: string | null = null;
       if (!socialAccountId) {
         const platformNorm = post.platform === 'x' ? 'twitter' : post.platform;
-        const { data: acct } = await supabase
-          .from('social_accounts')
-          .select('id, company_id')
-          .eq('user_id', post.user_id)
-          .eq('is_active', true)
-          .in('platform', [post.platform, platformNorm])
-          .limit(1)
-          .maybeSingle();
-        socialAccountId = acct?.id ?? null;
-        resolvedOrgId = (acct?.company_id as string | undefined) ?? null;
+        const resolved = await resolvePostSocialAccount({
+          userId: post.user_id,
+          platforms: [post.platform, platformNorm],
+          campaignId: post.campaign_id ?? null,
+        });
+        if (resolved.ok) {
+          socialAccountId = resolved.socialAccountId;
+          resolvedOrgId = resolved.companyId;
+        } else if (resolved.retryable) {
+          console.warn('[cron/process-scheduled-posts] account resolution unreadable; retrying next run', { post_id: post.id, code: resolved.code });
+          results.skipped++;
+          continue;
+        } else {
+          accountFailure = `${resolved.message} (${resolved.code})`;
+        }
       }
 
       if (!socialAccountId) {
-        // No connected account — terminal classification, do not retry.
-        await updatePostPublishStatus({
+        // No usable account - terminal classification, do not retry (a read failure was retried above).
+        // CLASS-2 D8: every write here names the status it expects. The scan read `scheduled`; the
+        // queue worker may have claimed the post since, and a blind `failed` flipped its live claim.
+        await recordStatus({
           post_id: post.id,
           status: 'FAILED',
-          last_error: `No connected ${post.platform} account`,
+          last_error: accountFailure ?? `No connected ${post.platform} account`,
+          expectedFromStatus: 'scheduled',
         });
         results.skipped++;
         continue;
@@ -178,7 +206,8 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
         await supabase
           .from('scheduled_posts')
           .update({ social_account_id: socialAccountId })
-          .eq('id', post.id);
+          .eq('id', post.id)
+          .eq('status', 'scheduled');
       }
 
       // Per-post runJob with tenant containment. The runner rejects
@@ -218,10 +247,11 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       if (outcome.status === 'tenant_invalid') {
         // Owning org is gone or suspended — mark FAILED with terminal
         // classification so the cron doesn't keep retrying this post.
-        await updatePostPublishStatus({
+        await recordStatus({
           post_id: post.id,
           status: 'FAILED',
           last_error: `Tenant invalid: ${outcome.reason}`,
+          expectedFromStatus: 'scheduled',
         });
         results.skipped_tenant_invalid++;
         results.errors.push(`[${post.id}] tenant_invalid: ${outcome.reason}`);
@@ -239,10 +269,14 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
         const msg = outcome.error instanceof Error ? outcome.error.message : String(outcome.error);
         results.errors.push(`[${post.id}] ${msg}`);
         try {
-          await updatePostPublishStatus({
+          // publishNow threw: it restores the pre-claim status (`scheduled`) when nothing was sent, and
+          // records an uncertain outcome itself when the call had started. Only the restored row is
+          // this cron's to fail; any other state belongs to another execution or to reconciliation.
+          await recordStatus({
             post_id: post.id,
             status: 'FAILED',
             last_error: msg || 'Unexpected error',
+            expectedFromStatus: 'scheduled',
           });
         } catch (_) { /* fail-soft */ }
         continue;
@@ -264,11 +298,17 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
         results.skipped++;
         continue;
       }
-      await updatePostPublishStatus({
+      // A mirror of what publishNow already wrote, so it lands only on that status: once `failed`
+      // the post is claimable, and another execution may hold it already. D5 + D8 are only correct
+      // TOGETHER (05): a superseded publishNow writes nothing (D5) and is skipped above
+      // (`suppressed`); were it not, this pinned mirror would still match nothing - and a BLIND
+      // mirror here would make the very write D5 refused, one layer up.
+      await recordStatus({
         post_id:          post.id,
         status:           result.status,
         external_post_id: result.external_post_id,
         last_error:       result.status === 'PUBLISHED' ? undefined : result.message,
+        expectedFromStatus: result.status.toLowerCase(),
       });
 
       if (result.status === 'PUBLISHED') {

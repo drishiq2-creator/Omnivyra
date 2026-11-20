@@ -44,6 +44,7 @@ import {
 } from '../../../backend/services/marketPulseV2Service';
 import { processMarketPulseJobV1 } from '../../../backend/services/marketPulseJobProcessor';
 import { bearerTokenMatches } from '../../../backend/security/constantTimeEqual';
+import { isMarketPulseAutomationEnabled } from '../../../backend/services/marketPulse/automationGate';
 
 const BATCH_SIZE = 50;
 
@@ -94,6 +95,13 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   }
   if (!bearerTokenMatches(req.headers['authorization'], cronSecret)) {
     return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  // e9 BLOCKING-NOW 2026-11-14 (owner ruling: automated Market Pulse scans stay OFF until charging is live): the shared
+  // gate (backend/services/marketPulse/automationGate), checked after auth and BEFORE any read, queue or AI call.
+  if (!isMarketPulseAutomationEnabled()) {
+    console.log('[cron/market-pulse-automation] disabled (MARKET_PULSE_AUTOMATION_ENABLED is not "true"); no work done');
+    return res.status(200).json({ ok: true, skipped: 'automation_disabled' });
   }
 
   const startedAt = Date.now();

@@ -56,6 +56,9 @@ export type PrincipalUnresolvedReason =
   | 'NO_AUTH'
   | 'INVALID_AUTH'
   | 'ACCOUNT_DELETED'
+  // Refused BY INTENT (e9/05 2026-11-14): authResolver rejects users.status='suspended' before any principal is built;
+  // previously that reached callers only through the INVALID_AUTH catch-all.
+  | 'ACCOUNT_SUSPENDED'
   | 'USER_NOT_FOUND'
   | 'NO_EMAIL';
 
@@ -334,6 +337,18 @@ async function resolvePrincipalUncached(
     }
   }
 
+  // 2b. Record a refused lifecycle state BEFORE the bridge fallback (05, 2026-11-14): when a bridge cookie is present,
+  //     step 3 returns the bridge principal and the explicit reason in step 4 is never reached - so a suspended or
+  //     deleted user's attempt would otherwise leave no trace in exactly the case where a request still gets through.
+  //     Authorization is unchanged: the bridge is a separate identity (the env super-admin's own signed credential).
+  if (auth.error === 'ACCOUNT_SUSPENDED' || auth.error === 'ACCOUNT_DELETED') {
+    await logSecurityEvent({
+      capability: 'identity.resolve',
+      decision: 'lifecycle_refused_identity_attempt',
+      reason: `${auth.error}${hasBridgeCookie(req) ? '; legacy bridge cookie present - bridge evaluated next' : ''}`,
+    });
+  }
+
   // 3. Fall back to legacy cookie super-admin, IF the request carries the
   //    bridge cookie. The bridge is mutually exclusive with Supabase
   //    identity — if both are present, Supabase wins (handled above).
@@ -344,6 +359,7 @@ async function resolvePrincipalUncached(
 
   // 4. Map auth-failure codes to PrincipalUnresolvedReason.
   if (auth.error === 'ACCOUNT_DELETED') return { ok: false, reason: 'ACCOUNT_DELETED' };
+  if (auth.error === 'ACCOUNT_SUSPENDED') return { ok: false, reason: 'ACCOUNT_SUSPENDED' };
   if (auth.error === 'USER_NOT_FOUND') return { ok: false, reason: 'USER_NOT_FOUND' };
   if (auth.error === 'NO_EMAIL') return { ok: false, reason: 'NO_EMAIL' };
   if (auth.error === 'NO_TOKEN') return { ok: false, reason: 'NO_AUTH' };

@@ -20,6 +20,9 @@ import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeF
  * ever starting one), otherwise with PUBLISH_OUTCOME_UNCERTAIN. The age only
  * selects candidates; what the row proves decides the label. The state
  * machine permits 'publishing → failed', so this is a legal terminal transition.
+ * Exception: a pre-call claim taken by a superseding publish-now
+ * (PUBLISH_CLAIMED:SUPERSEDE:<uuid>) may have a live queued job behind it, so
+ * it is fenced to 'cancelled' / PRIOR_JOB_CANCEL_FAILED, never made claimable.
  *
  * We do NOT auto-resume here. A row stuck in 'publishing' may have a
  * platform-side post that was never recorded (split-brain), and its
@@ -40,6 +43,9 @@ import { supabase } from '../../../backend/db/supabaseClient';
 import { bearerTokenMatches } from '../../../backend/security/constantTimeEqual';
 import {
   isPreCallClaim,
+  isSupersedePreCallClaim,
+  PRIOR_JOB_CANCEL_FAILED,
+  PRIOR_JOB_CANCEL_FAILED_MESSAGE,
   PUBLISH_NOT_ATTEMPTED,
   PUBLISH_OUTCOME_UNCERTAIN,
 } from '../../../backend/queue/publishOutcome';
@@ -105,20 +111,37 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       //     — a call may have reached the platform: PUBLISH_OUTCOME_UNCERTAIN,
       //     which the worker, the thread orchestrator, publish-now, manual
       //     retry and the blueprint guard all treat as possibly live.
-      const preCall = isPreCallClaim({ status: 'publishing', error_code: row.error_code });
+      //   PUBLISH_CLAIMED:SUPERSEDE:<uuid> — DECIDED FIRST, because
+      //     isPreCallClaim also accepts it and the plain pre-call label would
+      //     shadow it. A superseding publish-now took the post and never got
+      //     past its cancel of the post's queued jobs: the cancel could not be
+      //     confirmed and its own fence write failed, or it died mid-cancel.
+      //     A job that can publish may still be queued, and 'failed' is
+      //     claimable, so it would publish a post the user was told was not
+      //     posted. Write the fence publishNow would have written instead:
+      //     'cancelled' / PRIOR_JOB_CANCEL_FAILED, which no publisher claims.
+      const superseding = isSupersedePreCallClaim({ status: 'publishing', error_code: row.error_code });
+      const preCall = !superseding && isPreCallClaim({ status: 'publishing', error_code: row.error_code });
       // Compare-and-set on 'publishing' AND the exact error_code read: a
       // holder that recorded its call start (or finished) in between wins, and
       // the row is left for the next sweep to judge on what it then says.
       let sweep = supabase
         .from('scheduled_posts')
-        .update({
-          status: 'failed',
-          error_code: preCall ? PUBLISH_NOT_ATTEMPTED : PUBLISH_OUTCOME_UNCERTAIN,
-          error_message: preCall
-            ? `Stuck in publishing state for >= ${Math.round(thresholdMs / 1000)}s before any platform call — swept, safe to retry`
-            : `Stuck in publishing state for >= ${Math.round(thresholdMs / 1000)}s — swept; the platform call may have succeeded`,
-          updated_at: new Date().toISOString(),
-        })
+        .update(superseding
+          ? {
+            status: 'cancelled',
+            error_code: PRIOR_JOB_CANCEL_FAILED,
+            error_message: PRIOR_JOB_CANCEL_FAILED_MESSAGE,
+            updated_at: new Date().toISOString(),
+          }
+          : {
+            status: 'failed',
+            error_code: preCall ? PUBLISH_NOT_ATTEMPTED : PUBLISH_OUTCOME_UNCERTAIN,
+            error_message: preCall
+              ? `Stuck in publishing state for >= ${Math.round(thresholdMs / 1000)}s before any platform call — swept, safe to retry`
+              : `Stuck in publishing state for >= ${Math.round(thresholdMs / 1000)}s — swept; the platform call may have succeeded`,
+            updated_at: new Date().toISOString(),
+          })
         .eq('id', row.id)
         .eq('status', 'publishing');
       sweep = row.error_code === null || row.error_code === undefined

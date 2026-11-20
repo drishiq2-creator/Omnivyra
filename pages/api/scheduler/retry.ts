@@ -7,6 +7,7 @@ import { randomUUID } from 'crypto';
 import {
   hasUncertainOutcome,
   PUBLISH_OUTCOME_UNCERTAIN,
+  queueCancelLeftJobUndecided,
   retryClaimState,
   retryPreparingCode,
 } from '@/backend/queue/publishOutcome';
@@ -180,7 +181,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   // error alone does not block: the row is already 'cancelled', which is what
   // the worker obeys.
   const cancel = await cancelScheduledPostQueueEntry(scheduledPostId, { reason: 'superseded_by_manual_retry' });
-  if (cancel.errors.some((e) => e.startsWith('queue_jobs'))) {
+  if (queueCancelLeftJobUndecided(cancel)) {
     const released = await releaseClaim();
     return res.status(503).json({
       status: 'failed',

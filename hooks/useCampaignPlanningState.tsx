@@ -28,11 +28,14 @@ import AIContentIntegration from '../components/AIContentIntegration';
 import ContentCreationPanel from '../components/ContentCreationPanel';
 import VoiceNotesComponent from '../components/VoiceNotesComponent';
 import WeeklyRefinementInterface from '../components/WeeklyRefinementInterface';
+import { resolveReturnedCampaignId } from '../lib/campaign/returnedCampaignId';
 
 
 export function useCampaignPlanningState() {
   const router = useRouter();
-  const { user } = useCompanyContext();
+  // selectedCompanyId: the app's ACTIVE company (04, 2026-11-18). A NEW campaign must be created under it:
+  // create-12week-plan refuses a new campaign without an authorized company (400 COMPANY_REQUIRED since 025a03a52).
+  const { user, selectedCompanyId } = useCompanyContext();
   const [campaignData, setCampaignData] = useState({
     id: '',
     name: '',
@@ -396,6 +399,12 @@ export function useCampaignPlanningState() {
       notify('info', 'Please create a campaign first');
       return;
     }
+    // Fail closed (04, 2026-11-18): with no active company there is nothing to create the campaign under, so do not
+    // call (the server would answer 400 COMPANY_REQUIRED); tell the user plainly instead.
+    if (!selectedCompanyId) {
+      notify('info', 'Select a company to generate a plan.');
+      return;
+    }
 
     setIsLoading(true);
     setPlanGenerationStartedAt(Date.now());
@@ -408,6 +417,7 @@ export function useCampaignPlanningState() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           campaignId,
+          companyId: selectedCompanyId,
           startDate: campaignData.startDate || new Date().toISOString().split('T')[0],
           aiContent: campaignData.description || 'Generate comprehensive content marketing plan',
           provider: 'demo'
@@ -417,12 +427,26 @@ export function useCampaignPlanningState() {
       if (response.ok) {
         const result = await response.json();
         console.log('Campaign plan generated:', result);
-        
+
+        // Phase 1 of the deleted-campaign takeover fix (owner ruling 2026-11-18): adopt the server's
+        // campaign_id; the server will mint it in phase 2. Changed by orchestration (89) under the
+        // owner's ruling while no UI session was running.
+        const adoptedCampaignId = resolveReturnedCampaignId(campaignId, result);
+        if (adoptedCampaignId !== campaignId) {
+          setCampaignId(adoptedCampaignId);
+          setCampaignData(prev => (prev.id === campaignId ? { ...prev, id: adoptedCampaignId } : prev));
+          // 04 review: replace ONLY campaignId; every other param (e.g. ?companyId, read by this hook) survives a reload.
+          const adoptedUrl = new URL(window.location.href);
+          adoptedUrl.searchParams.set('campaignId', adoptedCampaignId);
+          window.history.replaceState({}, '', `${adoptedUrl.pathname}${adoptedUrl.search}`);
+        }
+
         // Check for existing plan after generation
-        await checkExistingPlan(campaignId);
-        
+        await checkExistingPlan(adoptedCampaignId);
+
         // Redirect to campaign details to view the generated plan
-        window.location.href = `/campaign-details/${campaignId}`;
+        // The adopted id is server-controlled (phase 2): encode it into the path.
+        window.location.href = `/campaign-details/${encodeURIComponent(adoptedCampaignId)}`;
       } else {
         throw new Error('Failed to generate campaign plan');
       }
@@ -440,7 +464,7 @@ export function useCampaignPlanningState() {
   // Check if campaign plan exists and load description
   const checkExistingPlan = async (campaignId: string) => {
     try {
-      const response = await fetch(`/api/campaigns/get-weekly-plans?campaignId=${campaignId}`);
+      const response = await fetch(`/api/campaigns/get-weekly-plans?campaignId=${encodeURIComponent(campaignId)}`);
       if (response.ok) {
         const data = await response.json();
         console.log('Weekly plans data received:', data);

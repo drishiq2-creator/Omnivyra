@@ -53,6 +53,7 @@ import { buildHoldPolicySnapshot, freezeHoldPolicySnapshot } from './billing/hol
 import { evaluateCreditSafetyGate } from './billing/creditSafetyGate';
 import { resolveBillingPolicy } from './billing/billingPolicyResolver';
 import { assertUuid, canonicalizeReference, type Uuid } from '@/lib/shared/uuid';
+import { settledAmountsFromPartialConfirm } from './billing/holdSettlementState';
 
 /** Fire credit threshold alerts in the background — non-blocking, swallows errors. */
 
@@ -147,12 +148,17 @@ export interface SettlementReport {
    * just logged — no negative balance carried).
    */
   underfunded:     boolean;
+  /**
+   * True when a settle was ADOPTED after an ambiguous error and the committed row carried no readable amount, so the
+   * charged figure is the PLANNED one (05). Reconcile against the ledger before relying on it.
+   */
+  amountEstimated?: boolean;
   /** USD cost breakdown from resolveLlmCost when llmPricing was provided. */
   pricing?:        ResolvedLlmCost;
 }
 
 export type ExecuteResult<T> =
-  | { status: 'executed';            result: T; settlement?: SettlementReport }
+  | { status: 'executed';            result: T; settlement?: SettlementReport; settlementPending?: import('./billing/holdSettlementState').SettlementPending }
   | { status: 'already_confirmed' }
   | { status: 'already_released' }
   | { status: 'insufficient_credits'; available: number; required: number }
@@ -671,7 +677,8 @@ export async function confirmCreditReservationToActual(
   }
 
   const confirmId = (data as any)?.id ?? null;
-  const consumed = Number((data as any)?.total_consumed ?? actual);
+  // Either payload shape (fresh totals, or the ledger row a replay returns); planned `actual` only when neither.
+  const consumed = settledAmountsFromPartialConfirm(data, handle.creditsReserved, { consumed: actual, released: Math.max(0, handle.creditsReserved - actual) }).consumed;
   if (confirmId) {
     await trackUsage({
       orgId:                handle.orgId,

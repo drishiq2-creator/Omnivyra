@@ -15,6 +15,7 @@ import { createApiRoute as __createApiRoute } from '../../../../lib/platform/rou
  */
 
 import type { NextApiRequest, NextApiResponse } from 'next';
+
 import { supabase } from '../../../../backend/db/supabaseClient';
 import { assertOrgAccess } from '../../../../backend/services/requestAccessService';
 import { getBillingWalletSnapshot } from '../../../../backend/services/billing/payments/billingWalletService';
@@ -24,6 +25,7 @@ import { resolveActiveContract } from '../../../../backend/services/billing/cont
 import { projectOrgSubscriptions } from '../../../../backend/services/billing/payments/subscriptionProjectionService';
 import { evaluateAllBillingFlags } from '../../../../backend/services/billing/billingFeatureFlags';
 import { checkFinancialControls } from '../../../../backend/services/billing/orgFinancialControlService';
+import { CONFIRM_PHASES } from '../../../../shared/billing/creditPhaseVocabulary';
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
@@ -64,7 +66,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       .from('credit_transactions')
       .select('reference_type, credits_delta')
       .eq('organization_id', companyId)
-      .eq('execution_phase', 'confirm')
+      .in('execution_phase', [...CONFIRM_PHASES])
       .gte('created_at', periodStart)
       .limit(2000);
     const byModule: Record<string, number> = {};

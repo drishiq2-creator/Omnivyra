@@ -1,5 +1,6 @@
 import { fetchWithAuth } from '../community-ai/fetchWithAuth';
 import type { ChatMessage, StructuredPlan } from './types';
+import { resolveReturnedCampaignId } from '../../lib/campaign/returnedCampaignId';
 
 type Params = {
   campaignId?: string;
@@ -37,6 +38,8 @@ export function useCampaignPlanCreation({
   setSelectedPlan,
 }: Params) {
   return async function create12WeekPlan(startDate: string, durationWeeks?: number) {
+    // The id every step AFTER the create response uses (see resolveReturnedCampaignId below).
+    let effectiveCampaignId = campaignId;
     try {
       setIsLoading(true);
       const aiContent = selectedPlan || generateDefaultPlan();
@@ -79,8 +82,13 @@ export function useCampaignPlanCreation({
         throw new Error(`Failed to create plan: ${detail}${hint}`);
       }
 
-      await response.json();
-      const refetchRes = await fetch(`/api/campaigns/retrieve-plan?campaignId=${encodeURIComponent(campaignId)}`);
+      const result = await response.json();
+      // Phase 1 of the deleted-campaign takeover fix (owner ruling 2026-11-18): adopt the server's
+      // campaign_id; the server will mint it in phase 2. Changed by orchestration (89) under the
+      // owner's ruling while no UI session was running.
+      const adoptedCampaignId = resolveReturnedCampaignId(campaignId, result);
+      effectiveCampaignId = adoptedCampaignId;
+      const refetchRes = await fetch(`/api/campaigns/retrieve-plan?campaignId=${encodeURIComponent(adoptedCampaignId)}`);
       if (refetchRes.ok) {
         const refetchData = await refetchRes.json();
         setRetrievePlanData(refetchData);
@@ -93,7 +101,7 @@ export function useCampaignPlanCreation({
         message: `Campaign plan created successfully for ${weeksMsg} weeks, starting ${new Date(startDate).toLocaleDateString()}. Use **View submitted plan** above to open your plan.`,
         timestamp: new Date().toLocaleTimeString(),
         provider: getProviderName(selectedProvider),
-        campaignId,
+        campaignId: adoptedCampaignId,
       };
       setMessages((prev) => [...prev, successMessage]);
       setShowDateSelection(false);
@@ -110,7 +118,7 @@ export function useCampaignPlanCreation({
           if (recommendationIdParam) nextParams.set('recommendationId', recommendationIdParam);
         }
         nextParams.set('focus', 'weekly-blueprint');
-        window.location.href = `/campaign-details/${campaignId}?${nextParams.toString()}`;
+        window.location.href = `/campaign-details/${encodeURIComponent(adoptedCampaignId)}?${nextParams.toString()}`;
       }
     } catch (error) {
       console.error('Error creating campaign plan:', error);
@@ -120,7 +128,7 @@ export function useCampaignPlanCreation({
         message: 'Error: Failed to create campaign plan. Please try again.',
         timestamp: new Date().toLocaleTimeString(),
         provider: getProviderName(selectedProvider),
-        campaignId,
+        campaignId: effectiveCampaignId,
       };
       setMessages((prev) => [...prev, errorMessage]);
     } finally {

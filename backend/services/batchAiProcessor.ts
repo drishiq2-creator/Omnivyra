@@ -77,9 +77,9 @@ function asObject(v: unknown): Record<string, unknown> {
 let _pending: PendingRequest[] = [];
 let _timer: ReturnType<typeof setTimeout> | null = null;
 
-function scheduleFlusher() {
+function scheduleFlusher(delayMs: number = BATCH_WINDOW_MS) {
   if (_timer !== null) return;
-  _timer = setTimeout(flushBatch, BATCH_WINDOW_MS);
+  _timer = setTimeout(flushBatch, delayMs);
 }
 
 async function flushBatch() {
@@ -88,8 +88,20 @@ async function flushBatch() {
 
   // Dynamic batch size based on current load
   const batchSize = getDynamicBatchSize(_pending.length);
-  const batch = _pending.splice(0, batchSize);
-  if (_pending.length > 0) scheduleFlusher();
+  // BLOCKING tenancy (e9 2026-11-13): this used to splice the first N pending items of the module-wide queue, so one
+  // prompt could carry several companies' briefs (topics, objectives, audiences, pain points, key points). A batch
+  // now holds ONE company's items only; other companies' items stay queued for their own batch.
+  const batchCompany = _pending[0].companyId;
+  const batch: PendingRequest[] = [];
+  const rest: PendingRequest[] = [];
+  for (const p of _pending) {
+    if (p.companyId === batchCompany && batch.length < batchSize) batch.push(p); else rest.push(p);
+  }
+  _pending = rest;
+  // Fairness: the batch company is the OLDEST pending item's, so draining is FIFO by company and no company waits
+  // behind a busy one indefinitely. Items left over have already waited a full window, so the next flush runs
+  // immediately instead of opening another coalescing window per remaining company.
+  if (_pending.length > 0) scheduleFlusher(0);
 
   const { content: systemPrompt } = getContentBlueprintPromptWithFingerprint();
 
@@ -134,8 +146,9 @@ BATCH MODE: You will receive an array of content briefs. Return a JSON array wit
         };
         const validated = validateContentBlueprint(bp) ?? bp;
         setCachedBlueprint(companyId, item.topic, item.contentType, item.targetAudience, validated);
-        // Store fragments for future reuse across campaigns/users
+        // Fragments are reused only within the SAME company (they carry its brief content).
         storeFragments(validated, {
+          companyId,
           topic:       item.topic,
           contentType: item.contentType,
           ctaType:     item.ctaType,
@@ -165,7 +178,13 @@ BATCH MODE: You will receive an array of content briefs. Return a JSON array wit
  * @param item - DailyExecutionItemLike (duck-typed to avoid circular import)
  */
 export async function batchedGenerateBlueprint(item: Record<string, unknown>): Promise<ContentBlueprint> {
-  const companyId = nonEmpty(item.company_id) || 'default';
+  // BLOCKING tenancy (e9 2026-11-13): the company is REQUIRED. It used to default to a shared 'default' key, and
+  // the planning processor never passed one, so the blueprint cache, the fragment cache and the batch were shared
+  // across companies. Fail closed: no company, no generation through this path.
+  const companyId = nonEmpty(item.company_id);
+  if (!companyId) {
+    throw new Error('batchedGenerateBlueprint: company_id is required (tenant-isolated batching and caches)');
+  }
   const topic     = nonEmpty(item.topic) || nonEmpty(item.title) || 'TBD';
   const contentType = nonEmpty(item.content_type)?.toLowerCase() || 'post';
   const intent    = asObject(item.intent);
@@ -193,7 +212,7 @@ export async function batchedGenerateBlueprint(item: Record<string, unknown>): P
   }
 
   // 3. Fragment reuse — assemble from stored hooks/CTAs/structures
-  const assembled = assembleFromFragments(topic, contentType, ctaType, targetAudience);
+  const assembled = assembleFromFragments(companyId, topic, contentType, ctaType, targetAudience);
   if (assembled) {
     setCachedBlueprint(companyId, topic, contentType, targetAudience, assembled);
     return assembled;

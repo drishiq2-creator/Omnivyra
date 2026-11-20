@@ -903,6 +903,21 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
           newScheduledFor: newScheduledAtIso,
           reason: isMove ? 'reschedule_full_move' : 'reschedule_retime',
         });
+        if (!atomicResult.locked && atomicResult.lock_unreadable) {
+          // The database could not be read (not contention, 7c): the new time IS saved, the queue is not.
+          await releaseFence();
+          const incompleteRecorded = await recordIncomplete('lock_state_unreadable');
+          res.setHeader('Retry-After', '5'); // b3 standing rule (2026-11-19)
+          return res.status(503).json({
+            error: "We couldn't reach the database to re-queue the publish job. The new time is saved, but the post will still publish at its PREVIOUS time until you repeat the reschedule.",
+            code: 'QUEUE_LOCK_STATE_UNREADABLE',
+            scheduled_post_id: priorScheduledPostId,
+            partial: true,
+            recovery: 'repeat_reschedule',
+            incomplete_recorded: incompleteRecorded,
+            retryable: true,
+          });
+        }
         if (!atomicResult.locked) {
           emitCreatorEvent({
             event: CREATOR_EVENTS.QUEUE_LOCK_CONTENTION,
@@ -914,7 +929,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
           await releaseFence();
           const incompleteRecorded = await recordIncomplete('lock_contention');
           return res.status(409).json({
-            error: 'Another reschedule is in progress for this post. The new time is saved but its publish job was not re-queued; repeat the reschedule.',
+            error: 'Another reschedule is in progress for this post. The new time is saved, but the post will still publish at its PREVIOUS time until you repeat the reschedule.',
             code: 'CONCURRENT_QUEUE_MUTATION',
             scheduled_post_id: priorScheduledPostId,
             partial: true,

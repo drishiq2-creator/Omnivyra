@@ -27,11 +27,17 @@
  * that cannot be imported here.
  */
 
-import { describeWithExtensionSource } from '../helpers/extensionSourceRoot';
+import { readFileSync } from 'fs';
+// PL-18 (e9, pre-launch): the extension source is NOT in this repo. These suites used to read it from one person's
+// Desktop (C:/Users/Admin/OneDrive/...), so they failed to LOAD everywhere else - CI included (0 tests, invisible to
+// parity). They now read VERBATIM LINE EXCERPTS of the v1.4.0 source - only the lines asserted on (owner ruling: public
+// repo, minimum product code) - in backend/tests/fixtures/chrome-extension-v1.4.0; fixture-tool.js there verifies them
+// (and the whole-file properties) against the real source. See that folder's README.
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const EXT_FIXTURE = require('path').resolve(__dirname, '../fixtures/chrome-extension-v1.4.0') + '/';
 
-// The service worker / manifest / apiClient live in the external extension
-// source (OMNIVYRA_EXTENSION_ROOT). Only the blocks that read them are skipped
-// when it is unset; the decision-model blocks (T1-T7) always run.
+const SW_PATH = EXT_FIXTURE + 'background/serviceWorker.js';
+const swSrc = readFileSync(SW_PATH, 'utf8');
 
 const PRODUCTION_EXTENSION_ID = 'khlballmijciomdbigljpafliajdekbg';
 const PRODUCTION_API = 'https://www.omnivyra.com';
@@ -214,15 +220,7 @@ describe('T4 — the developer workflow is preserved', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-describeWithExtensionSource(
-  'source shape — the guard is present at every activation site',
-  [['background', 'serviceWorker.js'], ['manifest.json']],
-  (ext) => {
-  let swSrc = '';
-  beforeAll(() => {
-    swSrc = ext.read('background', 'serviceWorker.js');
-  });
-
+describe('source shape — the guard is present at every activation site', () => {
   it('the production extension id and guard exist', () => {
     expect(swSrc).toContain(`const PRODUCTION_EXTENSION_ID = '${PRODUCTION_EXTENSION_ID}'`);
     expect(swSrc).toMatch(/function isDevelopmentBuild\(\)/);
@@ -261,21 +259,21 @@ describeWithExtensionSource(
   });
 
   it('manifest version is 1.4.0 and the store id is the one gated on', () => {
-    const manifest = JSON.parse(ext.read('manifest.json'));
+    const manifest = JSON.parse(
+      readFileSync(EXT_FIXTURE + 'manifest.json', 'utf8'),
+    );
     expect(manifest.version).toBe('1.4.0');
   });
-  },
-);
+});
 
-describeWithExtensionSource(
-  'T9 — the authenticated command protocol is untouched',
-  [['core', 'apiClient.js']],
-  (ext) => {
+describe('T9 — the authenticated command protocol is untouched', () => {
   it('renewal and result submission are unchanged by this hardening', () => {
-    const apiSrc = ext.read('core', 'apiClient.js');
+    const apiSrc = readFileSync(
+      EXT_FIXTURE + 'core/apiClient.js',
+      'utf8',
+    );
     expect(apiSrc).toContain('async renewDispatchLease');
     expect(apiSrc).toContain("options.headers['X-Omnivyra-Dispatch-Renewal'] = '1'");
     expect(apiSrc).toContain('/api/extension/action-result');
   });
-  },
-);
+});

@@ -13,8 +13,6 @@
  * no message, no platform id, no counter, no opportunity transition.
  */
 
-import { describeWithExtensionSource } from '../helpers/extensionSourceRoot';
-
 interface Row { [k: string]: unknown }
 const db: Record<string, Row[]> = { community_ai_actions: [], engagement_messages: [] };
 
@@ -66,6 +64,13 @@ jest.mock('../../../lib/platform/routeFactory', () => ({ createApiRoute: (h: unk
 
 import { createHash } from 'crypto';
 import renewHandler from '../../../pages/api/extension/dispatch/renew';
+// PL-18 (e9, pre-launch): the extension source is NOT in this repo. These suites used to read it from one person's
+// Desktop (C:/Users/Admin/OneDrive/...), so they failed to LOAD everywhere else - CI included (0 tests, invisible to
+// parity). They now read VERBATIM LINE EXCERPTS of the v1.4.0 source - only the lines asserted on (owner ruling: public
+// repo, minimum product code) - in backend/tests/fixtures/chrome-extension-v1.4.0; fixture-tool.js there verifies them
+// (and the whole-file properties) against the real source. See that folder's README.
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const EXT_FIXTURE = require('path').resolve(__dirname, '../fixtures/chrome-extension-v1.4.0') + '/';
 
 /** Same derivation the route uses. */
 const holderFor = (s: { userId: string; orgId: string; hmacNonce: string }) =>
@@ -256,19 +261,15 @@ describe('re-offer rule: no client is ever re-offered a claimed command', () => 
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Needs the external extension source: OMNIVYRA_EXTENSION_ROOT (see
-// backend/tests/helpers/extensionSourceRoot.ts). Unset → this block is
-// reported SKIPPED; every other block in this file still runs.
-describeWithExtensionSource(
-  'extension side — renewal before EVERY attempt',
-  [['core', 'commandProcessor.js'], ['core', 'apiClient.js'], ['manifest.json']],
-  (ext) => {
-  let procSrc = '';
-  let apiSrc = '';
-  beforeAll(() => {
-    procSrc = ext.read('core', 'commandProcessor.js');
-    apiSrc = ext.read('core', 'apiClient.js');
-  });
+describe('extension side — renewal before EVERY attempt', () => {
+  const procSrc = require('fs').readFileSync(
+    EXT_FIXTURE + 'core/commandProcessor.js',
+    'utf8',
+  );
+  const apiSrc = require('fs').readFileSync(
+    EXT_FIXTURE + 'core/apiClient.js',
+    'utf8',
+  );
 
   it('renewal sits INSIDE the retry loop, not once before it', () => {
     const loopStart = procSrc.indexOf('for (let attempt = 1');
@@ -312,8 +313,12 @@ describeWithExtensionSource(
   });
 
   it('the extension release version was incremented — v1.3.9 is NOT fixed', () => {
-    const manifest = JSON.parse(ext.read('manifest.json'));
+    const manifest = JSON.parse(
+      require('fs').readFileSync(
+        EXT_FIXTURE + 'manifest.json',
+        'utf8',
+      ),
+    );
     expect(manifest.version).not.toBe('1.3.9');
   });
-  },
-);
+});

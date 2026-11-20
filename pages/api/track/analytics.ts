@@ -9,12 +9,22 @@ import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeF
  *   - Prioritized insights (top 3 by impact × confidence)
  *   - Cold start state when no data exists
  *
- * Prefers blog_analytics_daily for historical data (faster at scale).
- * Falls back to raw blog_analytics if daily table is empty.
+ * Reads the RAW blog_analytics events only.
+ *
+ * blog_analytics_daily is NOT read (7c, 2026-11-19): nothing writes it (its only writer, the never-scheduled
+ * /api/cron/aggregate-blog-analytics, was retired), and the old preference was ALL-OR-NOTHING - if ANY daily row
+ * existed in the window, raw events were ignored for the whole window, so a partial backfill would UNDERCOUNT.
+ * Re-introduce a rollup only together with a reader that uses daily rows for COMPLETE past days and raw events
+ * for the rest (and a backfill). The table itself is a register item (drop it, or build that reader).
+ *
+ * UNREADABLE != ZERO (e9, 2026-11-12): every query's error is read. A failed read (error object OR thrown) answers 503 + Retry-After
+ * ANALYTICS_UNAVAILABLE and the panel says so - it never renders "0 views" or a fake trend from a
+ * read that did not happen.
  */
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { supabase } from '../../../backend/db/supabaseClient';
 import { enforceCompanyAccess } from '../../../backend/services/userContextService';
+import { AnalyticsReadError, rowsOf, settled } from '../../../backend/services/blog/blogAnalyticsRead';
 
 // ── Public types (used by BlogAnalyticsPanel) ──────────────────────────────
 
@@ -166,6 +176,17 @@ function pctChange(cur: number, prev: number): number | null {
 // ── Handler ────────────────────────────────────────────────────────────────
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
+  try {
+    return await analyticsHandler(req, res);
+  } catch (err) {
+    if (!(err instanceof AnalyticsReadError)) throw err;
+    console.error('[track/analytics] read failed', { account_id: req.query.account_id, read: err.what, error: err.message });
+    res.setHeader('Retry-After', '5');
+    return res.status(503).json({ code: 'ANALYTICS_UNAVAILABLE', error: 'Blog analytics are temporarily unavailable.' });
+  }
+}
+
+async function analyticsHandler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
 
   const accountId = typeof req.query.account_id === 'string' ? req.query.account_id.trim() : null;
@@ -182,56 +203,31 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   const cur7Start  = new Date(now - 7 * 86_400_000).toISOString();
   const prev7Start = new Date(now - 14 * 86_400_000).toISOString();
 
-  // ── Try pre-aggregated daily table first ──────────────────────────────
-  const { data: dailyRows } = await supabase
-    .from('blog_analytics_daily')
-    .select('url_slug, views, avg_time, avg_scroll, sessions, date')
-    .eq('account_id', accountId)
-    .gte('date', since.slice(0, 10))
-    .order('date', { ascending: false });
-
-  let totalViews: number;
-  let avgTime:    number;
-  let avgScroll:  number;
-  let rawPages:   Array<{ slug: string; views: number; avg_time: number; avg_scroll: number }>;
-
-  if (dailyRows && dailyRows.length > 0) {
-    // Use pre-aggregated data
-    const slugMap = new Map<string, { views: number; times: number[]; scrolls: number[] }>();
-    for (const r of dailyRows as any[]) {
-      const e = slugMap.get(r.url_slug) ?? { views: 0, times: [], scrolls: [] };
-      e.views += r.views ?? 0;
-      if (r.avg_time   > 0) e.times.push(r.avg_time);
-      if (r.avg_scroll > 0) e.scrolls.push(r.avg_scroll);
-      slugMap.set(r.url_slug, e);
-    }
-    const avg = (a: number[]) => a.length ? Math.round(a.reduce((s, n) => s + n, 0) / a.length) : 0;
-    rawPages   = [...slugMap.entries()].map(([slug, d]) => ({
-      slug, views: d.views, avg_time: avg(d.times), avg_scroll: avg(d.scrolls),
-    })).sort((a, b) => b.views - a.views).slice(0, 10);
-    totalViews = rawPages.reduce((s, p) => s + p.views, 0);
-    avgTime    = avg(rawPages.flatMap((p) => Array(p.views).fill(p.avg_time)));
-    avgScroll  = avg(rawPages.flatMap((p) => Array(p.views).fill(p.avg_scroll)));
-  } else {
-    // Fall back to raw blog_analytics
-    const [pvRes, lvRes] = await Promise.all([
-      supabase.from('blog_analytics').select('url_slug').eq('account_id', accountId).eq('event_type', 'pageview').gte('created_at', since),
-      supabase.from('blog_analytics').select('url_slug, time_on_page, scroll_depth').eq('account_id', accountId).eq('event_type', 'pageleave').gte('created_at', since),
-    ]);
-    const agg = aggregateSlice(pvRes.data ?? [], lvRes.data ?? []);
-    totalViews = agg.totalViews; avgTime = agg.avgTime; avgScroll = agg.avgScroll; rawPages = agg.pages;
-  }
+  // ── Totals from the RAW events only (7c, CI-124 analytics re-land) ─────
+  // The reader used to PREFER blog_analytics_daily. Nothing writes that table (its aggregator cron was never
+  // scheduled and is retired), so the branch always missed - and the day anyone put rows there (a backfill, a
+  // manual run over a short window) it would have preferred INCOMPLETE aggregates over complete raw events and
+  // silently under-reported views. Any future aggregate must be read only where it COVERS the whole window.
+  const [pvRes, lvRes] = await Promise.all([
+    settled('pageviews', supabase.from('blog_analytics').select('url_slug').eq('account_id', accountId).eq('event_type', 'pageview').gte('created_at', since)),
+    settled('pageleaves', supabase.from('blog_analytics').select('url_slug, time_on_page, scroll_depth').eq('account_id', accountId).eq('event_type', 'pageleave').gte('created_at', since)),
+  ]);
+  const agg = aggregateSlice(rowsOf(pvRes, 'pageviews'), rowsOf(lvRes, 'pageleaves'));
+  const totalViews = agg.totalViews;
+  const avgTime    = agg.avgTime;
+  const avgScroll  = agg.avgScroll;
+  const rawPages   = agg.pages;
 
   // ── Before/After (always from raw) ────────────────────────────────────
   const [curPv, curLv, prevPv, prevLv] = await Promise.all([
-    supabase.from('blog_analytics').select('url_slug').eq('account_id', accountId).eq('event_type', 'pageview').gte('created_at', cur7Start),
-    supabase.from('blog_analytics').select('url_slug, time_on_page, scroll_depth').eq('account_id', accountId).eq('event_type', 'pageleave').gte('created_at', cur7Start),
-    supabase.from('blog_analytics').select('url_slug').eq('account_id', accountId).eq('event_type', 'pageview').gte('created_at', prev7Start).lt('created_at', cur7Start),
-    supabase.from('blog_analytics').select('url_slug, time_on_page, scroll_depth').eq('account_id', accountId).eq('event_type', 'pageleave').gte('created_at', prev7Start).lt('created_at', cur7Start),
+    settled('pageviews 7d', supabase.from('blog_analytics').select('url_slug').eq('account_id', accountId).eq('event_type', 'pageview').gte('created_at', cur7Start)),
+    settled('pageleaves 7d', supabase.from('blog_analytics').select('url_slug, time_on_page, scroll_depth').eq('account_id', accountId).eq('event_type', 'pageleave').gte('created_at', cur7Start)),
+    settled('pageviews prior 7d', supabase.from('blog_analytics').select('url_slug').eq('account_id', accountId).eq('event_type', 'pageview').gte('created_at', prev7Start).lt('created_at', cur7Start)),
+    settled('pageleaves prior 7d', supabase.from('blog_analytics').select('url_slug, time_on_page, scroll_depth').eq('account_id', accountId).eq('event_type', 'pageleave').gte('created_at', prev7Start).lt('created_at', cur7Start)),
   ]);
 
-  const cur  = aggregateSlice(curPv.data  ?? [], curLv.data  ?? []);
-  const prev = aggregateSlice(prevPv.data ?? [], prevLv.data ?? []);
+  const cur  = aggregateSlice(rowsOf(curPv, 'pageviews 7d'),       rowsOf(curLv, 'pageleaves 7d'));
+  const prev = aggregateSlice(rowsOf(prevPv, 'pageviews prior 7d'), rowsOf(prevLv, 'pageleaves prior 7d'));
 
   const delta: PeriodDelta = {
     views_delta:  pctChange(cur.totalViews, prev.totalViews),
