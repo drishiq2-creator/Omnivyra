@@ -38,14 +38,20 @@ function replaceOnce(src, from, to, label) {
   if (n !== 1) throw new AnchorError(`${label}: anchor found ${n} times: ${from.slice(0, 80)}`);
   return src.replace(from, () => to);
 }
-const verdict = (r) => (r.harnessError ? 'ERROR   ' : r.killed ? 'KILLED  ' : 'SURVIVED');
+// A DIRTY baseline (the unmutated route already violates) is a harness failure too (7c 2026-11-20): a mutant judged
+// against it can read KILLED for the wrong reason - the violation was there before the mutation. Only the gate-kind
+// results carry baselineClean; `=== false` keeps a result without the field (suite kind) unaffected.
+const dirty = (r) => r.baselineClean === false;
+const verdict = (r) => (r.harnessError ? 'ERROR   ' : dirty(r) ? 'DIRTY   ' : r.killed ? 'KILLED  ' : 'SURVIVED');
 function population(kind, defined, results) {
   const attempted = results.filter((r) => !r.harnessError).length;
   const harness = results.filter((r) => r.harnessError).map((r) => r.id);
-  const killed = results.filter((r) => r.killed).length;
+  const dirtyIds = results.filter(dirty).map((r) => r.id);
+  const killed = results.filter((r) => r.killed && !dirty(r)).length;
   console.log(`${kind}: ${killed}/${defined} killed; attempted ${attempted}/${defined}` +
-    (harness.length ? `; ${harness.length} HARNESS ERROR(s) - anchor no longer matches, mutant never ran: ${harness.join(', ')}` : ''));
-  return attempted === defined && results.length === defined && killed === defined;
+    (harness.length ? `; ${harness.length} HARNESS ERROR(s) - anchor no longer matches, mutant never ran: ${harness.join(', ')}` : '') +
+    (dirtyIds.length ? `; ${dirtyIds.length} DIRTY BASELINE(s) - the unmutated route already violates, a kill proves nothing: ${dirtyIds.join(', ')}` : ''));
+  return attempted === defined && results.length === defined && killed === defined && dirtyIds.length === 0;
 }
 function moveBelow(src, block, after, label) {
   const without = replaceOnce(src, block, '', `${label} (cut)`);
