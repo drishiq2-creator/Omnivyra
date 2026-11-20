@@ -221,10 +221,12 @@ export const HEADER_NAV_ITEMS: HeaderNavItem[] = [
     href: '/website-setup',
     icon: Link2,
     description: 'Website connection, tracking, forms and lead capture.',
-    matchers: ['/website-setup', '/website-health', '/integrations', '/leads', '/lead-capture'],
+    matchers: ['/website-setup', '/website-health', '/website-intelligence', '/integrations', '/leads', '/lead-capture'],
     children: [
       { label: 'Website Setup', href: '/website-setup', description: 'Connect a website, verify your domain, install tracking, and activate lead capture.' },
       { label: 'Website Health', href: '/website-health', description: 'Operational command center: integration, tracking, lead capture, intelligence & one-click validation.' },
+      // B2 (cb, 2026-11-20): the website-intelligence page existed but was reachable only from a funnel tile.
+      { label: 'Website Intelligence', href: '/website-intelligence', description: 'What your website tells us: visitors, engagement and conversion signals, and what to improve.' },
       { label: 'Website Integrations', href: '/integrations?focus=website', description: 'Manage CMS connections and lead webhooks.' },
       { label: 'Forms', href: '/leads?tab=forms', description: 'Build and embed lead-capture forms.' },
       { label: 'Lead Capture', href: '/lead-capture', description: 'Capture topology, attribution continuity, and activation readiness.' },

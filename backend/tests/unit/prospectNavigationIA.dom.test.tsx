@@ -73,13 +73,21 @@ describe('5/6 — Web & Capture is separate and complete', () => {
   });
 
   it('retains all five existing routes unchanged', () => {
-    expect(website().children.map((c) => c.href)).toEqual([
+    // B2 (2026-11-20) adds Website Intelligence as a sixth entry; the original five stay, in order.
+    expect(website().children.map((c) => c.href).filter((h) => h !== '/website-intelligence')).toEqual([
       '/website-setup',
       '/website-health',
       '/integrations?focus=website',
       '/leads?tab=forms',
       '/lead-capture',
     ]);
+  });
+
+  it('B2: Website Intelligence is reachable from the menu, right after Website Health', () => {
+    const hrefs = website().children.map((c) => c.href);
+    expect(hrefs).toContain('/website-intelligence');
+    expect(hrefs.indexOf('/website-intelligence')).toBe(hrefs.indexOf('/website-health') + 1);
+    expect(childHref('website-capture', 'Website Intelligence')).toBe('/website-intelligence');
   });
 });
 
@@ -102,6 +110,7 @@ describe('8 — matcher behaviour: no unintended double activation', () => {
     ['/integrations', 'Web & Capture'],
     ['/leads', 'Web & Capture'],
     ['/lead-capture', 'Web & Capture'],
+    ['/website-intelligence', 'Web & Capture'],
   ])('%s activates exactly one group: %s', (pathname, expected) => {
     expect(activeGroups(pathname as string)).toEqual([expected]);
   });
