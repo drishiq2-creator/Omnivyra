@@ -34,6 +34,16 @@ import { ownedDbTable } from '../../db/writeOwner';
  *
  * EVERY decision, allowed or blocked, is audited. If the audit write
  * fails the decision is demoted to BLOCKED — no log, no automation.
+ *
+ * THE ONE AUTO-REPLY SWITCH. automation_config (enabled + auto_reply_enabled,
+ * both default false) evaluated here is the single switch that can authorize an
+ * autonomous reply. `engagement_system_controls.auto_reply_enabled` and
+ * `response_rules.auto_reply` authorize nothing (engagementGovernanceService.ts,
+ * responseOrchestrator.ts). An ALLOWED decision is necessary, not sufficient:
+ * `runAutoExecution` hands the action to the community executor, which still
+ * requires a persisted human approval (D-01) and refuses an ad-hoc action, so
+ * Mode 3 cannot send until a governed approval binding exists (D-02, owned by
+ * Orchestration). Pinned by executionAuthorityInventory.test.ts.
  */
 
 export type ShouldAutoExecuteInput = {
@@ -190,15 +200,7 @@ export async function shouldAutoExecute(
   // reverse course — but we already incremented usage on the DB.
   // Bump the counter back down to keep the limit honest.
   if (!log.ok) {
-    try {
-      await ownedDbTable('automation_usage')
-        .update({
-          actions_executed: Math.max(0, (newCount ?? 1) - 1),
-          updated_at: new Date().toISOString(),
-        })
-        .eq('organization_id', input.organization_id)
-        .eq('day', new Date().toISOString().slice(0, 10));
-    } catch { /* swallow */ }
+    await undoAutomationUsageIncrement(input.organization_id, newCount ?? null);
     return {
       allowed: false,
       reason: 'audit_log_write_failed',
@@ -267,3 +269,38 @@ export async function runAutoExecution(input: {
 }
 
 export type { AutomationConfig };
+
+/**
+ * Undo ONE automation-usage increment (the decision could not be logged, so it does not run).
+ *
+ * CLASS-2 B10 (e9 sweep): this SET the counter to newCount - 1, an absolute value from before -
+ * erasing every increment that landed in between (another automation's). It is an exact decrement by
+ * compare-and-set on the value read, re-read and retried on a miss; a decrement that never lands
+ * over-counts (refuses sooner), never under-counts.
+ */
+export async function undoAutomationUsageIncrement(organizationId: string, newCount: number | null): Promise<void> {
+  const day = new Date().toISOString().slice(0, 10);
+  let current: number | null = newCount;
+  for (let attempt = 0; attempt < 3 && current !== null && current > 0; attempt += 1) {
+    try {
+      const { data: moved, error: decError } = await ownedDbTable('automation_usage')
+        .update({ actions_executed: current - 1, updated_at: new Date().toISOString() })
+        .eq('organization_id', organizationId)
+        .eq('day', day)
+        .eq('actions_executed', current)
+        .select('actions_executed');
+      if (decError) return;
+      if (Array.isArray(moved) && moved.length === 1) return;
+      const { data: now, error: readError } = await ownedDbTable('automation_usage')
+        .select('actions_executed')
+        .eq('organization_id', organizationId)
+        .eq('day', day)
+        .maybeSingle();
+      if (readError) return;
+      const v = (now as { actions_executed?: unknown } | null)?.actions_executed;
+      current = typeof v === 'number' ? v : null;
+    } catch {
+      return; // the counter stays over-counted (refuses sooner); never under-counted
+    }
+  }
+}

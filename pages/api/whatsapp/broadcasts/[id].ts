@@ -17,7 +17,8 @@ import {
   enqueueBroadcast,
   retryFailed,
   expandRecipients,
-  senderAccountRefusalResponse,
+  enqueueOutcomeResponse,
+  retryOutcomeResponse,
   type ContactInput,
 } from '../../../../backend/services/whatsappBroadcastService';
 
@@ -40,10 +41,12 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
 
   // ── GET: broadcast detail ──────────────────────────────────────────────────
   if (req.method === 'GET') {
-    const { data: recipientStats } = await supabase
+    const { data: recipientStats, error: statsError } = await supabase
       .from('whatsapp_broadcast_recipients')
       .select('status', { count: 'exact' })
       .eq('broadcast_id', id);
+    // A failed read is not "no recipients": the operator would read zeros as the truth.
+    if (statsError) return res.status(503).json({ error: 'Recipient status unavailable. Please try again.' });
 
     // Group by status
     const byStatus: Record<string, number> = {};
@@ -63,25 +66,27 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
 
     if (action === 'enqueue') {
       const { plan = 'free' } = req.body || {};
+      // `enqueued: true` only when jobs are known to be queued (enqueueOutcomeResponse).
+      let outcome: Parameters<typeof enqueueOutcomeResponse>[0];
       try {
-        await enqueueBroadcast(id, plan as string);
-        return res.status(200).json({ enqueued: true });
+        outcome = { ok: true, result: await enqueueBroadcast(id, plan as string) };
       } catch (err) {
-        // A draft naming another company's account (created before the
-        // ownership check) is refused like an unknown account.
-        const refused = senderAccountRefusalResponse(err);
-        if (refused) return res.status(refused.status).json({ error: refused.error });
-        return res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+        outcome = { ok: false, error: err };
       }
+      const answer = enqueueOutcomeResponse(outcome);
+      return res.status(answer.status).json(answer.body);
     }
 
     if (action === 'retry') {
+      // `retried: true` only when recipients were actually re-queued.
+      let outcome: Parameters<typeof retryOutcomeResponse>[0];
       try {
-        await retryFailed(id);
-        return res.status(200).json({ retried: true });
+        outcome = { ok: true, result: await retryFailed(id) };
       } catch (err) {
-        return res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+        outcome = { ok: false, error: err };
       }
+      const answer = retryOutcomeResponse(outcome);
+      return res.status(answer.status).json(answer.body);
     }
 
     if (action === 'recipients') {

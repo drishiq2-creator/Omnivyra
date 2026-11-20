@@ -58,20 +58,39 @@ async function getRedis(): Promise<any | null> {
   }
 }
 
-async function redisGetCount(key: string): Promise<number | null> {
+/**
+ * Whether the shared client can take a command now. It is the BullMQ client
+ * (maxRetriesPerRequest null, offline queue, endless reconnect): while it is not
+ * connected a command is queued and never rejected, so awaiting it would hang the
+ * send until Redis returns and the DB fallback below would never run. Any status
+ * other than 'ready' is skipped; a client without a status field is used.
+ */
+function redisUsable(redis: unknown): boolean {
+  const status = (redis as { status?: unknown } | null)?.status;
+  return typeof status !== 'string' || status === 'ready';
+}
+
+/** Gives a refused reservation back. A failed give-back over-counts (refuses sooner), never over-sends. */
+async function redisDecrBy(key: string, count: number): Promise<void> {
   const redis = await getRedis();
-  if (!redis) return null;
+  if (!redis || !redisUsable(redis)) return;
   try {
-    const val = await redis.get(key);
-    return val === null ? 0 : parseInt(val, 10);
-  } catch {
-    return null; // Redis unavailable → fall through to DB
+    await redis.decrby(key, count);
+  } catch (err) {
+    console.warn('[whatsappRateLimiter] refused reservation not given back; the day over-counts (refuses sooner)', {
+      key, count, error: err instanceof Error ? err.message : String(err),
+    });
   }
 }
 
+/**
+ * The TTL is housekeeping, not the reset: the key carries the UTC DATE (wa:usage:<id>:YYYY-MM-DD),
+ * so a new day is a new key whatever happens to the TTL. A failed or skipped expire leaks one key
+ * per sender per day; it never throttles the next day (05).
+ */
 async function redisIncrBy(key: string, count: number, ttlSeconds: number): Promise<number | null> {
   const redis = await getRedis();
-  if (!redis) return null;
+  if (!redis || !redisUsable(redis)) return null;
   try {
     const newVal = await redis.incrby(key, count);
     if (newVal === count) {
@@ -86,27 +105,64 @@ async function redisIncrBy(key: string, count: number, ttlSeconds: number): Prom
 
 // ── DB layer (fallback) ───────────────────────────────────────────────────────
 
-async function dbGetDailyUsage(socialAccountId: string): Promise<number> {
-  const { data } = await ownedDbTable('social_accounts')
-    .select('messaging_tier')
-    .eq('id', socialAccountId)
-    .single();
+/**
+ * THE DEFECT THIS CLOSES (C10, 2026-11-11): the fallback used to READ
+ * api_provider_accounts.current_usage_day by account_name = <social account id> (the
+ * external-API credential table, where no such row ever exists, so usage read as 0)
+ * and to INCREMENT through rpc('increment_wa_usage'), a function that exists in no
+ * environment, with the error discarded. During a Redis outage every send was
+ * allowed: the limit failed OPEN.
+ *
+ * Now: ONE call to whatsapp_consume_daily_quota, which checks and consumes in a single
+ * statement (it writes only when the new total stays within the limit). FAIL CLOSED:
+ * an error, a thrown call, or an answer without a boolean `allowed` and a numeric
+ * `used` is a refusal - never "allowed" - and is logged at ERROR.
+ *
+ * AVAILABILITY TRADE (intended): this layer is reached only when Redis is unavailable,
+ * so WhatsApp sends now STOP when Redis AND the database quota store are both
+ * unavailable, where before they continued unmetered. That is the correct behaviour
+ * for a send limit; a refused send logged with FAIL_CLOSED_REASON is this design
+ * working, not a defect.
+ */
+export const FAIL_CLOSED_REASON =
+  'fail-closed by design: the WhatsApp daily limit cannot be checked (Redis and the quota store unavailable), so sends stop until it can';
+const INT_MAX = 2_147_483_647;
 
-  // Read current_usage_day from api_provider_accounts linked to this WA source
-  const { data: usage } = await ownedDbTable('api_provider_accounts')
-    .select('current_usage_day')
-    .eq('account_name', socialAccountId) // best available link without schema change
-    .single();
-
-  return usage?.current_usage_day ?? 0;
-}
-
-async function dbIncrUsage(socialAccountId: string, count: number): Promise<void> {
-  await supabase.rpc('increment_wa_usage', {
-    account_id: socialAccountId,
-    increment:  count,
-  });
-  // If RPC doesn't exist yet, falls through silently — DB becomes best-effort
+async function dbConsume(
+  socialAccountId: string,
+  usageDay:        string,
+  count:           number,
+  limit:           number,
+): Promise<{ allowed: boolean; used: number } | null> {
+  try {
+    const { data, error } = await supabase.rpc('whatsapp_consume_daily_quota', {
+      p_social_account_id: socialAccountId,
+      p_usage_day:         usageDay,
+      p_count:             count,
+      p_limit:             limit,
+    });
+    if (error) {
+      console.error('[whatsappRateLimiter] daily quota check failed; send refused (fail closed) - ' + FAIL_CLOSED_REASON, {
+        social_account_id: socialAccountId, error: error.message,
+      });
+      return null;
+    }
+    const row = Array.isArray(data) ? data[0] : data;
+    if (!row || typeof row.allowed !== 'boolean' || typeof row.used !== 'number') {
+      // No answer is not an answer: a missing or malformed row refuses (a blank
+      // response can arrive as {error:null} with no data).
+      console.error('[whatsappRateLimiter] daily quota check returned no answer; send refused (fail closed) - ' + FAIL_CLOSED_REASON, {
+        social_account_id: socialAccountId,
+      });
+      return null;
+    }
+    return { allowed: row.allowed, used: row.used };
+  } catch (err) {
+    console.error('[whatsappRateLimiter] daily quota check threw; send refused (fail closed) - ' + FAIL_CLOSED_REASON, {
+      social_account_id: socialAccountId, error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
 }
 
 // ── Core rate limit check ─────────────────────────────────────────────────────
@@ -126,10 +182,16 @@ export async function checkAndConsume(params: {
   const { social_account_id, phone_number_id, company_id, plan, count } = params;
 
   // Resolve tier from social_accounts
-  const { data: account } = await ownedDbTable('social_accounts')
+  // best-effort: an unreadable tier falls back to tier 1, the MOST restrictive limit, so a failed read never raises the cap
+  const { data: account, error: tierError } = await ownedDbTable('social_accounts')
     .select('messaging_tier')
     .eq('id', social_account_id)
     .single();
+  if (tierError) {
+    console.warn('[whatsappRateLimiter] messaging_tier unreadable; using tier 1 (most restrictive)', {
+      social_account_id, error: tierError.message,
+    });
+  }
 
   const tier      = account?.messaging_tier ?? 1;
   const tierLimit = TIER_LIMITS[tier] ?? TIER_LIMITS[1];
@@ -139,28 +201,34 @@ export async function checkAndConsume(params: {
   const redisKey = `wa:usage:${phone_number_id}:${new Date().toISOString().slice(0, 10)}`; // YYYY-MM-DD
   const ttl      = 24 * 60 * 60; // 24h
 
-  // ── Layer 1: Redis ────────────────────────────────────────────────────────
-  const currentRedis = await redisGetCount(redisKey);
-
-  if (currentRedis !== null) {
-    // Redis is available
-    if (currentRedis + count > effective) {
-      return { allowed: false, remaining: Math.max(0, effective - currentRedis), tier, source: 'redis' };
+  // ── Layer 1: Redis - ONE atomic INCRBY, then the comparison (CLASS-2 B5) ──
+  // This was GET, compare, then INCRBY: two enqueues on one number (different broadcasts, so
+  // not under one lease) both read room and both consumed it - over the tier/plan limit. And a
+  // failed INCRBY (null) answered allowed:true with nothing counted. Now the increment IS the
+  // reservation: over the limit -> given back and refused; a failed INCRBY (it may or may not
+  // have counted) falls to the DB layer, which is atomic and fails closed - never allowed
+  // without a counted consume.
+  const newTotal = await redisIncrBy(redisKey, count, ttl);
+  if (newTotal !== null) {
+    if (newTotal > effective) {
+      await redisDecrBy(redisKey, count);
+      return { allowed: false, remaining: Math.max(0, effective - (newTotal - count)), tier, source: 'redis' };
     }
-    const newTotal = await redisIncrBy(redisKey, count, ttl);
-    const remaining = newTotal !== null ? Math.max(0, effective - newTotal) : 0;
-    return { allowed: true, remaining, tier, source: 'redis' };
+    return { allowed: true, remaining: Math.max(0, effective - newTotal), tier, source: 'redis' };
   }
 
-  // ── Layer 2: DB fallback (Refinement 6) ───────────────────────────────────
-  const currentDb = await dbGetDailyUsage(social_account_id);
-
-  if (currentDb + count > effective) {
-    return { allowed: false, remaining: Math.max(0, effective - currentDb), tier, source: 'db' };
+  // ── Layer 2: DB fallback (Refinement 6) - atomic, fails CLOSED ────────────
+  // An unlimited plan/tier is metered against the integer maximum (still counted).
+  const dbLimit  = Number.isFinite(effective) ? effective : INT_MAX;
+  // The usage day is the UTC date (toISOString is always UTC), matching the Redis key
+  // above and WhatsApp's UTC-aligned daily window; a local-time day would misalign at
+  // the boundary and over-permit.
+  const consumed = await dbConsume(social_account_id, new Date().toISOString().slice(0, 10), count, dbLimit);
+  if (!consumed) {
+    return { allowed: false, remaining: 0, tier, source: 'db' };
   }
-
-  await dbIncrUsage(social_account_id, count);
-  return { allowed: true, remaining: Math.max(0, effective - currentDb - count), tier, source: 'db' };
+  const remaining = Number.isFinite(effective) ? Math.max(0, effective - consumed.used) : Infinity;
+  return { allowed: consumed.allowed, remaining, tier, source: 'db' };
 }
 
 // ── Chunking strategy (Improvement 4) ────────────────────────────────────────
@@ -184,19 +252,8 @@ export function getBroadcastChunkStrategy(tier: number): ChunkStrategy {
   return { batch_size, delay_ms };
 }
 
-// ── Daily counter reset ───────────────────────────────────────────────────────
-
-/**
- * Reset daily usage counters for all WhatsApp phone numbers.
- * Schedule via cron at 00:00 UTC.
- * Redis keys auto-expire via TTL; this resets the DB backup counters.
- */
-export async function resetDailyCounters(): Promise<void> {
-  // api_provider_accounts.current_usage_day reset for WA sources
-  const { error } = await ownedDbTable('api_provider_accounts')
-    .update({ current_usage_day: 0, last_reset_at: new Date().toISOString() })
-    .eq('is_active', true);
-    // Note: filter by WA api_source_id once WhatsApp is added to external_api_sources
-
-  if (error) console.error('[whatsappRateLimiter] resetDailyCounters failed:', error.message);
-}
+// No daily reset job: the database counter is keyed by UTC day
+// (whatsapp_daily_usage), and Redis keys expire by TTL. The former
+// resetDailyCounters had no caller, and if wired it would have zeroed
+// current_usage_day on EVERY active api_provider_accounts row - other
+// components' counters - so it is removed rather than scheduled.

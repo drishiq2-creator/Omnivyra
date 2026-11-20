@@ -15,6 +15,8 @@ import { useState, useEffect, useCallback } from 'react';
 import Head from 'next/head';
 import Link from 'next/link';
 import { useCompanyContext } from '@/components/CompanyContext';
+import { useIdempotencyKey } from '@/hooks/useIdempotencyKey';
+import { broadcastActions, describeBroadcastCreateOutcome, partialEnqueueMessage } from '@/lib/whatsapp/broadcastCreateOutcome';
 import {
   Send,
   RefreshCw,
@@ -40,12 +42,17 @@ type Broadcast = {
   message_type: MessageType;
   template_name?: string | null;
   body?: string | null;
-  status: 'draft' | 'queued' | 'running' | 'sending' | 'sent' | 'failed' | 'partial' | 'paused';
+  // The server writes draft, running, paused and completed; the rest are legacy display values.
+  status: 'draft' | 'queued' | 'running' | 'sending' | 'sent' | 'completed' | 'failed' | 'partial' | 'paused';
   total_recipients: number;
   sent_count: number;
   delivered_count: number;
   read_count: number;
   failed_count: number;
+  /** Recipients still pending or sending (whatsapp_refresh_broadcast_counts). */
+  open_count?: number | null;
+  /** NULL = counts never computed (open_count's 0 is then unknown). */
+  counts_refreshed_at?: string | null;
   created_at: string;
   scheduled_for?: string | null;
 };
@@ -68,13 +75,14 @@ const STATUS_COLORS: Record<string, string> = {
   running: 'bg-yellow-100 text-yellow-700',
   sending: 'bg-yellow-100 text-yellow-700',
   sent:    'bg-green-100 text-green-700',
+  completed: 'bg-green-100 text-green-700',
   failed:  'bg-red-100 text-red-700',
   partial: 'bg-orange-100 text-orange-700',
   paused:  'bg-gray-100 text-gray-500',
 };
 
 const StatusIcon = ({ status }: { status: string }) => {
-  if (status === 'sent')                    return <CheckCircle className="h-4 w-4 text-green-600" />;
+  if (status === 'sent' || status === 'completed') return <CheckCircle className="h-4 w-4 text-green-600" />;
   if (status === 'failed')                  return <XCircle className="h-4 w-4 text-red-600" />;
   if (status === 'running' || status === 'sending') return <RefreshCw className="h-4 w-4 text-yellow-600 animate-spin" />;
   if (status === 'queued')                  return <Clock className="h-4 w-4 text-blue-600" />;
@@ -95,9 +103,12 @@ export default function WhatsAppBroadcastsPage() {
   const [loading, setLoading] = useState(false);
   const [creating, setCreating] = useState(false);
   const [retrying, setRetrying] = useState<string | null>(null);
+  const [resuming, setResuming] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // A partial enqueue: some batches will send, the rest were not queued (not an error, not success).
+  const [notice, setNotice] = useState<string | null>(null);
   const [recipientErrors, setRecipientErrors] = useState<string[]>([]);
 
   // Form state
@@ -110,6 +121,10 @@ export default function WhatsAppBroadcastsPage() {
     body: '',
     recipients: '',        // one E.164 phone per line
   });
+  // One Idempotency-Key per create (CLASS-2): a double click or a re-sent submit of the SAME form
+  // reuses it, so the server creates and sends ONE broadcast. A changed form is a new key; reset()
+  // after a success, so creating an identical broadcast again on purpose is a new operation.
+  const createOp = useIdempotencyKey('wa-broadcast-create', [companyId, form]);
 
   // Load WA accounts + active templates
   useEffect(() => {
@@ -190,6 +205,7 @@ export default function WhatsAppBroadcastsPage() {
     if (!companyId || !form.social_account_id) return;
     setCreating(true);
     setError(null);
+    setNotice(null);
     setRecipientErrors([]);
 
     const { valid, errors: valErrors } = validateRecipients(form.recipients);
@@ -222,7 +238,7 @@ export default function WhatsAppBroadcastsPage() {
     try {
       const res = await fetch('/api/whatsapp/broadcasts', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...createOp.headers },
         credentials: 'include',
         body: JSON.stringify({
           company_id: companyId,
@@ -238,10 +254,18 @@ export default function WhatsAppBroadcastsPage() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? 'Failed to create broadcast');
+      // Today the form is cleared just below, which already changes the key; reset() keeps a
+      // deliberate identical second create a NEW operation even if the form stops clearing.
+      createOp.reset();
       setShowForm(false);
       setForm((f) => ({ ...f, name: '', body: '', recipients: '', template_params: '' }));
       setRecipientErrors([]);
       await fetchBroadcasts();
+      // A 2xx means the broadcast row exists, NOT that it is sending: read what was queued.
+      // Set AFTER the refresh, which clears `error` when it starts.
+      const outcome = describeBroadcastCreateOutcome(data);
+      if (outcome?.tone === 'error') setError(outcome.message);
+      if (outcome?.tone === 'warning') setNotice(outcome.message);
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -252,6 +276,7 @@ export default function WhatsAppBroadcastsPage() {
   const handleRetry = async (broadcastId: string) => {
     setRetrying(broadcastId);
     setError(null);
+    setNotice(null);
     try {
       const res = await fetch(`/api/whatsapp/broadcasts/${broadcastId}?action=retry`, {
         method: 'POST',
@@ -266,6 +291,35 @@ export default function WhatsAppBroadcastsPage() {
       setError(err.message);
     } finally {
       setRetrying(null);
+    }
+  };
+
+  /**
+   * Resume: queue the recipients still pending (a paused broadcast, or the rest of a partial
+   * enqueue). The server refuses (409) while a batch of this broadcast is still queued or
+   * active, and that answer is shown as it is.
+   */
+  const handleResume = async (broadcastId: string) => {
+    setResuming(broadcastId);
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await fetch(`/api/whatsapp/broadcasts/${broadcastId}?action=enqueue`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ company_id: companyId }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? 'Resume failed');
+      await fetchBroadcasts();
+      // After the refresh, which clears `error` when it starts.
+      if (data.partial === true) setNotice(partialEnqueueMessage(data));
+      else if (data.enqueued !== true) setError('The server did not confirm that anything was queued. Check this broadcast before resuming again.');
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setResuming(null);
     }
   };
 
@@ -303,7 +357,7 @@ export default function WhatsAppBroadcastsPage() {
               <RefreshCw className="h-4 w-4 text-gray-600" />
             </button>
             <button
-              onClick={() => { setShowForm((v) => !v); setError(null); }}
+              onClick={() => { setShowForm((v) => !v); setError(null); setNotice(null); }}
               disabled={noWaAccount}
               title={noWaAccount ? 'Connect a WhatsApp account first' : 'New broadcast'}
               className="px-3 py-2 bg-green-600 text-white rounded text-sm hover:bg-green-700 disabled:opacity-50 flex items-center gap-1.5"
@@ -323,7 +377,10 @@ export default function WhatsAppBroadcastsPage() {
           )}
 
           {error && (
-            <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded text-sm">{error}</div>
+            <div role="alert" className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded text-sm">{error}</div>
+          )}
+          {notice && (
+            <div role="alert" data-tone="warning" className="bg-amber-50 border border-amber-200 text-amber-800 px-4 py-3 rounded text-sm">{notice}</div>
           )}
 
           {/* Create Broadcast Form */}
@@ -499,7 +556,7 @@ export default function WhatsAppBroadcastsPage() {
               {broadcasts.map((b) => {
                 const stats = analytics[b.id];
                 const isExpanded = expandedId === b.id;
-                const canRetry = b.status === 'failed' || b.status === 'partial';
+                const { canRetry, canResume } = broadcastActions(b);
                 return (
                   <div key={b.id} className="bg-white rounded-lg border border-gray-200 overflow-hidden">
                     <div
@@ -528,6 +585,17 @@ export default function WhatsAppBroadcastsPage() {
                           >
                             <RefreshCw className={`h-3 w-3 ${retrying === b.id ? 'animate-spin' : ''}`} />
                             Retry
+                          </button>
+                        )}
+                        {canResume && (
+                          <button
+                            onClick={(e) => { e.stopPropagation(); handleResume(b.id); }}
+                            disabled={resuming === b.id}
+                            title="Queue the recipients not yet queued"
+                            className="px-2 py-1 text-xs rounded border border-green-300 text-green-700 hover:bg-green-50 disabled:opacity-50 flex items-center gap-1"
+                          >
+                            <Send className={`h-3 w-3 ${resuming === b.id ? 'animate-pulse' : ''}`} />
+                            Resume
                           </button>
                         )}
                         {isExpanded ? <ChevronUp className="h-4 w-4 text-gray-400" /> : <ChevronDown className="h-4 w-4 text-gray-400" />}
