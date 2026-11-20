@@ -152,6 +152,7 @@ function rowToView(row: Record<string, unknown>): CanonicalLeadView {
     // value is asserted BY CONSTRUCTION. Without re-attaching the marker here
     // the read path cannot tell a stored classification from a read-time
     // display hint, and those two must not carry the same authority.
+    // UNGATED READ, on purpose (piLdbSchemaReady.ts): pre-apply this is undefined via select('*') and skipped.
     ...(row.origin_category
       ? {
         origin: {
