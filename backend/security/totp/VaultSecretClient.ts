@@ -20,6 +20,7 @@
 
 import { supabase as db } from '../../db/supabaseClient';
 import { logger } from '../../services/logger';
+import { SecurityReadError } from '../SecurityReadError';
 
 const SECURITY_NAME_PREFIX = 'security:';
 
@@ -72,8 +73,10 @@ export async function readVaultSecret(id: string): Promise<string | null> {
   const { data, error } = await db.rpc('security_get_secret', { p_id: id });
 
   if (error) {
+    // A FAILED read is not "not present" (b3/7c 2026-11-20): TOTP enrolment / verification would report the secret
+    // as missing. Throw; callers fail closed honestly.
     logger.warn('vault_get_secret_failed', { id, message: error.message });
-    return null;
+    throw new SecurityReadError('readVaultSecret', 'vault', error.message ?? null);
   }
 
   if (data === null || data === undefined) return null;
@@ -92,6 +95,8 @@ export async function readVaultSecret(id: string): Promise<string | null> {
 export async function deleteVaultSecret(id: string): Promise<void> {
   const { error } = await db.rpc('security_delete_secret', { p_id: id });
   if (error) {
+    // security-read-exempt: deleting the vault secret is best-effort cleanup AFTER the factor row is revoked; a
+    // leaked-but-unreferenced secret is orphan garbage, never an authentication decision.
     logger.warn('vault_delete_secret_failed', { id, message: error.message });
     // Not fatal; the consumer can still revoke the factor row. Caller
     // logic should treat a leaked-but-unreferenced secret as orphan

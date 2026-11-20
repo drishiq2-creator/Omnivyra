@@ -1,4 +1,5 @@
 import { ownedDbTable } from '../../db/writeOwner';
+import { throwOnSecurityReadError } from '../SecurityReadError';
 /**
  * RecoveryCodeService — argon2id-hashed one-shot recovery codes.
  *
@@ -123,10 +124,11 @@ export async function regenerate(
   input: RegenerateRecoveryCodesInput,
 ): Promise<RegeneratedRecoveryCodes> {
   // 1. Revoke unused codes from any prior batch.
-  await ownedDbTable('recovery_codes')
+  const { error: secErr1 } = await ownedDbTable('recovery_codes')
     .update({ used_at: new Date().toISOString(), used_ip: null })
     .eq('user_id', input.userId)
     .is('used_at', null);
+  throwOnSecurityReadError({ error: secErr1 }, 'regenerate', 'recovery_codes');
 
   // 2. Generate + hash new codes individually.
   const batchId = randomUUID();
@@ -181,6 +183,14 @@ export interface VerifyRecoveryCodeInput {
  */
 export async function verifyAndConsume(
   input: VerifyRecoveryCodeInput,
+  opts: {
+    /**
+     * Runs AFTER a code matched and BEFORE it is consumed (b3 2026-11-20, recovery-login). If it throws, NOTHING is
+     * consumed and the error propagates - so a step that must precede consumption (revoking every session) can fail
+     * without burning the user's code.
+     */
+    beforeConsume?: () => Promise<void>;
+  } = {},
 ): Promise<RecoveryCodeVerifyResult> {
   // Per-user + per-IP brute-force gate. argon2.verify is intentionally
   // expensive; the gate ensures the cost is bounded under a guessing
@@ -198,10 +208,11 @@ export async function verifyAndConsume(
     return { ok: false, reason: 'NOT_MATCHED' };
   }
 
-  const { data: rows } = await ownedDbTable('recovery_codes')
+  const { data: rows, error: secErr2 } = await ownedDbTable('recovery_codes')
     .select('*')
     .eq('user_id', input.userId)
     .is('used_at', null);
+  throwOnSecurityReadError({ error: secErr2 }, 'verifyAndConsume', 'recovery_codes');
 
   const list = (rows ?? []) as RecoveryCodeRow[];
   if (list.length === 0) {
@@ -224,13 +235,16 @@ export async function verifyAndConsume(
     }
     if (!matched) continue;
 
+    if (opts.beforeConsume) await opts.beforeConsume();
+
     // Atomic single-flight consume.
     const now = new Date().toISOString();
-    const { data: claimed } = await ownedDbTable('recovery_codes')
+    const { data: claimed, error: secErr3 } = await ownedDbTable('recovery_codes')
       .update({ used_at: now, used_ip: input.ip ?? null })
       .eq('id', row.id)
       .is('used_at', null)
       .select('id');
+    throwOnSecurityReadError({ error: secErr3 }, 'verifyAndConsume', 'recovery_codes');
 
     if (!claimed || claimed.length === 0) {
       // Race lost — another verifier consumed this row.
