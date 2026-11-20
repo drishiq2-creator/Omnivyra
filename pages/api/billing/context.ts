@@ -24,7 +24,7 @@ import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeF
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { resolvePrincipal } from '../../../backend/security/IdentityResolver';
 import { requireTenantAccess } from '../../../backend/security/TenantGuard';
-import { resolveOrgBillingContext } from '../../../backend/services/billing/payments/orgBillingContextResolver';
+import { resolveOrgBillingContext, OrgBillingContextUnreadableError } from '../../../backend/services/billing/payments/orgBillingContextResolver';
 import {
   normalizeBillingGeographyInput,
   captureBillingProfileGeography,
@@ -59,7 +59,14 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
 
   // ── GET — resolved geography (read path UNCHANGED) ────────────────────────
   if (req.method === 'GET') {
-    const ctx = await resolveOrgBillingContext(tenant.organizationId);
+    let ctx;
+    try {
+      ctx = await resolveOrgBillingContext(tenant.organizationId);
+    } catch (err) {
+      // Unreadable is not "geography unknown" (c6 2026-11-20). State only.
+      if (err instanceof OrgBillingContextUnreadableError) return res.status(503).json({ error: 'billing_context_unreadable', code: err.code });
+      throw err;
+    }
     return res.status(200).json({
       organization_id: tenant.organizationId,
       country: ctx.country,
@@ -93,6 +100,10 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   }
 
   const ctx = result.context;
+  if (ctx === null) {
+    // The capture WROTE; only the re-read failed. Never report a saved profile as a failed save.
+    return res.status(200).json({ captured: true, organization_id: organizationId, reread: 'billing_context_unreadable' });
+  }
   return res.status(200).json({
     captured: true,
     organization_id: organizationId,

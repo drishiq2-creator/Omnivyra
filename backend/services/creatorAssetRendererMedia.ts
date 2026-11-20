@@ -87,6 +87,7 @@ import { ensureRenderFonts } from './creatorRenderFonts';
 ensureRenderFonts();
 import { type ProviderImageResult, type ProviderFailureKind, classifyProviderImageError, worseProviderFailure, type ConditionDegradation, type ConditionDegradationCategory, IMAGE_BUCKET, DOCUMENT_BUCKET, AI_IMAGE_TIMEOUT_MS, AI_IMAGE_SIZE, bucketReadyByName, safeObject, getOverlayPreset } from './creatorAssetRendererContracts';
 import { timeoutAfter, getFirstImageResult, bufferFromRemoteImage, resolveOpenAiImageKey } from './creatorAssetRendererSvg';
+import { admitInlineImage } from './creator/inlineImageBudget';
 // THE feature gate for reference-conditioned generation — one definition,
 // shared with the renderer that decides which endpoint it may call.
 import {
@@ -167,6 +168,12 @@ export async function generateProviderImage(input: {
   const apiKey = await resolveOpenAiImageKey();
   if (!apiKey) {
     return { image: null, fallbackReason: 'OpenAI API key unavailable' };
+  }
+  // A8 step 2 (b3 2026-11-20): inside a render-inline request scope, this PAID image takes one unit of the
+  // company's daily budget BEFORE any provider call; refused (cap / unreadable counter) -> no call at all, and the
+  // route answers the recorded refusal. Outside that scope (worker, render-image) nothing is counted.
+  if (!(await admitInlineImage())) {
+    return { image: null, fallbackReason: 'inline_image_budget_refused' };
   }
 
   const { default: OpenAI } = await import('openai');

@@ -144,13 +144,23 @@ export async function resolveOperationalAliases(
 
 /* ── Status / lifecycle ─────────────────────────────────────────────────────── */
 
+/**
+ * A failed read is a FAILURE (503), never "no row": `setStatus` treats a null previous status as a first
+ * assignment that any known state may take, so reading a failure as null would let every transition through.
+ */
+function failOnRead(error: unknown, code: string): void {
+  if (error) throw new OperationalError(code, 503);
+}
+
 export async function getStatus(ref: OperationalEntityRef): Promise<{ status: string; changed_at: string } | null> {
   if (hasAliases(ref)) {
-    const { data } = await scopeRead(ownedDbTable(S).select('status, changed_at, entity_id'), ref).limit(50);
+    const { data, error } = await scopeRead(ownedDbTable(S).select('status, changed_at, entity_id'), ref).limit(50);
+    failOnRead(error, 'status_read_failed');
     const row = pickEffective(Array.isArray(data) ? (data as Array<Record<string, unknown>>) : [], ref, 'changed_at');
     return row ? { status: String(row.status), changed_at: String(row.changed_at) } : null;
   }
-  const { data } = await scope(ownedDbTable(S).select('status, changed_at'), ref).maybeSingle();
+  const { data, error } = await scope(ownedDbTable(S).select('status, changed_at'), ref).maybeSingle();
+  failOnRead(error, 'status_read_failed');
   return data ? { status: String((data as any).status), changed_at: String((data as any).changed_at) } : null;
 }
 
@@ -175,11 +185,13 @@ export async function setStatus(ref: OperationalEntityRef, actor: Actor, status:
 
 export async function getAssignment(ref: OperationalEntityRef): Promise<{ assignee_id: string | null; assigned_at: string } | null> {
   if (hasAliases(ref)) {
-    const { data } = await scopeRead(ownedDbTable(A).select('assignee_id, assigned_at, entity_id').eq('active', true), ref).limit(50);
+    const { data, error } = await scopeRead(ownedDbTable(A).select('assignee_id, assigned_at, entity_id').eq('active', true), ref).limit(50);
+    failOnRead(error, 'assignment_read_failed');
     const row = pickEffective(Array.isArray(data) ? (data as Array<Record<string, unknown>>) : [], ref, 'assigned_at');
     return row ? { assignee_id: (row.assignee_id as string | null) ?? null, assigned_at: String(row.assigned_at) } : null;
   }
-  const { data } = await scope(ownedDbTable(A).select('assignee_id, assigned_at').eq('active', true), ref).maybeSingle();
+  const { data, error } = await scope(ownedDbTable(A).select('assignee_id, assigned_at').eq('active', true), ref).maybeSingle();
+  failOnRead(error, 'assignment_read_failed');
   return data ? { assignee_id: (data as any).assignee_id ?? null, assigned_at: String((data as any).assigned_at) } : null;
 }
 
@@ -197,21 +209,25 @@ export async function assign(ref: OperationalEntityRef, actor: Actor, assigneeId
 
 export async function unassign(ref: OperationalEntityRef, actor: Actor, reason?: string): Promise<void> {
   await deactivateActiveAssignment(ref);
-  await ownedDbTable(A).insert({
+  const { error } = await ownedDbTable(A).insert({
     company_id: ref.companyId, entity_type: ref.entityType, entity_id: ref.entityId,
     assignee_id: null, assigned_by: actor.userId ?? null, active: false, assigned_at: now(), unassigned_at: now(),
     metadata: reason ? { reason } : {},
   });
+  if (error) throw new OperationalError('unassign_write_failed', 500);
   await recordTimeline(ref, 'assignment_changed', actor, { assignee: null, reason: reason ?? null });
 }
 
 async function deactivateActiveAssignment(ref: OperationalEntityRef): Promise<void> {
   // Covers the aliases too: one lead has at most ONE active assignment, whichever key it was made under.
-  await scopeRead(ownedDbTable(A).update({ active: false, unassigned_at: now() }).eq('active', true), ref);
+  // A failed deactivation must stop assign(): inserting anyway would leave TWO active assignments.
+  const { error } = await scopeRead(ownedDbTable(A).update({ active: false, unassigned_at: now() }).eq('active', true), ref);
+  if (error) throw new OperationalError('assignment_deactivate_failed', 500);
 }
 
 export async function listAssignmentsForUser(companyId: string, userId: string): Promise<Array<Record<string, unknown>>> {
-  const { data } = await ownedDbTable(A).select('*').eq('company_id', companyId).eq('assignee_id', userId).eq('active', true).limit(500);
+  const { data, error } = await ownedDbTable(A).select('*').eq('company_id', companyId).eq('assignee_id', userId).eq('active', true).limit(500);
+  failOnRead(error, 'assignment_read_failed');
   return Array.isArray(data) ? (data as Array<Record<string, unknown>>) : [];
 }
 
@@ -232,16 +248,19 @@ export async function addNote(ref: OperationalEntityRef, actor: Actor, input: No
 }
 
 export async function listNotes(ref: OperationalEntityRef): Promise<Array<Record<string, unknown>>> {
-  const { data } = await scopeRead(ownedDbTable(N).select('*').is('deleted_at', null), ref).order('pinned', { ascending: false }).order('created_at', { ascending: false }).limit(500);
+  const { data, error } = await scopeRead(ownedDbTable(N).select('*').is('deleted_at', null), ref).order('pinned', { ascending: false }).order('created_at', { ascending: false }).limit(500);
+  failOnRead(error, 'notes_read_failed');
   return Array.isArray(data) ? (data as Array<Record<string, unknown>>) : [];
 }
 
 export async function setNotePinned(companyId: string, noteId: string, actor: Actor, pinned: boolean): Promise<void> {
-  await ownedDbTable(N).update({ pinned, updated_at: now() }).eq('company_id', companyId).eq('id', noteId);
+  const { error } = await ownedDbTable(N).update({ pinned, updated_at: now() }).eq('company_id', companyId).eq('id', noteId);
+  if (error) throw new OperationalError('note_update_failed', 500);
 }
 
 export async function deleteNote(companyId: string, noteId: string, actor: Actor): Promise<void> {
-  await ownedDbTable(N).update({ deleted_at: now(), updated_at: now() }).eq('company_id', companyId).eq('id', noteId);
+  const { error } = await ownedDbTable(N).update({ deleted_at: now(), updated_at: now() }).eq('company_id', companyId).eq('id', noteId);
+  if (error) throw new OperationalError('note_update_failed', 500);
 }
 
 /* ── Tasks ──────────────────────────────────────────────────────────────────── */
@@ -276,7 +295,8 @@ export async function updateTask(companyId: string, taskId: string, actor: Actor
 }
 
 export async function listTasks(ref: OperationalEntityRef): Promise<Array<Record<string, unknown>>> {
-  const { data } = await scopeRead(ownedDbTable(T).select('*'), ref).order('created_at', { ascending: false }).limit(500);
+  const { data, error } = await scopeRead(ownedDbTable(T).select('*'), ref).order('created_at', { ascending: false }).limit(500);
+  failOnRead(error, 'tasks_read_failed');
   return Array.isArray(data) ? (data as Array<Record<string, unknown>>) : [];
 }
 
