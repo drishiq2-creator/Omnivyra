@@ -15,8 +15,13 @@ export async function recordMetric(
   metadata?: Record<string, unknown> | null
 ): Promise<void> {
   // A refused insert used to be DROPPED (the returned error was never read): callers that rely on this row as a
-  // DURABLE count (e.g. billing/price_catalog_unavailable, which pages when checkout is down) would see nothing. Never
-  // throws - but a lost write is logged at error level and counted in memory (a9, 2026-11-20).
+  // DURABLE count (e.g. market_pulse/run_start_unconfirmed, which a paging rule keys on) would see nothing. Now a lost
+  // write is logged at error level and counted in memory (a9, 2026-11-20).
+  // NEVER THROWS - LOAD-BEARING, relied on off-file (7c): pages/api/market-pulse/run.ts awaits this inside a try
+  // before answering 202; a rejection escaping here would surface as a 500 and turn a kept-key 202 into a re-run
+  // (a second, possibly charged scan). Do not make this function throw or rethrow.
+  // The in-memory counter is visible only from the worker scrape; on Vercel the SYSTEM_HEALTH_METRIC_WRITE_FAILED log
+  // line is the only reliable signal of a lost write.
   let message: string | null = null;
   try {
     const { error } = await ownedDbTable('system_health_metrics').insert({
