@@ -18,7 +18,8 @@ on:
       - 'monitoring/**'
       - '.github/workflows/monitoring-rules.yml'
   push:
-    branches: [main]
+    # integration/**: cb's push-based CI branches (workflow_dispatch only works once this file is on main).
+    branches: [main, 'integration/**']
     paths:
       - 'monitoring/**'
       - '.github/workflows/monitoring-rules.yml'
