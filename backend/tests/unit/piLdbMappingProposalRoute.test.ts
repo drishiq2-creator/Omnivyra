@@ -46,6 +46,12 @@ jest.mock('../../services/leadIngestion/orchestrator', () => ({
   }),
 }));
 
+// c6 2026-11-20: the route's TENANT gate is now the import-wizard gate (ingestion + schema applied + the tenant's
+// `prospect_import` flag; its own conditions are pinned in piLdbRolloutGates). Same switch, new code.
+jest.mock('../../services/leadIngestion/prospectImportGate', () => ({
+  resolveProspectImportGate: async () => ({ allowed: tenantGateAllowed, reason: 'test' }),
+}));
+
 jest.mock('../../services/leadMapping/mappingEngine', () => ({
   // A real 64-hex digest shape, since the approval route's own validation and
   // the client both depend on that format.
@@ -209,7 +215,7 @@ describe('the gate order protects tenancy', () => {
     tenantGateAllowed = false;
     const res = await call();
     expect(res._status).toBe(404);
-    expect(res._json.code).toBe('LEAD_INGESTION_DISABLED');
+    expect(res._json.code).toBe('PROSPECT_IMPORT_DISABLED');
     // Only a verified admin of THIS tenant learns its state; otherwise the
     // route would let anyone enumerate which orgs have importing on.
     expect(enforceCompanyAccess).toHaveBeenCalled();

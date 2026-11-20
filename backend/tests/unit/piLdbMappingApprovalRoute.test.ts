@@ -29,6 +29,10 @@ jest.mock('../../services/leadIngestion/orchestrator', () => ({
   isLeadIngestionEnabled: () => ingestionEnabled,
   resolveLeadIngestionGate: async () => ({ allowed: tenantGateAllowed, reason: 'test' }),
 }));
+// c6 2026-11-20: the TENANT gate is now the import-wizard gate (pinned in piLdbRolloutGates). Same switch, new code.
+jest.mock('../../services/leadIngestion/prospectImportGate', () => ({
+  resolveProspectImportGate: async () => ({ allowed: tenantGateAllowed, reason: 'test' }),
+}));
 
 // The idempotency wrapper is DB-backed. Bypassed here so the handler is
 // exercised directly — exactly as campaign_release_seam.test.ts does. That the
@@ -166,6 +170,7 @@ describe('method and gates', () => {
     tenantGateAllowed = false;
     const res = await call();
     expect(res._status).toBe(404);
+    expect(res._json.code).toBe('PROSPECT_IMPORT_DISABLED');
     expect(enforceCompanyAccess).toHaveBeenCalled();
     expect(requireCapability).toHaveBeenCalled();
   });

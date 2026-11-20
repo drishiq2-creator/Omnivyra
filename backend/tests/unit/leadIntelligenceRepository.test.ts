@@ -126,6 +126,9 @@ describe('Durable Lead Intelligence repository', () => {
  * backend/tests/realschema/pildb_origin_category_acceptance.test.ts.
  */
 describe('PI-LDB 2F · the durable origin write contract (D2)', () => {
+  // c6 2026-11-20: the origin columns are written only after the PI-LDB apply (piLdbRolloutGates pins the OFF side).
+  beforeAll(() => { process.env.PI_LDB_SCHEMA_READY = 'true'; });
+  afterAll(() => { delete process.env.PI_LDB_SCHEMA_READY; });
   const ASSERTED_AT = '2026-11-07T09:00:00.000Z';
 
   /** The single row the upsert left behind. */

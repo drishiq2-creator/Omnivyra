@@ -243,6 +243,11 @@ beforeEach(() => {
 
 /* ── the contract itself ───────────────────────────────────────────────────*/
 
+// c6 2026-11-20: these cases describe the lead_intelligence write AFTER the PI-LDB apply (display / origin_*
+// columns exist). Before it the columns are not written at all - pinned in piLdbRolloutGates.test.ts.
+beforeAll(() => { process.env.PI_LDB_SCHEMA_READY = 'true'; });
+afterAll(() => { delete process.env.PI_LDB_SCHEMA_READY; });
+
 describe('the four states are genuinely four', () => {
   it('has four distinct status values', () => {
     // The ONE assertion that catches a contract which keeps all four names and

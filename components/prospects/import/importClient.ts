@@ -24,7 +24,7 @@ export class ImportApiError extends Error {
 
   /** The gate's own answer: this company does not have importing switched on. */
   get isGateClosed(): boolean {
-    return this.code === 'LEAD_INGESTION_DISABLED';
+    return this.code === 'LEAD_INGESTION_DISABLED' || this.code === 'PROSPECT_IMPORT_DISABLED';
   }
 
   /** Saving a mapping for REUSE is unavailable; this import is unaffected. */

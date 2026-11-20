@@ -249,6 +249,9 @@ const protectiveReads = () => allGets().filter((r) => r.query.includes('scores')
 /* ── the seam is real ──────────────────────────────────────────────────────*/
 
 describe('the production transport is actually under test', () => {
+  // c6 2026-11-20: `display` is written only after the PI-LDB apply (piLdbRolloutGates pins the OFF side).
+  beforeAll(() => { process.env.PI_LDB_SCHEMA_READY = 'true'; });
+  afterAll(() => { delete process.env.PI_LDB_SCHEMA_READY; });
   it('a confirmed write goes out over HTTP and comes back as persisted', async () => {
     const out = await durableLeadIntelligenceSink.emit(lead());
 

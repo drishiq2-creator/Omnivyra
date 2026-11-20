@@ -11,6 +11,7 @@
  */
 
 import { ownedDbTable } from '../../db/writeOwner';
+import { isPiLdbSchemaReady } from './piLdbSchemaReady';
 // Declared in the provenance contract, which is the authoritative vocabulary
 // (lib/leadIntelligence re-exports neither the type nor the guard).
 import type { SourceCategory } from '../../../lib/prospectProvenance/contract';
@@ -70,7 +71,8 @@ function toRow(lead: CanonicalLead, scores: CanonicalLeadScores): Record<string,
     // mixing our own synthesised labels in would leave a later reader unable to
     // tell which keys the provider actually sent. Until now this was dropped
     // entirely, so a durable lead had no name on any surface.
-    display: lead.display ?? null,
+    // 20270211000003's column: gated like origin_* below (piLdbSchemaReady.ts).
+    ...(isPiLdbSchemaReady() ? { display: lead.display ?? null } : {}),
     // D2/D3: THE AUTHORITATIVE ORIGIN, and only when it is asserted.
     //
     // An adapter hint reaches this as NULL, which the table's trigger reads
@@ -85,8 +87,14 @@ function toRow(lead: CanonicalLead, scores: CanonicalLeadScores): Record<string,
     // table's columns rather than the body's keys, an absent key would assign
     // the default and WIPE the value. Sending NULL and letting the trigger
     // decide needs no such assumption.
-    origin_category: lead.origin?.provenance === 'asserted' ? (lead.origin.category ?? null) : null,
-    origin_observed_at: lead.origin?.provenance === 'asserted' ? (lead.origin.observedAt ?? null) : null,
+    // Written ONLY once the PI-LDB schema is applied (piLdbSchemaReady.ts): before 0005 these columns do not exist,
+    // and this write serves every live lead source. With the switch ON both keys are ALWAYS present (see above).
+    ...(isPiLdbSchemaReady()
+      ? {
+          origin_category: lead.origin?.provenance === 'asserted' ? (lead.origin.category ?? null) : null,
+          origin_observed_at: lead.origin?.provenance === 'asserted' ? (lead.origin.observedAt ?? null) : null,
+        }
+      : {}),
     source_table: lead.sourceRef?.table ?? null,
     source_id: lead.sourceRef?.id ?? null,
     occurred_at: lead.occurredAt ?? null,
