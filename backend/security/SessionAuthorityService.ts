@@ -1,4 +1,5 @@
 import { ownedDbTable } from '../db/writeOwner';
+import { throwOnSecurityReadError } from './SecurityReadError';
 /**
  * SessionAuthorityService — server-authoritative login session state.
  *
@@ -44,7 +45,7 @@ export interface AuthSessionRow {
 
 export type SessionLookupResult =
   | { ok: true; session: AuthSessionRow }
-  | { ok: false; reason: 'NO_COOKIE' | 'BAD_FORMAT' | 'BAD_SIGNATURE' | 'NOT_FOUND' | 'REVOKED' | 'EXPIRED' };
+  | { ok: false; reason: 'NO_COOKIE' | 'BAD_FORMAT' | 'BAD_SIGNATURE' | 'NOT_FOUND' | 'REVOKED' | 'EXPIRED' | 'LOOKUP_FAILED' };
 
 // ── Cookie signing ───────────────────────────────────────────────────────────
 
@@ -222,8 +223,12 @@ export async function resolveSessionFromRequest(req: NextApiRequest): Promise<Se
     .maybeSingle();
 
   if (error) {
+    // A FAILED read is LOOKUP_FAILED, never NOT_FOUND (7c 2026-11-20): callers that only check `.ok` stay
+    // fail-closed exactly as before (no session -> no step-up / no canonical principal), but a read failure no longer
+    // reads as a genuinely absent session. Not a throw: buildPrincipalFromAuth runs this on EVERY bearer request and
+    // must tolerate a missing session row.
     logger.warn('session_authority_lookup_failed', { sessionId: parsed.sessionId, message: error.message });
-    return { ok: false, reason: 'NOT_FOUND' };
+    return { ok: false, reason: 'LOOKUP_FAILED' };
   }
 
   if (!data) return { ok: false, reason: 'NOT_FOUND' };
@@ -247,19 +252,24 @@ export async function resolveSessionFromRequest(req: NextApiRequest): Promise<Se
  * caller level if it becomes hot.
  */
 export async function touchSession(sessionId: string): Promise<void> {
-  await ownedDbTable('auth_sessions')
+  const { error: secErr1 } = await ownedDbTable('auth_sessions')
     .update({ last_seen_at: new Date().toISOString() })
     .eq('id', sessionId);
+  if (secErr1) {
+    // security-read-exempt: best-effort timestamp touch - a failure is logged, never thrown (it must not block a login).
+    logger.warn('security_touch_failed', { table: 'auth_sessions', op: 'touchSession', message: secErr1.message });
+  }
 }
 
 /**
  * Revoke a session. Idempotent.
  */
 export async function revokeSession(sessionId: string, reason: string): Promise<void> {
-  await ownedDbTable('auth_sessions')
+  const { error: secErr2 } = await ownedDbTable('auth_sessions')
     .update({ revoked_at: new Date().toISOString(), revocation_reason: reason })
     .eq('id', sessionId)
     .is('revoked_at', null);
+  throwOnSecurityReadError({ error: secErr2 }, 'revokeSession', 'auth_sessions');
 }
 
 /**
@@ -279,7 +289,10 @@ export async function revokeAllSessionsForUser(
     .eq('user_id', userId)
     .is('revoked_at', null);
   if (exemptSessionId) q = q.neq('id', exemptSessionId);
-  const { data } = await q.select('id');
+  // A failed revoke THROWS - never "0 revoked": callers (password change, sign-out-everywhere, recovery login, admin
+  // MFA reset) must not report success while the sessions stay live (b3 2026-11-20, fail-open #2).
+  const { data, error: revokeAllErr } = await q.select('id');
+  throwOnSecurityReadError({ error: revokeAllErr }, 'revokeAllSessionsForUser', 'auth_sessions');
   return data?.length ?? 0;
 }
 
@@ -296,12 +309,13 @@ export async function revokeSessionsForDevice(
   deviceId: string,
   reason: string,
 ): Promise<string[]> {
-  const { data } = await ownedDbTable('auth_sessions')
+  const { data, error: secErr3 } = await ownedDbTable('auth_sessions')
     .update({ revoked_at: new Date().toISOString(), revocation_reason: reason })
     .eq('user_id', userId)
     .eq('device_id', deviceId)
     .is('revoked_at', null)
     .select('id');
+  throwOnSecurityReadError({ error: secErr3 }, 'revokeSessionsForDevice', 'auth_sessions');
   return ((data ?? []) as Array<{ id: string }>).map((r) => r.id);
 }
 
@@ -343,6 +357,12 @@ export async function ensureSessionForUser(
         sessionId:    existing.id,
       });
       await revokeSession(existing.id, 'foreign_user_session_detected_during_sync');
+    } else if (lookup.reason === 'LOOKUP_FAILED') {
+      // The session read FAILED - we do not know whether this browser already holds a live (or foreign) session.
+      // Minting here would rotate the cookie on every request during an auth_sessions blip and skip the foreign-session
+      // revoke above (7c 2026-11-20). Answer exactly what this function's own failure path answers: no session minted.
+      logger.warn('session_authority_ensure_lookup_failed', { userId: input.userId });
+      return { sessionId: null, minted: false };
     }
 
     const created = await createSession({
@@ -384,10 +404,11 @@ export async function rotateSession(input: {
   sessionId: string;
   reason: string;
 }): Promise<RotatedSession | null> {
-  const { data: existingRow } = await ownedDbTable('auth_sessions')
+  const { data: existingRow, error: secErr4 } = await ownedDbTable('auth_sessions')
     .select('*')
     .eq('id', input.sessionId)
     .maybeSingle();
+  throwOnSecurityReadError({ error: secErr4 }, 'rotateSession', 'auth_sessions');
 
   if (!existingRow) return null;
   const existing = existingRow as AuthSessionRow;

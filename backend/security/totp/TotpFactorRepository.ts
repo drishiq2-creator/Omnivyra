@@ -15,6 +15,7 @@ import { ownedDbTable } from '../../db/writeOwner';
 
 import { supabase as db } from '../../db/supabaseClient';
 import { logger } from '../../services/logger';
+import { throwOnSecurityReadError } from '../SecurityReadError';
 import type {
   StoredTotpFactor,
   TotpAlgorithm,
@@ -54,12 +55,15 @@ function rowToStored(row: FactorRow): StoredTotpFactor {
 }
 
 export async function findActiveForUser(userId: string): Promise<StoredTotpFactor | null> {
-  const { data } = await ownedDbTable('totp_factors')
+  // A failed read THROWS (SecurityReadError) - never "no factor": the MFA login gate decides on this (b3 2026-11-20).
+  const result = await ownedDbTable('totp_factors')
     .select('*')
     .eq('user_id', userId)
     .is('revoked_at', null)
     .limit(1)
     .maybeSingle();
+  throwOnSecurityReadError(result, 'findActiveForUser', 'totp_factors');
+  const { data } = result;
   if (!data) return null;
   return rowToStored(data as FactorRow);
 }
@@ -68,11 +72,12 @@ export async function findByIdForUser(
   factorId: string,
   userId: string,
 ): Promise<StoredTotpFactor | null> {
-  const { data } = await ownedDbTable('totp_factors')
+  const { data, error: secErr1 } = await ownedDbTable('totp_factors')
     .select('*')
     .eq('id', factorId)
     .eq('user_id', userId)
     .maybeSingle();
+  throwOnSecurityReadError({ error: secErr1 }, 'findByIdForUser', 'totp_factors');
   if (!data) return null;
   return rowToStored(data as FactorRow);
 }
@@ -107,20 +112,25 @@ export async function insertPending(input: InsertPendingFactorInput): Promise<St
 
 export async function markVerified(factorId: string): Promise<StoredTotpFactor | null> {
   const now = new Date().toISOString();
-  const { data } = await ownedDbTable('totp_factors')
+  const { data, error: secErr2 } = await ownedDbTable('totp_factors')
     .update({ verified_at: now, last_used_at: now })
     .eq('id', factorId)
     .is('verified_at', null)
     .select('*')
     .maybeSingle();
+  throwOnSecurityReadError({ error: secErr2 }, 'markVerified', 'totp_factors');
   if (!data) return null;
   return rowToStored(data as FactorRow);
 }
 
 export async function touchLastUsed(factorId: string): Promise<void> {
-  await ownedDbTable('totp_factors')
+  const { error: secErr3 } = await ownedDbTable('totp_factors')
     .update({ last_used_at: new Date().toISOString() })
     .eq('id', factorId);
+  if (secErr3) {
+    // security-read-exempt: best-effort timestamp touch - a failure is logged, never thrown (it must not block a login).
+    logger.warn('security_touch_failed', { table: 'totp_factors', op: 'touchLastUsed', message: secErr3.message });
+  }
 }
 
 export async function revokeFactor(
@@ -128,7 +138,7 @@ export async function revokeFactor(
   userId: string,
   reason: string,
 ): Promise<boolean> {
-  const { data } = await ownedDbTable('totp_factors')
+  const { data, error: secErr4 } = await ownedDbTable('totp_factors')
     .update({
       revoked_at: new Date().toISOString(),
       revocation_reason: reason,
@@ -137,5 +147,6 @@ export async function revokeFactor(
     .eq('user_id', userId)
     .is('revoked_at', null)
     .select('id');
+  throwOnSecurityReadError({ error: secErr4 }, 'revokeFactor', 'totp_factors');
   return !!data && data.length > 0;
 }

@@ -60,6 +60,8 @@ export type AuditDecision =
   | 'auth_session_created'
   | 'auth_session_rotated'
   | 'auth_session_revoked'
+  /** A session revoke that was REQUIRED (credential rotation) FAILED - the other sessions stay live (b3 2026-11-20). */
+  | 'auth_session_revoke_failed'
   | 'auth_session_expired'
   | 'suspicious_session_invalidated'
   | 'concurrent_session_detected'
@@ -165,6 +167,8 @@ export async function logSecurityEvent(event: SecurityAuditEvent): Promise<void>
       via_legacy_bridge:       !!event.viaLegacyBridge,
     });
     if (error) {
+      // security-read-exempt: an audit WRITE must never block the security action it records (callers fire it with
+      // `void`); the failure is logged at warn for alerting. Not a read and not an authorization decision.
       logger.warn('security_audit_insert_failed', { capability: event.capability, message: error.message });
     }
   } catch (err) {
