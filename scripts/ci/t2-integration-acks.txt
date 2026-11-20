@@ -1,0 +1,2 @@
+# Integration suites deliberately removed on a branch (t2-integration-parity.js). Format: backend/tests/integration/<file> # reason (ruling)
+backend/tests/integration/piP0ContactGovernanceReadAt.test.ts # env-gated: runs only under PI_CG_POSTGREST=1 in pi-contact-governance-postgrest.yml (c6, stranded line 2026-11-19)
