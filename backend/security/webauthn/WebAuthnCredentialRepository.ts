@@ -85,19 +85,21 @@ export async function listForUser(userId: string): Promise<ReadonlyArray<StoredW
 export async function findByCredentialId(
   credentialId: string,
 ): Promise<StoredWebAuthnCredential | null> {
-  const { data } = await ownedDbTable('webauthn_credentials')
+  const { data, error: secErr1 } = await ownedDbTable('webauthn_credentials')
     .select('*')
     .eq('credential_id', credentialId)
     .maybeSingle();
+  throwOnSecurityReadError({ error: secErr1 }, 'findByCredentialId', 'webauthn_credentials');
   if (!data) return null;
   return rowToStored(data as CredentialRow);
 }
 
 export async function findById(id: string): Promise<StoredWebAuthnCredential | null> {
-  const { data } = await ownedDbTable('webauthn_credentials')
+  const { data, error: secErr2 } = await ownedDbTable('webauthn_credentials')
     .select('*')
     .eq('id', id)
     .maybeSingle();
+  throwOnSecurityReadError({ error: secErr2 }, 'findById', 'webauthn_credentials');
   if (!data) return null;
   return rowToStored(data as CredentialRow);
 }
@@ -157,12 +159,13 @@ export async function bumpCounter(
   newCounter: number | bigint,
 ): Promise<StoredWebAuthnCredential | null> {
   const candidate = typeof newCounter === 'bigint' ? newCounter.toString() : String(newCounter);
-  const { data } = await ownedDbTable('webauthn_credentials')
+  const { data, error: secErr3 } = await ownedDbTable('webauthn_credentials')
     .update({ counter: candidate, last_used_at: new Date().toISOString() })
     .eq('credential_id', credentialId)
     .lt('counter', candidate)
     .select('*')
     .maybeSingle();
+  throwOnSecurityReadError({ error: secErr3 }, 'bumpCounter', 'webauthn_credentials');
   if (!data) return null;
   return rowToStored(data as CredentialRow);
 }
@@ -173,9 +176,13 @@ export async function bumpCounter(
  * passkeys); we still record use but skip the monotonic check.
  */
 export async function touchLastUsed(credentialId: string): Promise<void> {
-  await ownedDbTable('webauthn_credentials')
+  const { error: secErr4 } = await ownedDbTable('webauthn_credentials')
     .update({ last_used_at: new Date().toISOString() })
     .eq('credential_id', credentialId);
+  if (secErr4) {
+    // security-read-exempt: best-effort timestamp touch - a failure is logged, never thrown (it must not block a login).
+    logger.warn('security_touch_failed', { table: 'webauthn_credentials', op: 'touchLastUsed', message: secErr4.message });
+  }
 }
 
 export async function revokeCredential(
@@ -183,11 +190,12 @@ export async function revokeCredential(
   userId: string,
   reason: string,
 ): Promise<boolean> {
-  const { data } = await ownedDbTable('webauthn_credentials')
+  const { data, error: secErr5 } = await ownedDbTable('webauthn_credentials')
     .update({ revoked_at: new Date().toISOString(), revocation_reason: reason })
     .eq('id', credentialDbId)
     .eq('user_id', userId)
     .is('revoked_at', null)
     .select('id');
+  throwOnSecurityReadError({ error: secErr5 }, 'revokeCredential', 'webauthn_credentials');
   return !!data && data.length > 0;
 }
