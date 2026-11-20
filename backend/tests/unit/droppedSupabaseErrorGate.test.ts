@@ -71,6 +71,18 @@ describe('scanSourceC: the error is tested, the branch neither refuses nor answe
   });
 });
 
+describe('written exemptions (auditable, never heuristic)', () => {
+  it('a reasoned marker on the line or the line above exempts it, in every shape', () => {
+    expect(gate.scanSourceB(L(READ, '// dropped-error-exempt: null means invalid token; the caller rejects', 'if (error) return null;'))).toEqual([]);
+    expect(gate.scanSourceC(L(READ, 'if (error) console.warn(error); // security-read-exempt: audit insert is best-effort by design'))).toEqual([]);
+    expect(gate.scanSource("const { data } = await supabase.from('t').select(); // dropped-error-exempt: count only, shown upstream")).toEqual([]);
+  });
+  it('CONTROL: a marker with NO reason exempts nothing; a marker two lines up exempts nothing', () => {
+    expect(gate.scanSourceB(L(READ, '// dropped-error-exempt:', 'if (error) return null;'))).toEqual([3]);
+    expect(gate.scanSourceB(L(READ, '// dropped-error-exempt: a reason', 'const x = 1;', 'if (error) return null;'))).toEqual([4]);
+  });
+});
+
 describe('the per-file, per-shape ratchet', () => {
   function repo(files: Record<string, string>, baseline: Record<string, Record<string, number>>) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dropped-err-'));

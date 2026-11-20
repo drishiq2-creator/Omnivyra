@@ -12,7 +12,10 @@
  *      logs and FALLS THROUGH, so the code continues as if the read answered (c6/7c, from findMatchingCompany).
  * COVERAGE CLAIM: a clean result means "no instance of shapes A, B or C", NEVER "no dropped errors" - other shapes
  * exist (e.g. a lenient resolver that maps any error to a default: PL-104). The ratchet is per file AND per shape, so
- * fixing one shape cannot net off a new instance of another.
+ * fixing one shape cannot net off a new instance of another. KNOWN GAP: an error answered with a non-literal
+ * "absent" response (e.g. `if (error || !data) return res.status(404)...`) is not keyed by B.
+ * EXEMPTION: `dropped-error-exempt: <reason>` (or `security-read-exempt: <reason>`) on the line or the line above;
+ * the reason must be non-empty. Exempt instances are not counted.
  *
  * HOW IT GATES (a per-FILE count ratchet, reduce-only): scripts/dropped-supabase-error-baseline.json maps
  * file -> allowed count. The gate FAILS when a file's count is ABOVE its baseline (a new instance, even in an
@@ -54,6 +57,14 @@ function walk(dir, out) {
   return out;
 }
 
+
+// EXEMPTION (written, auditable - never a heuristic exclusion): a comment on the flagged line or the line above
+// carrying `dropped-error-exempt: <reason>` (or 89's `security-read-exempt: <reason>`) with a NON-EMPTY reason.
+const EXEMPT = /\b(?:dropped-error-exempt|security-read-exempt):\s*\S/;
+function notExempt(src, hits) {
+  return hits.filter((n) => !(EXEMPT.test(src[n - 1] || '') || EXEMPT.test(src[n - 2] || '')));
+}
+
 /** SHAPE A - instances in one source text: `{ data }` destructured from a DB read with no `error` key. */
 function scanSource(text) {
   const src = text.split('\n');
@@ -67,7 +78,7 @@ function scanSource(text) {
     for (let k = i + 1; k < Math.min(src.length, i + 12) && !/;\s*$/.test(stmt.trimEnd()); k++) stmt += ' ' + src[k].trim();
     if (DB.test(stmt)) hits.push(i + 1);
   }
-  return hits;
+  return notExempt(src, hits);
 }
 
 // SHAPE B (7c 2026-11-20, from websiteService.getWebsite): the error IS read, then answered with an ABSENCE value,
@@ -119,7 +130,7 @@ function scanSourceC(text) {
     }
     if (depth <= 0 && !refuses && !/\belse\b/.test(src[k] || '')) hits.push(i + 1);
   }
-  return hits;
+  return notExempt(src, hits);
 }
 
 /** SHAPE B - instances in one source text: an error that is tested and then answered with an absence value. */
@@ -149,7 +160,7 @@ function scanSourceB(text) {
     }
     if (tryAt >= 0 && DB.test(src.slice(tryAt, i).join('\n'))) hits.push(i + 1);
   }
-  return hits;
+  return notExempt(src, hits);
 }
 
 function countAll(root) {
@@ -159,7 +170,7 @@ function countAll(root) {
       const rel = path.relative(root, abs).split(path.sep).join('/');
       if (EXCLUDE.test(rel)) continue;
       const text = fs.readFileSync(abs, 'utf8');
-      const a = scanSource(text).length, b = scanSourceB(text).length, c = scanSourceC(text).length;
+      const a = scanSource(text).length, b = scanSourceB(text).length, c = scanSourceC(text).length; // after exemptions
       if (a || b || c) counts[rel] = { A: a, B: b, C: c };
     }
   }
