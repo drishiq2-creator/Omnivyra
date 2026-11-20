@@ -16,6 +16,7 @@ import { ownedDbTable } from '../db/writeOwner';
 import { createCredit, makeIdempotencyKey } from './creditExecutionService';
 import { getRequestContext } from './requestContext';
 import { isProduction } from './config/productionFlags';
+import { isLiveProviderMode } from './billing/liveProviderMode';
 import { logger } from './logger';
 
 export type PurchaseResult =
@@ -143,8 +144,11 @@ export async function completePurchase(
   // and - before this - granted paid credits. This is the chokepoint for every PURCHASE-driven grant path (verify,
   // payment webhook, provider-first closure, staging, super-admin complete) - NOT for grants that never create a
   // credit_purchases row (admin grants, onboarding, earned credits, the subscription monthly-allocation sweep). The purchase is closed as failed with the reason
-  // recorded (so no sweep retries it) and nothing is credited. Rows with no recorded mode are not affected.
-  if (isProduction() && purchaseRow.provider_mode === 'test' && purchaseRow.fulfillment_status !== 'completed') {
+  // recorded (so no sweep retries it) and nothing is credited.
+  // Fail CLOSED (04, 2026-11-20; c6/7c, cb C151): only a row stamped 'live' may grant in production. 'test', NULL (rows
+  // from before the column), and any other value (checkoutSessionStore normalises unknown modes to 'unknown') are
+  // refused. C151 read: 0 completable NULL/unknown rows in prod, so this changes no real purchase.
+  if (isProduction() && !isLiveProviderMode(purchaseRow.provider_mode) && purchaseRow.fulfillment_status !== 'completed') {
     const { error: closeErr } = await ownedDbTable('credit_purchases')
       .update({
         status: 'failed',
