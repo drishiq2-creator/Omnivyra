@@ -31,6 +31,7 @@ import {
   Users,
   X,
   Zap,
+  MoreHorizontal,
 } from 'lucide-react';
 import { useCompanyContext } from '../CompanyContext';
 import { getSupabaseBrowser } from '../../lib/supabaseBrowser';
@@ -54,7 +55,9 @@ import {
 import { creatorOutcomeFirstEnabled } from '../../lib/creator-outcomes/outcomeRegistry';
 import { roleCanAccessArea } from '../../config/commandCenterCards';
 
-import { HEADER_NAV_ITEMS, getRoleLabel, isPathMatch, useClickOutside, CreditPill, NavDropdown } from './GlobalHeaderNav';
+import { HEADER_NAV_ITEMS, getRoleLabel, isPathMatch, useClickOutside, CreditPill, NavDropdown, type HeaderNavItem } from './GlobalHeaderNav';
+import { fitNavItems } from '../../lib/nav/fitNavItems';
+import { isCompanyAdminRole } from '../../lib/nav/websiteLeadCapture';
 
 function HelpFloatingButton({ onStartTour }: { onStartTour: () => void }) {
   const [open, setOpen] = useState(false);
@@ -203,6 +206,7 @@ function UserMenu({
       <button
         type="button"
         onClick={() => setOpen((value) => !value)}
+        aria-label="Account menu"
         className="flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-2 py-1.5 transition-colors hover:bg-slate-50"
       >
         {avatarUrl ? (
@@ -360,10 +364,7 @@ const GlobalHeader: React.FC<GlobalHeaderProps> = () => {
   const roleLabel = getRoleLabel(userRole);
   // Settings visibility: COMPANY_ADMIN OR SUPER_ADMIN OR ADMIN.
   // Was previously a literal equality check that hid Settings from SUPER_ADMINs.
-  const isCompanyAdmin = (() => {
-    const r = (userRole || '').toUpperCase();
-    return r === 'COMPANY_ADMIN' || r === 'SUPER_ADMIN' || r === 'ADMIN';
-  })();
+  const isCompanyAdmin = isCompanyAdminRole(userRole);
   // Billing nav visibility: company admins + finance roles. Standard users
   // never see it. The /company/billing page + its APIs independently enforce
   // org-isolation via assertOrgAccess, so this is presentation-only gating.
@@ -397,6 +398,48 @@ const GlobalHeader: React.FC<GlobalHeaderProps> = () => {
     [userRole]
   );
 
+  // Owner 2026-11-20: at common laptop widths the header overflowed and the avatar slid behind the scrollbar. The
+  // nav now measures itself and folds the menus that don't fit into "More ▾" (lib/nav/fitNavItems.ts). The right-hand
+  // cluster (company, credits, avatar) is shrink-0 and is never folded. An invisible measuring row supplies the real
+  // widths. Clipping with overflow-hidden is not an option, because it would clip the dropdowns.
+  const navRef = useRef<HTMLElement>(null);
+  const measureRef = useRef<HTMLDivElement>(null);
+  const [fitCount, setFitCount] = useState(visibleNavItems.length);
+  useEffect(() => {
+    const nav = navRef.current;
+    const measure = measureRef.current;
+    if (!nav || !measure) return;
+    const compute = () => {
+      // 0 = not laid out (the nav is display:none below md, or there is no layout engine): unmeasured, NOT "no
+      // room". Keep every menu; the ResizeObserver re-measures once it is laid out.
+      if (nav.clientWidth === 0) { setFitCount(visibleNavItems.length); return; }
+      const widths = Array.from(measure.querySelectorAll<HTMLElement>('[data-nav-measure="item"]')).map((el) => el.offsetWidth);
+      const home = measure.querySelector<HTMLElement>('[data-nav-measure="home"]')?.offsetWidth ?? 0;
+      const more = measure.querySelector<HTMLElement>('[data-nav-measure="more"]')?.offsetWidth ?? 0;
+      const GAP = 4; // gap-1
+      setFitCount(fitNavItems(Math.max(0, nav.clientWidth - home - GAP), widths, more, GAP));
+    };
+    compute();
+    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(compute) : null;
+    ro?.observe(nav);
+    window.addEventListener('resize', compute);
+    return () => { ro?.disconnect(); window.removeEventListener('resize', compute); };
+  }, [visibleNavItems]);
+  const shownNavItems = visibleNavItems.slice(0, fitCount);
+  const foldedNavItems = visibleNavItems.slice(fitCount);
+  const moreNavItem: HeaderNavItem | null = foldedNavItems.length
+    ? {
+        id: 'more',
+        label: 'More',
+        href: foldedNavItems[0].href,
+        icon: MoreHorizontal,
+        description: 'Menus that did not fit in the header.',
+        matchers: foldedNavItems.flatMap((i) => i.matchers),
+        // Each folded menu's items, grouped under that menu's name.
+        children: foldedNavItems.flatMap((i) => i.children.map((c) => ({ ...c, contentSectionId: undefined, group: i.label }))),
+      }
+    : null;
+
   return (
     <>
       <header className="sticky top-0 z-[70] border-b border-slate-200 bg-white/95 backdrop-blur">
@@ -410,7 +453,7 @@ const GlobalHeader: React.FC<GlobalHeaderProps> = () => {
 
           <div className="hidden h-5 w-px shrink-0 bg-slate-200 md:block" />
 
-          <nav className="hidden flex-1 items-center gap-1 md:flex">
+          <nav ref={navRef} className="relative hidden min-w-0 flex-1 items-center gap-1 md:flex" data-testid="header-nav">
             {/*
               Icon-only on desktop to reclaim header width — the nav row is a
               single non-wrapping flex line, so every label competes for space.
@@ -433,13 +476,40 @@ const GlobalHeader: React.FC<GlobalHeaderProps> = () => {
               <Home className="h-4 w-4" />
             </Link>
 
-            {visibleNavItems.map((item) => (
+            {shownNavItems.map((item) => (
               <NavDropdown
                 key={item.label}
                 item={item}
                 isActive={activeNav?.label === item.label}
               />
             ))}
+            {moreNavItem ? (
+              <NavDropdown
+                key="more"
+                item={moreNavItem}
+                isActive={Boolean(activeNav && foldedNavItems.some((i) => i.label === activeNav.label))}
+              />
+            ) : null}
+
+            {/* Invisible measuring row: the real width of every menu, of Home and of "More". Not focusable
+                (visibility: hidden) and hidden from assistive tech. */}
+            <div
+              ref={measureRef}
+              aria-hidden="true"
+              className="pointer-events-none invisible absolute left-0 top-0 -z-10 flex items-center gap-1 whitespace-nowrap"
+            >
+              <span data-nav-measure="home" className="flex items-center rounded-xl px-3 py-2"><Home className="h-4 w-4" /></span>
+              {visibleNavItems.map((item) => (
+                <span key={item.label} data-nav-measure="item" className="flex items-center gap-1.5 rounded-xl px-3 py-2 text-sm font-semibold">
+                  <item.icon className="h-4 w-4" />
+                  {item.label}
+                  <ChevronDown className="h-3.5 w-3.5" />
+                </span>
+              ))}
+              <span data-nav-measure="more" className="flex items-center gap-1.5 rounded-xl px-3 py-2 text-sm font-semibold">
+                <MoreHorizontal className="h-4 w-4" />More<ChevronDown className="h-3.5 w-3.5" />
+              </span>
+            </div>
           </nav>
 
           <div className="ml-auto flex shrink-0 items-center gap-2">
