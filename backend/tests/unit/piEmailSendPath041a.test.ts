@@ -282,13 +282,13 @@ describe('041-A — execution context comes from the 040 handoff', () => {
     expect(MIG).not.toMatch(/campaign_id|workflow_id|execution_instance_id|execution_task_id/);
   });
 
-  // NOT PORTED: pins pi-consol's bytes; the stack's own pins are in 034..040.
-
-  it.skip('TransportRequest and the 040 bridge are untouched', () => {
-    expect(sha('backend/services/leadOutreachExecution/transport.ts')).toBe('0d67e20221eb7a62');
-    expect(sha('backend/services/outreachBridge/outreachBridgeStore.ts')).toBe('2984776e8c003e38');
-    expect(sha('supabase/migrations/20261114000000_pi_outreach_bridge.sql'))
-      .toBe('2c8aededcf77557f');
+  // PORTED 2026-11-20 (c6; b3 ruling): the skipped original pinned pi-consol's bytes, which can never match this line.
+  // No other suite on the line pins these three files, so their pins are PORTED here at the line's bytes rather than
+  // deleted. (20270111100005 is byte-identical to pi-consol's 20261114000000 - renamed, not changed.)
+  it('TransportRequest and the 040 bridge are pinned at the line\'s bytes', () => {
+    expect(sha('backend/services/leadOutreachExecution/transport.ts')).toBe('07d68123ad738b78');
+    expect(sha('backend/services/outreachBridge/outreachBridgeStore.ts')).toBe('d5b90c108943a240');
+    expect(sha('supabase/migrations/20270111100005_pi_outreach_bridge.sql')).toBe('2c8aededcf77557f');
   });
 });
 
@@ -398,15 +398,12 @@ describe('041-A — the send boundary', () => {
     expect(TRANSPORT).toMatch(/if \(options\.recordContent/);
   });
 
-  // NOT PORTED: main's unsubscribe block throws inside its own try/catch; the no-throw behaviour is exercised in piEmailSendBoundary041a.
-
-  it.skip('the transport contract is respected — it still never throws', () => {
-    const send = TRANSPORT_RAW.slice(TRANSPORT_RAW.indexOf('async send(request: TransportRequest)'));
-    // Both new failure paths RETURN a classified outcome rather than throwing.
-    expect(send).toMatch(/reason: 'content_unavailable' \},\s*\n\s*error:/);
-    expect(send).toMatch(/reason: 'content_evidence_unrecorded' \},/);
-    expect(send).not.toMatch(/throw new/);
-  });
+  // DELETED 2026-11-20 (c6; b3 ruling): 'the transport contract is respected - it still never throws' was a source
+  // regex over pi-consol's transport (main's unsubscribe block throws inside its own try/catch, so it could not match).
+  // The contract is asserted BEHAVIOURALLY in piEmailSendBoundary041a: 'every refusal obeys the contract: it RETURNS,
+  // it does not throw' (a throwing content hook), 'AN UNRECORDABLE SEND IS NEVER SENT' (a throwing recorder) and the
+  // provider-error case (a throwing provider). Control (2026-11-20): making send() rethrow on content failure fails
+  // two of those tests.
 });
 
 // ── Common governance preservation ─────────────────────────────────────────
@@ -453,16 +450,20 @@ describe('041-A — the common path remains authoritative', () => {
     for (const ban of BANS) expect(PROOF).toMatch(ban);
   });
 
-  // NOT PORTED: pins pi-consol's dispatch bytes; piOutreachBridge040 pins main's.
-
-  it.skip('IDEMPOTENCY IS NOT REINVENTED', () => {
+  // UN-SKIPPED 2026-11-20 (c6; b3 ruling): a duplicate-send guard, so it must run. The skipped original also pinned
+  // pi-consol's dispatch.ts bytes, which can never match this line; that one line is dropped (the line's dispatch.ts
+  // is pinned by piOutreachBridge040). The attempt and its idempotency key stay with Common Outreach's dispatch.
+  const REINVENTS_KEY = /buildIdempotencyKey|idempotencyKey\s*=/;
+  it('IDEMPOTENCY IS NOT REINVENTED', () => {
     for (const surface of [SEND, CONTEXT, GEN, EVIDENCE]) {
-      expect(surface).not.toMatch(/buildIdempotencyKey|idempotencyKey\s*=/);
+      expect(surface.length).toBeGreaterThan(200);          // non-vacuous: each surface was actually read
+      expect(surface).not.toMatch(REINVENTS_KEY);
     }
-    // The attempt and its key stay with Common Outreach. Re-pinned by PI-041-A-H,
-    // which widened the CLAIM's starting state and touched neither the attempt
-    // numbering nor `buildIdempotencyKey`.
-    expect(sha('backend/services/leadOutreachExecution/dispatch.ts')).toBe('4cee6514d36c371e');
+  });
+
+  it('control: a send surface that builds its own key IS caught', () => {
+    expect(`${SEND}\nconst k = buildIdempotencyKey(task);`).toMatch(REINVENTS_KEY);
+    expect(`${EVIDENCE}\n  idempotencyKey = 'x';`).toMatch(REINVENTS_KEY);
   });
 
   it('PREPARATION PRECEDES DISPATCH, so an unsendable task leaves no attempt', () => {
@@ -477,36 +478,20 @@ describe('041-A — the common path remains authoritative', () => {
 // ── Frozen artefacts ───────────────────────────────────────────────────────
 
 describe('041-A — frozen artefacts are untouched', () => {
-  // NOT PORTED: pins pi-consol's WS-3; main's are pinned in piOutreachBridge040.
-  it.skip('the legacy outreach substrate is byte-identical', () => {
-    // Re-pinned by PI-041-A-H: `evaluateEligibility` was widened under explicit
-    // authorization. No gate was added, removed or reordered.
-    expect(sha('backend/services/leadOutreachExecution/governance.ts')).toBe('5982e2eb5a1f4199');
-    expect(sha('backend/services/leadOutreachExecution/approval.ts')).toBe('4ef1acc19f3feb64');
-    expect(sha('backend/services/leadOutreachExecution/quota.ts')).toBe('2336cc888a1f1f2b');
-    expect(sha('backend/services/leadOutreachExecution/storage.ts')).toBe('b1bd8e67651a7231');
-    expect(sha('backend/services/leadOutreachExecution/personAnchor.ts')).toBe('7459e807986f20a6');
-    // Re-pinned by ENG-003/G-16 under explicit authorization: `complaint` was
-    // ADDED to `FEEDBACK_SIGNALS` and `BUSINESS_SIGNALS`. Nothing else in the
-    // module moved — no axis reassigned, no rejection relaxed, no idempotency key
-    // altered, and `rejected` remains deliberately non-ingestible. The vocabulary
-    // itself is pinned exactly in `ws3Milestone7Feedback`, so a further silent
-    // addition still fails there as well as here.
-    expect(sha('backend/services/leadOutreachExecution/feedbackIngestion.ts'))
-      .toBe('c46ed8f4a7a83a70');
+  // PORTED 2026-11-20 (c6; b3 ruling). The skipped original pinned pi-consol's bytes. On this line governance.ts,
+  // approval.ts, quota.ts and personAnchor.ts are pinned by piOutreachBridge040 ('the legacy engine modules are
+  // byte-identical'); storage.ts and feedbackIngestion.ts had NO live pin anywhere, so theirs are ported here at the
+  // line's bytes. feedbackIngestion's vocabulary is also pinned exactly in ws3Milestone7Feedback.
+  it('the legacy outreach substrate files no other suite pins are pinned at the line\'s bytes', () => {
+    expect(sha('backend/services/leadOutreachExecution/storage.ts')).toBe('07d5b19b55b03851');
+    expect(sha('backend/services/leadOutreachExecution/feedbackIngestion.ts')).toBe('c5cc31310f1b3106');
   });
 
-  // NOT PORTED: pins pi-consol's bytes; the stack's own pins are in 034..040.
+  // DELETED 2026-11-20 (c6; b3 ruling): '032 through 040 are byte-identical' pinned pi-consol's bytes and pre-rename
+  // paths. On this line every file it covered is pinned live: workflowStore.ts and 20270111100001_pi_workflow_definitions
+  // by piExecutionInvocation034 / piExecutionPlan036 / piWorkflowExecution037; 20270111100003_pi_execution_plans and
+  // 20270111100004_pi_execution_step_scheduling by piOutreachBridge040 ('036 and 037 artefacts are byte-identical').
 
-  it.skip('032 through 040 are byte-identical', () => {
-    expect(sha('backend/services/workflows/workflowStore.ts')).toBe('27c53b4f55984059');
-    expect(sha('supabase/migrations/20261110000000_pi_workflow_definitions.sql'))
-      .toBe('c38b273336c2f179');
-    expect(sha('supabase/migrations/20261112000000_pi_execution_plans.sql'))
-      .toBe('b5ce18f36296974e');
-    expect(sha('supabase/migrations/20261113000000_pi_execution_step_scheduling.sql'))
-      .toBe('61dee239756473d4');
-  });
 
   it('the migration alters NO EXISTING table', () => {
     // Scoped rather than absolute: the new table legitimately ALTERs itself to
