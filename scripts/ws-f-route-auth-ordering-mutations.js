@@ -28,10 +28,24 @@ const ROOT = path.join(__dirname, '..');
 const args = new Set(process.argv.slice(2));
 const sha = (s) => crypto.createHash('sha1').update(s).digest('hex');
 
+// A mutant whose anchor no longer matches exactly once TESTS NOTHING: it is a HARNESS error (reported as ERROR,
+// never as SURVIVED, which would read as a finding about the code), and the battery fails. Independently, the
+// battery asserts mutants ATTEMPTED === mutants DEFINED (7c 2026-11-20): if ERROR is ever softened to a warning,
+// the population count still fails and names the gap.
+class AnchorError extends Error {}
 function replaceOnce(src, from, to, label) {
   const n = src.split(from).length - 1;
-  if (n !== 1) throw new Error(`${label}: anchor found ${n} times: ${from.slice(0, 80)}`);
+  if (n !== 1) throw new AnchorError(`${label}: anchor found ${n} times: ${from.slice(0, 80)}`);
   return src.replace(from, () => to);
+}
+const verdict = (r) => (r.harnessError ? 'ERROR   ' : r.killed ? 'KILLED  ' : 'SURVIVED');
+function population(kind, defined, results) {
+  const attempted = results.filter((r) => !r.harnessError).length;
+  const harness = results.filter((r) => r.harnessError).map((r) => r.id);
+  const killed = results.filter((r) => r.killed).length;
+  console.log(`${kind}: ${killed}/${defined} killed; attempted ${attempted}/${defined}` +
+    (harness.length ? `; ${harness.length} HARNESS ERROR(s) - anchor no longer matches, mutant never ran: ${harness.join(', ')}` : ''));
+  return attempted === defined && results.length === defined && killed === defined;
 }
 function moveBelow(src, block, after, label) {
   const without = replaceOnce(src, block, '', `${label} (cut)`);
@@ -114,14 +128,16 @@ function runRouteMutants() {
     const base = gate.analyzeRoute(m.route, raw, allowlist, methodExemptions, opts);
     let row;
     let error = null;
+    let harnessError = false;
     try {
       row = gate.analyzeRoute(m.route, m.mutate(raw), allowlist, methodExemptions, opts);
     } catch (e) {
       error = e.message;
+      harnessError = e instanceof AnchorError;
     }
     const got = row ? [...new Set(row.violations.map((v) => v.rule))].sort() : [];
     const killed = !error && base.violations.length === 0 && got.some((r) => m.expect.includes(r));
-    results.push({ id: m.id, cls: m.cls, route: m.route, baselineClean: base.violations.length === 0, rules: got, expect: m.expect, killed, error });
+    results.push({ id: m.id, cls: m.cls, route: m.route, baselineClean: base.violations.length === 0, rules: got, expect: m.expect, killed, error, harnessError });
   }
   return results;
 }
@@ -180,7 +196,7 @@ const CHECKER_MUTANTS = [
   { id: 'C24', cls: 'provable callback invocation (timeStage) not recognised', file: A,
     from: 'if (target && invokesParam(target.fn, i)) st = {', to: 'if (false) st = {' },
   { id: 'C25', cls: 'reviewed verifier names ignored', file: A,
-    from: "    if (nm && extraAuth.has(nm)) return { level: 'machine'", to: "    if (false) return { level: 'machine'" },
+    from: "    if (withRouteVerifiers && nm && extraAuth.has(nm)) return { level: 'machine'", to: "    if (false) return { level: 'machine'" },
   { id: 'C26', cls: 'branch that authenticates dominates the join (sibling branch)', file: A,
     from: '      const joined = both(live);', to: '      const joined = t.exits ? both(live) : { ...t.st };' },
 ];
@@ -200,15 +216,18 @@ function runCheckerMutants() {
     for (const m of CHECKER_MUTANTS) {
       const file = path.join(ROOT, m.file);
       let error = null;
+      let harnessError = false;
       try {
         fs.writeFileSync(file, replaceOnce(originals.get(m.file), m.from, m.to, m.id));
       } catch (e) {
         error = e.message;
+        harnessError = e instanceof AnchorError;
       }
       const run = error ? { status: 0, summary: 'not run' } : runSuite();
       fs.writeFileSync(file, originals.get(m.file));
-      results.push({ id: m.id, cls: m.cls, file: m.file, killed: !error && run.status !== 0, suite: run.summary, error });
-      console.log(`  ${m.id} ${!error && run.status !== 0 ? 'KILLED  ' : 'SURVIVED'} ${m.cls} — ${error || run.summary}`);
+      const r = { id: m.id, cls: m.cls, file: m.file, killed: !error && run.status !== 0, suite: run.summary, error, harnessError };
+      results.push(r);
+      console.log(`  ${m.id} ${verdict(r)} ${m.cls} — ${error || run.summary}`);
     }
   } finally {
     for (const [f, s] of originals) fs.writeFileSync(path.join(ROOT, f), s);
@@ -222,19 +241,17 @@ function main() {
   if (!args.has('--checker-only')) {
     const rr = runRouteMutants();
     console.log('ROUTE mutants (in-memory, repository allowlist):');
-    for (const r of rr) console.log(`  ${r.id} ${r.killed ? 'KILLED  ' : 'SURVIVED'} ${r.cls} — ${r.route} → [${r.rules.join(', ')}]${r.error ? ` ERROR ${r.error}` : ''}${r.baselineClean ? '' : ' (BASELINE NOT CLEAN)'}`);
-    const k = rr.filter((r) => r.killed).length;
-    console.log(`ROUTE: ${k}/${rr.length} killed, 0 N/A`);
-    if (k !== rr.length) failed = true;
+    for (const r of rr) console.log(`  ${r.id} ${verdict(r)} ${r.cls} — ${r.route} → [${r.rules.join(', ')}]${r.error ? ` ERROR ${r.error}` : ''}${r.baselineClean ? '' : ' (BASELINE NOT CLEAN)'}`);
+    if (!population('ROUTE', ROUTE_MUTANTS.length, rr)) failed = true;
   }
   if (!args.has('--routes-only')) {
     console.log('CHECKER mutants (on disk, WS-F suite):');
     const cr = runCheckerMutants();
     console.log(`green baseline: ${cr.baseline.status === 0 ? 'PASS' : 'FAIL'} (${cr.baseline.summary})`);
     if (cr.aborted) { console.log(`ABORTED: ${cr.aborted}`); failed = true; } else {
-      const k = cr.results.filter((r) => r.killed).length;
-      console.log(`CHECKER: ${k}/${cr.results.length} killed, 0 N/A; sources restored byte-identical: ${cr.restored}`);
-      if (k !== cr.results.length || !cr.restored) failed = true;
+      if (!population('CHECKER', CHECKER_MUTANTS.length, cr.results)) failed = true;
+      console.log(`CHECKER sources restored byte-identical: ${cr.restored}`);
+      if (!cr.restored) failed = true;
     }
   }
   console.log(failed ? 'MUTATION BATTERY: FAIL' : 'MUTATION BATTERY: PASS');
