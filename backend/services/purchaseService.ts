@@ -17,11 +17,14 @@ import { createCredit, makeIdempotencyKey } from './creditExecutionService';
 import { getRequestContext } from './requestContext';
 import { isProduction } from './config/productionFlags';
 import { isLiveProviderMode } from './billing/liveProviderMode';
+import { NON_LIVE_NO_GRANT, nonLivePurchaseRefusal } from '../../shared/billing/purchaseModeRefusal';
 import { logger } from './logger';
 
 export type PurchaseResult =
   | { success: true; purchaseId: string; creditsGranted: number }
-  | { success: false; reason: 'not_found' | 'already_completed' | 'already_failed' | 'error' | 'test_mode_no_grant'; detail?: string };
+  | { success: false; reason: 'not_found' | 'already_completed' | 'already_failed' | 'error' | typeof NON_LIVE_NO_GRANT; detail?: string;
+      /** Set with NON_LIVE_NO_GRANT: the row's STORED provider_mode, so callers can say which refusal it was (PL-162). */
+      providerMode?: unknown };
 
 type PurchaseRow = {
   id: string;
@@ -139,7 +142,11 @@ export async function completePurchase(
     return { success: false, reason: 'already_failed' };
   }
 
-  // ── 2b. A TEST-mode payment never grants REAL credits in production (b3 / owner, 2026-11-20) ─────────────────
+  // ── 2b. Only a LIVE payment grants credits in production (b3 / owner, 2026-11-20; PL-162) ─────────────────────
+  // This refuses every non-'live' stored mode, not only 'test': NULL, '', 'unknown', 'sandbox' and 'manual' too
+  // (c6's original comment below was written for the narrower === 'test' guard). 'manual' = an offline sale: the owner
+  // ruled it never adds credits automatically; a Super Admin grants them via Admin → Credits. Each stored mode is
+  // refused with its own code and recorded reason (shared/billing/purchaseModeRefusal.ts), never "test payment".
   // Prod runs on TEST provider keys today (PAYMENT_PROVIDER_MODE unset → 'test'), so a test-card payment verifies
   // and - before this - granted paid credits. This is the chokepoint for every PURCHASE-driven grant path (verify,
   // payment webhook, provider-first closure, staging, super-admin complete) - NOT for grants that never create a
@@ -149,20 +156,23 @@ export async function completePurchase(
   // from before the column), and any other value (checkoutSessionStore normalises unknown modes to 'unknown') are
   // refused. C151 read: 0 completable NULL/unknown rows in prod, so this changes no real purchase.
   if (isProduction() && !isLiveProviderMode(purchaseRow.provider_mode) && purchaseRow.fulfillment_status !== 'completed') {
+    const refusal = nonLivePurchaseRefusal(purchaseRow.provider_mode);
     const { error: closeErr } = await ownedDbTable('credit_purchases')
       .update({
         status: 'failed',
         fulfillment_status: 'failed',
-        fulfillment_error: 'test_mode_payment_no_grant',
+        fulfillment_error: refusal.fulfillmentError,
         updated_at: new Date().toISOString(),
       })
       .eq('id', purchaseId)
       .neq('fulfillment_status', 'completed');
+    // Event name kept for existing alerting; providerMode + code say which refusal it was.
     logger.error('purchase_test_mode_payment_refused', {
       purchaseId, organizationId: purchaseRow.organization_id, credits: purchaseRow.credits,
+      providerMode: purchaseRow.provider_mode ?? null, code: refusal.code,
       closeError: closeErr?.message ?? null,
     });
-    return { success: false, reason: 'test_mode_no_grant', detail: 'test-mode payment in production: no credits granted' };
+    return { success: false, reason: NON_LIVE_NO_GRANT, detail: refusal.message, providerMode: purchaseRow.provider_mode ?? null };
   }
 
   // ── 3. Grant credits (idempotent on purchaseId) ────────────────────────────

@@ -26,6 +26,7 @@ import { completePurchase, failPurchase, recordPaymentProviderEvent } from '../.
 import { requireCapability } from '../../../../backend/security/requireCapability';
 import { requireAdminRateLimit } from '../../../../backend/services/requestAccessService';
 import { BILLING_PLATFORM_MANAGE } from '../../../../shared/contracts/security';
+import { NON_LIVE_NO_GRANT, nonLivePurchaseRefusal } from '../../../../shared/billing/purchaseModeRefusal';
 import {
   assertMonetizationExposureModeConfigured,
   assertMonetizationOperationAllowed,
@@ -90,6 +91,9 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     const { data, error } = await sb
       .from('credit_purchases')
       .insert({
+        // PL-162: every credit_purchases insert states its mode, so the column DEFAULT never decides. A super-admin
+        // created purchase is an offline sale.
+        provider_mode: 'manual',
         organization_id,
         package_id: package_id ?? null,
         plan_id:    plan_id ?? null,
@@ -131,10 +135,12 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
 
   if (!result.success) {
     const failResult = result as Extract<typeof result, { success: false }>;
-    // A test-mode purchase in production is a DEFINITIVE refusal (completePurchase granted nothing and closed the row):
-    // 409 + the same code verify sends, never the 500 that reads as "something broke, retry" (04, 2026-11-20; 7c).
-    if (failResult.reason === 'test_mode_no_grant') {
-      return res.status(409).json({ error: failResult.reason, code: 'TEST_MODE_PAYMENT_NO_CREDITS', detail: failResult.detail });
+    // A non-live purchase in production is a DEFINITIVE refusal (completePurchase granted nothing and closed the row):
+    // 409 with the code of its STORED mode (PL-162): an offline ('manual') sale is OFFLINE_PURCHASE_NO_AUTO_CREDIT with
+    // "grant them via Admin → Credits", never "test payment". Never the 500 that reads as "something broke".
+    if (failResult.reason === NON_LIVE_NO_GRANT) {
+      const refusal = nonLivePurchaseRefusal(failResult.providerMode);
+      return res.status(409).json({ error: failResult.reason, code: refusal.code, detail: refusal.message });
     }
     const statusCode = failResult.reason === 'not_found' ? 404
                      : failResult.reason === 'already_failed' ? 409

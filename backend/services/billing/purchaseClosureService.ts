@@ -89,7 +89,7 @@ export async function fulfillProviderConfirmedPurchase(
   purchaseId: string,
   providerPaymentId?: string,
   providerFinancials?: ProviderFinancials | null,
-): Promise<{ ok: boolean; creditsGranted?: number; detail?: string; code?: string }> {
+): Promise<{ ok: boolean; creditsGranted?: number; detail?: string; code?: string; providerMode?: unknown }> {
   // ── FINANCIAL GATE — runs BEFORE any reopen, completion, grant or invoice ──
   //
   // THE chokepoint. Every provider-authoritative settlement path (verify,
@@ -170,7 +170,12 @@ export async function fulfillProviderConfirmedPurchase(
     logger.error('payment_reconciliation_failed', {
       purchaseId, reason: (result as { reason?: string }).reason ?? 'unknown',
     });
-    return { ok: false, detail: (result as { reason?: string }).reason ?? 'fulfillment_failed' };
+    return {
+      ok: false,
+      detail: (result as { reason?: string }).reason ?? 'fulfillment_failed',
+      // PL-162: verify names the refusal by the row's stored mode.
+      providerMode: (result as { providerMode?: unknown }).providerMode,
+    };
   }
 
   try { await generateTopupInvoice(purchaseId); }

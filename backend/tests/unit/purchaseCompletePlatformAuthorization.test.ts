@@ -246,16 +246,30 @@ describe('E — SUPER_ADMIN (platform capability, passkey + trusted device)', ()
 describe('G — super-admin complete vs the production test-mode guard', () => {
   afterEach(() => { mockIsProd = false; });
 
-  it.each<[string, unknown]>([['test', 'test'], ['no recorded mode', null]])(
-    'production + provider_mode %s → 409 TEST_MODE_PAYMENT_NO_CREDITS, NO credits, row closed', async (_n, mode) => {
+  // PL-162: one case per STORED mode, each with its own code and recorded reason. 'manual' (an offline sale, the
+  // column DEFAULT) is never told "test payment" (owner ruling 2026-11-20: a Super Admin grants via Admin → Credits).
+  it.each<[string, unknown, string, string]>([
+    ['test', 'test', 'TEST_MODE_PAYMENT_NO_CREDITS', 'test_mode_payment_no_grant'],
+    ['manual (offline sale)', 'manual', 'OFFLINE_PURCHASE_NO_AUTO_CREDIT', 'offline_purchase_no_auto_credit'],
+    ['no recorded mode', null, 'NON_LIVE_PURCHASE_NOT_GRANTABLE', 'non_live_payment_no_grant'],
+    ['an unexpected value', 'sandbox', 'NON_LIVE_PURCHASE_NOT_GRANTABLE', 'non_live_payment_no_grant'],
+  ])('production + provider_mode %s → 409 with ITS code, NO credits, row closed', async (_n, mode, code, recorded) => {
       mockIsProd = true;
       Object.assign(row('pur-b'), { provider_mode: mode });
       const res = await call(U.SUPER, { purchase_id: 'pur-b' });
       expect(res.statusCode).toBe(409);
-      expect(res.body).toMatchObject({ error: 'test_mode_no_grant', code: 'TEST_MODE_PAYMENT_NO_CREDITS' });
+      expect(res.body).toMatchObject({ error: 'non_live_no_grant', code });
       expect(mockRpc).toEqual([]);
-      expect(row('pur-b')).toMatchObject({ status: 'failed', fulfillment_error: 'test_mode_payment_no_grant' });
+      expect(row('pur-b')).toMatchObject({ status: 'failed', fulfillment_error: recorded });
     });
+
+  it('the offline refusal tells the operator where to grant instead', async () => {
+    mockIsProd = true;
+    Object.assign(row('pur-b'), { provider_mode: 'manual' });
+    const res = await call(U.SUPER, { purchase_id: 'pur-b' });
+    expect(res.body.detail).toBe("Offline purchases don't add credits automatically: grant them via Admin → Credits");
+    expect(JSON.stringify(res.body)).not.toMatch(/test/i);
+  });
 
   it('CONTROL: production + provider_mode live → credited as before', async () => {
     mockIsProd = true;
@@ -274,6 +288,8 @@ describe('F — create', () => {
     expect(res.statusCode).toBe(201);
     const inserted = mockDb.credit_purchases[mockDb.credit_purchases.length - 1];
     expect(inserted).toMatchObject({ id: res.body?.purchase_id, organization_id: B, credits: 250, status: 'pending' });
+    // PL-162: the row states its mode; the column DEFAULT never decides.
+    expect(inserted.provider_mode).toBe('manual');
   });
   it('16. missing organization_id → 400, nothing written', async () => {
     const res = await call(U.SUPER, { action: 'create', package_id: PKG, credits: 250 });
