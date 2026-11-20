@@ -191,6 +191,8 @@ export function useBlogManage() {
   }, [deleteId, selectedCompanyId, deleteAlsoRemote]);
 
   return {
+    // BlogAnalyticsPanel (re-wired 2026-11-20) reads the selected company.
+    companyId: selectedCompanyId || null,
     blogs,
     canManage,
     deleteId,

@@ -584,10 +584,23 @@ export default function BlogAnalyticsPanel({ accountId }: Props) {
   const [hotUnavailable,      setHotUnavailable]      = useState(false);
   const [loading,  setLoading]  = useState(true);
   const [error,    setError]    = useState(false);
+  // Retry re-reads (2026-11-20): bumping this re-runs the load effect.
+  const [readNonce, setReadNonce] = useState(0);
 
   useEffect(() => {
     if (!accountId) return;
+    // A company switch (or Retry) starts from nothing: no previous company's numbers, errors or flags carry over,
+    // and a late answer for a previous load is dropped.
+    let cancelled = false;
     setLoading(true);
+    setError(false);
+    setData(null);
+    setClusters([]);
+    setTopCluster(null);
+    setBotCluster(null);
+    setHot([]);
+    setClustersUnavailable(false);
+    setHotUnavailable(false);
 
     Promise.all([
       fetch(`/api/track/analytics?account_id=${encodeURIComponent(accountId)}&days=30`).then((r) => r.ok ? r.json() : null).catch(() => null),
@@ -595,6 +608,7 @@ export default function BlogAnalyticsPanel({ accountId }: Props) {
       fetch(`/api/track/hot?account_id=${encodeURIComponent(accountId)}`).then((r) => r.ok ? r.json() : null).catch(() => null),
     ])
       .then(([analytics, clustersRes, hotRes]) => {
+        if (cancelled) return;
         if (analytics)   setData(analytics);
         if (clustersRes) { setClusters(clustersRes.clusters ?? []); setTopCluster(clustersRes.top_cluster); setBotCluster(clustersRes.bottom_cluster); }
         else setClustersUnavailable(true);
@@ -602,9 +616,10 @@ export default function BlogAnalyticsPanel({ accountId }: Props) {
         else setHotUnavailable(true);
         if (!analytics)  setError(true);
       })
-      .catch(() => setError(true))
-      .finally(() => setLoading(false));
-  }, [accountId]);
+      .catch(() => { if (!cancelled) setError(true); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [accountId, readNonce]);
 
   if (loading) {
     return (
@@ -617,7 +632,14 @@ export default function BlogAnalyticsPanel({ accountId }: Props) {
   if (error || !data) {
     return (
       <div role="alert" className="rounded-xl border border-amber-200 bg-amber-50 p-4 mb-6 text-sm text-amber-800">
-        Blog analytics are temporarily unavailable. Your numbers are not zero - we could not load them. Please try again later.
+        Blog analytics are temporarily unavailable. Your numbers are not zero - we could not load them.
+        <button
+          type="button"
+          onClick={() => setReadNonce((n) => n + 1)}
+          className="ml-2 rounded border border-amber-300 bg-white px-2 py-0.5 text-xs font-medium text-amber-900 hover:bg-amber-100"
+        >
+          Retry
+        </button>
       </div>
     );
   }

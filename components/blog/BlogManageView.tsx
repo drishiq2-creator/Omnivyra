@@ -6,6 +6,7 @@ import type { useBlogManage } from '../../hooks/useBlogManage';
 import EmptyState from '../shared/EmptyState';
 import { publishingIssueEvidence, publishingIssueTitle } from './publishingIssues';
 import ExamplePreview from '../shared/ExamplePreview';
+import BlogAnalyticsPanel from './BlogAnalyticsPanel';
 
 type Props = {
   d: ReturnType<typeof useBlogManage>;
@@ -98,6 +99,10 @@ export default function BlogManageView({ d }: Props) {
             </div>
           </div>
         )}
+
+        {/* Blog analytics for the selected company (owner ruling 2026-11-20: back on the Blogs page, above the
+            post list). key=companyId remounts it on a company switch, so nothing from another company carries over. */}
+        {d.companyId && <BlogAnalyticsPanel key={d.companyId} accountId={d.companyId} />}
 
         <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
           <div className="flex gap-2">
