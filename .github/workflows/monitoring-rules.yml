@@ -12,6 +12,7 @@
 name: monitoring-rules
 
 on:
+  workflow_dispatch:
   pull_request:
     paths:
       - 'monitoring/**'
@@ -32,7 +33,7 @@ jobs:
     env:
       PROM_VERSION: 2.53.3
       # sha256 of prometheus-2.53.3.linux-amd64.tar.gz from the release's sha256sums.txt
-      PROM_SHA256: __PIN_BEFORE_MERGE__
+      PROM_SHA256: ebe549477a699c464a0cef0d8d55c0cc9972a1b301fc910b5f260cfc3e08f6a3
     steps:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
