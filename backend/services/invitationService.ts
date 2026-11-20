@@ -58,9 +58,40 @@ async function normalizeInvitationState(email: string, companyId: string): Promi
   }
 }
 
-async function findExistingByIdempotencyKey(idempotencyKey: string): Promise<{ id: string; expires_at: string } | null> {
+type ReplayRow = {
+  id: string;
+  expires_at: string;
+  revoked_at?: string | null;
+  accepted_at?: string | null;
+  token_consumed_at?: string | null;
+};
+
+/**
+ * A replay may only ever re-send a LIVE invitation (b3/04 2026-11-20, correct-sending). An idempotency key whose
+ * invitation was since revoked (a newer invitation superseded it), accepted, consumed or has expired must NOT be
+ * re-sent: its link is dead. The caller gets a definitive refusal it can show; nothing is enqueued.
+ */
+export const INVITATION_NOT_REPLAYABLE = 'INVITATION_NOT_REPLAYABLE';
+export class InvitationNotReplayableError extends Error {
+  readonly code = INVITATION_NOT_REPLAYABLE;
+  readonly statusCode = 409;
+  readonly retryable = false;
+  constructor(readonly reason: 'revoked' | 'accepted' | 'expired') {
+    super('This invitation is no longer active. Send a new invitation.');
+    this.name = 'InvitationNotReplayableError';
+  }
+}
+
+function assertReplayable(row: ReplayRow, nowMs: number = Date.now()): void {
+  if (row.revoked_at) throw new InvitationNotReplayableError('revoked');
+  if (row.accepted_at || row.token_consumed_at) throw new InvitationNotReplayableError('accepted');
+  const exp = Date.parse(row.expires_at);
+  if (!Number.isFinite(exp) || exp <= nowMs) throw new InvitationNotReplayableError('expired');
+}
+
+async function findExistingByIdempotencyKey(idempotencyKey: string): Promise<ReplayRow | null> {
   const { data, error } = await ownedDbTable('invitations')
-    .select('id, expires_at')
+    .select('id, expires_at, revoked_at, accepted_at, token_consumed_at')
     .eq('idempotency_key', idempotencyKey)
     .maybeSingle();
 
@@ -68,7 +99,7 @@ async function findExistingByIdempotencyKey(idempotencyKey: string): Promise<{ i
     throw new Error(`INVITATION_LOOKUP_FAILED:${error.message}`);
   }
 
-  return (data as { id: string; expires_at: string } | null) ?? null;
+  return (data as ReplayRow | null) ?? null;
 }
 
 export async function createInvitation(input: {
@@ -85,6 +116,7 @@ export async function createInvitation(input: {
   if (effectiveIdempotencyKey) {
     const existing = await findExistingByIdempotencyKey(effectiveIdempotencyKey);
     if (existing) {
+      assertReplayable(existing);
       const rawToken = buildInvitationToken(normalizedEmail, input.companyId, effectiveIdempotencyKey);
       return {
         id: existing.id,
@@ -122,6 +154,7 @@ export async function createInvitation(input: {
     if (error?.code === '23505' && effectiveIdempotencyKey) {
       const existing = await findExistingByIdempotencyKey(effectiveIdempotencyKey);
       if (existing) {
+        assertReplayable(existing);
         return {
           id: existing.id,
           rawToken,
@@ -213,14 +246,11 @@ export async function createAndSendInvitation(input: {
       },
     });
   } catch (error: any) {
-    // Enqueue failure is rare (DB-level) — match the old contract by
-    // revoking a freshly-created invitation and rethrowing. Replayed
-    // invitations are left alone (the original enqueue may still drain).
-    if (!invitation.replayed) {
-      await ownedDbTable('invitations')
-        .update({ revoked_at: new Date().toISOString() })
-        .eq('id', invitation.id);
-    }
+    // Enqueue failure (DB-level). The invitation is LEFT LIVE (b3/04 2026-11-20): revoking it here made the next
+    // same-key retry replay a REVOKED row and email a dead link (withIdempotency resumes a 5xx key). Left live, that
+    // retry replays it and enqueues the email under the same `<key>:email:magic_link` key (one email: the email_jobs
+    // key is UNIQUE). If nobody retries, a live unsent invitation remains until a new invitation for the address
+    // supersedes it (normalizeInvitationState) or it expires.
     throw error;
   }
 
