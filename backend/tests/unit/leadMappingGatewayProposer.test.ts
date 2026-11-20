@@ -332,7 +332,10 @@ describe('PI-LDB-5 · billing and gateway arguments', () => {
     expect(args.orgId).toBe(TENANT);
     expect(args.userId).toBe(ACTOR);
     expect(args.action).toBe(LEAD_ATTRIBUTE_MAPPING_ACTION);
-    expect(args.llmPricing.actionKey).toBe(LEAD_ATTRIBUTE_MAPPING_ACTION);
+    // FIXED price (owner 2026-11-20): the charge is credit_cost_config 'lead_attribute_mapping'. A token-priced
+    // call (llmPricing) is a pricing-hold violation, so it must be absent - not merely accompanied.
+    expect(args.fixedPricing).toEqual({ provider: expect.any(String), model: expect.any(String) });
+    expect(args.llmPricing).toBeUndefined();
     expect(args.completion.operation).toBe(LEAD_ATTRIBUTE_MAPPING_OPERATION);
     expect(args.completion.companyId).toBe(TENANT);
     // JSON mode: without it the response is prose and every call degrades.
@@ -342,7 +345,7 @@ describe('PI-LDB-5 · billing and gateway arguments', () => {
     expect(args.completion.temperature).toBe(0);
   });
 
-  it('bounds the token budget, and scales the output budget with the column count', async () => {
+  it('bounds the output budget, and scales it with the column count', async () => {
     const small = fakeGateway('{"proposals":[]}');
     await createGatewayMappingProposer(ctx, { runCompletion: small.run })(
       request({ headers: ['A'], samples: { A: [] } }),
@@ -357,14 +360,11 @@ describe('PI-LDB-5 · billing and gateway arguments', () => {
       }),
     );
 
-    const a = (small.calls[0] as any).llmPricing;
-    const b = (wide.calls[0] as any).llmPricing;
-    expect(b.maxOutputTokens).toBeGreaterThan(a.maxOutputTokens);
-    expect(b.maxInputTokens).toBeGreaterThanOrEqual(a.maxInputTokens);
-    // Both capped. An unbounded budget is an unbounded hold, and
-    // validateModelLimits rejects a budget the model cannot hold anyway.
-    expect(b.maxInputTokens).toBeLessThanOrEqual(12_000);
-    expect(b.maxOutputTokens).toBeLessThanOrEqual(3_000);
+    const a = (small.calls[0] as any).completion.max_tokens;
+    const b = (wide.calls[0] as any).completion.max_tokens;
+    expect(b).toBeGreaterThan(a);
+    // Capped: at a fixed price an unbounded output is unbounded cost to us.
+    expect(b).toBeLessThanOrEqual(3_000);
   });
 
   it('keys idempotency on the schema AND the question, not on the schema alone', async () => {

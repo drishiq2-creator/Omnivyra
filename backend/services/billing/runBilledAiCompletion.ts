@@ -59,7 +59,8 @@ export interface RunBilledAiCompletionArgs {
   action:        CreditAction;
   referenceType: string;
   referenceId:   string;
-  llmPricing: {
+  /** TOKEN mode: settle on actual tokens via the model rate card. Exactly one of llmPricing / fixedPricing. */
+  llmPricing?: {
     provider:        string;
     model:           string;
     maxInputTokens:  number;
@@ -67,6 +68,12 @@ export interface RunBilledAiCompletionArgs {
     actionKey:       string;
     timestamp?:      string | Date;
   };
+  /**
+   * FIXED mode (c6 2026-11-20, owner's pricing hold: no new rate-priced billing): the charge is the action's own
+   * credit_cost_config row (getCreditCost via runBilledOperation's fixed path), whatever the tokens. provider/model
+   * only label the result.
+   */
+  fixedPricing?: { provider: string; model: string };
   idempotency:   BillingIdempotencyArgs;
   note?:         string;
   metadata?:     Record<string, unknown>;
@@ -101,7 +108,10 @@ export interface BilledAiCompletionResult {
 export async function runBilledAiCompletion(
   args: RunBilledAiCompletionArgs,
 ): Promise<BilledAiCompletionResult> {
-  const orchestratorResult: OrchestratorResult<string> = await runBilledOperation<string>({
+  if ((args.llmPricing ? 1 : 0) + (args.fixedPricing ? 1 : 0) !== 1) {
+    throw new Error('[runBilledAiCompletion] exactly one of llmPricing / fixedPricing is required');
+  }
+  const base = {
     module:         args.module,
     action:         args.action,
     userId:         args.userId,
@@ -112,40 +122,66 @@ export async function runBilledAiCompletion(
     note:           args.note,
     metadata:       args.metadata,
     validateMembership: args.validateMembership,
+  };
+  // The AI call, identical in both modes: guard check + the credit handle visible to the gateway (SEC91-D2).
+  const callAi = async () => {
+    const creditHandle: CreditHandle = {
+      operationId:    'in-flight',
+      idempotencyKey: 'in-flight',
+      orgId:          args.orgId,
+      action:         args.action,
+      source:         'orchestrator',
+    };
+    await checkAiBillingGuard({ operation: args.completion.operation, creditHandle, orgId: args.orgId });
+    return runWithCreditHandle(creditHandle, () => runCompletionWithOperation({ ...args.completion }));
+  };
+
+  if (args.fixedPricing) {
+    let used = { inputTokens: 0, outputTokens: 0, provider: args.fixedPricing.provider, model: args.fixedPricing.model };
+    const fixed: OrchestratorResult<string> = await runBilledOperation<string>({
+      ...base,
+      executor: async (): Promise<string> => {
+        const gatewayResp = await callAi();
+        const usage = gatewayResp.metadata?.token_usage ?? {};
+        used = {
+          inputTokens:  Number(usage.prompt_tokens ?? 0),
+          outputTokens: Number(usage.completion_tokens ?? 0),
+          provider:     gatewayResp.metadata.provider === 'direct-anthropic' ? 'anthropic' : 'openai',
+          model:        gatewayResp.metadata.model ?? args.completion.model,
+        };
+        return typeof gatewayResp.output === 'string' ? gatewayResp.output : '';
+      },
+    });
+    if (fixed.result.status !== 'executed') {
+      throw new Error(`[runBilledAiCompletion] orchestrator did not execute: status=${fixed.result.status}`);
+    }
+    return {
+      text:             fixed.result.result,
+      operationId:      fixed.operationId,
+      correlationId:    fixed.correlationId,
+      idempotencyKey:   fixed.idempotencyKey,
+      promptTokens:     used.inputTokens,
+      completionTokens: used.outputTokens,
+      provider:         used.provider,
+      model:            used.model,
+    };
+  }
+
+  const llm = args.llmPricing!;
+  const orchestratorResult: OrchestratorResult<string> = await runBilledOperation<string>({
+    ...base,
     llmPricing: {
-      provider:        args.llmPricing.provider,
-      model:           args.llmPricing.model,
-      actionKey:       args.llmPricing.actionKey,
-      maxInputTokens:  args.llmPricing.maxInputTokens,
-      maxOutputTokens: args.llmPricing.maxOutputTokens,
-      timestamp:       args.llmPricing.timestamp,
+      provider:        llm.provider,
+      model:           llm.model,
+      actionKey:       llm.actionKey,
+      maxInputTokens:  llm.maxInputTokens,
+      maxOutputTokens: llm.maxOutputTokens,
+      timestamp:       llm.timestamp,
     },
     executor: async (): Promise<LlmExecutorResult<string>> => {
-      // We have a handle by virtue of being inside the orchestrator. Notify the
-      // guard so violations cannot accidentally proliferate at this seam.
-      const creditHandle: CreditHandle = {
-        operationId:    'in-flight',
-        idempotencyKey: 'in-flight',
-        orgId:          args.orgId,
-        action:         args.action,
-        source:         'orchestrator',
-      };
-      await checkAiBillingGuard({
-        operation: args.completion.operation,
-        creditHandle,
-        orgId: args.orgId,
-      });
-
-      // SEC91-D2: the gateway re-checks the billing guard; the handle must be
-      // visible there too, or this billed call is recorded as an untracked
-      // violation (and blocked outright once BILLING_REQUIRE_AI_HANDLE=true).
-      const gatewayResp = await runWithCreditHandle(creditHandle, () => runCompletionWithOperation({
-        ...args.completion,
-      }));
-
+      const gatewayResp = await callAi();
       const text = typeof gatewayResp.output === 'string' ? gatewayResp.output : '';
       const usage = gatewayResp.metadata?.token_usage ?? {};
-
       return {
         result: text,
         usage: {
@@ -180,7 +216,7 @@ export async function runBilledAiCompletion(
     idempotencyKey:   orchestratorResult.idempotencyKey,
     promptTokens:     Number(actualUsage.inputTokens ?? 0),
     completionTokens: Number(actualUsage.outputTokens ?? 0),
-    provider:         settlement?.provider ?? args.llmPricing.provider,
-    model:            settlement?.model    ?? args.llmPricing.model,
+    provider:         settlement?.provider ?? llm.provider,
+    model:            settlement?.model    ?? llm.model,
   };
 }

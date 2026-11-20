@@ -113,10 +113,6 @@ const OUTPUT_TOKENS_PER_HEADER = 40;
 const OUTPUT_TOKENS_FLOOR = 400;
 const OUTPUT_TOKENS_CEILING = 3_000;
 
-/** Input ceiling. `validateModelLimits` rejects a budget the model cannot hold. */
-const INPUT_TOKENS_FLOOR = 1_500;
-const INPUT_TOKENS_CEILING = 12_000;
-
 /** How much model prose we keep. Surfaced to a tenant as context, never scored. */
 const MAX_REASONING_CHARS = 240;
 
@@ -210,7 +206,6 @@ export function createGatewayMappingProposer(
     for (const values of Object.values(request.samples)) assertRedacted(values);
 
     const userPrompt = buildUserPrompt(request);
-    const maxInputTokens = inputBudget(SYSTEM_PROMPT.length + userPrompt.length);
     const maxOutputTokens = outputBudget(request.headers.length);
 
     let text: string;
@@ -223,13 +218,9 @@ export function createGatewayMappingProposer(
         action: LEAD_ATTRIBUTE_MAPPING_ACTION,
         referenceType: 'source_mapping_profile',
         referenceId: `${ctx.sourceType}:${ctx.schemaFingerprint}`,
-        llmPricing: {
-          provider: LEAD_ATTRIBUTE_MAPPING_PROVIDER,
-          model: LEAD_ATTRIBUTE_MAPPING_MODEL,
-          maxInputTokens,
-          maxOutputTokens,
-          actionKey: LEAD_ATTRIBUTE_MAPPING_ACTION,
-        },
+        // FIXED 2 credits per proposal (owner 2026-11-20; pricing hold - no new token-priced billing): the charge is
+        // credit_cost_config 'lead_attribute_mapping'. Reusing a saved profile or mapping by hand makes no AI call.
+        fixedPricing: { provider: LEAD_ATTRIBUTE_MAPPING_PROVIDER, model: LEAD_ATTRIBUTE_MAPPING_MODEL },
         idempotency: {
           kind: 'http',
           actorUserId: ctx.actorUserId,
@@ -392,13 +383,6 @@ function normaliseConfidence(raw: unknown): number | undefined {
   if (typeof raw !== 'number' || !Number.isFinite(raw)) return undefined;
   if (raw < 0 || raw > 1) return undefined;
   return raw;
-}
-
-function inputBudget(promptChars: number): number {
-  // ~4 characters per token, plus headroom for the tokeniser splitting unusual
-  // headings more finely than English prose.
-  const estimate = Math.ceil(promptChars / 4) + 600;
-  return Math.min(INPUT_TOKENS_CEILING, Math.max(INPUT_TOKENS_FLOOR, estimate));
 }
 
 function outputBudget(headerCount: number): number {
