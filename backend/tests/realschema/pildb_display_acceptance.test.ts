@@ -65,7 +65,7 @@ jest.mock('../../db/supabaseClient', () => {
     // cover, and ts-jest is transpile-only — so a green run proves nothing
     // about types here. Without these, every `this.x` is a TS2339.
     table: string;
-    mode: 'select' | 'insert' | 'upsert';
+    mode: 'select' | 'insert' | 'upsert' | 'update';
     returning: string;
     wheres: string[];
     params: unknown[];
@@ -111,6 +111,10 @@ jest.mock('../../db/supabaseClient', () => {
     maybeSingle() { this.oneRow = true; return this; }
     single() { this.oneRow = true; return this; }
     insert(row) { this.mode = 'insert'; this.payload = row; return this; }
+    // c6 2026-11-20: the repository writes an EXISTING score-less lead as insert -> 23505 -> update(...).eq(...).
+    // Without this the shim threw 'update is not a function' (cb, run 44768103804) and the enable-transition write
+    // was never executed against the real schema.
+    update(row) { this.mode = 'update'; this.payload = row; return this; }
     upsert(row, opts) {
       this.mode = 'upsert';
       this.payload = row;
@@ -125,6 +129,13 @@ jest.mock('../../db/supabaseClient', () => {
         if (this.orders.length) sql += ' ORDER BY ' + this.orders.join(', ');
         if (this.limitN !== null) sql += ' LIMIT ' + Number(this.limitN);
         return sql;
+      }
+      if (this.mode === 'update') {
+        const row = this.payload || {};
+        const sets = Object.keys(row).map((c) => ident(c) + ' = ' + this.p(row[c]));
+        let sql = 'UPDATE public.' + ident(this.table) + ' SET ' + sets.join(', ');
+        if (this.wheres.length) sql += ' WHERE ' + this.wheres.join(' AND ');
+        return sql + ' RETURNING ' + this.returning;
       }
       const row = this.payload || {};
       const cols = Object.keys(row);
@@ -474,7 +485,7 @@ describe('PI-LDB rollout · the deploy is DECOUPLED from the switch (cb control,
       delete process.env.PI_LDB_SCHEMA_READY;
       try {
         const off = await upsertCanonicalLeadWithOutcome(lead);
-        expect(off.status).toBe('persisted');
+        expect({ status: off.status, reason: off.reason }).toEqual({ status: 'persisted', reason: null });
         const { rows } = await db.query(
           `SELECT display IS NULL d, origin_category IS NULL c FROM ${TABLE} WHERE id = $1`, [off.leadId],
         );
@@ -482,9 +493,13 @@ describe('PI-LDB rollout · the deploy is DECOUPLED from the switch (cb control,
       } finally {
         process.env.PI_LDB_SCHEMA_READY = prior;
       }
-      // Control, same lead, switch ON (the replay's default): both columns land.
+      // THE ENABLE TRANSITION, same lead, switch ON (the replay's default): a lead first written with the switch OFF
+      // is re-written with it ON - the path every existing lead takes after the flip. It must persist, and both
+      // columns land. (A score-less lead takes insert -> 23505 -> UPDATE, so this executes the UPDATE on the real
+      // schema, triggers and CHECKs included.)
       const on = await upsertCanonicalLeadWithOutcome(lead);
-      expect(on.status).toBe('persisted');
+      expect({ status: on.status, reason: on.reason }).toEqual({ status: 'persisted', reason: null });
+      expect(on.leadId).toBe(off.leadId);
       const { rows } = await db.query(
         `SELECT display ->> 'name' n, origin_category c FROM ${TABLE} WHERE id = $1`, [on.leadId],
       );
