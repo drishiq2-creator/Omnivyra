@@ -1,4 +1,5 @@
 import { ownedDbTable } from '../db/writeOwner';
+import { throwOnSecurityReadError } from './SecurityReadError';
 /**
  * SessionAuthorityService — server-authoritative login session state.
  *
@@ -247,19 +248,22 @@ export async function resolveSessionFromRequest(req: NextApiRequest): Promise<Se
  * caller level if it becomes hot.
  */
 export async function touchSession(sessionId: string): Promise<void> {
-  await ownedDbTable('auth_sessions')
+  const { error: secErr1 } = await ownedDbTable('auth_sessions')
     .update({ last_seen_at: new Date().toISOString() })
     .eq('id', sessionId);
+  // Best-effort timestamp: a failure is logged, never thrown (it must not block a login).
+  if (secErr1) logger.warn('security_touch_failed', { table: 'auth_sessions', op: 'touchSession', message: secErr1.message });
 }
 
 /**
  * Revoke a session. Idempotent.
  */
 export async function revokeSession(sessionId: string, reason: string): Promise<void> {
-  await ownedDbTable('auth_sessions')
+  const { error: secErr2 } = await ownedDbTable('auth_sessions')
     .update({ revoked_at: new Date().toISOString(), revocation_reason: reason })
     .eq('id', sessionId)
     .is('revoked_at', null);
+  throwOnSecurityReadError({ error: secErr2 }, 'revokeSession', 'auth_sessions');
 }
 
 /**
@@ -279,7 +283,10 @@ export async function revokeAllSessionsForUser(
     .eq('user_id', userId)
     .is('revoked_at', null);
   if (exemptSessionId) q = q.neq('id', exemptSessionId);
-  const { data } = await q.select('id');
+  // A failed revoke THROWS - never "0 revoked": callers (password change, sign-out-everywhere, recovery login, admin
+  // MFA reset) must not report success while the sessions stay live (b3 2026-11-20, fail-open #2).
+  const { data, error: revokeAllErr } = await q.select('id');
+  throwOnSecurityReadError({ error: revokeAllErr }, 'revokeAllSessionsForUser', 'auth_sessions');
   return data?.length ?? 0;
 }
 
@@ -296,12 +303,13 @@ export async function revokeSessionsForDevice(
   deviceId: string,
   reason: string,
 ): Promise<string[]> {
-  const { data } = await ownedDbTable('auth_sessions')
+  const { data, error: secErr3 } = await ownedDbTable('auth_sessions')
     .update({ revoked_at: new Date().toISOString(), revocation_reason: reason })
     .eq('user_id', userId)
     .eq('device_id', deviceId)
     .is('revoked_at', null)
     .select('id');
+  throwOnSecurityReadError({ error: secErr3 }, 'revokeSessionsForDevice', 'auth_sessions');
   return ((data ?? []) as Array<{ id: string }>).map((r) => r.id);
 }
 
@@ -384,10 +392,11 @@ export async function rotateSession(input: {
   sessionId: string;
   reason: string;
 }): Promise<RotatedSession | null> {
-  const { data: existingRow } = await ownedDbTable('auth_sessions')
+  const { data: existingRow, error: secErr4 } = await ownedDbTable('auth_sessions')
     .select('*')
     .eq('id', input.sessionId)
     .maybeSingle();
+  throwOnSecurityReadError({ error: secErr4 }, 'rotateSession', 'auth_sessions');
 
   if (!existingRow) return null;
   const existing = existingRow as AuthSessionRow;
