@@ -483,8 +483,11 @@ describe('PI-LDB rollout · the deploy is DECOUPLED from the switch (cb control,
       } as unknown as CanonicalLead;
       const prior = process.env.PI_LDB_SCHEMA_READY;
       delete process.env.PI_LDB_SCHEMA_READY;
+      // Hoisted (cb, run 44769495226): the ON half below asserts the SAME lead id, which is what proves the ON write
+      // updated this row rather than creating a second one.
+      let off: Awaited<ReturnType<typeof upsertCanonicalLeadWithOutcome>>;
       try {
-        const off = await upsertCanonicalLeadWithOutcome(lead);
+        off = await upsertCanonicalLeadWithOutcome(lead);
         expect({ status: off.status, reason: off.reason }).toEqual({ status: 'persisted', reason: null });
         const { rows } = await db.query(
           `SELECT display IS NULL d, origin_category IS NULL c FROM ${TABLE} WHERE id = $1`, [off.leadId],
