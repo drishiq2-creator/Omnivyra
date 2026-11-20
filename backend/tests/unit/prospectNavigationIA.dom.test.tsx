@@ -239,3 +239,21 @@ describe('12 — mobile Home is unchanged', () => {
     expect(homeLinks()[1]).toContain('setMobileOpen(false)');
   });
 });
+
+// PI (c6 2026-11-20): the ICP workspace is reachable from the menu.
+describe('Ideal Customer Profile sits beneath Prospect', () => {
+  it('is a child of Prospect pointing at /prospects/icp', () => {
+    expect(childHref('prospect', 'Ideal Customer Profile')).toBe('/prospects/icp');
+  });
+  it('is NOT inside the Lead Intelligence group', () => {
+    const icp = prospect().children.find((c) => c.label === 'Ideal Customer Profile');
+    expect(icp?.group).toBeUndefined();
+  });
+  it('/prospects/icp activates Prospect and only Prospect', () => {
+    expect(activeGroups('/prospects/icp')).toEqual(['Prospect']);
+  });
+  it('CONTROL: the existing Prospects and Lead Intelligence children are unchanged', () => {
+    expect(childHref('prospect', 'Prospects')).toBe('/prospects');
+    expect(prospect().children.filter((c) => c.group === 'Lead Intelligence').map((c) => c.label)).toEqual(['Overview', 'All Leads']);
+  });
+});

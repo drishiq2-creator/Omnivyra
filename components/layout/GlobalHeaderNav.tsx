@@ -208,6 +208,9 @@ export const HEADER_NAV_ITEMS: HeaderNavItem[] = [
     matchers: ['/prospects', '/lead-intelligence'],
     children: [
       { label: 'Prospects', href: '/prospects', description: 'Every prospect this company has, newest first.' },
+      // PI (c6 2026-11-20): the ICP workspace existed at /prospects/icp with no way to reach it but typing the address.
+      // Ungrouped, like Prospects: the ICP is the prospect domain's definition, not a Lead Intelligence lens.
+      { label: 'Ideal Customer Profile', href: '/prospects/icp', description: 'Generate, edit and ratify who you sell to.' },
       { label: 'Overview', href: '/lead-intelligence', group: 'Lead Intelligence', description: 'Totals, intent, source and status distribution.' },
       { label: 'All Leads', href: '/lead-intelligence?tab=leads', group: 'Lead Intelligence', description: 'Unified, searchable list across every source.' },
     ],
