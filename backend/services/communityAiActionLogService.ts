@@ -16,8 +16,11 @@ export const COMMUNITY_AI_ACTION_EVENT_TYPES = Object.freeze([
   'scheduled',
   'auto_executed',
   'skipped_due_to_platform_policy',
-  // A send the platform accepted without confirmation - distinct from 'executed' (b3 standing rule 1). Admitted by
-  // 20270217000071; execute.ts writes it once the terminal event moves into persistExecutionResult (PL-108 step 2).
+  // A send the platform accepted without confirmation - distinct from 'executed' (b3 standing rule 1). The executor
+  // already PRODUCES it (communityAiActionExecutorContracts: a permissive / legacy connector ack -> sent_unverified, so
+  // persistence is honest), but the writers flatten it to 'executed' because the old CHECK refused it - the schema forced
+  // the dishonesty. 20270217000071 admits it so the flatten sites can be DELETED, in this order: 071 APPLIED in prod
+  // first, then the writers (a write before the apply is refused and the log row lost). Register row tracks the sites.
   'sent_unverified',
 ] as const);
 export type ActionEventType = (typeof COMMUNITY_AI_ACTION_EVENT_TYPES)[number];
