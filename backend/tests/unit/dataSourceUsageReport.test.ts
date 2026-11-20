@@ -35,9 +35,6 @@ beforeEach(() => {
       { id: 'd1', provider_key: 'apollo', started_at: '2026-11-09T08:00:00Z', execution_status: 'completed', provider_cost_units: 2, funding: 'tenant', credits_charged: 0, initiated_by: U2,
         results_observed: 10, results_ingested: 6, results_skipped_duplicate: 3, results_held_for_review: 1 },
     ], error: null },
-    prospect_capture_runs: { data: [
-      { command_id: 'cmd-1', provider: 'linkedin_sales_navigator', created_at: '2026-11-08T12:00:00Z', status: 'complete', initiated_by: U2, received: 5, created: 3, updated: 1, duplicates_parked: 1 },
-    ], error: null },
     user_company_roles: { data: [{ user_id: U1 }], error: null },   // U2 is no longer an active member
     users: { data: [{ id: U1, name: 'Asha', email: 'a@x.test' }], error: null },
   };
@@ -45,7 +42,7 @@ beforeEach(() => {
 
 it('reads every ledger TENANT-SCOPED and only counts and ids', async () => {
   await buildUsageReport(ORG, W);
-  for (const t of ['prospect_enrichment_attempts', 'prospect_discovery_attempts', 'prospect_capture_runs']) {
+  for (const t of ['prospect_enrichment_attempts', 'prospect_discovery_attempts']) {
     const r = reads.find((x) => x.table === t)!;
     expect(r.eqs).toContainEqual(['organization_id', ORG]);
     expect(r.cols).not.toMatch(/raw|payload|email|name|detail/);
@@ -54,10 +51,10 @@ it('reads every ledger TENANT-SCOPED and only counts and ids', async () => {
 
 it('totals: vendor units (reconcilable), credits, and the value received', async () => {
   const r = await buildUsageReport(ORG, W);
-  expect(r.ledgers).toEqual({ enrichment: 'ok', discovery: 'ok', capture: 'ok' });
+  expect(r.ledgers).toEqual({ enrichment: 'ok', discovery: 'ok' });
   expect(r.totals).toMatchObject({
-    runs: 5, vendorUnits: 4, vendorUnitsUnknownRuns: 1, creditsCharged: 18,
-    leadsReceived: 15, leadsAdded: 1 + 6 + 3, leadsUpdated: 1, heldForReview: 1, skippedDuplicates: 3 + 1,
+    runs: 4, vendorUnits: 4, vendorUnitsUnknownRuns: 1, creditsCharged: 18,
+    leadsReceived: 10, leadsAdded: 1 + 6, leadsUpdated: 0, heldForReview: 1, skippedDuplicates: 3,
   });
 });
 
@@ -70,10 +67,10 @@ it('the paid-not-stored row still counts its vendor unit with 0 credits', async 
 it('per source, per user (active members named; others "Former member"; system), per day', async () => {
   const r = await buildUsageReport(ORG, W);
   expect(r.bySource.map((s) => `${s.kind}:${s.source}:${s.runs}`).sort())
-    .toEqual(['capture:linkedin_sales_navigator:1', 'discovery:apollo:1', 'enrichment:apollo:3']);
+    .toEqual(['discovery:apollo:1', 'enrichment:apollo:3']);
   const users = Object.fromEntries(r.byUser.map((u) => [u.label, u.runs]));
-  expect(users).toEqual({ Asha: 2, 'Former member': 2, 'Automatic (system)': 1 });
-  expect(r.byDay.map((d) => d.day)).toEqual(['2026-11-08', '2026-11-09', '2026-11-10']);
+  expect(users).toEqual({ Asha: 2, 'Former member': 1, 'Automatic (system)': 1 });
+  expect(r.byDay.map((d) => d.day)).toEqual(['2026-11-09', '2026-11-10']);
   expect(r.runs[0].runId).toBe('e2');   // newest first
 });
 
@@ -86,15 +83,15 @@ it('a ledger that cannot be read (before the usage migration) is UNAVAILABLE, ne
 });
 
 it('a null-error, non-array answer is not an answer either', async () => {
-  tables.prospect_capture_runs = { data: null, error: null };
-  expect((await buildUsageReport(ORG, W)).ledgers.capture).toBe('unavailable');
+  tables.prospect_discovery_attempts = { data: null, error: null };
+  expect((await buildUsageReport(ORG, W)).ledgers.discovery).toBe('unavailable');
 });
 
 it('over the row cap -> truncated (and capped)', async () => {
-  tables.prospect_capture_runs = { data: Array.from({ length: USAGE_ROW_CAP + 1 }, (_, i) => ({ command_id: `c${i}`, provider: 'linkedin_sales_navigator', created_at: '2026-11-08T12:00:00Z', status: 'complete', received: 1, created: 1, updated: 0, duplicates_parked: 0 })), error: null };
+  tables.prospect_discovery_attempts = { data: Array.from({ length: USAGE_ROW_CAP + 1 }, (_, i) => ({ id: `d${i}`, provider_key: 'apollo', started_at: '2026-11-08T12:00:00Z', execution_status: 'completed', provider_cost_units: 1, funding: 'tenant', credits_charged: 0, results_observed: 1, results_ingested: 1, results_skipped_duplicate: 0, results_held_for_review: 0 })), error: null };
   const r = await buildUsageReport(ORG, W);
-  expect(r.ledgers.capture).toBe('truncated');
-  expect(r.bySource.find((s) => s.kind === 'capture')!.runs).toBe(USAGE_ROW_CAP);
+  expect(r.ledgers.discovery).toBe('truncated');
+  expect(r.bySource.find((s) => s.kind === 'discovery')!.runs).toBe(USAGE_ROW_CAP);
 });
 
 it('window: default 30 days; refuses inverted, invalid or longer than 92 days', () => {
@@ -110,8 +107,8 @@ it('refuses a report without a tenant', async () => {
 });
 
 it('pure aggregation is order-independent', () => {
-  const ev = [toEvent('capture', { command_id: 'a', provider: 'linkedin_sales_navigator', created_at: '2026-11-01T00:00:00Z', received: 2, created: 2 }),
+  const ev = [toEvent('discovery', { id: 'a', provider_key: 'apollo', started_at: '2026-11-01T00:00:00Z', results_observed: 2, results_ingested: 2 }),
     toEvent('enrichment', { id: 'b', provider_key: 'apollo', started_at: '2026-11-02T00:00:00Z', outcome: 'enriched', provider_cost_units: 1 })];
-  const l = { enrichment: 'ok', discovery: 'ok', capture: 'ok' } as const;
+  const l = { enrichment: 'ok', discovery: 'ok' } as const;
   expect(aggregateUsage(ev, new Map(), W, l)).toEqual(aggregateUsage([...ev].reverse(), new Map(), W, l));
 });

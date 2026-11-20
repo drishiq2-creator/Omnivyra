@@ -11,7 +11,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { apiFetch } from '@/lib/apiFetch';
 import { useCompanyContext } from '@/components/CompanyContext';
 
-type Category = 'vendor_data' | 'salesnav_capture' | 'contact_data';
+type Category = 'vendor_data' | 'contact_data';
 type State = 'required' | 'current' | 'grace' | 'expired' | 'text_changed' | 'unknown';
 interface Notice { version: string; status: string; title: string; intro: string; categories: Record<Category, string>; textSha256: string }
 interface CatStatus { state: State; allowed: boolean; acceptedAt: string | null; graceEndsAt: string | null }

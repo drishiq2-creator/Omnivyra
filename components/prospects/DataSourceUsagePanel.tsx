@@ -16,13 +16,13 @@ interface Totals {
   leadsReceived: number; leadsAdded: number; leadsUpdated: number; heldForReview: number; skippedDuplicates: number;
 }
 interface Run {
-  kind: 'enrichment' | 'discovery' | 'capture'; source: string; runId: string; at: string; userId: string | null;
+  kind: 'enrichment' | 'discovery'; source: string; runId: string; at: string; userId: string | null;
   funding: 'tenant' | 'platform' | null; vendorUnits: number | null; creditsCharged: number | null; outcome: string | null;
   leadsReceived: number; leadsAdded: number; heldForReview: number; skippedDuplicates: number;
 }
 interface Report {
   window: { from: string; to: string };
-  ledgers: Record<'enrichment' | 'discovery' | 'capture', 'ok' | 'unavailable' | 'truncated'>;
+  ledgers: Record<'enrichment' | 'discovery', 'ok' | 'unavailable' | 'truncated'>;
   totals: Totals;
   bySource: Array<{ source: string; kind: string } & Totals>;
   byUser: Array<{ userId: string | null; label: string } & Totals>;
@@ -32,8 +32,8 @@ interface Report {
 }
 
 const SOURCE_LABEL: Record<string, string> = { apollo: 'Apollo', linkedin_sales_navigator: 'Sales Navigator' };
-const KIND_LABEL: Record<string, string> = { enrichment: 'Enrichment', discovery: 'Search', capture: 'Capture' };
-const LEDGER_LABEL: Record<string, string> = { enrichment: 'enrichment', discovery: 'search', capture: 'Sales Navigator capture' };
+const KIND_LABEL: Record<string, string> = { enrichment: 'Enrichment', discovery: 'Search' };
+const LEDGER_LABEL: Record<string, string> = { enrichment: 'enrichment', discovery: 'search' };
 const PERIODS = [7, 30, 90] as const;
 
 const label = (s: string) => SOURCE_LABEL[s] ?? s;
@@ -123,7 +123,7 @@ export default function DataSourceUsagePanel() {
               {report.bySource.map((r) => (
                 <tr key={`${r.kind}:${r.source}`}>
                   <td>{label(r.source)}</td><td>{KIND_LABEL[r.kind] ?? r.kind}</td><td align="right">{r.runs}</td>
-                  <td align="right">{r.kind === 'capture' ? '-' : units(r)}</td><td align="right">{r.creditsCharged}</td><td align="right">{r.leadsAdded}</td>
+                  <td align="right">{units(r)}</td><td align="right">{r.creditsCharged}</td><td align="right">{r.leadsAdded}</td>
                 </tr>
               ))}
             </tbody>
@@ -165,7 +165,7 @@ export default function DataSourceUsagePanel() {
                   <td>{label(r.source)} {KIND_LABEL[r.kind]?.toLowerCase()}</td>
                   <td>{r.funding === 'platform' ? 'Omnivyra credits' : r.funding === 'tenant' ? 'Your key' : '-'}</td>
                   <td>{r.outcome ?? '-'}</td>
-                  <td align="right">{r.vendorUnits ?? (r.kind === 'capture' ? '-' : 'unrecorded')}</td>
+                  <td align="right">{r.vendorUnits ?? 'unrecorded'}</td>
                   <td align="right">{r.creditsCharged ?? '-'}</td>
                 </tr>
               ))}

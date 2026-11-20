@@ -14,7 +14,7 @@ import {
 
 const RAW = {
   version: 'v2', status: 'PENDING COUNSEL REVIEW', publishedAt: '2026-11-10T00:00:00.000Z', graceDays: 14,
-  title: 'T', intro: 'I', categories: { vendor_data: 'V', salesnav_capture: 'S', contact_data: 'C' },
+  title: 'T', intro: 'I', categories: { vendor_data: 'V', contact_data: 'C' },
 };
 const N: TenantDataNotice = loadTenantDataNotice(RAW);
 const ORG = '00000000-0000-4000-8000-0000000000aa';
@@ -29,7 +29,7 @@ describe('the notice', () => {
   it('the shipped config loads, is marked PENDING COUNSEL REVIEW and covers all three categories', () => {
     const n = loadTenantDataNotice();
     expect(n.status).toBe('PENDING COUNSEL REVIEW');
-    expect(Object.keys(n.categories)).toEqual(['vendor_data', 'salesnav_capture', 'contact_data']);
+    expect(Object.keys(n.categories)).toEqual(['vendor_data', 'contact_data']);
     expect(n.textSha256).toMatch(/^[a-f0-9]{64}$/);
   });
   it('any wording edit changes the hash', () => {

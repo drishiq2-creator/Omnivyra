@@ -13,7 +13,14 @@
  * selector, so the stored evidence never depends on the normaliser (PI review F1).
  */
 import { ownedDbTable } from '../../db/writeOwner';
-import { SALESNAV_SOURCE } from './contract';
+
+/**
+ * The evidence provider whose `public_profile_url` the locator reads. Re-homed from the removed Sales Navigator
+ * capture contract (c6 2026-11-20, owner ruling: capture is PL-170). Until capture returns, or the import wizard's
+ * locator-only `linkedinProfileUrl` target lands (b3, step 4), no current writer produces this provider - a short,
+ * REGISTERED dormancy window between the two landings.
+ */
+export const LINKEDIN_LOCATOR_EVIDENCE_PROVIDER = 'linkedin_sales_navigator';
 
 export interface PersonLocators {
   /** The captured public profile URL, verbatim, or null when none was captured. */
@@ -38,7 +45,7 @@ export async function readPersonLocators(organizationId: string, personId: strin
     .select('raw_payload, last_seen_at')
     .eq('organization_id', org)          // tenant boundary — never optional
     .eq('person_id', person)
-    .eq('provider', SALESNAV_SOURCE)
+    .eq('provider', LINKEDIN_LOCATOR_EVIDENCE_PROVIDER)
     .order('last_seen_at', { ascending: false })
     .limit(1);
   if (error) throw new Error(`source_records locator read failed: ${error.message}`);

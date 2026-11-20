@@ -41,7 +41,7 @@ import {
   personNamesAgree,
 } from '../../services/enrichment/providers/adapters/apollo';
 import { canonicalSelectors } from '../../services/enrichment/execution';
-import { readPersonLocators } from '../../services/salesNavCapture/locator';
+import { readPersonLocators } from '../../services/enrichment/personLocators';
 import type { EnrichmentRequest } from '../../services/enrichment/providers/contract';
 
 const fetchMock = safeFetch as unknown as jest.Mock;
@@ -221,7 +221,7 @@ describe('the locator is NOT identity: no writes, no identity paths', () => {
 
   it('the locator code reaches no identity writer (source scan)', () => {
     const files = [
-      'backend/services/salesNavCapture/locator.ts',
+      'backend/services/enrichment/personLocators.ts',
       'lib/linkedin/profileUrl.ts',
     ].map((f) => fs.readFileSync(path.join(__dirname, '../../..', f), 'utf8')
       // Code only: the headers NAME these paths in order to forbid them.
