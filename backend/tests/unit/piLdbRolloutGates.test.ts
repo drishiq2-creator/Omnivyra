@@ -27,7 +27,7 @@ jest.mock('../../db/writeOwner', () => {
         return builder;
       },
       insert(row: Record<string, unknown>) { const list = arr(); list.push({ id: `id_${list.length + 1}`, ...row }); return Promise.resolve({ data: null, error: null }); },
-      select() { return builder; },
+      select(cols?: string) { (((globalThis as Record<string, unknown>).__liSelects ||= []) as Array<[string, string | undefined]>).push([table, cols]); return builder; },
       eq(c: string, v: unknown) { state.filters.push([c, v]); return builder; },
       order() { return builder; },
       limit(n: number) { state.limitN = n; return builder; },
@@ -65,6 +65,7 @@ const lead = (over: Partial<CanonicalLead> = {}): CanonicalLead => ({
 beforeEach(() => { stores.lead_intelligence.length = 0; stores.lead_intelligence_events.length = 0; flags.throw = false; });
 
 import { isPiLdbSchemaReady } from '../../services/leadIntelligence/piLdbSchemaReady';
+import { getCanonicalLead, listCanonicalLeads } from '../../services/leadIntelligence/leadIntelligenceRepository';
 import { resolveProspectImportGate, PROSPECT_IMPORT_FLAG_KEY } from '../../services/leadIngestion/prospectImportGate';
 import { isProspectImportUiEnabled } from '../../../lib/prospects/import/prospectImportUi';
 
@@ -97,6 +98,26 @@ describe('repository: the PI-LDB columns are written only once the schema is app
 
 jest.mock('../../../components/prospects/import/ImportWizard', () => ({ __esModule: true, default: () => null }));
 jest.mock('../../../components/CompanyContext', () => ({ useCompanyContext: () => ({ selectedCompanyId: null }) }));
+
+describe('repository: the READ is ungated, and safe pre-apply only because the view reads select(*)', () => {
+  const selects = () => ((globalThis as Record<string, unknown>).__liSelects ||= []) as Array<[string, string | undefined]>;
+  beforeEach(() => { selects().length = 0; });
+
+  it('getCanonicalLead and listCanonicalLeads select * on lead_intelligence (an explicit list naming display / origin_* would fail every pre-apply read)', async () => {
+    await getCanonicalLead('co1', 'id_1');
+    await listCanonicalLeads({ companyId: 'co1' });
+    const onTable = selects().filter(([t]) => t === 'lead_intelligence');
+    expect(onTable.length).toBeGreaterThanOrEqual(2);
+    for (const [, cols] of onTable) expect(cols).toBe('*');
+  });
+
+  it('a stored origin is returned even with the switch OFF (gate the write, never the read)', async () => {
+    stores.lead_intelligence.push({ id: 'id_9', company_id: 'co1', dedupe_key: 'k9', source: 'website', origin_category: 'csv', origin_observed_at: '2026-01-01T00:00:00Z', ingested_at: '2026-01-01T00:00:00Z' });
+    expect(isPiLdbSchemaReady()).toBe(false);
+    const view = await getCanonicalLead('co1', 'id_9');
+    expect((view as Record<string, any>)?.origin?.category).toBe('csv');
+  });
+});
 
 describe('import wizard UI flag: default OFF', () => {
   it('DEFAULT: the /prospects/import page is notFound; control: with the flag on it renders', async () => {
