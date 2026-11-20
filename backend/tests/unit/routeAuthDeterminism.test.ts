@@ -48,13 +48,13 @@ const ROUTES: Array<[string, string]> = [
   ['pages/api/fixture/shallow.ts', routeCalling('chainB')],
 ];
 
-function findingsInOrder(order: Array<[string, string]>): Record<string, string[]> {
+function findingsInOrder(order: Array<[string, string]>, modules: Record<string, string> = MODULES, ordering: Record<string, unknown> = {}): Record<string, string[]> {
   let out: Record<string, string[]> = {};
   jest.isolateModules(() => {
     const gate = require('../../../scripts/check-route-auth.js');
     const res: Record<string, string[]> = {};
     for (const [rel, src] of order) {
-      const row: Row = gate.analyzeRoute(rel, src, {}, {}, { modules: MODULES });
+      const row: Row = gate.analyzeRoute(rel, src, {}, {}, { modules, ordering });
       res[rel] = row.violations.map((v) => `${v.rule} ${v.msg}`).sort();
     }
     out = res;
@@ -73,6 +73,34 @@ describe('route-auth gate: findings do not depend on the order routes are analys
     const f = findingsInOrder(ROUTES);
     expect(f['pages/api/fixture/shallow.ts'].join('\n')).toMatch(/^R5-ORDER .*db-write \.insert\(\)/);
     expect(f['pages/api/fixture/deep.ts']).toEqual([]);
+  });
+
+  // 7c B1 (2026-11-20): a route's own orderingVerifiers (extraAuth) must not shape a SHARED summary. Route V names
+  // verifyHook as its verifier; sharedSvc calls verifyHook, which writes. If V's summary of sharedSvc treated
+  // verifyHook as auth (skipping its effects) and was cached, route N - which has no such verifier - lost the write.
+  const HOOK_MODULES: Record<string, string> = {
+    'backend/services/verifyHook.ts': "import { supabase } from '../db/supabaseClient';\nexport async function verifyHook(x) { await supabase.from('hook_log').insert({ x }); return true; }\n",
+    'backend/services/sharedSvc.ts': "import { verifyHook } from './verifyHook';\nexport async function sharedSvc(x) { return verifyHook(x); }\n",
+  };
+  const HOOK_ROUTES: Array<[string, string]> = [
+    ['pages/api/fixture/hooked.ts', `${AUTH}
+import { sharedSvc } from '../../../backend/services/sharedSvc';
+import { verifyHook } from '../../../backend/services/verifyHook';
+export default async function handler(req, res) {
+  await sharedSvc(req.body.x);
+  if (!(await verifyHook(req))) return res.status(401).end();
+  return res.status(200).end();
+}`],
+    ['pages/api/fixture/plain.ts', routeCalling('sharedSvc')],
+  ];
+  const HOOK_ORDERING = { orderingVerifiers: { 'pages/api/fixture/hooked.ts': [{ verifier: 'verifyHook', reason: 'fixture: the hooked route verifies with verifyHook before 401' }] } };
+
+  it('a route\'s own verifier never truncates a shared summary another route uses (either order)', () => {
+    const forward = findingsInOrder(HOOK_ROUTES, HOOK_MODULES, HOOK_ORDERING);
+    const reversed = findingsInOrder([...HOOK_ROUTES].reverse(), HOOK_MODULES, HOOK_ORDERING);
+    expect(reversed).toEqual(forward);
+    // control: the route without that verifier sees the write through sharedSvc -> verifyHook
+    expect(forward['pages/api/fixture/plain.ts'].join('\n')).toMatch(/db-write \.insert\(\)/);
   });
 
   it('walk() lists files in name order, whatever order the filesystem returns them in', () => {

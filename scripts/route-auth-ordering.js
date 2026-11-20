@@ -65,11 +65,15 @@ function createOrderingAnalyzer({ PRIMITIVES, AUTHZ_HELPERS, DELEGATION_ROOTS, r
   }
 
   const line = (m, node) => m.sf.getLineAndCharacterOfPosition(node.getStart(m.sf)).line + 1;
-  /** An imported approved primitive / authz helper invoked by this call (provenance-checked). */
-  function authOf(call, m) {
+  /**
+   * An imported approved primitive / authz helper invoked by this call (provenance-checked).
+   * withRouteVerifiers=false skips this ROUTE's extraAuth verifiers: summarize() must, because its result is
+   * cached across routes and a verifier of route A says nothing about what a shared function reaches for route B.
+   */
+  function authOf(call, m, withRouteVerifiers = true) {
     const c = unwrap(call.expression);
     const nm = calleeName(call);
-    if (nm && extraAuth.has(nm)) return { level: 'machine', name: nm, helper: false };
+    if (withRouteVerifiers && nm && extraAuth.has(nm)) return { level: 'machine', name: nm, helper: false };
     if (!ts.isIdentifier(c)) return null;
     const imp = m.imports.get(c.text);
     if (!imp) return null;
@@ -158,7 +162,8 @@ function createOrderingAnalyzer({ PRIMITIVES, AUTHZ_HELPERS, DELEGATION_ROOTS, r
 
   /**
    * Unordered side effects a (non-delegation) function can reach within SUMMARY_DEPTH calls.
-   * DETERMINISM: the result depends only on (function, depth). There is no shared visited set (it made the
+   * DETERMINISM: the result depends only on (function, depth) - never on the route being analysed: it does not
+   * consult the route's extraAuth verifiers (authOf(..., false)). There is no shared visited set (it made the
    * result depend on which caller reached a function first, and the cache then served that truncated result
    * to every later route - the gate's findings changed with the directory order). Recursion and cycles are
    * bounded by the depth cut alone; memoising by (function, depth) keeps the cost linear.
@@ -174,7 +179,7 @@ function createOrderingAnalyzer({ PRIMITIVES, AUTHZ_HELPERS, DELEGATION_ROOTS, r
       if (ts.isCallExpression(n)) {
         const s = sinkOf(n, m);
         if (s) out.push({ ...s, at: `${m.rel}:${line(m, n)}` });
-        else if (!authOf(n, m)) {
+        else if (!authOf(n, m, false)) {
           const r = resolveCallee(n, m, null);
           if (r) for (const e of summarize(r.fn, r.m, depth + 1)) out.push({ ...e, via: [r.name, ...(e.via || [])] });
         }

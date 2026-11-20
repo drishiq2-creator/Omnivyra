@@ -998,6 +998,7 @@
         "effects": [
           "db-write .update() backend/auth/tokenStore.ts",
           "db-write .upsert() backend/services/engagementIngestionService.ts",
+          "db-write .insert() backend/services/engagementEvaluationService.ts",
           "external-call fetch() backend/services/omnivyraClientV1.ts",
           "db-write .insert() backend/services/communityAiOmnivyraService.ts",
           "db-write .insert() backend/services/communityAiAutoRuleService.ts",
