@@ -33,7 +33,9 @@ jobs:
     timeout-minutes: 10
     env:
       PROM_VERSION: 2.53.3
-      # sha256 of prometheus-2.53.3.linux-amd64.tar.gz from the release's sha256sums.txt
+      # sha256 of prometheus-2.53.3.linux-amd64.tar.gz from the release's PUBLISHED sha256sums.txt, fetched
+      # independently (cb, 2026-11-20). On a version bump, take the new value from that file - NEVER from the
+      # 'sha256 <got>' a failing run prints: that certifies whatever was downloaded, tampered or not (7c).
       PROM_SHA256: ebe549477a699c464a0cef0d8d55c0cc9972a1b301fc910b5f260cfc3e08f6a3
     steps:
       - name: Checkout

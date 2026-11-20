@@ -50,6 +50,10 @@ groups:
   - name: notification_delivery
     interval: 60s
     rules:
+      # `x + 0` in each rule: arithmetic drops __name__, so both `or` branches carry IDENTICAL label sets. The
+      # branches are disjoint today (one needs `x offset W`, the other its absence), so removing `+ 0` would change
+      # nothing a test can see - KEEP IT: if an edit ever broke that disjointness, identical label sets make
+      # Prometheus fail loudly on a duplicate series instead of quietly raising two alerts for one event (7c).
       # A credit alert that reached NOBODY: the company has no active COMPANY_ADMIN (or its memberships could not be
       # read). Money-adjacent silence - credit exhaustion would go unannounced. Page.
       - alert: CreditAlertUndeliverable
