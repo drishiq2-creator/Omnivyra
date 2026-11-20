@@ -150,6 +150,11 @@ describe('set-password: OTHER_SESSIONS_NOT_SIGNED_OUT', () => {
     expect(clearBrowserAuthState).not.toHaveBeenCalled();
   });
 
+  it('the button discloses BEFORE acting that this device is signed out too (revokeAll ends the current session)', () => {
+    expect(SIGN_OUT_OTHERS_LABEL).toMatch(/all devices/i);
+    expect(SIGN_OUT_OTHERS_LABEL).toMatch(/including this one/i);
+  });
+
   it('outcome union: SIGN_OUT_OTHERS_COPY covers SIGN_OUT_OTHERS_OUTCOMES in both directions', () => {
     expect(Object.keys(SIGN_OUT_OTHERS_COPY).sort()).toEqual([...SIGN_OUT_OTHERS_OUTCOMES].sort());
   });

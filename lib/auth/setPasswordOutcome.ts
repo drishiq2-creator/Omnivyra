@@ -10,6 +10,12 @@
  * cookie is already cleared). Live on main since #64/#65: revokeAll runs revokeAllAccessForUser (canonical sessions +
  * JWT epoch + refresh tokens) and ends the CURRENT session too, so "done" sends the user to sign in again.
  *
+ * revokeAll, NOT revokeOthers, is structural (7c 2026-11-20): the JWT epoch is per-user and invalidates every token
+ * issued before it, so there is no way to kill OTHER devices' bearer tokens while sparing this one. revokeOthers only
+ * revokes canonical auth_sessions rows and would leave other devices' bearer tokens alive: the false assurance this
+ * notice exists to prevent. So the button is "all devices", and its label says so BEFORE the user acts.
+ * 2xx ignores `revoked: count`: count is auth_sessions only, and a 200 with count 0 still killed every bearer token.
+ *
  * Mirrors the server's export in pages/api/auth/set-password.ts (a page must not import an API route module: it
  * would pull server code into the client bundle). The test pins the two together.
  */
@@ -20,7 +26,7 @@ export function otherSessionsNotSignedOut(body: unknown): boolean {
 }
 
 export const OTHER_SESSIONS_NOTICE = "Your password changed, but we couldn't sign out your other devices.";
-export const SIGN_OUT_OTHERS_LABEL = 'Sign out other devices now';
+export const SIGN_OUT_OTHERS_LABEL = 'Sign out all devices, including this one';
 export const SIGN_OUT_OTHERS_DONE = 'Your other devices are signed out. Sign in again to continue.';
 /** A refusal (4xx): nothing was revoked. Point at the real control (pages/settings/security.tsx). */
 export const SIGN_OUT_OTHERS_REFUSED =
