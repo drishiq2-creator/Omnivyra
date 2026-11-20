@@ -35,6 +35,7 @@ describe('community_ai_action_logs accepts every event type the code logs', () =
   it('PREMISE: the code set is non-empty and includes the type the CHECK used to refuse', () => {
     expect(COMMUNITY_AI_ACTION_EVENT_TYPES.length).toBeGreaterThan(0);
     expect(COMMUNITY_AI_ACTION_EVENT_TYPES).toContain('skipped_due_to_platform_policy');
+    expect(COMMUNITY_AI_ACTION_EVENT_TYPES).toContain('sent_unverified');
   });
 
   it.each([...COMMUNITY_AI_ACTION_EVENT_TYPES])('%s inserts into the real table as itself', async (t: string) => {

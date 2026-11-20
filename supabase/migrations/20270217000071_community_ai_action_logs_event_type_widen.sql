@@ -1,11 +1,15 @@
 -- 20270217000071_community_ai_action_logs_event_type_widen (a9, 2026-11-20). Version reserved by cb (rc-attest
 -- b761d8b5f); review: 7c. Template: c6's 20270217000064 (7c-reviewed).
 --
--- Widens community_ai_action_logs.event_type CHECK with 'skipped_due_to_platform_policy' - the outcome the executor
--- logs when the platform policy refuses an action. The old CHECK refused it, so every such insert failed (PL-108). With
--- the value admitted, the writer stores the TRUE type (no "map to 'skipped' + flag" workaround; b3: one approach).
+-- Widens community_ai_action_logs.event_type CHECK with two values (PL-108):
+--   'skipped_due_to_platform_policy' - the outcome the executor logs when the platform policy refuses an action. The old
+--     CHECK refused it, so every such insert failed. The writer stores the TRUE type (no "map to 'skipped' + flag"
+--     workaround; b3: one approach).
+--   'sent_unverified' - a send the platform accepted but did not confirm. execute.ts collapsed it into 'executed'
+--     (b3 standing rule 1: an UNKNOWN outcome must not read as a confirmed one). Folded into 071 by b3's ruling after cb
+--     C145 (2026-11-20 07:20 UTC) confirmed 071 UNAPPLIED: no ledger row, live CHECK still the 6-value list.
 --
--- PRECONDITION (cb C141, prod read 2026-11-20): the live constraint is VALIDATED and its definition is EXACTLY the
+-- PRECONDITION (cb C141, re-confirmed C145, prod reads 2026-11-20): the live constraint is VALIDATED and its definition is EXACTLY the
 -- 6-value list (approved, executed, failed, skipped, scheduled, auto_executed) - identical to
 -- supabase/_schema/baseline.sql, which CI restores. Anything else RAISES and nothing changes: a drifted constraint
 -- must be re-read, never overwritten.
@@ -45,7 +49,7 @@ BEGIN
   ALTER TABLE public.community_ai_action_logs
     ADD CONSTRAINT community_ai_action_logs_event_type_check CHECK (event_type IN (
       'approved', 'executed', 'failed', 'skipped', 'scheduled', 'auto_executed',
-      'skipped_due_to_platform_policy'
+      'skipped_due_to_platform_policy', 'sent_unverified'
     ));
 END
 $widen$;
@@ -59,9 +63,9 @@ BEGIN
     FROM pg_constraint
    WHERE conrelid = 'public.community_ai_action_logs'::regclass
      AND conname = 'community_ai_action_logs_event_type_check' AND contype = 'c';
-  IF v_def IS DISTINCT FROM 'CHECK ((event_type = ANY (ARRAY[''approved''::text, ''executed''::text, ''failed''::text, ''skipped''::text, ''scheduled''::text, ''auto_executed''::text, ''skipped_due_to_platform_policy''::text])))'
+  IF v_def IS DISTINCT FROM 'CHECK ((event_type = ANY (ARRAY[''approved''::text, ''executed''::text, ''failed''::text, ''skipped''::text, ''scheduled''::text, ''auto_executed''::text, ''skipped_due_to_platform_policy''::text, ''sent_unverified''::text])))'
      OR NOT v_valid THEN
-    RAISE EXCEPTION '071 postcondition: community_ai_action_logs_event_type_check is not the validated 7-value list (live: %)', v_def;
+    RAISE EXCEPTION '071 postcondition: community_ai_action_logs_event_type_check is not the validated 8-value list (live: %)', v_def;
   END IF;
 END
 $verify$;

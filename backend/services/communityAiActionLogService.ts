@@ -5,7 +5,8 @@ import { recordRawCounter } from '../observability';
  * Every event type a caller may log. THE single source: the logger's parameter is typed from it (a call site cannot
  * pass anything else), and backend/tests/realschema/community_ai_action_logs_insert.test.ts inserts EVERY value into
  * the real table - so a new type the table's CHECK does not accept fails CI by construction (a9, 2026-11-20; b3 rule).
- * The CHECK admits all of them since 20270217000071 (it refused 'skipped_due_to_platform_policy' before).
+ * The CHECK admits all of them since 20270217000071 (it refused 'skipped_due_to_platform_policy' and
+ * 'sent_unverified' before).
  */
 export const COMMUNITY_AI_ACTION_EVENT_TYPES = Object.freeze([
   'approved',
@@ -15,6 +16,9 @@ export const COMMUNITY_AI_ACTION_EVENT_TYPES = Object.freeze([
   'scheduled',
   'auto_executed',
   'skipped_due_to_platform_policy',
+  // A send the platform accepted without confirmation - distinct from 'executed' (b3 standing rule 1). Admitted by
+  // 20270217000071; execute.ts writes it once the terminal event moves into persistExecutionResult (PL-108 step 2).
+  'sent_unverified',
 ] as const);
 export type ActionEventType = (typeof COMMUNITY_AI_ACTION_EVENT_TYPES)[number];
 
