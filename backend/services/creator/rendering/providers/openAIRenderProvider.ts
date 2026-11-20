@@ -11,7 +11,7 @@
  * `supports()` / `capabilities()` / `estimateCost()` are PURE.
  */
 
-import { classifyProviderImageError, openAIImageModelCandidates } from '../../openAIImageModel';
+import { classifyProviderImageError, openAIImageModelCandidates, RETIRING_OPENAI_IMAGE_MODELS } from '../../openAIImageModel';
 import type {
   RenderProvider,
   RenderCapabilityMatrix,
@@ -59,8 +59,13 @@ export function createOpenAIRenderProvider(
   // The same model chain as the in-request renderer (env override first unless it names a retiring model; gpt-image-1.5
   // leaves the API 2026-12-01). Generation walks the chain exactly as creatorAssetRendererMedia does: a model this
   // account is refused ("does not exist" / not available) falls through to the next, so a worker render never fails
-  // where the in-request render succeeds (7c, 2026-11-20). An explicitly configured cfg.model is the only candidate.
-  const models = cfg.model ? [cfg.model] : openAIImageModelCandidates();
+  // where the in-request render succeeds (7c, 2026-11-20). An explicitly configured cfg.model is the only candidate -
+  // UNLESS it names a retiring model: then it gets the same treatment as a retiring env override (dropped with the
+  // creator_image_model_override_ignored warning, defaults used), so this knob cannot bypass the sunset (7c NB).
+  const explicit = typeof cfg.model === 'string' ? cfg.model.trim() : '';
+  const models = explicit && !RETIRING_OPENAI_IMAGE_MODELS.has(explicit.toLowerCase())
+    ? [explicit]
+    : openAIImageModelCandidates(explicit || undefined);
   // The first candidate: the cost basis and the reference-edit attempt (as the in-request renderer's editModel).
   const model = models[0];
 

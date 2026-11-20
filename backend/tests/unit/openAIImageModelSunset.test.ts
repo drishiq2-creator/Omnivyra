@@ -238,4 +238,19 @@ describe('the render-worker provider walks the same model chain as the in-reques
     await expect(provider.submit(WORKER_SPEC, 'idem-cfg')).rejects.toThrow('OpenAI image API 404');
     expect(seen).toEqual(['gpt-image-2.6-flare']);
   });
+
+  it('a RETIRING cfg.model is NOT honoured: dropped with the override_ignored warning, the defaults are used (7c NB)', async () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const seen: string[] = [];
+      const provider = createOpenAIRenderProvider({ apiKey: 'test-key', model: RETIRING[0], fetchImpl: workerFetch({}, seen) });
+      await provider.submit(WORKER_SPEC, 'idem-cfg-retiring').catch(() => undefined);
+      expect(seen).not.toContain(RETIRING[0]);
+      expect(seen[0]).toBe(OPENAI_IMAGE_MODEL_DEFAULTS[0]);
+      const events = warn.mock.calls.map((c) => c[1]).filter((d: any) => d?.event === 'creator_image_model_override_ignored');
+      expect(events).toEqual([expect.objectContaining({ ignored: RETIRING[0] })]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
 });
