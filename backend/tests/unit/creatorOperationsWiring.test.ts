@@ -146,8 +146,11 @@ describe('7 — the neighbours survive', () => {
   });
 
   it('the new tab was inserted, not substituted', () => {
-    expect(navIds).toHaveLength(13);
+    // 14 = the 13 pinned when creator-ops landed + the super-admin Outreach operator tab ('outreach', a9 2026-11-20,
+    // email slice 1). Each later tab bumps this count AND is named here, so a substitution still fails.
+    expect(navIds).toHaveLength(14);
     expect(navIds.map((t) => t.id)).toContain('creator-ops');
+    expect(navIds.map((t) => t.id)).toContain('outreach');
   });
 });
 
