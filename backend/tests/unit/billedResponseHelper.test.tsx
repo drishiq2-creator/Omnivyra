@@ -49,8 +49,8 @@ describe('classifyBilledResponse: keyed on status + code only', () => {
     expect([...KNOWN_UNVERIFIABLE_CODES].sort()).toEqual(['BUDGET_UNVERIFIABLE', 'DAILY_LIMIT_UNVERIFIABLE', 'ORG_CONTROLS_UNVERIFIABLE']);
   });
 
-  it.each([...KNOWN_UNVERIFIABLE_CODES, 'SOME_FUTURE_UNVERIFIABLE'])(
-    '503 %s: plain retry, nothing charged, never top-up, never the code',
+  it.each([...KNOWN_UNVERIFIABLE_CODES])(
+    '503 %s (known, pre-charge on the server): plain retry, nothing charged, never top-up, never the code',
     (code) => {
       const out = classifyBilledResponse(503, { error: 'internal detail', code }, 'fallback');
       expect(out).toEqual({ kind: 'retry', message: UNVERIFIABLE_MESSAGE });
@@ -59,6 +59,26 @@ describe('classifyBilledResponse: keyed on status + code only', () => {
       expect(text).not.toMatch(/UNVERIFIABLE|Top up|internal detail/);
     },
   );
+
+  // b3 ruling + c6 (2026-11-19): the *_UNVERIFIABLE suffix is NOT a billing vocabulary, and some producers
+  // raise it AFTER the effect (super-admin/free-credits/grant.ts: ROLE_UNVERIFIABLE after credits were
+  // granted). So an unlisted code is an UNKNOWN outcome: no charge claim, and "check before trying again",
+  // never a plain retry. ROLE_ / ADMIN_STATE_ are real producers' codes, not inventions.
+  it.each(['ROLE_UNVERIFIABLE', 'ADMIN_STATE_UNVERIFIABLE', 'SOME_FUTURE_UNVERIFIABLE'])(
+    '503 %s (not a known pre-charge code): uncertain, no charge claim, no plain retry',
+    (code) => {
+      const out = classifyBilledResponse(503, { error: 'internal detail', code }, 'fallback');
+      expect(out).toEqual({ kind: 'uncertain', message: UNCERTAIN_MESSAGE });
+      const text = billedOutcomeText(out);
+      expect(text).not.toMatch(/charged/i);
+      expect(text).toMatch(/check/i);
+      expect(text).not.toMatch(/UNVERIFIABLE|Top up|internal detail/);
+    },
+  );
+
+  it('control: a known pre-charge code is a plain retry, not uncertain', () => {
+    expect(classifyBilledResponse(503, { error: 'x', code: 'BUDGET_UNVERIFIABLE' }, 'fallback').kind).toBe('retry');
+  });
 
   it('the suffix rule needs an exact code shape (not just any string containing it)', () => {
     expect(classifyBilledResponse(503, { error: 'x', code: 'unverifiable' }, 'fallback').kind).toBe('uncertain');
@@ -188,10 +208,16 @@ describe('every wired billed caller sends a per-action key and classifies errors
     ['components/content/SuggestWithAIPanel.tsx', 'suggestKeys', 'suggestOp'],
   ])('%s', (file, gate, op) => {
     const src = read(file);
-    expect(src).toMatch(new RegExp(String.raw`const ${gate} = createBilledActionKeyGate\(`));
+    // A caller either ends its key on every outcome (createBilledActionKeyGate + finally end), or,
+    // where the route REPLAYS (c6), keeps it on an unknown outcome via the shared lifetime helper
+    // (createBilledKeyLifetime + finish). refine_variant moved to the latter (BLOCKING-launch, b3).
+    const lifetime = new RegExp(String.raw`const ${gate} = createBilledKeyLifetime\(`).test(src);
+    expect(src).toMatch(new RegExp(String.raw`const ${gate} = (createBilledActionKeyGate|createBilledKeyLifetime)\(`));
     expect(src).toMatch(new RegExp(String.raw`const ${op} = ${gate}\.begin\(`));
     expect(src).toMatch(new RegExp(String.raw`\.\.\.${op}\.headers`));
-    expect(src).toMatch(new RegExp(String.raw`finally \{\s*${gate}\.end\(`));
+    // The RESPONSE-path finish (status + body); the abort path's `{ lost: true }` can't satisfy it.
+    if (lifetime) expect(src).toMatch(new RegExp(String.raw`${gate}\.finish\([^)]*\{\s*status:`));
+    else expect(src).toMatch(new RegExp(String.raw`finally \{\s*${gate}\.end\(`));
     expect(src).toMatch(/classifyBilledResponse|parseRunStartError/);
   });
 });
