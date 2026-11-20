@@ -84,10 +84,11 @@ export interface SweepResult {
   candidates: number;
   /** Sessions transitioned to `expired` by this run. */
   expired: number;
-  /** Candidates that were still fresh, or already swept (duplicate event). */
+  /** Candidates not expired by this run: still fresh, anchor write failed, or the CAS transition did not land. */
   skipped: number;
-  /** Candidates skipped specifically because the deterministic expiry event
-   *  already existed (a re-sweep / overlapping run was suppressed). */
+  /** Candidates whose deterministic expiry event already existed, so no second anchor was written. Since c6
+   *  2026-11-20 such a candidate still RE-ATTEMPTS its CAS (it is still non-terminal, so the earlier transition never
+   *  landed) - this counts suppressed anchors, not skipped sessions. */
   duplicateSuppressed: number;
   /** Idempotency keys of the sessions expired by this run. */
   expiredKeys: string[];
@@ -153,7 +154,10 @@ export async function sweepStaleSettlements(
       logger.warn('settlement_expiry_anchor_failed', { message: err instanceof Error ? err.message : String(err) });
       continue;
     }
-    if (recorded.duplicate) { skipped++; duplicateSuppressed++; continue; } // already swept
+    // The expiry anchor already exists, but this session is STILL a non-terminal stale candidate: the earlier sweep's
+    // transition never landed (write failed, or its CAS lost to a webhook that moved created -> pending). Re-attempt
+    // the CAS below instead of skipping it forever (c6 2026-11-20). The anchor is not re-written either way.
+    if (recorded.duplicate) duplicateSuppressed++;
 
     // Persist the expiry transition. providerEventReference is intentionally
     // omitted so an existing provider_event_reference is PRESERVED.

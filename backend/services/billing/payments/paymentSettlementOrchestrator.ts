@@ -33,6 +33,7 @@ import {
   findCheckoutSessionByProviderReference as realFindByProviderReference,
   recordSettlementEvent as realRecordSettlementEvent,
   applySettlementTransition as realApplySettlementTransition,
+  CheckoutSessionStoreReadError,
 } from './checkoutSessionStore';
 
 /** Normalized internal settlement states — the ONLY externally visible states. */
@@ -298,12 +299,18 @@ export async function reconcileSettlementWebhook(
     payload: args.payload ?? {},
   });
   if (recorded.duplicate) {
-    // Redelivered event — already recorded. NO transition, NO persist, NO
-    // downstream action.
-    return {
-      ok: true, status: 'duplicate', replayed: true,
-      settlement_state: sessionState, previous_state: sessionState,
-    };
+    // Redelivered event — already recorded. The anchor dedupes EFFECTS, and the only effect is the forward-only CAS
+    // transition below. So a duplicate whose session has ALREADY reached (or passed) the event's state is a no-op;
+    // a duplicate whose session is still BEHIND it means the earlier delivery recorded the anchor but its transition
+    // never landed (write failed -> we answered 500 -> the provider redelivered). That one falls through and
+    // re-attempts - c6 2026-11-20: it returned "duplicate" and the paid session was stranded for good.
+    const behind = session !== null && canTransition(sessionState ?? 'created', ev.normalizedStatus);
+    if (!behind) {
+      return {
+        ok: true, status: 'duplicate', replayed: true,
+        settlement_state: sessionState, previous_state: sessionState,
+      };
+    }
   }
 
   if (!session) {
@@ -328,14 +335,19 @@ export async function reconcileSettlementWebhook(
     // CAS on the state this decision was made from (class 2, 2026-11-12).
     fromStatus: (session?.settlementStatus as string | null | undefined) ?? null,
   });
-  if (applied && applied.applied === false && applied.reason === 'state_changed') {
-    // Another writer (e.g. the expiry sweeper) moved the session first; this
-    // event's transition was NOT applied. Report it as such, never "reconciled".
-    return { ok: true, status: 'no_transition', replayed: false, settlement_state: null, previous_state: from };
+  if (applied && applied.applied === false && applied.reason === 'write_failed') {
+    // The transition was NOT persisted. Never answer 2xx for an event we failed to apply (the provider would stop
+    // redelivering); throw -> the webhook route answers 500 -> the redelivery re-attempts via the duplicate path above.
+    throw new CheckoutSessionStoreReadError('settlement transition', `write failed (${from} -> ${to})`);
+  }
+  if (applied && applied.applied === false) {
+    // state_changed: another writer (e.g. the expiry sweeper) moved the session first. schema_missing: settlement is
+    // inert (logged once by the store). Either way this event's transition was NOT applied - never "reconciled".
+    return { ok: true, status: 'no_transition', replayed: recorded.duplicate, settlement_state: null, previous_state: from };
   }
   logger.info('settlement_state_transition', {
     provider: args.provider, from, to, // normalized states only — no pricing
   });
 
-  return { ok: true, status: 'reconciled', replayed: false, settlement_state: to, previous_state: from };
+  return { ok: true, status: 'reconciled', replayed: recorded.duplicate, settlement_state: to, previous_state: from };
 }

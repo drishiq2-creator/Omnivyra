@@ -202,3 +202,102 @@ describe('expiry sweep job - an unread candidate set is reported FAILED, not emp
     expect(r).toMatchObject({ ran: true, failed: false, candidates: 0 });
   });
 });
+
+// ── a recorded anchor must never strand a session whose transition did not land (7c question, 2026-11-20) ──────────
+// The anchor dedupes EFFECTS; the only effect is the forward-only CAS. Before: write_failed fell through to
+// "reconciled" (2xx) and any redelivery / re-sweep short-circuited on the anchor as "duplicate" - stranded for good.
+function settlementFake(initial: string) {
+  const s = { state: initial, failWrites: 0 };
+  const anchors = new Set<string>();
+  const writes: string[] = [];
+  const deps = {
+    findCheckoutSessionByProviderReference: async () => ({
+      idempotencyKey: 'idem-1', organizationId: 'org-1', provider: 'razorpay', providerReference: 'order_abc',
+      sessionStatus: 'created', settlementStatus: s.state,
+    }),
+    recordSettlementEvent: async (i: any) => {
+      const k = `${i.provider}:${i.providerEventId}`;
+      if (anchors.has(k)) return { duplicate: true };
+      anchors.add(k); return { duplicate: false };
+    },
+    applySettlementTransition: async (i: any) => {
+      writes.push(i.settlementStatus);
+      if (s.failWrites > 0) { s.failWrites--; return { applied: false as const, reason: 'write_failed' as const }; }
+      if (i.fromStatus !== undefined && i.fromStatus !== s.state) return { applied: false as const, reason: 'state_changed' as const };
+      s.state = i.settlementStatus; return { applied: true as const };
+    },
+  };
+  return { s, anchors, writes, deps };
+}
+const captured = {
+  id: 'evt_rzp_9', event: 'payment.captured',
+  payload: { payment: { entity: { id: 'pay_9', order_id: 'order_abc', status: 'captured', amount: 50000 } } },
+};
+
+describe('settlement webhook - a failed transition write is never acknowledged, and its redelivery lands', () => {
+  test('write_failed -> throws (route 500); the redelivery re-attempts past the anchor and settles', async () => {
+    const f = settlementFake('created');
+    f.s.failWrites = 1;
+    await expect(reconcileSettlementWebhook({ provider: 'razorpay', payload: captured }, f.deps as any))
+      .rejects.toBeInstanceOf(CheckoutSessionStoreReadError);
+    expect(f.anchors.size).toBe(1);   // the anchor WAS recorded - this is what used to strand it
+    const again = await reconcileSettlementWebhook({ provider: 'razorpay', payload: captured }, f.deps as any);
+    expect(again).toMatchObject({ ok: true, status: 'reconciled', replayed: true, settlement_state: 'succeeded' });
+    expect(f.s.state).toBe('succeeded');
+  });
+  test('CONTROL: a redelivery after a LANDED transition is still a duplicate no-op (no second write)', async () => {
+    const f = settlementFake('created');
+    await reconcileSettlementWebhook({ provider: 'razorpay', payload: captured }, f.deps as any);
+    const again = await reconcileSettlementWebhook({ provider: 'razorpay', payload: captured }, f.deps as any);
+    expect(again).toMatchObject({ ok: true, status: 'duplicate' });
+    expect(f.writes).toEqual(['succeeded']);
+  });
+  test('CONTROL: state_changed (another writer first) stays a 2xx no_transition, not a throw', async () => {
+    const f = settlementFake('created');
+    f.deps.applySettlementTransition = async () => ({ applied: false as const, reason: 'state_changed' as const }) as any;
+    await expect(reconcileSettlementWebhook({ provider: 'razorpay', payload: captured }, f.deps as any))
+      .resolves.toMatchObject({ ok: true, status: 'no_transition' });
+  });
+});
+
+describe('expiry sweeper - an existing expiry anchor does not strand a still-stale session', () => {
+  const NOW = 1_700_000_000_000;
+  const harness = (state: string) => {
+    const f = settlementFake(state);
+    const deps = {
+      findSettlementSweepCandidates: async () => (['created', 'pending'].includes(f.s.state) ? [{
+        idempotencyKey: 'idem-1', provider: 'razorpay', providerReference: 'order_abc', settlementStatus: f.s.state,
+        createdAt: new Date(NOW - 120 * 60_000).toISOString(), lastReconciledAt: null,
+      }] : []),
+      recordSettlementEvent: f.deps.recordSettlementEvent,
+      applySettlementTransition: f.deps.applySettlementTransition,
+    };
+    return { f, deps };
+  };
+  test('first sweep write_failed -> next sweep re-attempts past the anchor and expires', async () => {
+    const h = harness('created');
+    h.f.s.failWrites = 1;
+    const first = await sweepStaleSettlements({ nowMs: NOW }, h.deps as any);
+    expect(first.expired).toBe(0);
+    const second = await sweepStaleSettlements({ nowMs: NOW }, h.deps as any);
+    expect(second).toMatchObject({ expired: 1, duplicateSuppressed: 1 });
+    expect(h.f.s.state).toBe('expired');
+    expect(h.f.anchors.size).toBe(1);
+  });
+  test('first sweep CAS lost to a webhook (created -> pending) -> a later sweep of the stale pending expires it', async () => {
+    const h = harness('created');
+    const real = h.deps.applySettlementTransition;
+    let raced = false;
+    h.deps.applySettlementTransition = async (i: any) => { if (!raced) { raced = true; h.f.s.state = 'pending'; } return real(i); };
+    expect((await sweepStaleSettlements({ nowMs: NOW }, h.deps as any)).expired).toBe(0);
+    expect(h.f.s.state).toBe('pending');
+    expect((await sweepStaleSettlements({ nowMs: NOW }, h.deps as any)).expired).toBe(1);
+    expect(h.f.s.state).toBe('expired');
+  });
+  test('CONTROL: once expired the session is no candidate - no further writes', async () => {
+    const h = harness('created');
+    await sweepStaleSettlements({ nowMs: NOW }, h.deps as any);
+    await sweepStaleSettlements({ nowMs: NOW }, h.deps as any);
+    expect(h.f.writes).toEqual(['expired']);
+  });
+});

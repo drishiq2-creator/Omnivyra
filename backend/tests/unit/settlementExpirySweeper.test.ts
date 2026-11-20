@@ -61,7 +61,10 @@ function makeStore(seed: Sess[], opts: { statelessApply?: boolean; beforeApply?:
     applySettlementTransition: async (input) => {
       transitions.push(input);
       if (opts.beforeApply) { const f = opts.beforeApply; opts.beforeApply = undefined; f(sessions); }
-      if (opts.statelessApply) return { applied: true }; // simulate migration-unapplied no-op
+      // Migration unapplied: the REAL store answers schema_missing (checkoutSessionStore.applySettlementTransition).
+      // c6 2026-11-20: this fixture used to answer { applied: true } with no state change - a state the store cannot
+      // produce - and the test below relied on it.
+      if (opts.statelessApply) return { applied: false, reason: 'schema_missing' };
       const s = sessions.find((x) => x.idempotencyKey === input.idempotencyKey);
       // The real store is a CAS on fromStatus (class 2, 2026-11-12): model it.
       if (s && input.fromStatus !== undefined && s.settlementStatus !== input.fromStatus) {
@@ -128,17 +131,16 @@ describe('expiry sweeper — idempotency', () => {
     expect(store.transitions).toHaveLength(1);
   });
 
-  test('the deterministic expiry event id makes a re-sweep a safe no-op even in degraded mode', async () => {
-    // statelessApply simulates the migration being unapplied — the state write
-    // is a no-op, so the session keeps reappearing as a candidate. The
-    // append-only event ledger collision still prevents a second transition.
+  test('degraded mode (migration unapplied): nothing is claimed expired and the anchor is written once', async () => {
+    // c6 2026-11-20: a duplicate anchor no longer skips - a still-stale candidate re-attempts its CAS (see the
+    // stranded-session tests below). In degraded mode that re-attempt is a harmless schema_missing no-op.
     const store = makeStore([sess({ createdAt: agoMin(40) })], { statelessApply: true });
     const first = await sweepStaleSettlements({ nowMs: NOW, policy: { createdMaxAgeMs: 30 * 60_000 } }, store.deps);
     const second = await sweepStaleSettlements({ nowMs: NOW, policy: { createdMaxAgeMs: 30 * 60_000 } }, store.deps);
-    expect(first.expired).toBe(1);
-    expect(second.expired).toBe(0);       // duplicate event id → skipped
-    expect(store.transitions).toHaveLength(1);
-    expect(store.recordedEvents).toHaveLength(1);
+    expect(first.expired).toBe(0);        // the write did not land - never reported as expired
+    expect(second.expired).toBe(0);
+    expect(second.duplicateSuppressed).toBe(1);
+    expect(store.recordedEvents).toHaveLength(1); // the deterministic id still dedupes the anchor
   });
 });
 
