@@ -14,7 +14,7 @@ import {
 const tabs = ['Pending', 'Completed', 'Skipped'];
 
 import type { useCommunityActions } from '../hooks/useCommunityActions';
-import { SEND_NOW_LABEL, scheduledNotSentCopy } from '../lib/communityAi/scheduledRetiredCopy';
+import { APPROVED_NOT_SENT_LABEL, SEND_NOW_LABEL, scheduledNotSentCopy } from '../lib/communityAi/scheduledRetiredCopy';
 type S = ReturnType<typeof useCommunityActions>;
 export default function CommunityActionsView({ d }: { d: S }) {
   const {
@@ -267,6 +267,9 @@ export default function CommunityActionsView({ d }: { d: S }) {
                     <td className="px-3 py-2">
                       <div className="flex flex-col gap-1">
                         <span>{action.status}</span>
+                        {isApproved && !isScheduledNotSent && (
+                          <span className="text-[11px] text-amber-700">{APPROVED_NOT_SENT_LABEL}</span>
+                        )}
                         {autoExecuted && (
                           <span
                             className="inline-flex w-fit items-center gap-1 px-2 py-0.5 rounded-full text-[11px] bg-emerald-50 text-emerald-700 border border-emerald-200"
@@ -344,7 +347,7 @@ export default function CommunityActionsView({ d }: { d: S }) {
                                 : 'Blocked by Playbook execution mode'
                             }
                           >
-                            {isExecuting ? 'Executing...' : isScheduledNotSent ? SEND_NOW_LABEL : 'Execute'}
+                            {isExecuting ? 'Executing...' : isApproved ? SEND_NOW_LABEL : 'Execute'}
                           </button>
                         )}
                         {showSkip && (

@@ -166,6 +166,9 @@ export function useCommunityActions() {
       const status = action.status.toLowerCase();
       // A row that was scheduled never ran (the scheduler never ran in prod): it is still pending a decision.
       if (action.retired_schedule) return activeTab === 'Pending';
+      // An APPROVED row (approve.ts stamps status 'approved' and does NOT send; auto rules too) is still waiting to be
+      // sent. It matched no tab before, so approved replies were invisible and could never be sent (a9, 2026-11-20).
+      if (status === 'approved') return activeTab === 'Pending';
       return status === activeTab.toLowerCase();
     });
     const statusFiltered =

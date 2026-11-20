@@ -5,6 +5,8 @@
  * approved_at). Own module so tests that factory-mock the view's hook still see it.
  */
 export const SEND_NOW_LABEL = 'Send now';
+/** An approved reply that hasn't been sent (approve.ts sets status 'approved' without executing). */
+export const APPROVED_NOT_SENT_LABEL = 'Approved — not sent yet';
 
 export function scheduledNotSentCopy(scheduledAt: string | null | undefined): string {
   const when = scheduledAt ? new Date(scheduledAt) : null;

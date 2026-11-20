@@ -129,3 +129,35 @@ describe('a retired-schedule row that REQUIRES approval was approved when schedu
     expect(screen.getByRole('button', { name: 'Execute Manually' })).toBeTruthy();
   });
 });
+
+describe('approved-but-unsent replies are visible (a9 confirmed, 2026-11-20)', () => {
+  // approve.ts sets status 'approved' and does NOT send; such rows arrive in pending_actions.
+  const APPROVED = { ...base, action_id: 'a-appr', target_id: 't3', status: 'approved', approved_at: '2026-11-19T09:00:00Z' };
+
+  beforeEach(() => {
+    fetchWithAuth.mockImplementation(() =>
+      okJson({
+        pending_actions: [PENDING, APPROVED],
+        scheduled_actions: [SCHEDULED],
+        completed_actions: [],
+        skipped_actions: [],
+        permissions: { canApprove: true, canExecute: true, canSkip: true, canManageConnectors: false },
+      }),
+    );
+  });
+
+  it('an approved row shows under Pending, labelled "Approved — not sent yet", with Send now', async () => {
+    const { result } = renderHook(() => useCommunityActions());
+    await waitFor(() => expect(result.current.filteredActions.map((a: any) => a.action_id).sort()).toEqual(['a-appr', 'a-pend', 'a-sched']));
+    render(<Harness />);
+    await waitFor(() => expect(screen.getAllByText('Approved — not sent yet')).toHaveLength(1));
+    expect(screen.getAllByRole('button', { name: SEND_NOW_LABEL })).toHaveLength(2);
+  });
+
+  it('the retired-schedule row (also status approved) is listed ONCE and gets the not-sent notice, not the approved label', async () => {
+    render(<Harness />);
+    await waitFor(() => screen.getByText(/this reply was not sent/));
+    expect(screen.getAllByText(/this reply was not sent/)).toHaveLength(1);
+    expect(screen.getAllByText('Approved — not sent yet')).toHaveLength(1);
+  });
+});
