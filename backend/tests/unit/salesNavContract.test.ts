@@ -2,7 +2,8 @@
 import {
   parseSalesNavUrl, pageUrlFor, canonicalMemberId, isAllowedClose, isRepeatedPage, pageReservationRequest,
   SALESNAV_STATUS_CODES, SALESNAV_TERMINAL_STATUSES, SALESNAV_RUN_STATUSES, SALESNAV_TRANSPORTS, SALESNAV_SOURCE,
-  MAX_SALESNAV_PAGE, DEFAULT_SALESNAV_DAILY_CAP,
+  MAX_SALESNAV_PAGE, DEFAULT_SALESNAV_DAILY_CAP, MAX_SALESNAV_DAILY_CAP, resolveDailyCap, parseListTotal,
+  isAllowedPause, SALESNAV_RESUMABLE_STATUSES,
 } from '../../services/salesNav/contract';
 
 describe('parseSalesNavUrl - the one allowlist', () => {
@@ -66,12 +67,18 @@ describe('canonicalMemberId - the shared cap key', () => {
 
 describe('the job model', () => {
   it('every terminal status has a closed code set; non-terminal states have none', () => {
+    const nonTerminal = ['queued', 'running', ...SALESNAV_RESUMABLE_STATUSES] as string[];
     expect([...SALESNAV_TERMINAL_STATUSES].sort()).toEqual(
-      SALESNAV_RUN_STATUSES.filter((s) => s !== 'queued' && s !== 'running').slice().sort());
+      SALESNAV_RUN_STATUSES.filter((s) => !nonTerminal.includes(s)).slice().sort());
     for (const s of SALESNAV_TERMINAL_STATUSES) expect((SALESNAV_STATUS_CODES as Record<string, string[]>)[s].length).toBeGreaterThan(0);
   });
   it('isAllowedClose accepts only listed (status, code) pairs', () => {
-    expect(isAllowedClose('auth_expired', 'checkpoint')).toBe(true);
+    expect(isAllowedClose('auth_expired', 'checkpoint')).toBe(false);   // v2: a RESUMABLE state, not a close
+    expect(isAllowedPause('auth_expired', 'checkpoint')).toBe(true);
+    expect(isAllowedPause('paused_daily_cap', 'daily_cap')).toBe(true);
+    expect(isAllowedPause('paused_daily_cap', 'checkpoint')).toBe(false);
+    expect(isAllowedPause('completed', 'no_next_page')).toBe(false);
+    expect(isAllowedClose('partial_capped', 'daily_cap')).toBe(false);  // v2: replaced by paused_daily_cap
     expect(isAllowedClose('completed', 'empty_first_page')).toBe(true);
     expect(isAllowedClose('completed', 'checkpoint')).toBe(false);      // a code from another status
     expect(isAllowedClose('running', 'no_next_page')).toBe(false);      // not terminal
@@ -88,7 +95,8 @@ describe('the job model', () => {
     expect(SALESNAV_SOURCE).toBe('linkedin_sales_navigator');
     expect(SALESNAV_TRANSPORTS).toEqual(['extension', 'unipile', 'vayne', 'rpa']);
     expect(MAX_SALESNAV_PAGE).toBe(25);
-    expect(DEFAULT_SALESNAV_DAILY_CAP).toBe(500);
+    expect(DEFAULT_SALESNAV_DAILY_CAP).toBe(150);
+    expect(MAX_SALESNAV_DAILY_CAP).toBe(200);
   });
 });
 
@@ -113,14 +121,46 @@ describe('isRepeatedPage - the set-overlap backstop (v1.3)', () => {
   });
 });
 
-describe('pageReservationRequest - the reservation rule', () => {
-  it('known remaining -> min(25, remaining), not disclosed', () => {
-    expect(pageReservationRequest(100)).toEqual({ requested: 25, disclosed: false });
-    expect(pageReservationRequest(7)).toEqual({ requested: 7, disclosed: false });
-    expect(pageReservationRequest(0)).toEqual({ requested: 0, disclosed: false });
-    expect(pageReservationRequest(7.9)).toEqual({ requested: 7, disclosed: false });
+describe('resolveDailyCap (owner 2026-11-21: default 150, hard max 200)', () => {
+  it('honours an integer 1..200', () => {
+    for (const v of [1, 150, 175, 200]) expect(resolveDailyCap(v)).toBe(v);
+    expect(resolveDailyCap(' 180 ')).toBe(180);
   });
-  it('unknown remaining -> 25 WITH disclosure (never silently assumed)', () => {
-    for (const v of [null, undefined, Number.NaN, -1, Infinity]) expect(pageReservationRequest(v as never)).toEqual({ requested: 25, disclosed: true });
+  it('anything else falls back to the DEFAULT (never more reading)', () => {
+    for (const v of [undefined, null, 0, -5, 201, 500, 150.5, Number.NaN, '1,000', 'abc', {}, '']) expect(resolveDailyCap(v)).toBe(150);
+  });
+});
+
+describe('parseListTotal - exact integers only (a9 r6)', () => {
+  it('accepts exact counts', () => {
+    expect(parseListTotal(312)).toBe(312);
+    expect(parseListTotal('312')).toBe(312);
+    expect(parseListTotal(0)).toBe(0);
+  });
+  it.each(['1,000+', '1K', '2.5K', 'about 300', '1,234', '12.0', -3, 2.5, null, undefined, NaN, '', ' '])('%p -> null', (v) => {
+    expect(parseListTotal(v)).toBeNull();
+  });
+});
+
+describe('pageReservationRequest (v2: A / B / the page beats the total)', () => {
+  const base = { pageIndex: 1, listTotal: 100 as unknown, readSoFar: 25, lastHasNextPage: true as boolean | null, totalUnreliable: false };
+  it('A: page 0 is always 25, disclosed', () => {
+    expect(pageReservationRequest({ ...base, pageIndex: 0 })).toEqual({ requested: 25, disclosed: true, totalUnreliable: false });
+  });
+  it('A: an unknown or non-exact total is 25, disclosed', () => {
+    for (const t of [null, '1,000+', '2.5K']) expect(pageReservationRequest({ ...base, listTotal: t })).toEqual({ requested: 25, disclosed: true, totalUnreliable: false });
+  });
+  it('B: min(25, total - read)', () => {
+    expect(pageReservationRequest(base)).toEqual({ requested: 25, disclosed: false, totalUnreliable: false });
+    expect(pageReservationRequest({ ...base, readSoFar: 90 })).toEqual({ requested: 10, disclosed: false, totalUnreliable: false });
+  });
+  it('THE PAGE BEATS THE TOTAL: B computes 0 but the page says there is more -> A + totalUnreliable', () => {
+    expect(pageReservationRequest({ ...base, readSoFar: 100, lastHasNextPage: true })).toEqual({ requested: 25, disclosed: true, totalUnreliable: true });
+  });
+  it('control: B computes 0 and there is NO next page -> request 0 (the run completes; NOT a cap)', () => {
+    expect(pageReservationRequest({ ...base, readSoFar: 100, lastHasNextPage: false })).toEqual({ requested: 0, disclosed: false, totalUnreliable: false });
+  });
+  it('once unreliable, stays on A for the rest of the run', () => {
+    expect(pageReservationRequest({ ...base, readSoFar: 10, totalUnreliable: true })).toEqual({ requested: 25, disclosed: true, totalUnreliable: true });
   });
 });

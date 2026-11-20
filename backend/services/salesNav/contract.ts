@@ -1,5 +1,12 @@
 /**
- * SALES NAVIGATOR SHARED CONTRACT v1.3 (owner ruling 2026-11-20; c6 owns it; v1.2/v1.3 = a9 r2/r3 + 7c review).
+ * SALES NAVIGATOR SHARED CONTRACT v2 (owner rulings 2026-11-20/21; c6 owns it; a9 r2-r6 + 7c review folded in).
+ *
+ * v2 (owner, 2026-11-21): each company uses ITS OWN Sales Navigator account (we never supply LinkedIn access);
+ * the daily cap is 150 (default) up to a HARD MAX of 200 per LinkedIn member; a run that reaches the cap is PAUSED
+ * and RESUMES after the UTC day reset from its saved position until the list is done; duplicates are excluded
+ * (in the run, across resumed days, and against leads the company already has) and shown as 'skipped (already
+ * have)'. Anything a route READ from LinkedIn counts against the cap (consume-on-reserve) - the cap protects the
+ * account, so a skipped duplicate still consumed it.
  *
  * Three routes extract Sales Navigator leads, built in parallel, and they MUST NOT diverge:
  *   'unipile' / 'vayne'  API vendors             - c6
@@ -24,8 +31,20 @@ export type SalesNavTransport = (typeof SALESNAV_TRANSPORTS)[number];
 
 /** Leads per submitSalesNavPage call (the extension's batch; API transports split bigger vendor pages). */
 export const MAX_SALESNAV_PAGE = 25;
-/** Default per-LinkedIn-member daily cap, shared by ALL transports (owner-adjustable). */
-export const DEFAULT_SALESNAV_DAILY_CAP = 500;
+/** Per-LinkedIn-member daily cap, shared by ALL transports (owner 2026-11-21): default 150, HARD MAX 200. */
+export const DEFAULT_SALESNAV_DAILY_CAP = 150;
+export const MAX_SALESNAV_DAILY_CAP = 200;
+
+/**
+ * The company's effective cap. A company setting is honoured only as an integer in 1..200; anything else - absent,
+ * malformed, above the hard max - yields the DEFAULT (150), never more. Fails toward LESS reading, never more.
+ */
+export function resolveDailyCap(companySetting: unknown): number {
+  const n = typeof companySetting === 'number' ? companySetting
+    : typeof companySetting === 'string' && /^\d{1,4}$/.test(companySetting.trim()) ? Number(companySetting.trim()) : Number.NaN;
+  if (!Number.isInteger(n) || n < 1 || n > MAX_SALESNAV_DAILY_CAP) return DEFAULT_SALESNAV_DAILY_CAP;
+  return n;
+}
 
 // -- 1. the lead (wire shape) ------------------------------------------------------------------------------------
 // FIELD POLICY (owner via b3, 2026-11-20): a route maps ONLY what the Sales Navigator page actually SHOWS (name,
@@ -134,9 +153,19 @@ export function canonicalMemberId(raw: unknown): string | null {
 
 // -- 5. the job model --------------------------------------------------------------------------------------------
 export const SALESNAV_RUN_STATUSES = [
-  'queued', 'running', 'completed', 'partial_capped', 'auth_expired', 'rate_limited', 'refused', 'failed', 'cancelled',
-  'unknown',
+  'queued', 'running', 'paused_daily_cap', 'auth_expired',
+  'completed', 'rate_limited', 'refused', 'failed', 'cancelled', 'unknown',
 ] as const;
+
+/**
+ * v2 RESUMABLE (non-terminal) states. The run keeps its list URL, next page index and counts.
+ *   paused_daily_cap  the member's cap was reached: resumes AUTOMATICALLY after the UTC day reset (shown honestly as
+ *                     "paused for today's limit - resumes tomorrow", with Cancel).
+ *   auth_expired      LinkedIn logged out / checkpoint: WAITS for the user to reconnect and resume (or Cancel).
+ * A resumed run first RE-VERIFIES its position (else unknown / page_position_mismatch) and the login (else
+ * auth_expired). Replaces v1's terminal 'partial_capped'.
+ */
+export const SALESNAV_RESUMABLE_STATUSES = ['paused_daily_cap', 'auth_expired'] as const;
 
 /**
  * v1.2 (a9 / 7c, 2026-11-20). A run with no page result within this window is STALE: it is closed 'unknown'
@@ -149,8 +178,6 @@ export type SalesNavRunStatus = (typeof SALESNAV_RUN_STATUSES)[number];
 /** Codes allowed per terminal status (closed sets: a route cannot invent one). */
 export const SALESNAV_STATUS_CODES = {
   completed: ['no_next_page', 'empty_first_page'],
-  partial_capped: ['daily_cap'],
-  auth_expired: ['logged_out', 'checkpoint'],
   rate_limited: ['site_rate_limit', 'vendor_rate_limit'],
   refused: ['gate_closed', 'url_not_allowed', 'member_unresolved', 'member_mismatch', 'quota_unreadable'],
   failed: ['dom_changed', 'vendor_error', 'transport_error', 'internal_error'],
@@ -170,16 +197,52 @@ export type SalesNavTerminalStatus = keyof typeof SALESNAV_STATUS_CODES;
 /** Statuses that END a run. 'completed' only when the source has no further page; ANY unknown page -> 'unknown'. */
 export const SALESNAV_TERMINAL_STATUSES = Object.keys(SALESNAV_STATUS_CODES) as readonly SalesNavTerminalStatus[];
 
+/** Codes for the resumable states (closed sets, like the terminal ones). */
+export const SALESNAV_PAUSE_CODES = {
+  paused_daily_cap: ['daily_cap'],
+  auth_expired: ['logged_out', 'checkpoint'],
+} as const;
+export type SalesNavResumableStatus = keyof typeof SALESNAV_PAUSE_CODES;
+
+/** True only for a (resumable status, code) pair the contract allows. */
+export function isAllowedPause(status: unknown, code: unknown): boolean {
+  if (typeof status !== 'string' || !(status in SALESNAV_PAUSE_CODES)) return false;
+  return (SALESNAV_PAUSE_CODES as Record<string, readonly string[]>)[status].includes(String(code));
+}
+
 /**
- * The page RESERVATION RULE (owner via b3, 2026-11-20), for every transport: ask for min(MAX_SALESNAV_PAGE, remaining)
- * when the source states how many leads remain; otherwise ask for MAX_SALESNAV_PAGE and DISCLOSE that a page may read
- * up to that many (the cap is consumed on reserve, never refunded). Pure.
+ * The list total a page states - an EXACT non-negative integer only (a9 r6). '1,000+', '1K', '2.5K', 'about 300',
+ * separators, decimals, negatives and anything unparseable are NULL (then the reservation falls back to rule A).
+ * Enforced here for every transport, whatever the route sent.
  */
-export function pageReservationRequest(remainingInSource: number | null | undefined):
-  { requested: number; disclosed: boolean } {
-  const known = typeof remainingInSource === 'number' && Number.isFinite(remainingInSource) && remainingInSource >= 0;
-  if (!known) return { requested: MAX_SALESNAV_PAGE, disclosed: true };
-  return { requested: Math.min(MAX_SALESNAV_PAGE, Math.floor(remainingInSource as number)), disclosed: false };
+export function parseListTotal(raw: unknown): number | null {
+  if (typeof raw === 'number') return Number.isSafeInteger(raw) && raw >= 0 ? raw : null;
+  if (typeof raw === 'string' && /^\d{1,9}$/.test(raw.trim())) return Number(raw.trim());
+  return null;
+}
+
+/**
+ * The page RESERVATION RULE, every transport (owner via b3 2026-11-20; a9 r5/r6):
+ *   A  page 0, an unknown total, or a total already found unreliable: request MAX_SALESNAV_PAGE (25), DISCLOSED.
+ *   B  otherwise: min(25, listTotal - readSoFar).
+ *   THE PAGE BEATS THE TOTAL: if B computes 0 while the last page said hasNextPage === true, use A for the rest of
+ *   the run and mark it totalUnreliable. A computed 0 is never a cap: paused_daily_cap is ONLY the QUOTA granting 0.
+ * Pure. The cap is consumed on reserve and never refunded.
+ */
+export function pageReservationRequest(input: {
+  pageIndex: number;
+  listTotal: unknown;
+  readSoFar: number;
+  lastHasNextPage: boolean | null;
+  totalUnreliable: boolean;
+}): { requested: number; disclosed: boolean; totalUnreliable: boolean } {
+  const A = { requested: MAX_SALESNAV_PAGE, disclosed: true };
+  const total = parseListTotal(input.listTotal);
+  if (input.pageIndex <= 0 || total === null || input.totalUnreliable) return { ...A, totalUnreliable: input.totalUnreliable };
+  const read = Number.isFinite(input.readSoFar) && input.readSoFar > 0 ? Math.floor(input.readSoFar) : 0;
+  const computed = Math.max(0, total - read);
+  if (computed === 0 && input.lastHasNextPage === true) return { ...A, totalUnreliable: true };
+  return { requested: Math.min(MAX_SALESNAV_PAGE, computed), disclosed: false, totalUnreliable: false };
 }
 
 /** v1.3 (a9 r3 / 7c): Sales Navigator lists REORDER between fetches, so a repeat is a SET overlap, not row 1. */
@@ -187,12 +250,12 @@ export const PAGE_REPEAT_MIN_OVERLAP = 3;
 export const PAGE_REPEAT_MIN_RATIO = 0.8;
 
 /**
- * True when THIS page is (mostly) the previous page again: at least PAGE_REPEAT_MIN_OVERLAP of this page's distinct
- * lead_keys were on the previous page AND they are at least PAGE_REPEAT_MIN_RATIO of this page's distinct keys.
- * Pure; keys only. An empty page is never a repeat (the empty-state rules decide it).
+ * True when THIS page is (mostly) already seen: at least PAGE_REPEAT_MIN_OVERLAP of this page's distinct lead_keys
+ * were seen ANYWHERE earlier in the run (a9 r4: union basis, across resumed days too) AND they are at least
+ * PAGE_REPEAT_MIN_RATIO of this page's distinct keys. Pure; keys only. An empty page is never a repeat.
  */
-export function isRepeatedPage(previousKeys: readonly string[], thisKeys: readonly string[]): boolean {
-  const prev = new Set(previousKeys);
+export function isRepeatedPage(seenInRunKeys: readonly string[], thisKeys: readonly string[]): boolean {
+  const prev = new Set(seenInRunKeys);
   const cur = new Set(thisKeys);
   if (cur.size === 0) return false;
   let overlap = 0;
@@ -227,6 +290,7 @@ export interface SubmitSalesNavPageResult {
   readonly created: number;
   readonly updated: number;
   readonly heldForReview: number;
+  /** 'skipped (already have)': in this run, a resumed day, or already in the company's leads. Not 'added'. */
   readonly skippedDuplicates: number;
   readonly dropped: number;
   /** Leads beyond the quota granted for this page: NOT ingested. */
@@ -257,7 +321,13 @@ export interface SalesNavContract {
    */
   recordSalesNavPage(ctx: SalesNavCallerContext, input: {
     runId: string; pageIndex: number; outcome: 'ok' | 'unknown'; hasNextPage: boolean | null;
+    /** As stated on the page (parsed with parseListTotal server-side). */
+    listTotal: unknown;
     leadKeys: readonly string[]; unknownCode?: (typeof SALESNAV_STATUS_CODES)['unknown'][number];
   }): Promise<void>;
+  /** v2: park a run in a resumable state, keeping its list URL, next page index and counts. */
+  pauseSalesNavRun(ctx: SalesNavCallerContext, input: { runId: string; status: SalesNavResumableStatus; code: string; nextPageIndex: number }): Promise<void>;
+  /** v2: continue a paused run (cap reset, or the user reconnected). Re-verify position + login before ingesting. */
+  resumeSalesNavRun(ctx: SalesNavCallerContext, input: { runId: string }): Promise<{ resumed: true; nextPageIndex: number } | { resumed: false; reason: string }>;
   closeSalesNavRun(ctx: SalesNavCallerContext, input: { runId: string; status: SalesNavTerminalStatus; code: string; retryAfterAt?: string | null }): Promise<void>;
 }
