@@ -303,7 +303,10 @@ describe('C — references (owner clarification: new, but inspired by the select
       referenceFidelity: 'high', referenceKind: 'user+look',
     });
     expect(editCalls).toHaveLength(1);
-    expect(editCalls[0].input_fidelity).toBe('high');
+    // High fidelity on the default model (gpt-image-2.6, 2026-11-19): quality raised above 'low'; input_fidelity is
+    // sent only to the gpt-image-1 family (referenceEditParams; openAIImageModelSunset covers the 1.5 override).
+    expect(editCalls[0]).not.toHaveProperty('input_fidelity');
+    expect(editCalls[0].quality).toBe('medium');
     expect(Array.isArray(editCalls[0].image)).toBe(false);
     expect((editCalls[0].image as { type: string }).type).toBe('image/png');
   });
@@ -311,7 +314,9 @@ describe('C — references (owner clarification: new, but inspired by the select
   it('CRITICAL: the user\'s own subject / product photo still gets high fidelity (unchanged)', async () => {
     await generateProviderImage({ prompt: 'p', referenceImages: [{ bytes: Buffer.from('USER'), mimeType: 'image/png' }], referenceFidelity: 'high', referenceKind: 'user' });
     expect(editCalls).toHaveLength(1);
-    expect(editCalls[0].input_fidelity).toBe('high');
+    // High fidelity on the default model (gpt-image-2.6, 2026-11-19): quality raised above 'low'; input_fidelity is
+    // sent only to the gpt-image-1 family (referenceEditParams; openAIImageModelSunset covers the 1.5 override).
+    expect(editCalls[0]).not.toHaveProperty('input_fidelity');
     expect(editCalls[0].quality).toBe('medium');
   });
 
