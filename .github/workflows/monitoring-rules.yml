@@ -80,3 +80,39 @@ jobs:
             echo "::error::CONTROL PASSED: the tests cannot tell a page on ONE undelivered credit alert from none"; exit 1
           fi
           echo "control failed as required"
+
+      - name: CONTROL - an off-by-one top-up-outage threshold must FAIL the one-event case
+        run: |
+          set -uo pipefail
+          d="$(mktemp -d)"
+          cp monitoring/billing-alerts.test.yml "$d/"
+          python3 - monitoring/billing-alerts.yml "$d/billing-alerts.yml" <<'PY'
+          import sys
+          s = open(sys.argv[1], encoding='utf-8').read()
+          old = 'window="15m"}) > 0\n'
+          assert s.count(old) == 1, s.count(old)
+          open(sys.argv[2], 'w', encoding='utf-8').write(s.replace(old, 'window="15m"}) > 1\n'))
+          PY
+          grep -n -A1 'alert: BillingPriceConfigUnavailable' "$d/billing-alerts.yml"
+          if ./promtool test rules "$d/billing-alerts.test.yml"; then
+            echo "::error::CONTROL PASSED: the tests cannot tell a page on ONE refused top-up from none"; exit 1
+          fi
+          echo "control failed as required"
+
+      - name: CONTROL - the top-up signal's unreadable rule must FAIL when its condition is broken
+        run: |
+          set -uo pipefail
+          d="$(mktemp -d)"
+          cp monitoring/billing-alerts.test.yml "$d/"
+          python3 - monitoring/billing-alerts.yml "$d/billing-alerts.yml" <<'PY'
+          import sys
+          s = open(sys.argv[1], encoding='utf-8').read()
+          old = '}) == 1\n'
+          assert s.count(old) == 1, s.count(old)
+          open(sys.argv[2], 'w', encoding='utf-8').write(s.replace(old, '}) == 2\n'))
+          PY
+          grep -n -A1 'alert: BillingConfigSignalUnreadable' "$d/billing-alerts.yml"
+          if ./promtool test rules "$d/billing-alerts.test.yml"; then
+            echo "::error::CONTROL PASSED: the tests cannot tell a paging read failure from none"; exit 1
+          fi
+          echo "control failed as required"

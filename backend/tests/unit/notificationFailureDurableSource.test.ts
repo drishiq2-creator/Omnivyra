@@ -22,7 +22,7 @@ function builder(table: string) {
     if (r === 'hang') return new Promise(() => undefined);
     return Promise.resolve({ data: r.data ?? null, error: r.error ?? null });
   };
-  for (const m of ['select', 'insert', 'delete', 'gte', 'lt', 'order', 'limit', 'in']) {
+  for (const m of ['select', 'insert', 'delete', 'gte', 'lt', 'order', 'limit', 'in', 'eq']) {
     b[m] = (...args: unknown[]) => {
       if (m === 'select' || m === 'insert' || m === 'delete') op = m;
       calls.push({ table, op: m, args });
@@ -43,7 +43,7 @@ jest.mock('../../observability', () => ({
 }));
 
 import { recordNotificationFailure, __resetNotificationFailureCoalesce, RECORD_TIMEOUT_MS, COALESCE_MS } from '../../services/notificationFailureRecord';
-import { exportNotificationFailures, __resetNotificationFailureExporter } from '../../observability/notificationFailureExporter';
+import { exportNotificationFailures, __resetNotificationFailureExporter, exportBillingConfigUnavailable, BILLING_CONFIG_WINDOW_MS } from '../../observability/notificationFailureExporter';
 import { pruneNotificationFailures, BATCH, MAX_BATCHES, RETENTION_DAYS } from '../../jobs/notificationFailurePrune';
 
 const NOW = Date.parse('2026-11-20T12:00:00Z');
@@ -141,6 +141,45 @@ describe('exportNotificationFailures (worker)', () => {
   });
 });
 
+describe('exportBillingConfigUnavailable (worker; checkout-down signal, PL-114)', () => {
+  const g = (name: string, labels?: Record<string, string>) =>
+    gauges.filter(([n, , l]) => n === name && JSON.stringify(l) === JSON.stringify(labels)).map(([, v]) => v).pop();
+
+  it('sums metric_value of billing/price_config_unavailable rows in the last 15 minutes; unreadable = 0', async () => {
+    next = [{ data: [{ metric_value: 1 }, { metric_value: '1' }, { metric_value: 1 }] }];
+    await expect(exportBillingConfigUnavailable(NOW)).resolves.toBe('exported');
+    expect(g('billing_price_config_unavailable_recent', { window: '15m' })).toBe(3);
+    expect(g('billing_price_config_unavailable_unreadable')).toBe(0);
+    expect(g('billing_price_config_unavailable_truncated')).toBe(0);
+    expect(calls.filter((c) => c.table === 'system_health_metrics' && c.op === 'eq').map((c) => c.args)).toEqual([
+      ['metric_name', 'price_config_unavailable'], ['component', 'billing'],
+    ]);
+    expect(calls.find((c) => c.table === 'system_health_metrics' && c.op === 'gte')?.args).toEqual(['observed_at', new Date(NOW - BILLING_CONFIG_WINDOW_MS).toISOString()]);
+  });
+
+  it('CONTROL: no rows -> 0 (a genuinely quiet window reads zero)', async () => {
+    next = [{ data: [] }];
+    await exportBillingConfigUnavailable(NOW);
+    expect(g('billing_price_config_unavailable_recent', { window: '15m' })).toBe(0);
+  });
+
+  it('a full page sets truncated = 1 (the sum is a floor)', async () => {
+    next = [{ data: Array.from({ length: 5000 }, () => ({ metric_value: 1 })) }];
+    await exportBillingConfigUnavailable(NOW);
+    expect(g('billing_price_config_unavailable_truncated')).toBe(1);
+  });
+
+  it.each([
+    ['an error object', { error: { message: 'connection reset' } } as Result],
+    ['a thrown rejection', 'throw' as const],
+  ])('a READ FAILURE (%s) sets unreadable = 1 and writes NO count', async (_n, outcome) => {
+    next = [outcome];
+    await expect(exportBillingConfigUnavailable(NOW)).resolves.toBe('unreadable');
+    expect(gauges).toEqual([['billing_price_config_unavailable_unreadable', 1, undefined]]);
+    expect(err).toHaveBeenCalledWith('BILLING_CONFIG_SIGNAL_UNREADABLE', expect.any(String));
+  });
+});
+
 describe('pruneNotificationFailures', () => {
   const ids = (n: number) => ({ data: Array.from({ length: n }, (_, i) => ({ id: `r${i}` })) });
 
@@ -188,6 +227,11 @@ describe('REGISTRATION: an unregistered job silently never runs', () => {
     expect(cron).toMatch(/shouldRunCronJob\("notificationFailurePrune", NOTIFICATION_FAILURE_PRUNE_INTERVAL_MS, lastNotificationFailurePruneRun\)/);
     expect(cron).toMatch(/const result = await pruneNotificationFailures\(\);\s*if \(!result\.ok\) \{\s*lastNotificationFailurePruneRun = Date\.now\(\) - NOTIFICATION_FAILURE_PRUNE_INTERVAL_MS \+ NOTIFICATION_FAILURE_PRUNE_RETRY_MS;/);
     expect(cron.split('notificationFailurePrune:     lastNotificationFailurePruneRun,').length - 1).toBe(3); // persisted like its siblings
+  });
+
+  it('one exporter tick runs BOTH durable reads (no second exporter)', () => {
+    const src = read('backend/observability/notificationFailureExporter.ts');
+    expect(src).toMatch(/const tick = \(\) => \{ void exportNotificationFailures\(\); void exportBillingConfigUnavailable\(\); \};/);
   });
 
   it('the worker starts the exporter, AFTER env validation', () => {

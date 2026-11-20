@@ -1,0 +1,81 @@
+# promtool unit tests for billing-alerts.yml (a9, 2026-11-20; LIVE top-up / create-order, c6 a589cda6d).
+#   promtool test rules monitoring/billing-alerts.test.yml
+# CI (monitoring-rules.yml) also (1) swaps the outage rule's `> 0` for `> 1` and (2) the unreadable rule's `== 1` for
+# `== 2`, and requires these tests to FAIL each time - one refused top-up must page, and a failed read must page.
+rule_files:
+  - billing-alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  # ONE refused top-up in the 15m window pages at once (two replicas, one alert); back to 0 resolves it. The exporter
+  # health gauge is present throughout, so the liveness rules stay quiet.
+  - interval: 1m
+    input_series:
+      - series: 'billing_price_config_unavailable_recent{job="omnivyra-worker",instance="w1",window="15m"}'
+        values: '0x3 1x15 0x10'
+      - series: 'billing_price_config_unavailable_recent{job="omnivyra-worker",instance="w2",window="15m"}'
+        values: '0x3 1x15 0x10'
+      - series: 'billing_price_config_unavailable_unreadable{job="omnivyra-worker",instance="w1"}'
+        values: '0x30'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: BillingPriceConfigUnavailable
+        exp_alerts:
+          - exp_labels: { severity: critical, component: billing, category: money, page: sre }
+            exp_annotations:
+              summary: "Top-up is failing: the price config is unreadable (1 in 15m)"
+              description: "create-order refused a top-up because pricingConfigService.getFxConfig could not read the FX / price-override config (503 PRICE_CONFIG_UNAVAILABLE). Check the database and the billing error log lines; system_health_metrics billing/price_config_unavailable holds each occurrence. The count is a floor if billing_price_config_unavailable_truncated is 1."
+      - eval_time: 25m
+        alertname: BillingPriceConfigUnavailable
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: BillingConfigSignalUnreadable
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: BillingConfigExporterMissing
+        exp_alerts: []
+
+  # The Vercel APP job is ignored (per-instance registries can miss and invent events).
+  - interval: 1m
+    input_series:
+      - series: 'billing_price_config_unavailable_recent{job="omnivyra-app",instance="www",window="15m"}'
+        values: '3x20'
+      - series: 'billing_price_config_unavailable_unreadable{job="omnivyra-worker",instance="w1"}'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: BillingPriceConfigUnavailable
+        exp_alerts: []
+
+  # A READ FAILURE pages after 5 minutes; a recovered read clears it.
+  - interval: 1m
+    input_series:
+      - series: 'billing_price_config_unavailable_unreadable{job="omnivyra-worker",instance="w1"}'
+        values: '0x2 1x10 0x10'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: BillingConfigSignalUnreadable
+        exp_alerts:
+          - exp_labels: { severity: critical, component: billing, category: money, page: sre }
+            exp_annotations:
+              summary: "The top-up outage signal cannot be read"
+              description: "The worker's exporter has failed to read system_health_metrics (billing/price_config_unavailable) for 5 minutes (BILLING_CONFIG_SIGNAL_UNREADABLE in the worker log). BillingPriceConfigUnavailable cannot fire while this lasts."
+      - eval_time: 20m
+        alertname: BillingConfigSignalUnreadable
+        exp_alerts: []
+
+  # NOT REPORTING AT ALL: no unreadable series from the worker (only the app job reports) -> pages after 10 minutes,
+  # without relying on any notification rule (7c).
+  - interval: 1m
+    input_series:
+      - series: 'billing_price_config_unavailable_unreadable{job="omnivyra-app",instance="www"}'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: BillingConfigExporterMissing
+        exp_alerts:
+          - exp_labels: { severity: critical, component: billing, category: money, page: sre, job: omnivyra-worker }
+            exp_annotations:
+              summary: "The top-up outage signal is not being exported"
+              description: "No billing_price_config_unavailable_unreadable series from job omnivyra-worker for 10 minutes: check the worker is up and scraped, the exporter started (backend/workers/main.ts), and OBSERVABILITY_ENABLED is not false."

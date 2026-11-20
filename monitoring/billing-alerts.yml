@@ -1,0 +1,64 @@
+# Billing - Prometheus Alert Rules (a9, 2026-11-20; b3 ruling on c6's PL-114).
+# Operational IaC. Does NOT change application runtime.
+#
+# Load into Prometheus:
+#   Copy to: /etc/prometheus/rules/billing-alerts.yml
+#   Then in prometheus.yml:
+#     rule_files:
+#       - "rules/billing-alerts.yml"
+#
+# SOURCE - DURABLE, PROCESS-INDEPENDENT (the notification-alerts.yml pattern):
+#   The LIVE top-up (TopUpPanel -> /api/billing/checkout/create-order) fails CLOSED with 503 PRICE_CONFIG_UNAVAILABLE
+#   when pricingConfigService.getFxConfig cannot read the FX / price-override config (c6 a589cda6d), and records one
+#   system_health_metrics row (component 'billing', metric 'price_config_unavailable', value 1) via
+#   systemHealthMetricsService.recordMetric - which logs and counts a lost write (system_health_metric_write_failed).
+#   (The retired hidden-billing checkout-session route is NOT watched - PL-118.) The WORKER's exporter
+#   (backend/observability/notificationFailureExporter.ts, same 60 s tick) publishes on its /metrics:
+#     billing_price_config_unavailable_recent{window="15m"}   gauge: sum of metric_value in the last 15 minutes
+#     billing_price_config_unavailable_unreadable             gauge: 1 = the last read FAILED (0 on success: present while
+#                                                              the exporter runs, so its ABSENCE means "not reporting")
+#     billing_price_config_unavailable_truncated              gauge: 1 = the read hit the row cap (the count is a floor)
+#   Because the count comes from the database, a checkout refused on Vercel counts exactly like one in the worker.
+#   Rules read the worker scrape only (job="omnivyra-worker"); max() collapses several worker replicas.
+#
+# LIVENESS - ENFORCED IN THIS FILE (7c): BillingConfigExporterMissing fires when this export stops reporting (it does
+#   not rely on the notification rules sharing a tick); BillingConfigSignalUnreadable fires when the read fails - a
+#   stopped or blind exporter is never a silent all-clear.
+#
+# TEST-ALERT PATH (alerts are a release condition): Step 1 promtool (CI: monitoring-rules.yml, with a CONTROL that
+#   swaps the rule's > 0 for > 1 and requires failure); Step 2 the owner presses "Test" on the paging contact point;
+#   Step 3 owner-approved, cb executes: insert ONE system_health_metrics row (component 'billing', metric
+#   'price_config_unavailable', value 1, metadata {"test": true}), the owner confirms the page, cb deletes the row.
+---
+groups:
+  - name: billing_checkout
+    interval: 60s
+    rules:
+      # The LIVE top-up is DOWN: the price config could not be read, so create-order refused (503 PRICE_CONFIG_UNAVAILABLE).
+      # One occurrence in 15 minutes pages - nobody can buy credits while it lasts.
+      - alert: BillingPriceConfigUnavailable
+        expr: max(billing_price_config_unavailable_recent{job="omnivyra-worker",window="15m"}) > 0
+        for: 0m
+        labels: { severity: critical, component: billing, category: money, page: sre }
+        annotations:
+          summary: "Top-up is failing: the price config is unreadable ({{ $value }} in 15m)"
+          description: "create-order refused a top-up because pricingConfigService.getFxConfig could not read the FX / price-override config (503 PRICE_CONFIG_UNAVAILABLE). Check the database and the billing error log lines; system_health_metrics billing/price_config_unavailable holds each occurrence. The count is a floor if billing_price_config_unavailable_truncated is 1."
+
+      # The exporter could not READ the checkout signal: a checkout outage would not be seen while this lasts.
+      - alert: BillingConfigSignalUnreadable
+        expr: max(billing_price_config_unavailable_unreadable{job="omnivyra-worker"}) == 1
+        for: 5m
+        labels: { severity: critical, component: billing, category: money, page: sre }
+        annotations:
+          summary: "The top-up outage signal cannot be read"
+          description: "The worker's exporter has failed to read system_health_metrics (billing/price_config_unavailable) for 5 minutes (BILLING_CONFIG_SIGNAL_UNREADABLE in the worker log). BillingPriceConfigUnavailable cannot fire while this lasts."
+
+      # This export is not reporting at all (stopped, not scraped, or OBSERVABILITY_ENABLED=false): the two rules above
+      # would be silent for the wrong reason. Own rule, not the notification one (7c).
+      - alert: BillingConfigExporterMissing
+        expr: absent(billing_price_config_unavailable_unreadable{job="omnivyra-worker"})
+        for: 10m
+        labels: { severity: critical, component: billing, category: money, page: sre }
+        annotations:
+          summary: "The top-up outage signal is not being exported"
+          description: "No billing_price_config_unavailable_unreadable series from job omnivyra-worker for 10 minutes: check the worker is up and scraped, the exporter started (backend/workers/main.ts), and OBSERVABILITY_ENABLED is not false."
