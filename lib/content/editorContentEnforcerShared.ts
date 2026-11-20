@@ -1,5 +1,5 @@
 /** Part of editorContentEnforcer (Agent-B split — main module keeps the original path). */
-import { wordCount } from '../../pages/blogs.helpers';
+import { wordCount } from '../blog/blogText';
 
 /**
  * Editor Content Enforcer

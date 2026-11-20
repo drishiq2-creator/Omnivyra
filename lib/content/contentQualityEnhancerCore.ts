@@ -6,7 +6,7 @@
  * evaluator. Split from contentQualityEnhancer_v2_1.ts (Agent-B large-file
  * modularization); the main module re-exports the public surface.
  */
-import { wordCount } from '../../pages/blogs.helpers';
+import { wordCount } from '../blog/blogText';
 import type { BlogGenerationOutput } from '../blog/blogGenerationEngine';
 import type { ContentGenerationInput, DepthMapEntry } from './cardToContentBridge';
 

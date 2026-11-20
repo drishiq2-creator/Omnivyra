@@ -15,7 +15,7 @@ import {
   type WritingStyleProfile,
 } from '../../../lib/content/writingStyleEngine';
 import type { CompanyProfile } from '../../../lib/shared/companyProfileTypes';
-import type { BriefInsight, EnrichedGap } from '../../../pages/blogs.types';
+import type { BriefInsight, EnrichedGap } from '../../../lib/blog/blogsTypes';
 
 export interface PostMeta extends ExistingPostMeta {
   views_count: number;

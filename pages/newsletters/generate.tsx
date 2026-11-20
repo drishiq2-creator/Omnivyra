@@ -11,7 +11,7 @@ import { fetchWithAuth } from '../../components/community-ai/fetchWithAuth';
 import type { BlogGenerationOutput } from '../../lib/blog/blogGenerationEngine';
 import { NEWSLETTER_FORMAT_OPTIONS, isValidNewsletterFormat, type NewsletterFormatType } from '../../lib/blog/blogStructureTemplates';
 import type { ContentBlock } from '../../lib/blog/blockTypes';
-import type { BriefInsight, DraftFieldSuggestions, TemplateSessionPayload, EnrichedGap } from '../blogs.types';
+import type { BriefInsight, DraftFieldSuggestions, TemplateSessionPayload, EnrichedGap } from '../../lib/blog/blogsTypes';
 
 
 

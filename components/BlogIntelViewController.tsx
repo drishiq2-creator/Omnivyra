@@ -20,7 +20,7 @@ import {
   generateRepurposedContent, extractRepurposeInput,
   type RepurposedContent,
 } from '../lib/blog/repurposingEngine';
-import type { BriefInsight } from '../pages/blogs.types';
+import type { BriefInsight } from '../lib/blog/blogsTypes';
 import {
   buildTopicClusters,
   detectContentGaps,

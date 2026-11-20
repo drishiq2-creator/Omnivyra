@@ -8,7 +8,7 @@ import { Loader2, Sparkles, AlertCircle } from 'lucide-react';
 import BlogGenerateModal from '../../../components/blog/BlogGenerateModal';
 import type { BlogGenerationOutput } from '../../../lib/blog/blogGenerationEngine';
 import { BLOG_FORMAT_OPTIONS, type BlogFormatType } from '../../../lib/blog/blogStructureTemplates';
-import type { BriefInsight, DraftFieldSuggestions, TemplateSessionPayload, EnrichedGap } from '../../blogs.types';
+import type { BriefInsight, DraftFieldSuggestions, TemplateSessionPayload, EnrichedGap } from '../../../lib/blog/blogsTypes';
 
 type CompanyOption = {
   id: string;

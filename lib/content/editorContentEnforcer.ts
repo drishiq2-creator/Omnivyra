@@ -1,4 +1,4 @@
-import { wordCount } from '../../pages/blogs.helpers';
+import { wordCount } from '../blog/blogText';
 
 /**
  * Editor Content Enforcer

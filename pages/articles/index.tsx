@@ -19,7 +19,7 @@ import {
   type WritingStyleProfile,
 } from '../../lib/content/writingStyleEngine';
 import type { CompanyProfile } from '../../lib/shared/companyProfileTypes';
-import type { BriefInsight, DraftFieldSuggestions, TemplateSessionPayload, EnrichedGap } from '../blogs.types';
+import type { BriefInsight, DraftFieldSuggestions, TemplateSessionPayload, EnrichedGap } from '../../lib/blog/blogsTypes';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 

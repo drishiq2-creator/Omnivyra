@@ -11,7 +11,7 @@ import SuggestionOptionPicker from '../../components/content/SuggestionOptionPic
 import type { BlogGenerationOutput } from '../../lib/blog/blogGenerationEngine';
 import { ARTICLE_FORMAT_OPTIONS, isValidArticleFormat, type ArticleFormatType } from '../../lib/blog/blogStructureTemplates';
 import type { ContentBlock } from '../../lib/blog/blockTypes';
-import type { BriefInsight, DraftFieldSuggestions, TemplateSessionPayload, EnrichedGap } from '../blogs.types';
+import type { BriefInsight, DraftFieldSuggestions, TemplateSessionPayload, EnrichedGap } from '../../lib/blog/blogsTypes';
 
 
 

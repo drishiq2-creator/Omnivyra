@@ -1,4 +1,4 @@
-import { wordCount } from '../../pages/blogs.helpers';
+import { wordCount } from '../blog/blogText';
 
 /**
  * Content Quality Enhancer v2.3

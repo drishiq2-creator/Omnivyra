@@ -2,8 +2,8 @@
  * Shared types for BlogsPage.
  */
 
-import type { ExistingPostMeta, ContentGap } from '../lib/blog/topicDetection';
-import type { WritingStyleProfile } from '../lib/content/writingStyleEngine';
+import type { ExistingPostMeta, ContentGap } from './topicDetection';
+import type { WritingStyleProfile } from '../content/writingStyleEngine';
 
 export type BlogStatus = 'draft' | 'published' | 'failed';
 
@@ -86,6 +86,3 @@ export type TemplateSessionPayload = {
   topic?: string;
   target_words?: number;
 };
-export default function BlogsTypesPage() {
-  return null;
-}

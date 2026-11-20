@@ -19,7 +19,7 @@ import {
   generateRepurposedContent, extractRepurposeInput,
   type RepurposedContent,
 } from '../../../lib/blog/repurposingEngine';
-import type { BriefInsight, DraftFieldSuggestions, TemplateSessionPayload, EnrichedGap } from '../../blogs.types';
+import type { BriefInsight, DraftFieldSuggestions, TemplateSessionPayload, EnrichedGap } from '../../../lib/blog/blogsTypes';
 import {
   buildTopicClusters,
   detectContentGaps,

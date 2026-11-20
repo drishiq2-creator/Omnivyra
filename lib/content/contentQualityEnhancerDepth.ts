@@ -5,7 +5,7 @@
  * enforceDepth. Split from contentQualityEnhancer_v2_1.ts (Agent-B large-file
  * modularization).
  */
-import { wordCount } from '../../pages/blogs.helpers';
+import { wordCount } from '../blog/blogText';
 import type { ContentGenerationInput, DepthMapEntry } from './cardToContentBridge';
 import {
   type ParsedSection,

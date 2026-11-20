@@ -6,7 +6,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/router';
 import { Loader2, Sparkles, AlertCircle, CheckCircle2 } from 'lucide-react';
 import type { BlogGenerationOutput } from '../../../lib/blog/blogGenerationEngine';
-import type { BriefInsight, DraftFieldSuggestions, TemplateSessionPayload, EnrichedGap } from '../../blogs.types';
+import type { BriefInsight, DraftFieldSuggestions, TemplateSessionPayload, EnrichedGap } from '../../../lib/blog/blogsTypes';
 
 
 
