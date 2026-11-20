@@ -1,5 +1,5 @@
 /**
- * SALES NAVIGATOR SHARED CONTRACT v2.1 (owner rulings 2026-11-20/21; c6 owns it; a9 r2-r6 + 7c review folded in).
+ * SALES NAVIGATOR SHARED CONTRACT v2.2 (owner rulings 2026-11-20/21; c6 owns it; a9 r2-r6 + 7c review folded in).
  *
  * v2 (owner, 2026-11-21): each company uses ITS OWN Sales Navigator account (we never supply LinkedIn access);
  * the daily cap is 150 (default) up to a HARD MAX of 200 per LinkedIn member; a run that reaches the cap is PAUSED
@@ -64,7 +64,8 @@ export interface SalesNavLead {
   readonly account_external_id?: string | null;
   readonly company_linkedin_url?: string | null;
   readonly location?: string | null;
-  readonly connection_degree?: string | null;
+  /** 1st / 2nd / 3rd-degree as an INTEGER 1..3 (a9: what the reader validates); out of network or unknown = null. */
+  readonly connection_degree?: 1 | 2 | 3 | null;
   readonly saved_at?: string | null;
   /** When the route observed the row. */
   readonly captured_at?: string | null;
@@ -222,6 +223,31 @@ export const SALESNAV_PAUSE_CODES = {
   auth_expired: ['logged_out', 'checkpoint'],
 } as const;
 export type SalesNavResumableStatus = keyof typeof SALESNAV_PAUSE_CODES;
+
+/**
+ * Map a vendor's network distance onto connection_degree (1..3). Unipile: 'DISTANCE_1'..'DISTANCE_3'; out of network,
+ * anything else, or absent -> null. Pure.
+ */
+export function connectionDegreeOf(raw: unknown): 1 | 2 | 3 | null {
+  if (raw === 1 || raw === 2 || raw === 3) return raw;
+  const m = typeof raw === 'string' ? /^DISTANCE_([123])$/.exec(raw.trim()) : null;
+  return m ? (Number(m[1]) as 1 | 2 | 3) : null;
+}
+
+/**
+ * What a progress view must SHOW for a run (v2.2, a9): a 'running' run with no page result for
+ * SALESNAV_RUN_STALE_SECONDS is shown as unknown / run_stale even before the lazy close persists it - never as
+ * 'running'. Every other status is shown as stored. lastActivityAt null on a running run is treated as stale. Pure.
+ */
+export function effectiveRunStatus(
+  run: { status: SalesNavRunStatus; code: string | null; lastActivityAt: string | null },
+  now: Date,
+): { status: SalesNavRunStatus; code: string | null; stale: boolean } {
+  if (run.status !== 'running') return { status: run.status, code: run.code, stale: false };
+  const last = run.lastActivityAt ? Date.parse(run.lastActivityAt) : Number.NaN;
+  const stale = !Number.isFinite(last) || now.getTime() - last >= SALESNAV_RUN_STALE_SECONDS * 1000;
+  return stale ? { status: 'unknown', code: 'run_stale', stale: true } : { status: 'running', code: run.code, stale: false };
+}
 
 /** True only for a (resumable status, code) pair the contract allows. */
 export function isAllowedPause(status: unknown, code: unknown): boolean {

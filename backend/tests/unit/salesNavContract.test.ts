@@ -1,6 +1,6 @@
 /** Sales Navigator shared contract v1.1 - the pure parts every route depends on (c6). */
 import {
-  parseSalesNavUrl, pageUrlFor, canonicalMemberId, isAllowedClose, isRepeatedPage, pageReservationRequest, isCommandedPage,
+  parseSalesNavUrl, pageUrlFor, canonicalMemberId, isAllowedClose, isRepeatedPage, pageReservationRequest, isCommandedPage, connectionDegreeOf, effectiveRunStatus,
   SALESNAV_STATUS_CODES, SALESNAV_TERMINAL_STATUSES, SALESNAV_RUN_STATUSES, SALESNAV_TRANSPORTS, SALESNAV_SOURCE,
   MAX_SALESNAV_PAGE, DEFAULT_SALESNAV_DAILY_CAP, MAX_SALESNAV_DAILY_CAP, resolveDailyCap, parseListTotal,
   isAllowedPause, SALESNAV_RESUMABLE_STATUSES,
@@ -189,5 +189,35 @@ describe('pageReservationRequest (v2: A / B / the page beats the total)', () => 
   });
   it('once unreliable, stays on A for the rest of the run', () => {
     expect(pageReservationRequest({ ...base, readSoFar: 10, totalUnreliable: true })).toEqual({ requested: 25, disclosed: true, totalUnreliable: true });
+  });
+});
+
+describe('connectionDegreeOf (v2.2: integer 1..3)', () => {
+  it('maps Unipile distances and accepts the extension integers', () => {
+    expect(connectionDegreeOf('DISTANCE_1')).toBe(1);
+    expect(connectionDegreeOf('DISTANCE_3')).toBe(3);
+    expect(connectionDegreeOf(2)).toBe(2);
+  });
+  it.each(['OUT_OF_NETWORK', 'DISTANCE_4', '2nd', 0, 4, null, undefined])('%p -> null', (v) => {
+    expect(connectionDegreeOf(v)).toBeNull();
+  });
+});
+
+describe('effectiveRunStatus (v2.2: a stale running run is never shown as running)', () => {
+  const now = new Date('2026-11-21T12:00:00.000Z');
+  const at = (sec: number) => new Date(now.getTime() - sec * 1000).toISOString();
+  it('control: recent activity -> running', () => {
+    expect(effectiveRunStatus({ status: 'running', code: null, lastActivityAt: at(30) }, now)).toEqual({ status: 'running', code: null, stale: false });
+  });
+  it('120 s with no page result -> unknown / run_stale (boundary inclusive)', () => {
+    expect(effectiveRunStatus({ status: 'running', code: null, lastActivityAt: at(120) }, now)).toEqual({ status: 'unknown', code: 'run_stale', stale: true });
+    expect(effectiveRunStatus({ status: 'running', code: null, lastActivityAt: at(119) }, now).stale).toBe(false);
+  });
+  it('a running run with no recorded activity is stale, never running', () => {
+    expect(effectiveRunStatus({ status: 'running', code: null, lastActivityAt: null }, now).status).toBe('unknown');
+  });
+  it('other statuses are shown as stored (a paused run is not stale)', () => {
+    expect(effectiveRunStatus({ status: 'paused_daily_cap', code: 'daily_cap', lastActivityAt: at(86400) }, now))
+      .toEqual({ status: 'paused_daily_cap', code: 'daily_cap', stale: false });
   });
 });
