@@ -22,7 +22,10 @@ import { supabase } from '@/backend/db/supabaseClient';
 
 function take(h: string | string[] | undefined) { return (Array.isArray(h) ? h[0] : h) || ''; }
 
-async function inferDevBypassOrgId(req: NextApiRequest): Promise<string | null> {
+/** UNREADABLE is not "no organization" (b3 read-failure rule): a failed read answers 503, never a missing-org 400. */
+const ORG_UNREADABLE = Symbol('org-unreadable');
+
+async function inferDevBypassOrgId(req: NextApiRequest): Promise<string | null | typeof ORG_UNREADABLE> {
   const path = (req.url || '').split('?')[0] || '';
   const body = (req.body && typeof req.body === 'object' ? req.body : {}) as {
     commandId?: unknown;
@@ -31,24 +34,34 @@ async function inferDevBypassOrgId(req: NextApiRequest): Promise<string | null> 
   const commandId = String(body.commandId ?? body.command_id ?? req.query.commandId ?? req.query.command_id ?? '').trim();
 
   if (commandId) {
-    const { data } = await supabase
-      .from('community_ai_actions')
-      .select('organization_id')
-      .eq('id', commandId)
-      .maybeSingle();
-    return typeof data?.organization_id === 'string' ? data.organization_id : null;
+    try {
+      const { data, error } = await supabase
+        .from('community_ai_actions')
+        .select('organization_id')
+        .eq('id', commandId)
+        .maybeSingle();
+      if (error) return ORG_UNREADABLE;
+      return typeof data?.organization_id === 'string' ? data.organization_id : null;
+    } catch {
+      return ORG_UNREADABLE;
+    }
   }
 
   if (req.method?.toUpperCase() === 'GET' && path === '/api/extension/commands') {
-    const { data } = await supabase
-      .from('community_ai_actions')
-      .select('organization_id')
-      .eq('status', 'pending')
-      .eq('execution_mode', 'browser')
-      .order('created_at', { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    return typeof data?.organization_id === 'string' ? data.organization_id : null;
+    try {
+      const { data, error } = await supabase
+        .from('community_ai_actions')
+        .select('organization_id')
+        .eq('status', 'pending')
+        .eq('execution_mode', 'browser')
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (error) return ORG_UNREADABLE;
+      return typeof data?.organization_id === 'string' ? data.organization_id : null;
+    } catch {
+      return ORG_UNREADABLE;
+    }
   }
 
   return null;
@@ -74,7 +87,13 @@ export async function requireExtensionAuth(req: NextApiRequest, res: NextApiResp
     };
     const orgFromBody = String(body.organization_id ?? body.org_id ?? body.orgId ?? '').trim();
     const orgFromQuery = String(req.query.organization_id ?? req.query.org_id ?? req.query.orgId ?? '').trim();
-    const orgId = orgFromBody || orgFromQuery || await inferDevBypassOrgId(req);
+    const inferred = orgFromBody || orgFromQuery ? null : await inferDevBypassOrgId(req);
+    if (inferred === ORG_UNREADABLE) {
+      res.setHeader('Retry-After', '5');
+      res.status(503).json({ success: false, error: 'BYPASS_ORG_UNREADABLE' });
+      return null;
+    }
+    const orgId = orgFromBody || orgFromQuery || inferred;
     if (!orgId) {
       res.status(400).json({ success: false, error: 'BYPASS_REQUIRES_ORG_ID' });
       return null;
