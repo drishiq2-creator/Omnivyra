@@ -21,6 +21,11 @@
 import { ALREADY_REVOKED } from '../../shared/security/revokeCodes';
 
 /** devices/trust.ts 409 code (backend/security/devices/trustedDeviceTypes.ts). */
+// DUPLICATED ON PURPOSE (7c NB2, 2026-11-20). The route sends `code: result.reason` from
+// backend/security/devices/trustedDeviceTypes.ts; this literal mirrors it. Unlike the revoke codes
+// (shared/security/revokeCodes.ts, imported by both sides), the guard here is the source contract in
+// securitySettingsActionHonesty.test.tsx: exactly one trust 409, on the ALREADY_TRUSTED branch, and that line sends
+// the code. Change one side and that test fails.
 export const DEVICE_ALREADY_TRUSTED = 'ALREADY_TRUSTED';
 
 /** The outcome union AS A VALUE (b3 standard); the type derives from it. */

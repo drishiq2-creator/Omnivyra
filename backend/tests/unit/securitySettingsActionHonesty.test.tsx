@@ -193,10 +193,17 @@ describe('outcome tables (union-coverage pattern)', () => {
     expect(decided).toEqual({ ALREADY_REVOKED: 'done', REVOKE_UNCONFIRMED: 'unknown' });
   });
 
-  it('server contract: the trust route still sends ALREADY_TRUSTED on its 409 (the client keys done on it)', () => {
+  // Exactly ONE trust 409, and it carries the code. This pin protects TWO consumers:
+  //   - this page keys "done" on code ALREADY_TRUSTED (a 409 without it falls to "refused");
+  //   - lib/security/stepUpClient.ts:239 is STATUS-ONLY ("if (res.status === 409) return true; // ALREADY_TRUSTED"),
+  //     so a second, different 409 on this route would read as SUCCESS there.
+  // 7c NB1: the old regex stopped at res.status(409) and stayed green if `code: result.reason` was dropped, which
+  // silently reintroduced "couldn't trust" for a trusted device. The 409 LINE itself must carry the code.
+  it('server contract: the trust route has exactly one 409, on the ALREADY_TRUSTED branch, and that line sends the code', () => {
     const src = fs.readFileSync(path.resolve(__dirname, '../../../pages/api/auth/devices/trust.ts'), 'utf8');
     const sites = src.split(/\r?\n/).filter((l) => l.includes('status(409)'));
     expect(sites).toHaveLength(1);
+    expect(sites[0]).toMatch(/code: result\.reason\b/);
     expect(src).toMatch(/result\.reason === 'ALREADY_TRUSTED'\) \{\s*return res\.status\(409\)/);
   });
 
