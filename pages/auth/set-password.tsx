@@ -22,6 +22,16 @@ import { getSupabaseBrowser } from '../../lib/supabaseBrowser';
 import { clearBrowserAuthState } from '../../utils/authStorage';
 import { apiFetch } from '../../lib/apiFetch';
 import { validatePassword, PASSWORD_MIN_LENGTH, PASSWORD_MAX_LENGTH } from '../../lib/auth/passwordPolicy';
+import {
+  OTHER_SESSIONS_NOTICE,
+  SIGN_OUT_OTHERS_DONE,
+  SIGN_OUT_OTHERS_LABEL,
+  SIGN_OUT_OTHERS_REFUSED,
+  SIGN_OUT_OTHERS_UNKNOWN,
+  classifySignOutOthers,
+  otherSessionsNotSignedOut,
+  type SignOutOthersOutcome,
+} from '../../lib/auth/setPasswordOutcome';
 
 type Stage = 'loading' | 'form' | 'success' | 'error';
 const AUTH_FLOW_SESSION_MARKER = 'auth_flow_session_established_v1';
@@ -37,6 +47,27 @@ export default function SetPasswordPage() {
   const [loading, setLoading]     = useState(false);
   const [error, setError]         = useState<string | null>(null);
   const [flow, setFlow]           = useState<'signup' | 'recovery'>('signup');
+  // S1: the password changed but other sessions were NOT signed out. The notice must stay on screen, so the
+  // success auto-redirect is suppressed and the user continues explicitly.
+  const [otherSessionsWarning, setOtherSessionsWarning] = useState(false);
+  const [nextRoute, setNextRoute] = useState('/onboarding/profile');
+  const [signOutOthers, setSignOutOthers] = useState<'idle' | 'busy' | SignOutOthersOutcome>('idle');
+
+  async function signOutOtherDevices() {
+    setSignOutOthers('busy');
+    let status: number | null = null;
+    try {
+      const r = await apiFetch('/api/auth/sessions/revoke', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ revokeAll: true }),
+      });
+      status = r.status;
+    } catch (err) {
+      console.warn('[set-password] sign out other devices did not complete:', err);
+    }
+    setSignOutOthers(classifySignOutOthers(status));
+  }
 
   const attempted = useRef(false);
 
@@ -170,6 +201,7 @@ export default function SetPasswordPage() {
     setError(null);
 
     let route = '/onboarding/profile';
+    let warnOtherSessions = false;
     try {
       const { data } = await getSupabaseBrowser().auth.getSession();
       if (data.session?.access_token) {
@@ -178,11 +210,12 @@ export default function SetPasswordPage() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ password, flow }),
         });
-        const json = await spRes.json().catch(() => ({})) as { route?: string; error?: string };
+        const json = await spRes.json().catch(() => ({})) as { route?: string; error?: string; code?: string };
         if (!spRes.ok) {
           throw new Error(json.error || 'Failed to set password');
         }
         route = json.route ?? '/onboarding/profile';
+        warnOtherSessions = otherSessionsNotSignedOut(json);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to set password');
@@ -192,6 +225,12 @@ export default function SetPasswordPage() {
 
     setStage('success');
     try { window.sessionStorage.removeItem(AUTH_FLOW_SESSION_MARKER); } catch { /* ignore */ }
+    if (warnOtherSessions) {
+      // No auto-redirect: the warning is the most important thing on this screen.
+      setNextRoute(route);
+      setOtherSessionsWarning(true);
+      return;
+    }
     setTimeout(() => router.replace(route), 1200);
   }
 
@@ -295,8 +334,35 @@ export default function SetPasswordPage() {
                 </div>
                 <div>
                   <p className="text-lg font-bold text-[#0B1F33]">Password set!</p>
-                  <p className="mt-1 text-sm text-[#6B7C93]">Taking you to onboarding…</p>
+                  {!otherSessionsWarning && <p className="mt-1 text-sm text-[#6B7C93]">Taking you to onboarding…</p>}
                 </div>
+                {otherSessionsWarning && (
+                  <>
+                    <div role="alert" className="w-full rounded-xl border-2 border-amber-300 bg-amber-50 p-4 text-left text-sm font-medium text-amber-900">
+                      <p>{OTHER_SESSIONS_NOTICE}</p>
+                      {(signOutOthers === 'idle' || signOutOthers === 'busy') && (
+                        <button
+                          type="button"
+                          onClick={signOutOtherDevices}
+                          disabled={signOutOthers === 'busy'}
+                          className="mt-3 rounded-lg bg-amber-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
+                        >
+                          {signOutOthers === 'busy' ? 'Signing out…' : SIGN_OUT_OTHERS_LABEL}
+                        </button>
+                      )}
+                      {signOutOthers === 'done' && <p className="mt-3">{SIGN_OUT_OTHERS_DONE}</p>}
+                      {signOutOthers === 'refused' && <p className="mt-3">{SIGN_OUT_OTHERS_REFUSED}</p>}
+                      {signOutOthers === 'unknown' && <p className="mt-3">{SIGN_OUT_OTHERS_UNKNOWN}</p>}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => router.replace(signOutOthers === 'done' ? '/login' : nextRoute)}
+                      className="rounded-xl bg-[#0B1F33] px-5 py-2.5 text-sm font-semibold text-white"
+                    >
+                      Continue
+                    </button>
+                  </>
+                )}
               </div>
             )}
 
