@@ -35,10 +35,34 @@ const EMPTY: StrategyHistoryResult = {
  * Load strategy history for a company (campaigns created from recommendations, aspect usage).
  * Used by strategy-history API and by generate flow to attach strategy_memory context.
  */
+/**
+ * A read this history depends on FAILED (b3 2026-11-20, read-failure rule): never reported as an empty history.
+ * Callers that render it answer an error with retry (strategy-history route: 503 STRATEGY_HISTORY_UNAVAILABLE);
+ * callers that use it as optional input (recommendations/generate) already proceed without it.
+ */
+export const STRATEGY_HISTORY_UNAVAILABLE = 'STRATEGY_HISTORY_UNAVAILABLE';
+export class StrategyHistoryReadError extends Error {
+  readonly code = STRATEGY_HISTORY_UNAVAILABLE;
+  readonly retryable = true;
+  constructor(readonly stage: 'campaign_versions' | 'recommendation_snapshots') {
+    super('Strategy history could not be loaded. Try again.');
+    this.name = 'StrategyHistoryReadError';
+  }
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export async function getStrategyHistoryForCompany(
-  companyId: string
+  rawCompanyId: string
 ): Promise<StrategyHistoryResult> {
-  if (!companyId?.trim()) return EMPTY;
+  if (!rawCompanyId?.trim()) return EMPTY;
+  // campaign_versions.company_id and recommendation_snapshots.company_id are TEXT holding the canonical (lowercase)
+  // uuid; the access check upstream matches a uuid column, which accepts any casing. Canonicalise so a differently
+  // cased id from a client neither empties this history nor slips past the company filter (b3 2026-11-20).
+  const trimmed = rawCompanyId.trim();
+  // Only a uuid-shaped id is canonicalised. A non-uuid value is used as given - safe ONLY because such a value
+  // cannot pass enforceCompanyAccess upstream (company ids are uuids), so it never reaches here with access.
+  const companyId = UUID_RE.test(trimmed) ? trimmed.toLowerCase() : trimmed;
 
   const { data: versionRows, error: versionError } = await supabase
     .from('campaign_versions')
@@ -46,7 +70,7 @@ export async function getStrategyHistoryForCompany(
     .eq('company_id', companyId)
     .order('created_at', { ascending: true });
 
-  if (versionError) return EMPTY;
+  if (versionError) throw new StrategyHistoryReadError('campaign_versions');
   if (!versionRows?.length) return { ...EMPTY, campaigns_count: 0 };
 
   const campaigns_count = versionRows.length;
@@ -69,12 +93,18 @@ export async function getStrategyHistoryForCompany(
     return { ...EMPTY, campaigns_count, strategy_momentum: null };
   }
 
+  // TENANT SCOPE (b3 2026-11-20, BLOCKING cross-tenant read): the ids come from campaign snapshots, which store a
+  // client-supplied recommendation_id unvalidated (pages/api/campaigns/index.ts) - a stale or crafted id naming
+  // ANOTHER company's recommendation must not surface that company's trend_topic / category here. A foreign id reads
+  // like an unknown one (no aspect: falls back to the campaign's own counts).
   const { data: snapshotRows, error: snapError } = await supabase
     .from('recommendation_snapshots')
     .select('id, trend_topic, category')
+    .eq('company_id', companyId)
     .in('id', uniqueIds);
 
-  if (snapError || !snapshotRows?.length) {
+  if (snapError) throw new StrategyHistoryReadError('recommendation_snapshots');
+  if (!snapshotRows?.length) {
     return { ...EMPTY, campaigns_count, strategy_momentum: null };
   }
 
