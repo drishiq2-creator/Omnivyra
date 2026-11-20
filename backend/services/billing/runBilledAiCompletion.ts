@@ -70,6 +70,18 @@ export class BillingRefusalError extends Error {
   }
 }
 
+/**
+ * Did resolving the PRICE fail? Matches pricingService's typed PricingMissingError and the price-lookup errors thrown
+ * by pricingService and creditDeductionService.getCreditCost (by their stable message prefixes). Validation errors
+ * ("… is required", model limits) are NOT price errors. A source contract test pins these messages.
+ */
+const PRICE_RESOLUTION_MESSAGE = /^\[pricingService\] (Model pricing lookup failed|Action pricing lookup failed|Missing action_pricing_config row|Missing valid credit_rate_usd|credit_rate_usd lookup failed|credit_cost_config lookup failed)|^\[creditDeduction\] (missing credit cost config|credit cost lookup failed)/;
+export function isPriceResolutionError(e: unknown): boolean {
+  // By name, not instanceof: importing pricingService here would load its DB client into every caller of this module.
+  if ((e as { name?: unknown } | null)?.name === 'PricingMissingError') return true;
+  return e instanceof Error && PRICE_RESOLUTION_MESSAGE.test(e.message);
+}
+
 export function isBillingRefusalError(e: unknown): e is BillingRefusalError {
   return e instanceof BillingRefusalError || (e as { name?: unknown } | null)?.name === 'BillingRefusalError';
 }
@@ -123,63 +135,72 @@ export interface BilledAiCompletionResult {
 export async function runBilledAiCompletion(
   args: RunBilledAiCompletionArgs,
 ): Promise<BilledAiCompletionResult> {
-  const orchestratorResult: OrchestratorResult<string> = await runBilledOperation<string>({
-    module:         args.module,
-    action:         args.action,
-    userId:         args.userId,
-    orgId:          args.orgId,
-    referenceType:  args.referenceType,
-    referenceId:    args.referenceId,
-    idempotency:    args.idempotency,
-    note:           args.note,
-    metadata:       args.metadata,
-    validateMembership: args.validateMembership,
-    llmPricing: {
-      provider:        args.llmPricing.provider,
-      model:           args.llmPricing.model,
-      actionKey:       args.llmPricing.actionKey,
-      maxInputTokens:  args.llmPricing.maxInputTokens,
-      maxOutputTokens: args.llmPricing.maxOutputTokens,
-      timestamp:       args.llmPricing.timestamp,
-    },
-    executor: async (): Promise<LlmExecutorResult<string>> => {
-      // We have a handle by virtue of being inside the orchestrator. Notify the
-      // guard so violations cannot accidentally proliferate at this seam.
-      const creditHandle: CreditHandle = {
-        operationId:    'in-flight',
-        idempotencyKey: 'in-flight',
-        orgId:          args.orgId,
-        action:         args.action,
-        source:         'orchestrator',
-      };
-      await checkAiBillingGuard({
-        operation: args.completion.operation,
-        creditHandle,
-        orgId: args.orgId,
-      });
-
-      // SEC91-D2: the gateway re-checks the billing guard; the handle must be
-      // visible there too, or this billed call is recorded as an untracked
-      // violation (and blocked outright once BILLING_REQUIRE_AI_HANDLE=true).
-      const gatewayResp = await runWithCreditHandle(creditHandle, () => runCompletionWithOperation({
-        ...args.completion,
-      }));
-
-      const text = typeof gatewayResp.output === 'string' ? gatewayResp.output : '';
-      const usage = gatewayResp.metadata?.token_usage ?? {};
-
-      return {
-        result: text,
-        usage: {
-          inputTokens:  Number(usage.prompt_tokens ?? 0),
-          outputTokens: Number(usage.completion_tokens ?? 0),
-          source:       (Number(usage.total_tokens ?? 0) > 0 ? 'provider' : 'cache'),
-        },
-        provider: gatewayResp.metadata.provider === 'direct-anthropic' ? 'anthropic' : 'openai',
-        model:    gatewayResp.metadata.model ?? args.completion.model,
-      };
-    },
-  });
+  // 7c on 306b8498c: a PRICE that cannot be resolved (missing row, or the lookup itself failed) is
+  // PRICING_UNAVAILABLE, the union's one retryable "unknown" (503 + Retry-After). It used to leave as a generic 500.
+  // It is raised while the hold is being computed, before any reservation or provider call, so nothing was charged.
+  let orchestratorResult: OrchestratorResult<string>;
+  try {
+    orchestratorResult = await runBilledOperation<string>({
+      module:         args.module,
+      action:         args.action,
+      userId:         args.userId,
+      orgId:          args.orgId,
+      referenceType:  args.referenceType,
+      referenceId:    args.referenceId,
+      idempotency:    args.idempotency,
+      note:           args.note,
+      metadata:       args.metadata,
+      validateMembership: args.validateMembership,
+      llmPricing: {
+        provider:        args.llmPricing.provider,
+        model:           args.llmPricing.model,
+        actionKey:       args.llmPricing.actionKey,
+        maxInputTokens:  args.llmPricing.maxInputTokens,
+        maxOutputTokens: args.llmPricing.maxOutputTokens,
+        timestamp:       args.llmPricing.timestamp,
+      },
+      executor: async (): Promise<LlmExecutorResult<string>> => {
+        // We have a handle by virtue of being inside the orchestrator. Notify the
+        // guard so violations cannot accidentally proliferate at this seam.
+        const creditHandle: CreditHandle = {
+          operationId:    'in-flight',
+          idempotencyKey: 'in-flight',
+          orgId:          args.orgId,
+          action:         args.action,
+          source:         'orchestrator',
+        };
+        await checkAiBillingGuard({
+          operation: args.completion.operation,
+          creditHandle,
+          orgId: args.orgId,
+        });
+  
+        // SEC91-D2: the gateway re-checks the billing guard; the handle must be
+        // visible there too, or this billed call is recorded as an untracked
+        // violation (and blocked outright once BILLING_REQUIRE_AI_HANDLE=true).
+        const gatewayResp = await runWithCreditHandle(creditHandle, () => runCompletionWithOperation({
+          ...args.completion,
+        }));
+  
+        const text = typeof gatewayResp.output === 'string' ? gatewayResp.output : '';
+        const usage = gatewayResp.metadata?.token_usage ?? {};
+  
+        return {
+          result: text,
+          usage: {
+            inputTokens:  Number(usage.prompt_tokens ?? 0),
+            outputTokens: Number(usage.completion_tokens ?? 0),
+            source:       (Number(usage.total_tokens ?? 0) > 0 ? 'provider' : 'cache'),
+          },
+          provider: gatewayResp.metadata.provider === 'direct-anthropic' ? 'anthropic' : 'openai',
+          model:    gatewayResp.metadata.model ?? args.completion.model,
+        };
+      },
+    });
+  } catch (err) {
+    if (isPriceResolutionError(err)) throw new BillingRefusalError('PRICING_UNAVAILABLE', 'pricing_unavailable');
+    throw err;
+  }
 
   if (orchestratorResult.result.status !== 'executed') {
     const refusal = billingRefusalCodeForOrchestratorStatus(String(orchestratorResult.result.status));

@@ -11,21 +11,24 @@
  *   - clients map the code to client copy (lib/billing/billingRefusalCopy.ts).
  */
 let orchestratorStatus = 'executed';
+let orchestratorThrows: Error | null = null;
 jest.mock('../../services/billing/enterpriseBillingOrchestrator', () => ({
-  runBilledOperation: jest.fn(async () => ({
+  runBilledOperation: jest.fn(async () => { if (orchestratorThrows) throw orchestratorThrows; return ({
     operationId: 'op', correlationId: 'c', idempotencyKey: 'k',
     result: orchestratorStatus === 'executed'
       ? { status: 'executed', result: 'text', settlement: { actualUsage: { inputTokens: 1, outputTokens: 1 } } }
       : { status: orchestratorStatus },
-  })),
+  }); }),
 }));
 jest.mock('../../services/aiGateway', () => ({ runCompletionWithOperation: jest.fn() }));
 jest.mock('../../services/billing/aiGatewayBillingGuard', () => ({
   checkAiBillingGuard: jest.fn(), runWithCreditHandle: (_h: unknown, fn: () => unknown) => fn(),
 }));
 
+import fs from 'fs';
+import path from 'path';
 import {
-  runBilledAiCompletion, BillingRefusalError, isBillingRefusalError,
+  runBilledAiCompletion, BillingRefusalError, isBillingRefusalError, isPriceResolutionError,
 } from '../../services/billing/runBilledAiCompletion';
 import {
   BILLING_REFUSAL_CODES, BILLING_REFUSAL_HTTP_STATUS, billingRefusalCodeForOrchestratorStatus,
@@ -66,6 +69,49 @@ describe('runBilledAiCompletion: a billing refusal is TYPED, anything else is un
   it('control: executed returns the text', async () => {
     orchestratorStatus = 'executed';
     await expect(runBilledAiCompletion(ARGS)).resolves.toMatchObject({ text: 'text' });
+  });
+});
+
+describe('a PRICE that cannot be resolved is PRICING_UNAVAILABLE (503 + Retry-After), never a generic 500 (7c)', () => {
+  const named = (name: string, message: string) => Object.assign(new Error(message), { name });
+  afterEach(() => { orchestratorThrows = null; });
+
+  it.each<[string, Error]>([
+    ['PricingMissingError (no active model price)', named('PricingMissingError', "No active pricing for provider='openai' model='x' kind='input'.")],
+    ['a model-pricing lookup error', new Error('[pricingService] Model pricing lookup failed for openai/gpt-4o-mini/input: timeout')],
+    ['a missing action_pricing_config row', new Error("[pricingService] Missing action_pricing_config row for actionKey='content_rewrite'")],
+    ['a credit_rate_usd lookup error', new Error('[pricingService] credit_rate_usd lookup failed for org o: timeout')],
+    ['getCreditCost: missing row', new Error('[creditDeduction] missing credit cost config for blog')],
+    ['getCreditCost: lookup failed', new Error('[creditDeduction] credit cost lookup failed for blog: timeout')],
+  ])('%s → BillingRefusalError(PRICING_UNAVAILABLE, 503)', async (_n, err) => {
+    orchestratorThrows = err;
+    const e = await runBilledAiCompletion(ARGS).catch((x) => x);
+    expect(e).toBeInstanceOf(BillingRefusalError);
+    expect(e).toMatchObject({ code: 'PRICING_UNAVAILABLE', httpStatus: 503 });
+  });
+
+  it.each<[string, Error]>([
+    ['a validation error ("… is required")', new Error('[pricingService] provider is required')],
+    ['the AI call itself failing', new Error('openai 500 upstream')],
+  ])('control: %s is NOT a price failure (propagates unchanged)', async (_n, err) => {
+    orchestratorThrows = err;
+    const e = await runBilledAiCompletion(ARGS).catch((x) => x);
+    expect(isBillingRefusalError(e)).toBe(false);
+    expect(e).toBe(err);
+  });
+
+  it('source contract: pricingService and getCreditCost still throw the messages the classifier matches', () => {
+    const ROOT = path.resolve(__dirname, '../../..');
+    const ps = fs.readFileSync(path.join(ROOT, 'backend/services/pricingService.ts'), 'utf8');
+    const cd = fs.readFileSync(path.join(ROOT, 'backend/services/creditDeductionService.ts'), 'utf8');
+    for (const prefix of ['Model pricing lookup failed', 'Action pricing lookup failed', 'Missing action_pricing_config row', 'Missing valid credit_rate_usd', 'credit_rate_usd lookup failed', 'credit_cost_config lookup failed']) {
+      expect(ps).toContain('[pricingService] ' + prefix);
+      expect(isPriceResolutionError(new Error('[pricingService] ' + prefix + ' x'))).toBe(true);
+    }
+    for (const prefix of ['missing credit cost config', 'credit cost lookup failed']) {
+      expect(cd).toContain('[creditDeduction] ' + prefix);
+    }
+    expect(ps).toMatch(/this\.name = 'PricingMissingError'/);
   });
 });
 

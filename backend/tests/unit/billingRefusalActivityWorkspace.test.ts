@@ -166,6 +166,17 @@ describe('refine_variant: a billing refusal answers its status + code (it used t
       expect(res.body).toEqual({ error: 'Billing refused', code });
     });
 
+  it('PRICING_UNAVAILABLE → 503 + Retry-After: 30', async () => {
+    sinkBilled.mockImplementation(async () => { throw new BillingRefusalError('PRICING_UNAVAILABLE', 'pricing_unavailable'); });
+    const headers: Record<string, string> = {};
+    const res = mockRes();
+    res.setHeader = (k: string, v: string) => { headers[k.toLowerCase()] = v; return res; };
+    await handler({ method: 'POST', body: REFINE, query: {}, headers: {} } as any, res);
+    expect(res.statusCode).toBe(503);
+    expect(res.body).toEqual({ error: 'Billing refused', code: 'PRICING_UNAVAILABLE' });
+    expect(headers['retry-after']).toBe('30');
+  });
+
   it('control: a NON-billing failure keeps the generic 500', async () => {
     sinkBilled.mockImplementation(async () => { throw new Error('upstream boom'); });
     const res = await post(REFINE);

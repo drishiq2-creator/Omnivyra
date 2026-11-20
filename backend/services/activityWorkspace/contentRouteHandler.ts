@@ -1015,6 +1015,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     // user was never told about credits (04, 2026-11-20).
     const { isBillingRefusalError } = await import('@/backend/services/billing/runBilledAiCompletion');
     if (isBillingRefusalError(error)) {
+      const { BILLING_REFUSAL_RETRY_AFTER_SECONDS } = await import('@/shared/billing/billingRefusalCodes');
+      const retryAfter = BILLING_REFUSAL_RETRY_AFTER_SECONDS[error.code];
+      if (retryAfter) res.setHeader('Retry-After', String(retryAfter));
       return res.status(error.httpStatus).json({ error: 'Billing refused', code: error.code });
     }
     if ((error as Error & { code?: string })?.code === 'VARIANT_GENERATION_FAILED') {

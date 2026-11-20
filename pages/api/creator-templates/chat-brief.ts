@@ -159,7 +159,12 @@ Fill every brief field with your best inference so far; keep each concise. No ma
   } catch (error) {
     // A billing refusal answers its own status + CODE (shared/billing/billingRefusalCodes.ts); the client owns the copy.
     const { isBillingRefusalError } = await import('../../../backend/services/billing/runBilledAiCompletion');
-    if (isBillingRefusalError(error)) return res.status(error.httpStatus).json({ error: 'Billing refused', code: error.code });
+    if (isBillingRefusalError(error)) {
+      const { BILLING_REFUSAL_RETRY_AFTER_SECONDS } = await import('../../../shared/billing/billingRefusalCodes');
+      const retryAfter = BILLING_REFUSAL_RETRY_AFTER_SECONDS[error.code];
+      if (retryAfter) res.setHeader('Retry-After', String(retryAfter));
+      return res.status(error.httpStatus).json({ error: 'Billing refused', code: error.code });
+    }
     // Never the raw internal message (it used to reach the user verbatim).
     console.error('[creator-templates/chat-brief] failed', error);
     return res.status(500).json({ error: 'chat brief failed' });

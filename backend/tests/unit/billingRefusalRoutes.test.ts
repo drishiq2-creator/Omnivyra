@@ -51,8 +51,8 @@ import assist from '../../../pages/api/campaign-content/assist';
 import fieldAssist from '../../../pages/api/creator-templates/field-assist';
 
 function mockRes() {
-  const res: any = { statusCode: 0, body: undefined };
-  res.setHeader = () => res;
+  const res: any = { statusCode: 0, body: undefined, headers: {} as Record<string, string> };
+  res.setHeader = (k: string, v: string) => { res.headers[k.toLowerCase()] = v; return res; };
   res.status = (c: number) => { res.statusCode = c; return res; };
   res.json = (b: unknown) => { res.body = b; return res; };
   return res;
@@ -74,6 +74,17 @@ describe('chat-brief', () => {
       expect(res.statusCode).toBe(status);
       expect(res.body).toEqual({ error: 'Billing refused', code });
     });
+
+  it('PRICING_UNAVAILABLE answers 503 + Retry-After: 30 (the retryable "unknown"); a refusal without one sends none', async () => {
+    refusalCode = 'PRICING_UNAVAILABLE';
+    const res = await call(chatBrief, { messages: [{ role: 'user', content: 'hi' }] });
+    expect(res.statusCode).toBe(503);
+    expect(res.body).toEqual({ error: 'Billing refused', code: 'PRICING_UNAVAILABLE' });
+    expect(res.headers['retry-after']).toBe('30');
+    refusalCode = 'INSUFFICIENT_CREDITS';
+    const res2 = await call(chatBrief, { messages: [{ role: 'user', content: 'hi' }] });
+    expect(res2.headers['retry-after']).toBeUndefined();
+  });
 
   it('a NON-billing failure is a generic 500 (the raw "[runBilledAiCompletion] …" text used to reach the user)', async () => {
     billedMode = 'boom';
