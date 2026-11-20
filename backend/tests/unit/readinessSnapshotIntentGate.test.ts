@@ -70,11 +70,13 @@ describe('readinessSnapshot is exempt from the inactive-company gate', () => {
     expect(blocked).toHaveLength(7);
   });
 
-  test('the always-run set is exactly the previous ten jobs plus readinessSnapshot', () => {
+  // c6 2026-11-20 (named change): + the two self-gated PI jobs (piSchedulerIntentGate.test.ts).
+  test('the always-run set is exactly the previous ten jobs plus readinessSnapshot and the two PI jobs', () => {
     expect([...ALWAYS_RUN_JOBS].sort()).toEqual([
       'confidenceCalibration', 'connectorTokenRefresh', 'conversationTriageWorker', 'engagementSignalArchive',
       'findDuePostsAndEnqueue', 'governanceAudit', 'intelligenceEventCleanup', 'leadThreadQueueCleanup',
       'performanceAggregation', 'readinessSnapshot', 'staleExecutionSweep',
+      'prospectEnrichmentRetry', 'prospectScoreEvaluation',
     ].sort());
   });
 });

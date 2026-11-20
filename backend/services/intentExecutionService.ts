@@ -176,6 +176,15 @@ const ALWAYS_RUN_JOBS = new Set([
   // inactive-company gate ONLY — the 24h interval, usage overlay and admin
   // override still apply.
   'readinessSnapshot',
+  // PI (c6 2026-11-20, owner ruling: c6 builds PI). Prospect enrichment retries and prospect score evaluation were
+  // gated on the same activity set nothing writes, so even when switched ON they would never run (the score column
+  // would read "Not scored" forever). Both jobs carry their OWN gates and are inert without them:
+  //   prospectEnrichmentRetry  - PI_RETRY_SCHEDULER_ENABLED='true' + tenants in scope (prospectRetryJob.ts)
+  //   prospectScoreEvaluation  - PI_SCORE_EVALUATION_ENABLED='true' + PI_SCORE_EVALUATION_ORG_IDS (prospectScoreEvaluationJob.ts)
+  // so exempting them from the inactive-company gate switches nothing on. The interval, usage overlay and admin
+  // override still apply. Gate owner: c6 (PI); flags come on per the owner's pilot-company decision (via b3).
+  'prospectEnrichmentRetry',
+  'prospectScoreEvaluation',
 ]);
 
 // Frequency tier → milliseconds
