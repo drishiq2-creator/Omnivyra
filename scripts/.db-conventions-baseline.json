@@ -1,6 +1,6 @@
 {
   "selectStarTotal": 1067,
-  "countExactTotal": 198,
+  "countExactTotal": 197,
   "files": [
     {
       "file": "backend/services/marketPulseCollaborationService.ts",
@@ -1684,11 +1684,6 @@
     },
     {
       "file": "backend/services/earnCreditsService.ts",
-      "stars": 0,
-      "exacts": 1
-    },
-    {
-      "file": "backend/services/engagementAuthorService.ts",
       "stars": 0,
       "exacts": 1
     },
