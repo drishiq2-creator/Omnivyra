@@ -1,7 +1,8 @@
 import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeFactory';
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { enforceCompanyAccess } from '../../../backend/services/userContextService';
-import { enforceRole, Role } from '../../../backend/services/rbacService';
+import { enforceRole, getUserCompanyRole, Role } from '../../../backend/services/rbacService';
+import { canViewIntegrationSecrets, redactIntegrationSecrets } from '../../../backend/services/integrationSecretRedaction';
 import {
   createIntegration,
   getIntegrations,
@@ -36,8 +37,14 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method === 'GET') {
     const type = typeof req.query.type === 'string' ? req.query.type as IntegrationType : undefined;
     const integrations = await getIntegrations(companyId, type).catch(() => []);
-    // Mask sensitive config fields for non-admins
-    return res.status(200).json({ integrations });
+    // Hydrated integrations carry DECRYPTED credentials. Only company admins see them; every other member gets them
+    // redacted (backend/services/integrationSecretRedaction.ts). A failed role read answers null, i.e. redacted.
+    const { role } = await getUserCompanyRole(req, companyId);
+    const secretsVisible = canViewIntegrationSecrets(role);
+    return res.status(200).json({
+      integrations: secretsVisible ? integrations : integrations.map(redactIntegrationSecrets),
+      secrets_visible: secretsVisible,
+    });
   }
 
   // POST — only admins can create

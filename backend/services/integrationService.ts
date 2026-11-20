@@ -9,6 +9,7 @@ import {
   splitSecretConfig,
   upsertConnectionCredentials,
 } from './integrationCredentialService';
+import { restoreRedactedSecrets } from './integrationSecretRedaction';
 import { getCmsAdapter, isCmsProvider } from './cms/registry';
 import { ensureCanonicalConnectionForIntegration } from './cms/cmsConnectionNormalizationService';
 
@@ -134,7 +135,8 @@ export async function updateIntegration(
     }
   }
   if (updates.config) {
-    const normalizedConfig = normalizeIntegrationConfig(existing.type, updates.config);
+    // A redacted placeholder in the update means "unchanged" (integrationSecretRedaction.ts): keep the stored secret.
+    const normalizedConfig = normalizeIntegrationConfig(existing.type, restoreRedactedSecrets(updates.config, existing.config));
     const { nonSecretConfig, credentials } = splitSecretConfig(normalizedConfig);
     if (existing.website_connection_id) {
       await upsertConnectionCredentials(companyId, existing.website_connection_id, credentials);

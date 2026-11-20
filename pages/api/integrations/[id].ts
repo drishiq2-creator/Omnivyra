@@ -1,7 +1,8 @@
 import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeFactory';
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { enforceCompanyAccess } from '../../../backend/services/userContextService';
-import { enforceRole, Role } from '../../../backend/services/rbacService';
+import { enforceRole, getUserCompanyRole, Role } from '../../../backend/services/rbacService';
+import { canViewIntegrationSecrets, redactIntegrationSecrets } from '../../../backend/services/integrationSecretRedaction';
 import {
   getIntegration,
   updateIntegration,
@@ -23,7 +24,13 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method === 'GET') {
     const integration = await getIntegration(id, companyId);
     if (!integration) return res.status(404).json({ error: 'Integration not found' });
-    return res.status(200).json({ integration });
+    // Decrypted credentials are for company admins only (backend/services/integrationSecretRedaction.ts).
+    const { role } = await getUserCompanyRole(req, companyId);
+    const secretsVisible = canViewIntegrationSecrets(role);
+    return res.status(200).json({
+      integration: secretsVisible ? integration : redactIntegrationSecrets(integration),
+      secrets_visible: secretsVisible,
+    });
   }
 
   // PUT / DELETE require admin
