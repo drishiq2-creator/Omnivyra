@@ -170,7 +170,7 @@ export async function sweepStaleSettlements(
       settledAt: null,
       fromStatus: c.settlementStatus,
     });
-    if (applied && applied.applied === false) { skipped++; continue; }
+    if (!applied || applied.applied !== true) { skipped++; continue; } // a missing answer is never "expired" (7c)
     expiredKeys.push(c.idempotencyKey);
   }
 

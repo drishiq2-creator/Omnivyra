@@ -28,6 +28,7 @@
  */
 
 import { logger } from '../../logger';
+import { recordMetric } from '../../systemHealthMetricsService';
 import type { SupportedProvider } from './paymentProviderAdapter';
 import {
   findCheckoutSessionByProviderReference as realFindByProviderReference,
@@ -56,7 +57,8 @@ export interface NormalizedSettlementEvent {
 
 export type NormalizeResult =
   | { ok: true; event: NormalizedSettlementEvent }
-  | { ok: false; reason: string };
+  /** On unmapped_status the identifying fields are carried for forensics (no pricing). */
+  | { ok: false; reason: string; providerEventId?: string; sessionReference?: string };
 
 // ── lifecycle state machine — forward-only ──────────────────────────────────
 const PROGRESSIVE_RANK: Record<string, number> = { created: 0, pending: 1, authorized: 2, succeeded: 3 };
@@ -145,7 +147,12 @@ function buildEvent(
   rawStatus: string, state: SettlementState | null,
 ): NormalizeResult {
   if (!ref) return { ok: false, reason: 'missing_session_reference' };
-  if (!state) return { ok: false, reason: `unmapped_status:${eventType || rawStatus || 'unknown'}` };
+  if (!state) {
+    return {
+      ok: false, reason: `unmapped_status:${eventType || rawStatus || 'unknown'}`,
+      providerEventId: eventId(native, provider, eventType, ref, rawStatus), sessionReference: ref,
+    };
+  }
   return {
     ok: true,
     event: {
@@ -276,7 +283,19 @@ export async function reconcileSettlementWebhook(
   // 2. normalize
   const normalized = normalizeSettlementWebhook(args.provider, args.payload ?? {});
   if (!normalized.ok) {
-    const fail = normalized as { ok: false; reason: string };
+    const fail = normalized as { ok: false; reason: string; providerEventId?: string; sessionReference?: string };
+    if (fail.reason.startsWith('unmapped_status:')) {
+      // 7c 2026-11-20: terminal only while OUR mapping is complete. A provider status we do not map (a new capture
+      // variant, a dispute) is refused 400 BEFORE any anchor - so it is surfaced here, never dropped silently: error
+      // log + durable count with the raw status and identifiers (no pricing). [Recording a replayable anchor needs a
+      // migration - the events CHECK on normalized_status - registered separately.]
+      const detail = {
+        provider: args.provider, reason: fail.reason,
+        providerEventId: fail.providerEventId ?? null, sessionReference: fail.sessionReference ?? null,
+      };
+      logger.error('settlement_webhook_unmapped_status', detail);
+      await recordMetric('billing', 'settlement_unmapped_status', 1, 'count', detail);
+    }
     return { ok: false, status: 'invalid_payload', reason: fail.reason };
   }
   const ev = normalized.event;
@@ -335,12 +354,14 @@ export async function reconcileSettlementWebhook(
     // CAS on the state this decision was made from (class 2, 2026-11-12).
     fromStatus: (session?.settlementStatus as string | null | undefined) ?? null,
   });
-  if (applied && applied.applied === false && applied.reason === 'write_failed') {
+  // A MISSING answer is treated as a failed write too - never read as success (7c hardening: this commit exists
+  // because a non-applied outcome read as success; do not depend on the type alone).
+  if (!applied || (applied.applied !== true && applied.reason === 'write_failed')) {
     // The transition was NOT persisted. Never answer 2xx for an event we failed to apply (the provider would stop
     // redelivering); throw -> the webhook route answers 500 -> the redelivery re-attempts via the duplicate path above.
     throw new CheckoutSessionStoreReadError('settlement transition', `write failed (${from} -> ${to})`);
   }
-  if (applied && applied.applied === false) {
+  if (applied.applied !== true) {
     // state_changed: another writer (e.g. the expiry sweeper) moved the session first. schema_missing: settlement is
     // inert (logged once by the store). Either way this event's transition was NOT applied - never "reconciled".
     return { ok: true, status: 'no_transition', replayed: recorded.duplicate, settlement_state: null, previous_state: from };
