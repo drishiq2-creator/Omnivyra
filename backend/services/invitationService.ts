@@ -189,7 +189,12 @@ export async function createInvitation(input: {
  * Behavior changed:
  *   - we no longer auto-revoke the invitation on send failure, because
  *     there IS no synchronous send. If the enqueue itself fails (rare —
- *     DB error), we revoke and throw, matching the old contract.
+ *     DB error), the invitation is LEFT LIVE and the error is rethrown
+ *     (2026-11-20): revoking it made the same-key retry replay a REVOKED
+ *     row and email a DEAD link. Do NOT restore the revoke - see the
+ *     catch block below and invitationReplayLiveOnly.test.ts.
+ *   - a replay only ever re-sends a LIVE invitation; a revoked / accepted /
+ *     expired one throws InvitationNotReplayableError (409, not retryable).
  */
 export async function createAndSendInvitation(input: {
   email: string;
