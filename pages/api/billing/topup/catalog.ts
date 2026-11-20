@@ -12,7 +12,9 @@ import { isTopUpPurchaseOpen } from '../../../../backend/services/billing/topUpA
 
 function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'GET') return res.status(405).end();
-  res.setHeader('Cache-Control', 'public, max-age=300');
+  // no-store (04, 2026-11-20; 7c): `purchases_open` depends on the environment's payment mode. A shared 5-minute cache
+  // would keep offering Buy for up to 5 minutes after a switch BACK to test, when no purchase can complete.
+  res.setHeader('Cache-Control', 'no-store');
   return res.status(200).json({
     packs: TOPUP_PACKS.map((p) => ({
       id: p.id,

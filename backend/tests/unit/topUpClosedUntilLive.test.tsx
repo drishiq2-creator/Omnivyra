@@ -36,6 +36,13 @@ describe('isTopUpPurchaseOpen: the same condition completePurchase refuses on', 
     expect(isTopUpPurchaseOpen()).toBe(open);
   });
 
+  it('the catalog is never cached: a switch BACK to test must close Buy at once (7c)', () => {
+    const headers: Record<string, string> = {};
+    const res: any = { setHeader: (k: string, v: string) => { headers[k.toLowerCase()] = v; return res; }, status: () => res, json: () => res };
+    (catalogHandler as any)({ method: 'GET' }, res);
+    expect(headers['cache-control']).toBe('no-store');
+  });
+
   it('the catalog route reports it as purchases_open', () => {
     prod = true; delete process.env.PAYMENT_PROVIDER_MODE;
     const res: any = { statusCode: 0, body: undefined, setHeader: () => res, status: (c: number) => { res.statusCode = c; return res; }, json: (b: unknown) => { res.body = b; return res; } };

@@ -8,9 +8,9 @@
  *   - payment_provider_events.provider_mode: DEFAULT 'test', CHECK IN ('test','live') ('manual' is not legal there).
  * What a non-live value MEANS is per table: for a purchase row see shared/billing/purchaseModeRefusal.ts.
  *
- * Consumers on main: backend/services/purchaseService.ts completePurchase ("may this row grant?").
- * Pending: backend/services/billing/topUpAvailability.ts ("may this environment sell?") on the TopUp branch; it adds
- * this same file, and whoever lands second confirms the tree holds exactly one copy with both importers.
+ * Consumers: backend/services/purchaseService.ts completePurchase ("may this row grant?") and
+ * backend/services/billing/topUpAvailability.ts isTopUpPurchaseOpen ("may this environment sell?"). One copy, both
+ * importers: pinned by purchaseModeRefusalPl162.test.ts ("is this live?" has one definition).
  * NOT folded in yet (their own mode logic): backend/services/payments/orchestrator/cashfreeAdapter.ts:16,
  * backend/services/billing/payments/checkoutSessionStore.ts:46.
  */
