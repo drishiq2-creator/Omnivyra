@@ -7,10 +7,12 @@
  *           settling one hold concurrently produce exactly one settle.
  * Synthetic org ids only (disposable replay DB; the suite refuses a non-loopback W6_DB_URL).
  */
+import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import { Client } from 'pg';
 import { db, inRollback } from './setup';
+import { expireOrgFreeCreditsProductionState } from './pre053FunctionState';
 
 const URL = process.env.W6_DB_URL ?? '';
 if (!/@(127\.0\.0\.1|localhost|\[::1\]):\d+\//.test(URL)) throw new Error('credit_settle_guards_053 refuses a non-loopback W6_DB_URL');
@@ -54,17 +56,42 @@ async function seed(prefix: string): Promise<string> {
   return idOf(`${prefix}:hold`);
 }
 
-async function installLiveBodies(): Promise<void> {
+async function installLiveBodies(resBody: string = LIVE_RES, pcBody: string = LIVE_PC): Promise<void> {
   await q(`CREATE OR REPLACE FUNCTION public.apply_credit_reservation(p_org_id uuid, p_phase text, p_free_amount int DEFAULT 0,
     p_incentive_amount int DEFAULT 0, p_paid_amount int DEFAULT 0, p_idempotency_key text DEFAULT NULL,
     p_reference_type text DEFAULT NULL, p_reference_id text DEFAULT NULL, p_note text DEFAULT NULL,
     p_performed_by uuid DEFAULT NULL, p_parent_id uuid DEFAULT NULL, p_category text DEFAULT 'paid')
-    RETURNS jsonb LANGUAGE plpgsql SET search_path = pg_catalog, public AS $fn$` + LIVE_RES + '$fn$');
+    RETURNS jsonb LANGUAGE plpgsql SET search_path = pg_catalog, public AS $fn$` + resBody + '$fn$');
   await q(`CREATE OR REPLACE FUNCTION public.apply_credit_partial_confirm(p_org_id uuid, p_hold_txn_id uuid,
     p_actual_free int DEFAULT 0, p_actual_incentive int DEFAULT 0, p_actual_paid int DEFAULT 0,
     p_idempotency_key text DEFAULT NULL, p_reference_type text DEFAULT NULL, p_reference_id text DEFAULT NULL,
     p_note text DEFAULT NULL, p_performed_by uuid DEFAULT NULL)
-    RETURNS jsonb LANGUAGE plpgsql SET search_path = public, extensions AS $fn$` + LIVE_PC + '$fn$');
+    RETURNS jsonb LANGUAGE plpgsql SET search_path = public, extensions AS $fn$` + pcBody + '$fn$');
+}
+
+// ── pre-image capture + rollback (7c/cb 2026-11-20) ─────────────────────────────────────────────────────────────────
+const MIG = fs.readFileSync(path.join(process.cwd(), 'supabase/migrations/20270217000053_credit_settle_guards_reauthor.sql'), 'utf8');
+const CAP = 'public.credit_settle_guards_053_preimage';
+const RES_REG = 'public.apply_credit_reservation(uuid,text,integer,integer,integer,text,text,text,text,uuid,uuid,text)';
+const PC_REG = 'public.apply_credit_partial_confirm(uuid,uuid,integer,integer,integer,text,text,text,text,uuid)';
+const EXP_REG = 'public.expire_org_free_credits(uuid,integer,text)';
+const OUT_RES = '5242c45fa92183090997c4bb4f6b8189';
+const OUT_PC = '71b0c840b1eb3116b4e53ec840aa4d19';
+/** 20270217000001 single_count's patch of the prod body; pinned below to 000001's own output md5 (03d616e6). */
+const SC_LIVE = LIVE_RES
+  .replace('GREATEST(0, v_wallet.free_balance      - v_wallet.reserved_free)', 'GREATEST(0, v_wallet.free_balance)')
+  .replace('GREATEST(0, v_wallet.incentive_balance - v_wallet.reserved_incentive)', 'GREATEST(0, v_wallet.incentive_balance)')
+  .replace('GREATEST(0, v_wallet.paid_balance      - v_wallet.reserved_paid)', 'GREATEST(0, v_wallet.paid_balance)');
+const liveMd5 = async (reg: string) =>
+  (await q('SELECT md5(prosrc) AS m FROM pg_proc WHERE oid = to_regprocedure($1)', [reg])).rows[0]?.m ?? null;
+const captured = async (): Promise<Record<string, string>> =>
+  Object.fromEntries((await q(`SELECT fn, prosrc_md5 FROM ${CAP}`)).rows.map((r: any) => [r.fn, r.prosrc_md5]));
+const capTableExists = async () => (await q(`SELECT to_regclass('${CAP}') IS NOT NULL AS e`)).rows[0].e as boolean;
+/** A database in PRODUCTION's pre-053 shape: no capture rows yet, expire_org_free_credits present, given bodies live. */
+async function prodShape(resBody: string, pcBody: string = LIVE_PC): Promise<void> {
+  await q(`DELETE FROM ${CAP}`);
+  await expireOrgFreeCreditsProductionState();
+  await installLiveBodies(resBody, pcBody);
 }
 
 describe('BEFORE - the LIVE prod bodies have each defect (installed in a rolled-back transaction)', () => {
@@ -163,9 +190,128 @@ describe('AFTER - 053 refuses each defect and keeps the live arithmetic', () => 
     expect(rows[0].pc_cfg).toEqual(['search_path=public, extensions']);
   });
 
-  it('the rollback restores the three LIVE bodies byte-for-byte (its own md5 check passes)', async () => {
+  it('replay: 053 captured the bodies it replaced (the baseline = prod body, or 000001 over it), and the capture table is owner-only', async () => {
+    // The CI replay restores supabase/_schema/baseline.sql (a prod snapshot) and replays only versions above its ledgerMax,
+    // so 20260625 never runs here: the replaced bodies are prod's (000001's patch once 000001 is in the tree).
+    const cap = await captured();
+    expect(['ad5383bf6ccf24a2c8ddee70db3b1297', '03d616e692cdfb9fefc25eb81e8e4595']).toContain(cap[RES_REG]);
+    expect(cap[PC_REG]).toBe('ff208f60617a7a272305a804037bf47d');
+    const { rows } = await q(`SELECT c.relrowsecurity AS rls,
+        (SELECT count(*)::int FROM pg_policy WHERE polrelid = c.oid) AS policies,
+        (SELECT count(*)::int FROM aclexplode(c.relacl) a WHERE a.grantee <> c.relowner) AS grants
+      FROM pg_class c WHERE c.oid = '${CAP}'::regclass`);
+    expect(rows[0]).toEqual({ rls: true, policies: 0, grants: 0 });
+    for (const r of ['anon', 'authenticated', 'service_role']) {
+      const { rows: p } = await q(`SELECT has_table_privilege($1, '${CAP}', 'SELECT') AS s, has_table_privilege($1, '${CAP}', 'INSERT') AS i`, [r]);
+      expect(p[0]).toEqual({ s: false, i: false });
+    }
+  });
+
+  it('replay: the rollback restores EXACTLY the captured bodies and drops the capture table', async () => {
     await inRollback(async () => {
+      const cap = await captured();
       expect(await attempt(ROLLBACK)).toBe('ok');
+      expect(await liveMd5(RES_REG)).toBe(cap[RES_REG]);
+      expect(await liveMd5(PC_REG)).toBe(cap[PC_REG]);
+      expect(await liveMd5(EXP_REG)).toBe(cap[EXP_REG] ?? null);
+      expect(await capTableExists()).toBe(false);
+    });
+  });
+});
+
+describe('PROD PATH - prod body -> 20270217000001 -> 053 -> rollback (cb C128: prod = ad5383bf / ff208f60, both unapplied)', () => {
+  it('the 000001 stand-in is byte-exact: its md5 is 000001\'s own pinned output', () => {
+    expect(crypto.createHash('md5').update(SC_LIVE).digest('hex')).toBe('03d616e692cdfb9fefc25eb81e8e4595');
+  });
+
+  it('053 over 000001: captures 03d616e6, re-runs idempotently, and the rollback KEEPS 000001\'s fix (not the prod body)', async () => {
+    await inRollback(async () => {
+      await prodShape(SC_LIVE);
+      expect(await liveMd5(RES_REG)).toBe('03d616e692cdfb9fefc25eb81e8e4595');
+      expect(await attempt(MIG)).toBe('ok');
+      expect([await liveMd5(RES_REG), await liveMd5(PC_REG), await liveMd5(EXP_REG)]).toEqual([OUT_RES, OUT_PC, null]);
+      const cap = await captured();
+      expect(cap).toEqual({
+        [RES_REG]: '03d616e692cdfb9fefc25eb81e8e4595',
+        [PC_REG]: 'ff208f60617a7a272305a804037bf47d',
+        [EXP_REG]: 'ae410c7ab297eebe2890a7f925d95f04',
+      });
+      expect(await attempt(MIG)).toBe('ok');                   // class 2: a re-run, no "already applied" branch
+      expect(await captured()).toEqual(cap);                   // nothing re-captured
+      expect(await attempt(ROLLBACK)).toBe('ok');
+      expect([await liveMd5(RES_REG), await liveMd5(PC_REG), await liveMd5(EXP_REG)])
+        .toEqual(['03d616e692cdfb9fefc25eb81e8e4595', 'ff208f60617a7a272305a804037bf47d', 'ae410c7ab297eebe2890a7f925d95f04']);
+      expect(await capTableExists()).toBe(false);
+    });
+  });
+
+  it('053 straight over the prod body (no 000001): the rollback restores ad5383bf', async () => {
+    await inRollback(async () => {
+      await prodShape(LIVE_RES);
+      expect(await attempt(MIG)).toBe('ok');
+      expect(await attempt(ROLLBACK)).toBe('ok');
+      expect(await liveMd5(RES_REG)).toBe('ad5383bf6ccf24a2c8ddee70db3b1297');
+    });
+  });
+
+  it('a full-history replay (the 20260625 bodies c62d8dde / 9591e6b3): accepted, and the rollback restores them', async () => {
+    const src = fs.readFileSync(path.join(process.cwd(), 'supabase/migrations/20260625_monetization_invariant_hardening.sql'), 'utf8');
+    const b = [...src.matchAll(/AS \$\$([\s\S]*?)\$\$;/g)].map((m) => m[1]);
+    await inRollback(async () => {
+      await prodShape(b[1], b[2]);
+      expect([await liveMd5(RES_REG), await liveMd5(PC_REG)]).toEqual(['c62d8dde5e3ad20a22ad6fd8ccc77154', '9591e6b38a79e6cfb02f60f19075f140']);
+      expect(await attempt(MIG)).toBe('ok');
+      expect(await attempt(ROLLBACK)).toBe('ok');
+      expect([await liveMd5(RES_REG), await liveMd5(PC_REG)]).toEqual(['c62d8dde5e3ad20a22ad6fd8ccc77154', '9591e6b38a79e6cfb02f60f19075f140']);
+    });
+  });
+
+  it('a CRLF-applied prod body (1db00c4d) is accepted and restored byte-for-byte, CR included', async () => {
+    await inRollback(async () => {
+      await prodShape(LIVE_RES.replace(/\n/g, '\r\n'));
+      expect(await liveMd5(RES_REG)).toBe('1db00c4d06a4a16c84ed419c4cc47bf6');
+      expect(await attempt(MIG)).toBe('ok');
+      expect(await attempt(ROLLBACK)).toBe('ok');
+      expect(await liveMd5(RES_REG)).toBe('1db00c4d06a4a16c84ed419c4cc47bf6');
+    });
+  });
+
+  it('an UNKNOWN body is refused and nothing is captured or replaced', async () => {
+    await inRollback(async () => {
+      await prodShape(LIVE_RES + '\n-- drift\n');
+      expect(await attempt(MIG)).toMatch(/053 preflight: apply_credit_reservation body is unknown/);
+      expect(await captured()).toEqual({});
+      expect(await liveMd5(RES_REG)).not.toBe(OUT_RES);
+    });
+  });
+
+  it('053 live with NO stored pre-image -> refused (its rollback could not be made correct)', async () => {
+    await inRollback(async () => {
+      await q(`DELETE FROM ${CAP}`);
+      expect(await attempt(MIG)).toMatch(/is already 053's body but NO pre-053 body is stored/);
+    });
+  });
+
+  it('a stored pre-image that differs from the live class-1 body -> refused (insert-only, never overwritten)', async () => {
+    await inRollback(async () => {
+      await prodShape(LIVE_RES);
+      await q(`INSERT INTO ${CAP} (fn, prosrc, prosrc_md5) VALUES ($1, $2, md5($2))`, [RES_REG, SC_LIVE]);
+      expect(await attempt(MIG)).toMatch(/already holds a DIFFERENT pre-053 body/);
+    });
+  });
+
+  it('the rollback refuses when a live body is no longer 053\'s output (never undoes a later change)', async () => {
+    await inRollback(async () => {
+      await installLiveBodies(SC_LIVE);
+      expect(await attempt(ROLLBACK)).toMatch(/a live credit body is not 053's output/);
+      expect(await capTableExists()).toBe(true);
+    });
+  });
+
+  it('control: the rollback refuses when the capture row is missing', async () => {
+    await inRollback(async () => {
+      await q(`DELETE FROM ${CAP} WHERE fn = $1`, [PC_REG]);
+      expect(await attempt(ROLLBACK)).toMatch(/no captured pre-053 body for apply_credit_partial_confirm/);
     });
   });
 });

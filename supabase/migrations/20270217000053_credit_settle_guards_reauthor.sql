@@ -34,8 +34,31 @@
 -- SPLIT OUT (e9 allowed): the expiry leak on RELEASE (held free credits escaping their grant's expiry) needs per-grant
 -- lot tracking - a follow-up version, not 053.
 --
--- PRE-REQUISITE AT APPLY: the preflight accepts exactly the known bodies (prod md5, or the 20260625 repo body a CI
--- replay produces) and refuses anything else - an unknown body means prod moved and 053 must be re-generated.
+-- PRE-REQUISITE AT APPLY / ORDER (7c + cb, 2026-11-20; cb's prod read C128: both functions are the pre-000001 LF
+-- bodies ad5383bf / ff208f60, and neither 20270217000001 nor 053 has a ledger row):
+--   ORDER: 20270217000001 (single_count) BEFORE 053. ROLLBACK: 053 first, then 000001. 000001 refuses 053's body as an
+--   unknown md5, so a reversed order fails closed instead of silently mixing.
+--   PREFLIGHT = an md5 ALLOWLIST ONLY, three classes per function:
+--     1. a known pre-053 body: prod (ad5383bf; partial ff208f60), 000001's patch of it (03d616e6), the 20260625 bodies a
+--        full-history replay installs (c62d8dde; partial 9591e6b3) and 000001's patch of that (7799ec27) - each in its
+--        LF and CRLF form. Line endings are PER FUNCTION (a Windows checkout may have applied any one body CRLF); the
+--        CRLF md5s are computed by the generator from the LF text, not measured;
+--     2. 053's own output, LF or CRLF - a re-run. Every statement below is idempotent, so there is no "already applied"
+--        branch;
+--     3. anything else RAISES: the body moved and 053 must be re-generated.
+--   There is no substring test: 'already settled by' accepted ANY body containing that text (an identity it is not).
+--   The real-schema CI replay restores supabase/_schema/baseline.sql (a prod snapshot: ad5383bf / ff208f60) and runs
+--   only versions above its ledgerMax, so it exercises the PROD class-1 path; 20260625 runs only in a full-history replay.
+--   PRE-IMAGE CAPTURE: before a class-1 body is replaced, its prosrc is stored insert-only in
+--   public.credit_settle_guards_053_preimage, earlier in this same migration. A capture that cannot be stored, or a
+--   stored pre-image that differs from the live class-1 body, fails the migration. A 053 body that is live with NO stored
+--   pre-image fails too: its rollback could not be made correct (escalate to b3/owner, do not patch around it). The
+--   table has zero grants (owner only), RLS on and no policy; the postcondition asserts that posture.
+--   WHY THE ROLLBACK READS THE CAPTURE: 053 outputs ONE fixed body whatever it replaced, so neither the ledger nor the
+--   live md5 at rollback time can say which pre-image to restore (prod + 000001, a 20260625 replay, ...). The rollback
+--   restores exactly the captured body per function, and refuses unless the live body is still 053's output.
+--   PRIVILEGE: the postcondition keeps both functions SECURITY INVOKER (prosecdef = false), with their live search_path
+--   and service_role-only EXECUTE. A re-authored body is exactly where a privilege change could ride in.
 
 DO $preflight$
 DECLARE
@@ -48,13 +71,14 @@ BEGIN
   IF v_res IS NULL OR v_pc IS NULL THEN
     RAISE EXCEPTION '053 preflight: apply_credit_reservation / apply_credit_partial_confirm (exact signatures) missing';
   END IF;
-  IF NOT (md5(v_res) = 'ad5383bf6ccf24a2c8ddee70db3b1297' OR position('already settled by' IN v_res) > 0
-          OR md5(v_res) = '5242c45fa92183090997c4bb4f6b8189') THEN
-    RAISE EXCEPTION '053 preflight: apply_credit_reservation body is unknown (md5 %) - prod moved; re-generate 053', md5(v_res);
+  -- class 1 (known pre-053 bodies) or class 2 (053's own output); anything else is unknown.
+  IF md5(v_res) NOT IN ('ad5383bf6ccf24a2c8ddee70db3b1297', '1db00c4d06a4a16c84ed419c4cc47bf6', '03d616e692cdfb9fefc25eb81e8e4595', '90bcbfb5e9eb2eedf1a0b7a8266554bf', 'c62d8dde5e3ad20a22ad6fd8ccc77154', '6e9ef99095e506a3c70fb2dde9686de9', '7799ec2755c49c952bacd529916acc9c', '7ee214ad28938b36d57f63eb68a9b9cd',
+                        '5242c45fa92183090997c4bb4f6b8189', '6a79f58996df56a4fd6cc90b0f7e5180') THEN
+    RAISE EXCEPTION '053 preflight: apply_credit_reservation body is unknown (md5 %) - it moved; re-generate 053', md5(v_res);
   END IF;
-  IF NOT (md5(v_pc) = 'ff208f60617a7a272305a804037bf47d' OR position('already settled by' IN v_pc) > 0
-          OR md5(v_pc) = '71b0c840b1eb3116b4e53ec840aa4d19') THEN
-    RAISE EXCEPTION '053 preflight: apply_credit_partial_confirm body is unknown (md5 %) - prod moved; re-generate 053', md5(v_pc);
+  IF md5(v_pc) NOT IN ('ff208f60617a7a272305a804037bf47d', 'a8ada9f2eded912a880a86db6a2ce5f2', '9591e6b38a79e6cfb02f60f19075f140', '76cc813b0ad6561e4d47f04031fac8ea',
+                       '71b0c840b1eb3116b4e53ec840aa4d19', 'dbed080e69408f46cc334df19d7d5435') THEN
+    RAISE EXCEPTION '053 preflight: apply_credit_partial_confirm body is unknown (md5 %) - it moved; re-generate 053', md5(v_pc);
   END IF;
   IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'credit_transactions'
                   AND column_name = 'parent_transaction_id') THEN
@@ -76,6 +100,56 @@ BEGIN
   END IF;
 END
 $preflight$;
+
+-- Pre-053 bodies, captured for the rollback (see header). Owner-only: zero grants, RLS on, no policy.
+CREATE TABLE IF NOT EXISTS public.credit_settle_guards_053_preimage (
+  fn          text        PRIMARY KEY CHECK (fn IN ('public.apply_credit_reservation(uuid,text,integer,integer,integer,text,text,text,text,uuid,uuid,text)',
+                                                    'public.apply_credit_partial_confirm(uuid,uuid,integer,integer,integer,text,text,text,text,uuid)',
+                                                    'public.expire_org_free_credits(uuid,integer,text)')),
+  prosrc      text        NOT NULL,
+  prosrc_md5  text        NOT NULL,
+  captured_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT credit_settle_guards_053_preimage_md5 CHECK (prosrc_md5 = md5(prosrc))
+);
+ALTER TABLE public.credit_settle_guards_053_preimage ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON TABLE public.credit_settle_guards_053_preimage FROM PUBLIC;
+DO $revoke$
+DECLARE r text;
+BEGIN
+  -- every non-owner grantee, including any a default-privilege rule added (anon / authenticated / service_role / ...).
+  FOR r IN SELECT DISTINCT a.grantee::regrole::text
+             FROM pg_class c, aclexplode(c.relacl) a
+            WHERE c.oid = 'public.credit_settle_guards_053_preimage'::regclass AND a.grantee <> 0 AND a.grantee <> c.relowner LOOP
+    EXECUTE format('REVOKE ALL ON TABLE public.credit_settle_guards_053_preimage FROM %s', r);
+  END LOOP;
+END
+$revoke$;
+
+DO $capture$
+DECLARE
+  f      record;
+  v_src  text;
+  v_have text;
+BEGIN
+  FOR f IN SELECT * FROM (VALUES
+      ('public.apply_credit_reservation(uuid,text,integer,integer,integer,text,text,text,text,uuid,uuid,text)', ARRAY['ad5383bf6ccf24a2c8ddee70db3b1297', '1db00c4d06a4a16c84ed419c4cc47bf6', '03d616e692cdfb9fefc25eb81e8e4595', '90bcbfb5e9eb2eedf1a0b7a8266554bf', 'c62d8dde5e3ad20a22ad6fd8ccc77154', '6e9ef99095e506a3c70fb2dde9686de9', '7799ec2755c49c952bacd529916acc9c', '7ee214ad28938b36d57f63eb68a9b9cd']),
+      ('public.apply_credit_partial_confirm(uuid,uuid,integer,integer,integer,text,text,text,text,uuid)', ARRAY['ff208f60617a7a272305a804037bf47d', 'a8ada9f2eded912a880a86db6a2ce5f2', '9591e6b38a79e6cfb02f60f19075f140', '76cc813b0ad6561e4d47f04031fac8ea']),
+      ('public.expire_org_free_credits(uuid,integer,text)', NULL::text[])) AS t(fn, pre) LOOP
+    SELECT prosrc INTO v_src FROM pg_proc WHERE oid = to_regprocedure(f.fn);
+    CONTINUE WHEN v_src IS NULL;                         -- only expire_org_free_credits can be absent (preflight)
+    IF f.pre IS NULL OR md5(v_src) = ANY (f.pre) THEN    -- class 1 (expire: whatever is live; 053 drops it)
+      INSERT INTO public.credit_settle_guards_053_preimage (fn, prosrc, prosrc_md5) VALUES (f.fn, v_src, md5(v_src)) ON CONFLICT (fn) DO NOTHING;
+      SELECT prosrc_md5 INTO v_have FROM public.credit_settle_guards_053_preimage WHERE fn = f.fn;
+      IF v_have IS DISTINCT FROM md5(v_src) THEN
+        RAISE EXCEPTION '053 capture: % already holds a DIFFERENT pre-053 body (stored %, live %) - the rollback could not be made correct; escalate',
+          f.fn, v_have, md5(v_src);
+      END IF;
+    ELSIF NOT EXISTS (SELECT 1 FROM public.credit_settle_guards_053_preimage WHERE fn = f.fn) THEN
+      RAISE EXCEPTION '053 capture: % is already 053''s body but NO pre-053 body is stored - its rollback could not be made correct; escalate', f.fn;
+    END IF;
+  END LOOP;
+END
+$capture$;
 
 CREATE OR REPLACE FUNCTION public.apply_credit_reservation(
   p_org_id           uuid,
@@ -634,12 +708,13 @@ DO $verify$
 DECLARE
   r text;
 BEGIN
-  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid = to_regprocedure('public.apply_credit_reservation(uuid,text,integer,integer,integer,text,text,text,text,uuid,uuid,text)')) IS DISTINCT FROM '5242c45fa92183090997c4bb4f6b8189' THEN
+  IF COALESCE((SELECT md5(prosrc) FROM pg_proc WHERE oid = to_regprocedure('public.apply_credit_reservation(uuid,text,integer,integer,integer,text,text,text,text,uuid,uuid,text)')), '') NOT IN ('5242c45fa92183090997c4bb4f6b8189', '6a79f58996df56a4fd6cc90b0f7e5180') THEN
     RAISE EXCEPTION '053 postcondition: apply_credit_reservation body is not the generated one';
   END IF;
-  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid = to_regprocedure('public.apply_credit_partial_confirm(uuid,uuid,integer,integer,integer,text,text,text,text,uuid)')) IS DISTINCT FROM '71b0c840b1eb3116b4e53ec840aa4d19' THEN
+  IF COALESCE((SELECT md5(prosrc) FROM pg_proc WHERE oid = to_regprocedure('public.apply_credit_partial_confirm(uuid,uuid,integer,integer,integer,text,text,text,text,uuid)')), '') NOT IN ('71b0c840b1eb3116b4e53ec840aa4d19', 'dbed080e69408f46cc334df19d7d5435') THEN
     RAISE EXCEPTION '053 postcondition: apply_credit_partial_confirm body is not the generated one';
   END IF;
+  -- PRIVILEGE: both stay SECURITY INVOKER (live: invoker rights).
   IF (SELECT prosecdef FROM pg_proc WHERE oid = to_regprocedure('public.apply_credit_reservation(uuid,text,integer,integer,integer,text,text,text,text,uuid,uuid,text)'))
      OR (SELECT prosecdef FROM pg_proc WHERE oid = to_regprocedure('public.apply_credit_partial_confirm(uuid,uuid,integer,integer,integer,text,text,text,text,uuid)')) THEN
     RAISE EXCEPTION '053 postcondition: a credit function became SECURITY DEFINER (live: invoker rights)';
@@ -656,7 +731,16 @@ BEGIN
   IF to_regprocedure('public.expire_org_free_credits(uuid,integer,text)') IS NOT NULL THEN
     RAISE EXCEPTION '053 postcondition: expire_org_free_credits still exists';
   END IF;
+  -- The rollback's pre-images exist for both replaced functions, and the capture table is owner-only.
+  IF (SELECT count(*) FROM public.credit_settle_guards_053_preimage WHERE fn IN ('public.apply_credit_reservation(uuid,text,integer,integer,integer,text,text,text,text,uuid,uuid,text)', 'public.apply_credit_partial_confirm(uuid,uuid,integer,integer,integer,text,text,text,text,uuid)')) <> 2 THEN
+    RAISE EXCEPTION '053 postcondition: a pre-053 body is not captured';
+  END IF;
+  IF NOT (SELECT relrowsecurity FROM pg_class WHERE oid = 'public.credit_settle_guards_053_preimage'::regclass)
+     OR EXISTS (SELECT 1 FROM pg_policy WHERE polrelid = 'public.credit_settle_guards_053_preimage'::regclass)
+     OR EXISTS (SELECT 1 FROM pg_class c, aclexplode(c.relacl) a WHERE c.oid = 'public.credit_settle_guards_053_preimage'::regclass AND a.grantee <> c.relowner) THEN
+    RAISE EXCEPTION '053 postcondition: credit_settle_guards_053_preimage is not owner-only (RLS on, no policy, zero grants)';
+  END IF;
 END
 $verify$;
 
--- ROLLBACK: supabase/migrations/rollbacks/credit_settle_guards_reauthor_rollback.sql (restores the three LIVE bodies byte-for-byte)
+-- ROLLBACK: supabase/migrations/rollbacks/credit_settle_guards_reauthor_rollback.sql (restores the CAPTURED pre-053 bodies)

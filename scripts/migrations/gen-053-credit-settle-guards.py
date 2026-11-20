@@ -13,6 +13,7 @@ It rewrites the migration and its rollback; commit both with this script.
 """
 import hashlib
 import pathlib
+import re
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 FIX = ROOT / 'backend/tests/fixtures/live-credit-functions-20261113'
@@ -26,6 +27,43 @@ MD5 = lambda s: hashlib.md5(s.encode('utf-8')).hexdigest()
 assert MD5(LIVE_RES) == 'ad5383bf6ccf24a2c8ddee70db3b1297', 'fixture is not the prod apply_credit_reservation body'
 assert MD5(LIVE_PC) == 'ff208f60617a7a272305a804037bf47d', 'fixture is not the prod apply_credit_partial_confirm body'
 assert MD5(LIVE_EXP) == 'ae410c7ab297eebe2890a7f925d95f04', 'fixture is not the prod expire_org_free_credits body'
+CRLF = lambda s: s.replace('\n', '\r\n')
+
+# ── KNOWN PRE-053 BODIES (the preflight allowlist; 7c/cb 2026-11-20) ────────────────────────────────────────────────
+# Every md5 below is COMPUTED from a committed text, never typed: the prod fixtures, the 20260625 bodies a full-history
+# replay installs, and 20270217000001 single_count's patch of each (000001 runs BEFORE 053). The literals in the asserts
+# are checkpoints only: 000001 pins the same constants, so a drift between its patch and ours aborts generation here.
+_SRC_625 = (ROOT / 'supabase/migrations/20260625_monetization_invariant_hardening.sql').read_text(encoding='utf-8')
+_B625 = re.findall(r'AS \$\$(.*?)\$\$;', _SRC_625, re.S)
+assert len(_B625) == 3, '20260625 no longer has exactly three $$ bodies'
+R625_RES, R625_PC = _B625[1], _B625[2]
+assert MD5(R625_RES) == 'c62d8dde5e3ad20a22ad6fd8ccc77154', '20260625 apply_credit_reservation body moved'
+assert MD5(R625_PC) == '9591e6b38a79e6cfb02f60f19075f140', '20260625 apply_credit_partial_confirm body moved'
+
+
+def single_count(body, needles):
+    """20270217000001's patch: each availability needle replaced (it asserts the counts; we assert its md5s)."""
+    for old, new in needles:
+        body = body.replace(old, new)
+    return body
+
+
+SC_LIVE = single_count(LIVE_RES, [(f'GREATEST(0, v_wallet.{c}_balance{pad} - v_wallet.reserved_{c})', f'GREATEST(0, v_wallet.{c}_balance)')
+                                  for c, pad in (('free', '     '), ('incentive', ''), ('paid', '     '))])
+SC_625 = single_count(R625_RES, [(f'(v_wallet.{c}_balance - v_wallet.reserved_{c})', f'v_wallet.{c}_balance')
+                                 for c in ('free', 'incentive', 'paid')])
+assert MD5(SC_LIVE) == '03d616e692cdfb9fefc25eb81e8e4595' and MD5(CRLF(SC_LIVE)) == '90bcbfb5e9eb2eedf1a0b7a8266554bf', '000001 (prod) drift'
+assert MD5(SC_625) == '7799ec2755c49c952bacd529916acc9c' and MD5(CRLF(SC_625)) == '7ee214ad28938b36d57f63eb68a9b9cd', '000001 (replay) drift'
+
+
+def both_endings(*bodies):
+    """LF and CRLF md5 of each body: line endings are PER FUNCTION (a Windows checkout may have applied any of them)."""
+    return [m for b in bodies for m in (MD5(b), MD5(CRLF(b)))]
+
+
+RES_PRE = both_endings(LIVE_RES, SC_LIVE, R625_RES, SC_625)
+PC_PRE = both_endings(LIVE_PC, R625_PC)
+sqlset = lambda ms: ', '.join(f"'{m}'" for m in ms)
 
 # The unique constraints/indexes that ARE the idempotency key on credit_transactions (C100). A unique_violation on any
 # other constraint is a real error and is re-raised; a key collision with no row behind it is raised too, never {id:null}.
@@ -247,9 +285,36 @@ HEADER = f"""-- 20270217000053 - credit settle guards, RE-AUTHORED ON THE LIVE B
 -- SPLIT OUT (e9 allowed): the expiry leak on RELEASE (held free credits escaping their grant's expiry) needs per-grant
 -- lot tracking - a follow-up version, not 053.
 --
--- PRE-REQUISITE AT APPLY: the preflight accepts exactly the known bodies (prod md5, or the 20260625 repo body a CI
--- replay produces) and refuses anything else - an unknown body means prod moved and 053 must be re-generated.
+-- PRE-REQUISITE AT APPLY / ORDER (7c + cb, 2026-11-20; cb's prod read C128: both functions are the pre-000001 LF
+-- bodies ad5383bf / ff208f60, and neither 20270217000001 nor 053 has a ledger row):
+--   ORDER: 20270217000001 (single_count) BEFORE 053. ROLLBACK: 053 first, then 000001. 000001 refuses 053's body as an
+--   unknown md5, so a reversed order fails closed instead of silently mixing.
+--   PREFLIGHT = an md5 ALLOWLIST ONLY, three classes per function:
+--     1. a known pre-053 body: prod (ad5383bf; partial ff208f60), 000001's patch of it (03d616e6), the 20260625 bodies a
+--        full-history replay installs (c62d8dde; partial 9591e6b3) and 000001's patch of that (7799ec27) - each in its
+--        LF and CRLF form. Line endings are PER FUNCTION (a Windows checkout may have applied any one body CRLF); the
+--        CRLF md5s are computed by the generator from the LF text, not measured;
+--     2. 053's own output, LF or CRLF - a re-run. Every statement below is idempotent, so there is no "already applied"
+--        branch;
+--     3. anything else RAISES: the body moved and 053 must be re-generated.
+--   There is no substring test: 'already settled by' accepted ANY body containing that text (an identity it is not).
+--   The real-schema CI replay restores supabase/_schema/baseline.sql (a prod snapshot: ad5383bf / ff208f60) and runs
+--   only versions above its ledgerMax, so it exercises the PROD class-1 path; 20260625 runs only in a full-history replay.
+--   PRE-IMAGE CAPTURE: before a class-1 body is replaced, its prosrc is stored insert-only in
+--   public.credit_settle_guards_053_preimage, earlier in this same migration. A capture that cannot be stored, or a
+--   stored pre-image that differs from the live class-1 body, fails the migration. A 053 body that is live with NO stored
+--   pre-image fails too: its rollback could not be made correct (escalate to b3/owner, do not patch around it). The
+--   table has zero grants (owner only), RLS on and no policy; the postcondition asserts that posture.
+--   WHY THE ROLLBACK READS THE CAPTURE: 053 outputs ONE fixed body whatever it replaced, so neither the ledger nor the
+--   live md5 at rollback time can say which pre-image to restore (prod + 000001, a 20260625 replay, ...). The rollback
+--   restores exactly the captured body per function, and refuses unless the live body is still 053's output.
+--   PRIVILEGE: the postcondition keeps both functions SECURITY INVOKER (prosecdef = false), with their live search_path
+--   and service_role-only EXECUTE. A re-authored body is exactly where a privilege change could ride in.
 """
+
+CAP = 'public.credit_settle_guards_053_preimage'
+RES_OUT = both_endings(res)
+PC_OUT = both_endings(pc)
 
 PREFLIGHT = f"""
 DO $preflight$
@@ -263,13 +328,14 @@ BEGIN
   IF v_res IS NULL OR v_pc IS NULL THEN
     RAISE EXCEPTION '053 preflight: apply_credit_reservation / apply_credit_partial_confirm (exact signatures) missing';
   END IF;
-  IF NOT (md5(v_res) = 'ad5383bf6ccf24a2c8ddee70db3b1297' OR position('already settled by' IN v_res) > 0
-          OR md5(v_res) = '{MD5(res)}') THEN
-    RAISE EXCEPTION '053 preflight: apply_credit_reservation body is unknown (md5 %) - prod moved; re-generate 053', md5(v_res);
+  -- class 1 (known pre-053 bodies) or class 2 (053's own output); anything else is unknown.
+  IF md5(v_res) NOT IN ({sqlset(RES_PRE)},
+                        {sqlset(RES_OUT)}) THEN
+    RAISE EXCEPTION '053 preflight: apply_credit_reservation body is unknown (md5 %) - it moved; re-generate 053', md5(v_res);
   END IF;
-  IF NOT (md5(v_pc) = 'ff208f60617a7a272305a804037bf47d' OR position('already settled by' IN v_pc) > 0
-          OR md5(v_pc) = '{MD5(pc)}') THEN
-    RAISE EXCEPTION '053 preflight: apply_credit_partial_confirm body is unknown (md5 %) - prod moved; re-generate 053', md5(v_pc);
+  IF md5(v_pc) NOT IN ({sqlset(PC_PRE)},
+                       {sqlset(PC_OUT)}) THEN
+    RAISE EXCEPTION '053 preflight: apply_credit_partial_confirm body is unknown (md5 %) - it moved; re-generate 053', md5(v_pc);
   END IF;
   IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'credit_transactions'
                   AND column_name = 'parent_transaction_id') THEN
@@ -291,6 +357,56 @@ BEGIN
   END IF;
 END
 $preflight$;
+
+-- Pre-053 bodies, captured for the rollback (see header). Owner-only: zero grants, RLS on, no policy.
+CREATE TABLE IF NOT EXISTS {CAP} (
+  fn          text        PRIMARY KEY CHECK (fn IN ('{RES_REG}',
+                                                    '{PC_REG}',
+                                                    '{EXP_REG}')),
+  prosrc      text        NOT NULL,
+  prosrc_md5  text        NOT NULL,
+  captured_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT credit_settle_guards_053_preimage_md5 CHECK (prosrc_md5 = md5(prosrc))
+);
+ALTER TABLE {CAP} ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON TABLE {CAP} FROM PUBLIC;
+DO $revoke$
+DECLARE r text;
+BEGIN
+  -- every non-owner grantee, including any a default-privilege rule added (anon / authenticated / service_role / ...).
+  FOR r IN SELECT DISTINCT a.grantee::regrole::text
+             FROM pg_class c, aclexplode(c.relacl) a
+            WHERE c.oid = '{CAP}'::regclass AND a.grantee <> 0 AND a.grantee <> c.relowner LOOP
+    EXECUTE format('REVOKE ALL ON TABLE {CAP} FROM %s', r);
+  END LOOP;
+END
+$revoke$;
+
+DO $capture$
+DECLARE
+  f      record;
+  v_src  text;
+  v_have text;
+BEGIN
+  FOR f IN SELECT * FROM (VALUES
+      ('{RES_REG}', ARRAY[{sqlset(RES_PRE)}]),
+      ('{PC_REG}', ARRAY[{sqlset(PC_PRE)}]),
+      ('{EXP_REG}', NULL::text[])) AS t(fn, pre) LOOP
+    SELECT prosrc INTO v_src FROM pg_proc WHERE oid = to_regprocedure(f.fn);
+    CONTINUE WHEN v_src IS NULL;                         -- only expire_org_free_credits can be absent (preflight)
+    IF f.pre IS NULL OR md5(v_src) = ANY (f.pre) THEN    -- class 1 (expire: whatever is live; 053 drops it)
+      INSERT INTO {CAP} (fn, prosrc, prosrc_md5) VALUES (f.fn, v_src, md5(v_src)) ON CONFLICT (fn) DO NOTHING;
+      SELECT prosrc_md5 INTO v_have FROM {CAP} WHERE fn = f.fn;
+      IF v_have IS DISTINCT FROM md5(v_src) THEN
+        RAISE EXCEPTION '053 capture: % already holds a DIFFERENT pre-053 body (stored %, live %) - the rollback could not be made correct; escalate',
+          f.fn, v_have, md5(v_src);
+      END IF;
+    ELSIF NOT EXISTS (SELECT 1 FROM {CAP} WHERE fn = f.fn) THEN
+      RAISE EXCEPTION '053 capture: % is already 053''s body but NO pre-053 body is stored - its rollback could not be made correct; escalate', f.fn;
+    END IF;
+  END LOOP;
+END
+$capture$;
 """
 
 POST = f"""
@@ -298,12 +414,13 @@ DO $verify$
 DECLARE
   r text;
 BEGIN
-  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid = to_regprocedure('{RES_REG}')) IS DISTINCT FROM '{MD5(res)}' THEN
+  IF COALESCE((SELECT md5(prosrc) FROM pg_proc WHERE oid = to_regprocedure('{RES_REG}')), '') NOT IN ({sqlset(RES_OUT)}) THEN
     RAISE EXCEPTION '053 postcondition: apply_credit_reservation body is not the generated one';
   END IF;
-  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid = to_regprocedure('{PC_REG}')) IS DISTINCT FROM '{MD5(pc)}' THEN
+  IF COALESCE((SELECT md5(prosrc) FROM pg_proc WHERE oid = to_regprocedure('{PC_REG}')), '') NOT IN ({sqlset(PC_OUT)}) THEN
     RAISE EXCEPTION '053 postcondition: apply_credit_partial_confirm body is not the generated one';
   END IF;
+  -- PRIVILEGE: both stay SECURITY INVOKER (live: invoker rights).
   IF (SELECT prosecdef FROM pg_proc WHERE oid = to_regprocedure('{RES_REG}'))
      OR (SELECT prosecdef FROM pg_proc WHERE oid = to_regprocedure('{PC_REG}')) THEN
     RAISE EXCEPTION '053 postcondition: a credit function became SECURITY DEFINER (live: invoker rights)';
@@ -320,6 +437,15 @@ BEGIN
   IF to_regprocedure('{EXP_REG}') IS NOT NULL THEN
     RAISE EXCEPTION '053 postcondition: expire_org_free_credits still exists';
   END IF;
+  -- The rollback's pre-images exist for both replaced functions, and the capture table is owner-only.
+  IF (SELECT count(*) FROM {CAP} WHERE fn IN ('{RES_REG}', '{PC_REG}')) <> 2 THEN
+    RAISE EXCEPTION '053 postcondition: a pre-053 body is not captured';
+  END IF;
+  IF NOT (SELECT relrowsecurity FROM pg_class WHERE oid = '{CAP}'::regclass)
+     OR EXISTS (SELECT 1 FROM pg_policy WHERE polrelid = '{CAP}'::regclass)
+     OR EXISTS (SELECT 1 FROM pg_class c, aclexplode(c.relacl) a WHERE c.oid = '{CAP}'::regclass AND a.grantee <> c.relowner) THEN
+    RAISE EXCEPTION '053 postcondition: credit_settle_guards_053_preimage is not owner-only (RLS on, no policy, zero grants)';
+  END IF;
 END
 $verify$;
 """
@@ -331,35 +457,54 @@ mig = (HEADER + PREFLIGHT
        + f"REVOKE ALL ON FUNCTION {PC_REG} FROM PUBLIC, anon, authenticated;\nGRANT EXECUTE ON FUNCTION {PC_REG} TO service_role;\n"
        + f"\nDROP FUNCTION IF EXISTS {EXP_REG};\n"
        + POST
-       + "\n-- ROLLBACK: supabase/migrations/rollbacks/credit_settle_guards_reauthor_rollback.sql (restores the three LIVE bodies byte-for-byte)\n")
+       + "\n-- ROLLBACK: supabase/migrations/rollbacks/credit_settle_guards_reauthor_rollback.sql (restores the CAPTURED pre-053 bodies)\n")
 
-rb = (f"""-- Rollback of 20270217000053_credit_settle_guards_reauthor.sql (e1). GENERATED by
--- scripts/migrations/gen-053-credit-settle-guards.py: restores the three LIVE bodies byte-for-byte from the C100 fixtures
--- (md5 asserted below), with their live search_path, invoker rights and service_role-only EXECUTE.
-CREATE OR REPLACE FUNCTION {RES_SIG}
-AS $fn${LIVE_RES}$fn$;
-REVOKE ALL ON FUNCTION {RES_REG} FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION {RES_REG} TO service_role;
 
-CREATE OR REPLACE FUNCTION {PC_SIG}
-AS $fn${LIVE_PC}$fn$;
-REVOKE ALL ON FUNCTION {PC_REG} FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION {PC_REG} TO service_role;
-
-CREATE OR REPLACE FUNCTION {EXP_SIG}
-AS $fn${LIVE_EXP}$fn$;
-REVOKE ALL ON FUNCTION {EXP_REG} FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION {EXP_REG} TO service_role;
-
-DO $verify$
-BEGIN
-  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid = to_regprocedure('{RES_REG}')) <> 'ad5383bf6ccf24a2c8ddee70db3b1297'
-     OR (SELECT md5(prosrc) FROM pg_proc WHERE oid = to_regprocedure('{PC_REG}')) <> 'ff208f60617a7a272305a804037bf47d'
-     OR (SELECT md5(prosrc) FROM pg_proc WHERE oid = to_regprocedure('{EXP_REG}')) <> 'ae410c7ab297eebe2890a7f925d95f04' THEN
-    RAISE EXCEPTION '053 rollback: a restored body is not the live one';
+def restore(sig, reg, label):
+    return f"""
+  SELECT prosrc, prosrc_md5 INTO v_src, v_md5 FROM {CAP} WHERE fn = '{reg}';
+  IF NOT FOUND THEN
+    RAISE EXCEPTION '053 rollback: no captured pre-053 body for {label} - nothing restored; escalate';
   END IF;
+  EXECUTE format($sig$CREATE OR REPLACE FUNCTION {sig}
+AS %L$sig$, v_src);
+  EXECUTE $g$REVOKE ALL ON FUNCTION {reg} FROM PUBLIC, anon, authenticated$g$;
+  EXECUTE $g$GRANT EXECUTE ON FUNCTION {reg} TO service_role$g$;
+  IF (SELECT md5(prosrc) FROM pg_proc WHERE oid = to_regprocedure('{reg}')) IS DISTINCT FROM v_md5 THEN
+    RAISE EXCEPTION '053 rollback: restored {label} is not the captured body';
+  END IF;
+"""
+
+
+rb = (f"""-- Rollback of 20270217000053_credit_settle_guards_reauthor.sql (e1, c6). GENERATED by
+-- scripts/migrations/gen-053-credit-settle-guards.py. Restores EXACTLY the pre-053 bodies 053 captured in
+-- {CAP} (per function: prod, prod + 20270217000001, or a 20260625 replay - the live md5 cannot
+-- tell which, see the 053 header), with the live search_path, invoker rights and service_role-only EXECUTE, then drops
+-- the capture table. ORDER: roll back 053 BEFORE 20270217000001. One DO block: all or nothing.
+-- It REFUSES unless both live bodies are still 053's output, so it never undoes a later change.
+DO $rollback$
+DECLARE
+  v_src text;
+  v_md5 text;
+BEGIN
+  IF to_regclass('{CAP}') IS NULL THEN
+    RAISE EXCEPTION '053 rollback: {CAP} is missing - no pre-053 body to restore; escalate';
+  END IF;
+  IF COALESCE((SELECT md5(prosrc) FROM pg_proc WHERE oid = to_regprocedure('{RES_REG}')), '') <> ALL (ARRAY[{sqlset(RES_OUT)}])
+     OR COALESCE((SELECT md5(prosrc) FROM pg_proc WHERE oid = to_regprocedure('{PC_REG}')), '') <> ALL (ARRAY[{sqlset(PC_OUT)}]) THEN
+    RAISE EXCEPTION '053 rollback: a live credit body is not 053''s output - something changed it after 053; nothing restored';
+  END IF;
+{restore(RES_SIG, RES_REG, 'apply_credit_reservation')}{restore(PC_SIG, PC_REG, 'apply_credit_partial_confirm')}
+  -- expire_org_free_credits: restored only if it existed when 053 ran (053 dropped it).
+  IF EXISTS (SELECT 1 FROM {CAP} WHERE fn = '{EXP_REG}') THEN
+    IF to_regprocedure('{EXP_REG}') IS NOT NULL THEN
+      RAISE EXCEPTION '053 rollback: expire_org_free_credits exists again - something recreated it after 053; nothing restored';
+    END IF;
+{restore(EXP_SIG, EXP_REG, 'expire_org_free_credits')}  END IF;
+
+  DROP TABLE {CAP};
 END
-$verify$;
+$rollback$;
 """)
 
 OUT.write_text(mig, encoding='utf-8', newline='\n')
