@@ -142,7 +142,7 @@ const CHECKER_MUTANTS = [
   { id: 'C05', cls: 'right side of &&/||/?? dominates', file: A,
     from: '        expr(n.right, m, { ...l }, cx, scope);\n        return l;', to: '        return expr(n.right, m, { ...l }, cx, scope);' },
   { id: 'C06', cls: 'imported service effects not followed', file: A,
-    from: '      if (r) for (const e of summarize(r.fn, r.m, 1, new Set())) record(', to: '      if (false) for (const e of summarize(r.fn, r.m, 1, new Set())) record(' },
+    from: '      if (r) for (const e of summarize(r.fn, r.m, 1)) record(', to: '      if (false) for (const e of summarize(r.fn, r.m, 1)) record(' },
   { id: 'C07', cls: 'same-module helpers not interpreted', file: A,
     from: '      if (r && (r.local || r.delegated)) {', to: '      if (r && r.delegated) {' },
   { id: 'C08', cls: 'storage sink dropped', file: S,

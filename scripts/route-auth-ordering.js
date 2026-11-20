@@ -40,7 +40,10 @@ const INLINE_DEPTH = 6;
 
 function createOrderingAnalyzer({ PRIMITIVES, AUTHZ_HELPERS, DELEGATION_ROOTS, resolveSpec, loadModule, parseImports }) {
   const sfCache = new Map();
-  const summaryCache = new Map();
+  // Per parsed source (sfCache is content-addressed, so a fixture or mutant at the same path never shares an entry),
+  // then keyed by function position AND depth: summarize() is a pure function of (function, depth), so a result
+  // computed for one route is exactly the result for every other route - the scan order cannot change a finding.
+  const summaryCache = new WeakMap();
   // Verifier names that authenticate for the route being analysed (machine-token / webhook-signature entries).
   let extraAuth = new Set();
 
@@ -158,12 +161,19 @@ function createOrderingAnalyzer({ PRIMITIVES, AUTHZ_HELPERS, DELEGATION_ROOTS, r
     return { fn: unwrap(fn), m: { ...mm, rel: mod.rel }, name: imp.imported, delegated: DELEGATION_ROOTS.some((r) => r.test(target)) };
   }
 
-  /** Unordered side effects a (non-delegation) function can reach. */
-  function summarize(fn, m, depth, seen) {
-    const key = `${m.rel}#${fn.pos}`;
-    if (summaryCache.has(key)) return summaryCache.get(key);
-    if (depth > SUMMARY_DEPTH || seen.has(key)) return [];
-    seen.add(key);
+  /**
+   * Unordered side effects a (non-delegation) function can reach within SUMMARY_DEPTH calls.
+   * DETERMINISM: the result depends only on (function, depth). There is no shared visited set (it made the
+   * result depend on which caller reached a function first, and the cache then served that truncated result
+   * to every later route - the gate's findings changed with the directory order). Recursion and cycles are
+   * bounded by the depth cut alone; memoising by (function, depth) keeps the cost linear.
+   */
+  function summarize(fn, m, depth) {
+    if (depth > SUMMARY_DEPTH) return [];
+    let bySf = summaryCache.get(m.sf);
+    if (!bySf) { bySf = new Map(); summaryCache.set(m.sf, bySf); }
+    const key = `${fn.pos}@${depth}`;
+    if (bySf.has(key)) return bySf.get(key);
     const out = [];
     const visit = (n) => {
       if (ts.isCallExpression(n)) {
@@ -171,7 +181,7 @@ function createOrderingAnalyzer({ PRIMITIVES, AUTHZ_HELPERS, DELEGATION_ROOTS, r
         if (s) out.push({ ...s, at: `${m.rel}:${line(m, n)}` });
         else if (!authOf(n, m)) {
           const r = resolveCallee(n, m, null);
-          if (r) for (const e of summarize(r.fn, r.m, depth + 1, seen)) out.push({ ...e, via: [r.name, ...(e.via || [])] });
+          if (r) for (const e of summarize(r.fn, r.m, depth + 1)) out.push({ ...e, via: [r.name, ...(e.via || [])] });
         }
       }
       ts.forEachChild(n, visit);
@@ -180,7 +190,7 @@ function createOrderingAnalyzer({ PRIMITIVES, AUTHZ_HELPERS, DELEGATION_ROOTS, r
     const uniq = [];
     const k = new Set();
     for (const e of out) { const id = `${e.kind}|${e.at}`; if (!k.has(id)) { k.add(id); uniq.push(e); } }
-    summaryCache.set(key, uniq);
+    bySf.set(key, uniq);
     return uniq;
   }
 
@@ -320,7 +330,7 @@ function createOrderingAnalyzer({ PRIMITIVES, AUTHZ_HELPERS, DELEGATION_ROOTS, r
         cx.stack.pop(); cx.depth -= 1;
         return { ...st, id: st.id || out.st.id, tenant: st.tenant || out.st.tenant };
       }
-      if (r) for (const e of summarize(r.fn, r.m, 1, new Set())) record(cx, m, n, e, st, [r.name, ...(e.via || [])]);
+      if (r) for (const e of summarize(r.fn, r.m, 1)) record(cx, m, n, e, st, [r.name, ...(e.via || [])]);
       return st;
     }
     let out = st;
