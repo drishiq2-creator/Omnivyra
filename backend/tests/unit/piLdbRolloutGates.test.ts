@@ -87,9 +87,11 @@ describe('repository: the PI-LDB columns are written only once the schema is app
     for (const c of PI_LDB_COLUMNS) expect(Object.keys(stores.lead_intelligence[0])).toContain(c);
   });
 
-  it('only the exact value true opens it', () => {
-    for (const v of ['1', 'yes', 'on', 'TRUEish', '']) expect(isPiLdbSchemaReady({ PI_LDB_SCHEMA_READY: v } as never)).toBe(false);
-    expect(isPiLdbSchemaReady({ PI_LDB_SCHEMA_READY: ' TRUE ' } as never)).toBe(true);
+  it('STRICT: only the exact string "true" opens it (ON is the dangerous state)', () => {
+    for (const v of ['1', 'yes', 'on', 'TRUE', 'True', ' true', 'true ', '']) {
+      expect(isPiLdbSchemaReady({ PI_LDB_SCHEMA_READY: v } as never)).toBe(false);
+    }
+    expect(isPiLdbSchemaReady({ PI_LDB_SCHEMA_READY: 'true' } as never)).toBe(true);
   });
 });
 
@@ -112,7 +114,7 @@ describe('import wizard UI flag: default OFF', () => {
 
   it('unset -> hidden; only "true" shows it', () => {
     expect(isProspectImportUiEnabled(undefined)).toBe(false);
-    expect(isProspectImportUiEnabled('1')).toBe(false);
+    for (const v of ['1', 'TRUE', 'True', ' true']) expect(isProspectImportUiEnabled(v)).toBe(false);
     expect(isProspectImportUiEnabled('true')).toBe(true);
   });
 });

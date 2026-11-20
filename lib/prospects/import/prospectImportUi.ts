@@ -7,5 +7,6 @@
 export function isProspectImportUiEnabled(
   value: string | undefined = process.env.NEXT_PUBLIC_PROSPECT_IMPORT_ENABLED,
 ): boolean {
-  return String(value ?? '').trim().toLowerCase() === 'true';
+  // STRICT, like piLdbSchemaReady: only the exact string 'true' shows the surface.
+  return value === 'true';
 }
