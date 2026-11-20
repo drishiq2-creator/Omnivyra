@@ -673,7 +673,7 @@ export async function requireContentTenantAccess(
     .maybeSingle();
   if (error) {
     // A FAILED lookup is not "not found" (b3/7c 2026-11-20): retryable 503, never a 404 that reads as absence.
-    res.setHeader('Retry-After', '5');
+    res.setHeader('Retry-After', String(SEAM_RETRY_AFTER_SECONDS));
     res.status(503).json({ error: 'Content lookup failed. Try again.', code: 'CONTENT_LOOKUP_FAILED' });
     return null;
   }

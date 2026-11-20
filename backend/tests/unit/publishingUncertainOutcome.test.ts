@@ -18,15 +18,15 @@ jest.mock('../../services/workerSnapshotShadowHook', () => ({ runWorkerSnapshotS
 import { fakeDb, resetFakeDb, type Row } from '../helpers/fakeWhatsappDb';
 
 const job = (over: Row = {}): any => ({
-  id: 'j1', company_id: 'co-a', website_id: 'w1', connection_id: 'c1', provider: 'wordpress', blog_id: 'b1',
+  id: 'j1', company_id: 'c0a00000-0000-4000-8000-0000000000aa', website_id: 'w1', connection_id: 'c1', provider: 'wordpress', blog_id: 'b1',
   // A REAL claim: the run's lock identity (the claim fence filters on it).
   job_type: 'publish_post', status: 'processing', locked_by: 'w', locked_at: '2026-11-12T09:59:00.000Z', attempt_count: 0, max_attempts: 3, request_payload: {}, ...over,
 });
 const seed = (over: Row = {}) => resetFakeDb({
   publishing_jobs: [job(over)],
   publishing_attempts: [],
-  blogs: [{ id: 'b1', company_id: 'co-a', title: 't', status: 'draft', external_id: 'ext-old' }],
-  company_integrations: [{ id: 'int1', company_id: 'co-a', website_connection_id: 'c1' }],
+  blogs: [{ id: 'b1', company_id: 'c0a00000-0000-4000-8000-0000000000aa', title: 't', status: 'draft', external_id: 'ext-old' }],
+  company_integrations: [{ id: 'int1', company_id: 'c0a00000-0000-4000-8000-0000000000aa', website_connection_id: 'c1' }],
   integration_logs: [],
 });
 const jobRow = (): Row => fakeDb.tables.publishing_jobs.find((x) => x.id === 'j1')!;
@@ -109,8 +109,8 @@ describe('Part 1 - the job', () => {
     const PAST = '2026-01-01T00:00:00.000Z';
     resetFakeDb({
       publishing_jobs: [
-        { id: 'ju', status: 'processing', lock_expires_at: PAST, attempt_count: 1 },
-        { id: 'jp', status: 'processing', lock_expires_at: PAST, attempt_count: 1 },
+        { id: 'ju', company_id: 'c0a00000-0000-4000-8000-0000000000aa', status: 'processing', lock_expires_at: PAST, attempt_count: 1 },
+        { id: 'jp', company_id: 'c0a00000-0000-4000-8000-0000000000aa', status: 'processing', lock_expires_at: PAST, attempt_count: 1 },
       ],
       publishing_attempts: [
         { id: 'a1', job_id: 'ju', attempt_number: 1, status: 'failed', failure_category: svc.UNCERTAIN_PUBLISH_CATEGORY },

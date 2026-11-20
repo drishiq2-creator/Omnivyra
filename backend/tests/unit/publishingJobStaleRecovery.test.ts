@@ -15,7 +15,7 @@ import { failNext, fakeDb, resetFakeDb, type Row } from '../helpers/fakeWhatsapp
 import { recoverStalePublishingJobs } from '../../services/publishingJobService';
 
 const PAST = '2026-01-01T00:00:00.000Z';
-const job = (id: string, over: Row = {}): Row => ({ id, status: 'processing', lock_expires_at: PAST, attempt_count: 1, ...over });
+const job = (id: string, over: Row = {}): Row => ({ id, company_id: 'c0a00000-0000-4000-8000-0000000000aa', status: 'processing', lock_expires_at: PAST, attempt_count: 1, ...over });
 const attempt = (jobId: string, n: number, status: string, over: Row = {}): Row =>
   ({ id: `${jobId}-a${n}`, job_id: jobId, attempt_number: n, status, provider_response: { id: 'wp-123' }, ...over });
 const seed = (jobs: Row[], attempts: Row[]) => resetFakeDb({ publishing_jobs: jobs, publishing_attempts: attempts });

@@ -30,7 +30,7 @@ import {
   requeueDeadLetteredPublishingJob,
 } from '../../services/publishingJobService';
 
-const CO = 'co-a';
+const CO = 'c0a00000-0000-4000-8000-0000000000aa';
 const DL = '2026-11-12T10:00:00.000Z';
 const j = (id: string, over: Row = {}): Row => ({
   id, company_id: CO, blog_id: 'b1', provider: 'wordpress', job_type: 'publish_post', status: 'dead_letter',
@@ -78,7 +78,7 @@ describe('listPublishingIssues', () => {
   });
 
   it('another company\\u2019s dead letters are not listed', async () => {
-    resetFakeDb({ publishing_jobs: [j('x', { company_id: 'co-b' })], publishing_attempts: [] });
+    resetFakeDb({ publishing_jobs: [j('x', { company_id: 'c0b00000-0000-4000-8000-0000000000bb' })], publishing_attempts: [] });
     expect(await listPublishingIssues(CO)).toEqual([]);
   });
 
@@ -125,7 +125,7 @@ describe('requeueDeadLetteredPublishingJob', () => {
 
   it.each([
     ['not dead-lettered', [j('a', { status: 'retrying', dead_letter_at: null })], 'NOT_DEAD_LETTER'],
-    ['another company', [j('a', { company_id: 'co-b' })], 'NOT_FOUND'],
+    ['another company', [j('a', { company_id: 'c0b00000-0000-4000-8000-0000000000bb' })], 'NOT_FOUND'],
   ] as const)('%s: refused', async (_l, jobs, code) => {
     resetFakeDb({ publishing_jobs: [...jobs], publishing_attempts: [] });
     expect(await requeueDeadLetteredPublishingJob({ jobId: 'a', companyId: CO, actorUserId: 'u1', confirmOutcomeUnknown: true }))

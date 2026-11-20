@@ -43,7 +43,7 @@ import {
 } from '../../services/publishingJobService';
 import { publishBlogPost } from '../../services/blogService';
 
-const CO = 'co-a';
+const CO = 'c0a00000-0000-4000-8000-0000000000aa';
 const KEY = 'blog:b1:publish:int1';
 const UPDATE_KEY = 'blog:b1:update:int1';
 const LOCK = '2026-11-12T09:59:00.000Z';

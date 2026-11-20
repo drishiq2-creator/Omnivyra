@@ -31,15 +31,15 @@ import { failNext, fakeDb, resetFakeDb, type Row } from '../helpers/fakeWhatsapp
 import { claimDuePublishingJobs, executeClaimedPublishingJob } from '../../services/publishingJobService';
 
 const job = (over: Row = {}): any => ({
-  id: 'j1', company_id: 'co-a', website_id: 'w1', connection_id: 'c1', provider: 'wordpress', blog_id: 'b1',
+  id: 'j1', company_id: 'c0a00000-0000-4000-8000-0000000000aa', website_id: 'w1', connection_id: 'c1', provider: 'wordpress', blog_id: 'b1',
   // A REAL claim: the run's lock identity (the claim fence filters on it).
   job_type: 'publish_post', status: 'processing', locked_by: 'w', locked_at: '2026-11-12T09:59:00.000Z', attempt_count: 0, max_attempts: 3, request_payload: {}, ...over,
 });
 const seed = () => resetFakeDb({
   publishing_jobs: [job()],
   publishing_attempts: [],
-  blogs: [{ id: 'b1', company_id: 'co-a', title: 't', status: 'draft' }],
-  company_integrations: [{ id: 'int1', company_id: 'co-a', website_connection_id: 'c1' }],
+  blogs: [{ id: 'b1', company_id: 'c0a00000-0000-4000-8000-0000000000aa', title: 't', status: 'draft' }],
+  company_integrations: [{ id: 'int1', company_id: 'c0a00000-0000-4000-8000-0000000000aa', website_connection_id: 'c1' }],
   integration_logs: [],
 });
 const jobRow = (): Row => fakeDb.tables.publishing_jobs.find((x) => x.id === 'j1')!;
