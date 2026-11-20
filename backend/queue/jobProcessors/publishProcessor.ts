@@ -274,7 +274,9 @@ async function recordUnreadableOrganization(
       jobId: ctx.jobId, message: markError instanceof Error ? markError.message : String(markError),
     });
   }
-  await recordRetryStateForFailedDelivery(ctx.jobId, ctx.job);
+  // The org error IS this delivery's error (the caller re-throws it): passed so an UnrecoverableError
+  // is recorded as exhausted, like every other failed delivery (line signature x main caller, stage-0e).
+  await recordRetryStateForFailedDelivery(ctx.jobId, ctx.job, orgError);
   if (isFinalAttempt) {
     try {
       await updateScheduledPostOnFailure(
