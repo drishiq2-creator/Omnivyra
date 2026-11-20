@@ -46,10 +46,11 @@ let _cronStatus: CronStatus = 'initializing';
  * Worker-side setter for cron health. Called by main.ts from the
  * startCron() failure handler. Idempotent — successive calls overwrite.
  *
- * `_reason` is accepted for the callers' record and NOT stored: it is a raw error message (it can name hosts or
- * connection details) and /health is served on a public port. main.ts logs it where it is raised.
+ * STATUS ONLY, by signature: there is deliberately no reason/message parameter. /health is served on a PUBLIC port,
+ * and the reason a caller has is a raw error message (it can name hosts or connection details). Do NOT add one to
+ * store or serve it - log it where it is raised (main.ts does). CronStatus is a closed union for the same reason.
  */
-export function setCronStatus(status: CronStatus, _reason?: string | null): void {
+export function setCronStatus(status: CronStatus): void {
   _cronStatus = status;
 }
 
@@ -138,7 +139,7 @@ export function startHealthServer(port = 8080): http.Server {
       return;
     }
 
-    if (req.url === '/health' && req.method === 'GET') {
+    if (path === '/health' && req.method === 'GET') {
       // HTTP status remains 200 even when cron is degraded — Railway's
       // healthcheck only restarts on 5xx, and a crash-loop here would
       // hurt more than the degraded scheduler. Operators read the

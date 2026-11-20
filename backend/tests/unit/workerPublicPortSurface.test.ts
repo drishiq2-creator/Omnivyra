@@ -48,7 +48,7 @@ describe('worker public port surface', () => {
   });
 
   it('/health is status only, even while cron is degraded by an error that names a host', async () => {
-    setCronStatus('degraded', 'connect ECONNREFUSED redis://worker:s3cret@10.0.0.5:6379');
+    setCronStatus('degraded');
     try {
       const r = await call('/health');
       expect(r.status).toBe(200);
@@ -81,6 +81,17 @@ describe('worker public port surface', () => {
       expect((await call(p)).status).toBe(404);
     },
   );
+
+  it('setCronStatus takes the STATUS only - no parameter through which a raw error could reach /health', () => {
+    expect(setCronStatus.length).toBe(1);
+    expect(SRC).toMatch(/type CronStatus = 'ok' \| 'degraded' \| 'initializing';/); // closed union: no free text
+  });
+
+  it('/health with a query string is still /health (path, not raw url)', async () => {
+    const r = await call('/health?cb=1');
+    expect(r.status).toBe(200);
+    expect(Object.keys((await r.json()) as object).sort()).toEqual(['cron_status', 'status', 'ts', 'uptime']);
+  });
 
   it('POST /health -> 404 (only GET is served)', async () => {
     expect((await call('/health', 'POST')).status).toBe(404);
