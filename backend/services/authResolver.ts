@@ -595,7 +595,11 @@ export async function resolveAuthenticatedUser(
     if (iatSec !== null) {
       const iatMs = iatSec * 1000;
       const revokedAtMs = Date.parse(row.session_revoked_after);
-      if (Number.isFinite(revokedAtMs) && iatMs < revokedAtMs) {
+      // Whole-second comparison (2026-11-20): iat has 1 s resolution while the epoch is written with ms (NOW()). A
+      // token re-issued later in the SAME second as the revoke (the user's own re-authentication) must survive, so
+      // the cut-off is the START of the revoke's second. Stated margin: a token minted in that same second before the
+      // revoke also survives (< 1 s); refresh-token revocation (step 2) closes it.
+      if (Number.isFinite(revokedAtMs) && iatSec < Math.floor(revokedAtMs / 1000)) {
         logger.warn('auth_resolver_session_revoked', {
           userId: row.id,
           iat: new Date(iatMs).toISOString(),

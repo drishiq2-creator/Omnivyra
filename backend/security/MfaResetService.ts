@@ -40,7 +40,7 @@
 import { ownedDbTable } from '../db/writeOwner';
 import { revokeFactor as revokeTotpFactor, findActiveForUser as findActiveTotpFactor } from './totp/TotpFactorRepository';
 import { listForUser as listWebAuthnForUser, revokeCredential as revokeWebAuthnCredential } from './webauthn/WebAuthnCredentialRepository';
-import { revokeAllSessionsForUser } from './SessionAuthorityService';
+import { revokeAllAccessForUser } from '../services/lifecycleGovernance';
 import { revokeForUser as revokeStepUpForUser } from './stepup/StepUpSessionService';
 import { logger } from '../services/logger';
 import { logSecurityEvent } from './audit/SecurityAuditService';
@@ -127,7 +127,8 @@ export async function adminResetMfa(input: AdminResetMfaInput): Promise<AdminRes
   let stepupSessionsRevoked = 0;
   if (input.alsoRevokeSessions !== false) {
     try {
-      sessionsRevoked = await revokeAllSessionsForUser(input.userId, reasonText);
+      // Canonical sessions + the JWT epoch (b3 2026-11-20). Refresh tokens survive until step 2 (no user JWT here).
+      sessionsRevoked = (await revokeAllAccessForUser(input.userId, reasonText)).revokedAuthSessions;
       stepupSessionsRevoked = await revokeStepUpForUser(input.userId, reasonText);
     } catch (err) {
       logger.warn('admin_mfa_reset_session_revoke_failed', {
