@@ -8,6 +8,7 @@ import { createApiRoute as __createApiRoute } from '../../../../lib/platform/rou
 
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { TOPUP_PACKS } from '@/lib/billing/topupCatalog';
+import { isTopUpPurchaseOpen } from '../../../../backend/services/billing/topUpAvailability';
 
 function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'GET') return res.status(405).end();
@@ -21,6 +22,9 @@ function handler(req: NextApiRequest, res: NextApiResponse) {
       label: p.label,
     })),
     note: 'Top-up credits are consumed after monthly plan credits and never expire.',
+    // false in production until live payments (backend/services/billing/topUpAvailability.ts): a purchase started
+    // there could never complete (completePurchase refuses test-mode grants in prod), so the panel shows no Buy.
+    purchases_open: isTopUpPurchaseOpen(),
   });
 }
 

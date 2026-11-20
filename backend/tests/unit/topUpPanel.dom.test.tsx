@@ -49,7 +49,9 @@ let routes: Record<string, () => Promise<any>>;
 
 function installRoutes(over: Record<string, () => Promise<any>> = {}) {
   routes = {
-    '/api/billing/topup/catalog': () => jsonRes({ packs: [PACK] }),
+    // purchases_open: the real catalog always sends it (04, 2026-11-20). These suites model an environment where
+    // buying is OPEN; the closed path is pinned in topUpClosedUntilLive.test.tsx.
+    '/api/billing/topup/catalog': () => jsonRes({ packs: [PACK], purchases_open: true }),
     '/api/billing/topup/history': () => jsonRes({ purchases: [] }),
     '/api/billing/credit-breakdown': () => jsonRes({ buckets: [] }),
     '/api/billing/checkout/create-order': () => jsonRes({

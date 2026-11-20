@@ -12,6 +12,9 @@ import { createIdempotentOperation } from '@/lib/idempotency';
 import { resolvePrice, currencySymbol, CURRENCIES, type Currency } from '@/lib/billing/currency';
 import { TOPUPS } from '@/lib/billing/commercialPlans';
 
+/** Shown instead of Buy until live payments (no purchase can complete in prod before then). */
+export const TOPUP_CLOSED_NOTICE = "Buying credits opens soon. Your organisation's existing credits keep working; ask your admin if you need more now.";
+
 const RAZORPAY_JS = 'https://checkout.razorpay.com/v1/checkout.js';
 const CASHFREE_JS = 'https://sdk.cashfree.com/js/v3/cashfree.js';
 
@@ -71,6 +74,9 @@ interface Bucket {
 
 export default function TopUpPanel({ orgId }: { orgId: string | null | undefined }) {
   const [packs, setPacks] = useState<Pack[]>([]);
+  // Buying opens ONLY when the catalog says so (purchases_open === true). Missing or unreadable means closed: a
+  // purchase that can't complete must never be invited (c6 hotfix #73: no test-mode grants in production).
+  const [purchasesOpen, setPurchasesOpen] = useState(false);
   const [history, setHistory] = useState<Purchase[]>([]);
   const [status, setStatus] = useState<Status>({ kind: 'idle' });
   const [lastPackId, setLastPackId] = useState<string | null>(null);
@@ -106,7 +112,11 @@ export default function TopUpPanel({ orgId }: { orgId: string | null | undefined
     (async () => {
       try {
         const res = await apiFetch('/api/billing/topup/catalog');
-        if (res.ok) setPacks(((await res.json()).packs ?? []) as Pack[]);
+        if (res.ok) {
+          const catalog = await res.json();
+          setPacks((catalog.packs ?? []) as Pack[]);
+          setPurchasesOpen(catalog.purchases_open === true);
+        }
       } catch { /* */ }
     })();
     refreshHistory();
@@ -267,6 +277,11 @@ export default function TopUpPanel({ orgId }: { orgId: string | null | undefined
       </div>
 
       {/* Packs */}
+      {!purchasesOpen && packs.length > 0 && (
+        <div role="status" className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+          {TOPUP_CLOSED_NOTICE}
+        </div>
+      )}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
         {packs.map((p) => (
           <div
@@ -280,10 +295,10 @@ export default function TopUpPanel({ orgId }: { orgId: string | null | undefined
             <div className="mt-2 text-sm font-semibold text-slate-700">{priceLabel(p)}</div>
             <button
               onClick={() => buy(p)}
-              disabled={busy || !orgId}
+              disabled={busy || !orgId || !purchasesOpen}
               className="mt-4 w-full rounded-lg bg-indigo-600 px-4 py-2 text-sm font-bold text-white disabled:opacity-50"
             >
-              {busy && lastPackId === p.id ? 'Processing…' : 'Buy'}
+              {!purchasesOpen ? 'Opens soon' : busy && lastPackId === p.id ? 'Processing…' : 'Buy'}
             </button>
           </div>
         ))}
