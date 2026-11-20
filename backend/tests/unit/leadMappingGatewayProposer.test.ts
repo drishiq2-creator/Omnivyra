@@ -402,7 +402,40 @@ describe('PI-LDB-5 · billing and gateway arguments', () => {
       createGatewayMappingProposer(ctx, { runCompletion: gw.run })(wide(10, 'x'.repeat(2_000))),
     ).rejects.toBeInstanceOf(MappingInputTooLargeError);
     expect(gw.calls).toHaveLength(0);
-    expect(AI_MAPPING_MAX_INPUT_TOKENS).toBe(5_000);
+  });
+
+  it('THE MARGIN: worst case >= 10x at the rate the CODE reads (llm_model_pricing seed, not llm_pricing_config)', () => {
+    // pricingService.ts:130 reads llm_model_pricing; its latest seed is the 'restore ... complete' migration.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const fs = require('fs');
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const path = require('path');
+    const sql = fs.readFileSync(path.join(__dirname, '../../../supabase/migrations/20261024000004_restore_llm_model_pricing_complete.sql'), 'utf8');
+    const m = sql.match(/'openai',\s*'gpt-4o-mini',\s*'completion',\s*([0-9.]+),\s*([0-9.]+)/);
+    expect(m).not.toBeNull();
+    const [inPer1k, outPer1k] = [Number(m![1]), Number(m![2])];
+    const worstUsd = (AI_MAPPING_MAX_INPUT_TOKENS / 1000) * inPer1k + (1_000 / 1000) * outPer1k;
+    const priceUsd = 2 * 0.007;
+    expect(priceUsd / worstUsd).toBeGreaterThanOrEqual(10);
+  });
+
+  it('(D) the AI payload carries no target description and at most 3 samples per column; the request still names every target', async () => {
+    const gw = fakeGateway('{"proposals":[]}');
+    await createGatewayMappingProposer(ctx, { runCompletion: gw.run })(
+      request({ headers: ['A'], samples: { A: ['[redacted:email]', 'Acme Ltd', 'x', 'y', 'z'] } }),
+    );
+    const user = JSON.parse((gw.calls[0] as any).completion.messages[1].content);
+    expect(user.allowedTargets.length).toBe(allowed().length);
+    for (const t of user.allowedTargets) expect(Object.keys(t).sort()).toEqual(['dataType', 'entity', 'key', 'label']);
+    expect(user.columns[0].redactedSamples).toHaveLength(3);
+  });
+
+  it('truncation-safe output: at the column bound max_tokens covers 60 tokens per column and stays <= 1,000', async () => {
+    const gw = fakeGateway('{"proposals":[]}');
+    await createGatewayMappingProposer(ctx, { runCompletion: gw.run })(wide(AI_MAPPING_MAX_COLUMNS));
+    const maxTokens = (gw.calls[0] as any).completion.max_tokens;
+    expect(maxTokens).toBeGreaterThanOrEqual(AI_MAPPING_MAX_COLUMNS * 60);
+    expect(maxTokens).toBeLessThanOrEqual(1_000);
   });
 
   it('control: the same 10 columns with short text are under the token bound, and the call is made', async () => {

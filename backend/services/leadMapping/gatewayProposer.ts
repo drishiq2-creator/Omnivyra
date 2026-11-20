@@ -109,7 +109,7 @@ export const LEAD_ATTRIBUTE_MAPPING_MODEL = 'gpt-4o-mini';
  * header plus overhead is generous without leaving room for the model to
  * write an essay we would then truncate mid-JSON.
  */
-const OUTPUT_TOKENS_PER_HEADER = 40;
+const OUTPUT_TOKENS_PER_HEADER = 60;
 const OUTPUT_TOKENS_FLOOR = 400;
 const OUTPUT_TOKENS_CEILING = 1_000;
 
@@ -118,18 +118,27 @@ const OUTPUT_TOKENS_CEILING = 1_000;
  *
  * The proposal is a FIXED 2 credits (credit_cost_config 'lead_attribute_mapping'), so the real AI cost must be
  * bounded here, not by the price. Owner rule: price >= 10x real cost. 2 credits x $0.007 = $0.014, so the call
- * may cost at most $0.0014. At the repo's gpt-4o-mini rate card (llm_model_pricing seed 20260321 /
- * blackHoleCostCapture: $0.00015 per 1k in, $0.0006 per 1k out):
- *   input  <= 5,000 tokens  -> $0.00075
+ * may cost at most $0.0014. RATE = the row the code READS: llm_model_pricing openai/gpt-4o-mini (pricingService.ts:130;
+ * seeded 20260515_pricing_engine.sql:55, restored 20261024000004:60) = $0.0003 per 1k in, $0.0006 per 1k out.
+ * (llm_pricing_config's $0.00015 has no non-test reader - 7c 2026-11-20. Whether the live row should be OpenAI's
+ * published $0.15/M is a SEPARATE money item; if it is corrected, INPUT may rise to ~5,000 at the same margin.)
  *   output <= 1,000 tokens  -> $0.00060 (max_tokens: a hard provider-side cap)
- *   worst case               $0.00135  -> 10.4x at 2 credits.
- * Output: 40 tokens/header is the sizing; 15 columns x a generous 60 = 900 fits under 1,000 without truncating
- * the JSON mid-entry. Input: estimated CONSERVATIVELY at 3 chars/token (+600 headroom), not 4.
+ *   input  <= 2,666 tokens  -> $0.00080
+ *   worst case               $0.00140  -> 10.0x at 2 credits - the ADVERSARIAL case.
+ * Input is estimated CONSERVATIVELY at 3 chars/token (+600 headroom): ordinary prose and JSON run nearer 4, so a
+ * typical request that passes has FEWER real tokens than the bound (typical margin ~13x). Over-counting is the
+ * feature - do not "correct" the estimator to make more files pass.
+ * Output: 60 tokens per header (a header's JSON entry is comfortably under 60), so 15 columns need <= 900 + wrapper
+ * and max_tokens (<= 1,000) cannot cut the JSON mid-entry: a truncated-but-charged answer is structurally excluded.
+ * (D) 2026-11-20: the per-call target catalog no longer carries `description`, and the AI payload carries 3 samples
+ * per column - together ~26% less fixed input (probe: 1 column 2,591 -> 1,902 est.; 15 typical 3,428 -> 2,678).
  * Over either bound the proposer REFUSES before any billing or model call (MappingInputTooLargeError): the
  * engine records one degraded entry, the import maps deterministically, the user is told why, nothing is charged.
  */
 export const AI_MAPPING_MAX_COLUMNS = 15;
-export const AI_MAPPING_MAX_INPUT_TOKENS = 5_000;
+export const AI_MAPPING_MAX_INPUT_TOKENS = 2_666;
+/** (D) samples per column in the AI payload (the scorer keeps all of them). */
+export const AI_MAPPING_SAMPLES_PER_COLUMN = 3;
 export const estimateInputTokens = (promptChars: number): number => Math.ceil(promptChars / 3) + 600;
 
 /** How much model prose we keep. Surfaced to a tenant as context, never scored. */
@@ -436,17 +445,22 @@ function outputBudget(headerCount: number): number {
  */
 function buildUserPrompt(request: ProposerRequest): string {
   return JSON.stringify({
+    // (D) 2026-11-20 (7c + b3): the target catalog is sent on EVERY call and was most of the fixed cost. `description`
+    // is dropped: `entity` states the person/employer split (Rule 3) and `label` + `dataType` carry the type a sample
+    // is checked against (Rule 5). The deterministic scorer still uses the full registry; only the model's hint
+    // payload shrinks.
     allowedTargets: request.allowedTargets.map((t) => ({
       key: t.key,
       entity: t.entity,
       label: t.label,
-      description: t.description,
       dataType: t.dataType,
     })),
     columns: request.headers.map((header) => ({
       sourceField: header,
       description: request.fieldDescriptions?.[header] ?? null,
-      redactedSamples: request.samples[header] ?? [],
+      // (D) the model reads samples for TYPE evidence only (Rule 5); 3 suffice. The scorer still sees all redacted
+      // samples - this trims only what leaves the process.
+      redactedSamples: (request.samples[header] ?? []).slice(0, AI_MAPPING_SAMPLES_PER_COLUMN),
     })),
   });
 }
