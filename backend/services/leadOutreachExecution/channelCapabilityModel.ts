@@ -77,6 +77,15 @@
  * did — answered, declined, asked for a callback. The tenant's business
  * assessment of the prospect is a separate concept owned elsewhere, and folding
  * the two together is how a no-answer becomes "not interested".
+ *
+ * ─── EVERY NEW EGRESS CHANNEL NEEDS ITS OWN SERVER-SIDE GATE ──────────────
+ * The channel list a client sends (an operator screen's `channels`, a workflow
+ * step's choice) is NOT a control: any caller can put any channel in it. Email
+ * is safe while off only because `emailTransport` itself refuses every send
+ * unless `LEAD_OUTREACH_EMAIL_ENABLED` is `true` (`isEmailTransportEnabled`).
+ * A new egress channel must carry the same kind of gate inside its transport
+ * (or the dispatcher), default OFF, before it is registered; hiding it in a UI
+ * is never sufficient.
  */
 
 /** The operations a channel can have, independently of one another. */
