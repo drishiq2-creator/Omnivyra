@@ -35,6 +35,21 @@ const EMPTY: StrategyHistoryResult = {
  * Load strategy history for a company (campaigns created from recommendations, aspect usage).
  * Used by strategy-history API and by generate flow to attach strategy_memory context.
  */
+/**
+ * A read this history depends on FAILED (b3 2026-11-20, read-failure rule): never reported as an empty history.
+ * Callers that render it answer an error with retry (strategy-history route: 503 STRATEGY_HISTORY_UNAVAILABLE);
+ * callers that use it as optional input (recommendations/generate) already proceed without it.
+ */
+export const STRATEGY_HISTORY_UNAVAILABLE = 'STRATEGY_HISTORY_UNAVAILABLE';
+export class StrategyHistoryReadError extends Error {
+  readonly code = STRATEGY_HISTORY_UNAVAILABLE;
+  readonly retryable = true;
+  constructor(readonly stage: 'campaign_versions' | 'recommendation_snapshots') {
+    super('Strategy history could not be loaded. Try again.');
+    this.name = 'StrategyHistoryReadError';
+  }
+}
+
 export async function getStrategyHistoryForCompany(
   companyId: string
 ): Promise<StrategyHistoryResult> {
@@ -46,7 +61,7 @@ export async function getStrategyHistoryForCompany(
     .eq('company_id', companyId)
     .order('created_at', { ascending: true });
 
-  if (versionError) return EMPTY;
+  if (versionError) throw new StrategyHistoryReadError('campaign_versions');
   if (!versionRows?.length) return { ...EMPTY, campaigns_count: 0 };
 
   const campaigns_count = versionRows.length;
@@ -79,7 +94,8 @@ export async function getStrategyHistoryForCompany(
     .eq('company_id', companyId)
     .in('id', uniqueIds);
 
-  if (snapError || !snapshotRows?.length) {
+  if (snapError) throw new StrategyHistoryReadError('recommendation_snapshots');
+  if (!snapshotRows?.length) {
     return { ...EMPTY, campaigns_count, strategy_momentum: null };
   }
 
