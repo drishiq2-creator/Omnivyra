@@ -8,6 +8,12 @@
  */
 import { Client } from 'pg';
 
+// c6 2026-11-20 (cb, CI run 44765251202): this project replays EVERY migration, i.e. it IS the PI-LDB schema-ready
+// state, so the PI-LDB write switch (backend/services/leadIntelligence/piLdbSchemaReady.ts) is ON for every suite,
+// with the exact strict value. Suites that need the OFF state (the deploy-decoupling control in
+// pildb_display_acceptance) unset it locally and restore it.
+process.env.PI_LDB_SCHEMA_READY = 'true';
+
 const url = process.env.W6_DB_URL;
 if (!url) {
   throw new Error(
