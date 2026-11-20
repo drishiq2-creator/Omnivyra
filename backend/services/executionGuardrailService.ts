@@ -3,7 +3,7 @@
  *
  * Company-scoped guardrails applied before executeAction in:
  * - evaluateAutoRules (source: 'evaluation')
- * - communityAiScheduler (source: 'scheduler')
+ * (The community AI scheduler, source 'scheduler', was retired 2026-11-20 - owner ruling.)
  *
  * Does not apply to manual /api/community-ai/actions/execute.
  */
@@ -41,7 +41,7 @@ function tenMinutesAgo(): string {
  */
 export async function canExecuteAction(
   action: CommunityAiAction,
-  context: { source: 'evaluation' | 'scheduler' }
+  context: { source: 'evaluation' }
 ): Promise<GuardrailResult> {
   const companyId = action.company_id;
 

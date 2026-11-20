@@ -217,7 +217,8 @@ describe('Community-AI RBAC', () => {
     } as unknown as NextApiRequest;
     const approveRes = createMockRes();
     await actionsHandler(approveReq, approveRes);
-    expect(approveRes.status).toHaveBeenCalledWith(200);
+    // Scheduling is RETIRED (owner 2026-11-20): even an admin is refused; sending goes through execute below.
+    expect(approveRes.status).toHaveBeenCalledWith(422);
 
     const execReq = {
       method: 'POST',
@@ -232,9 +233,9 @@ describe('Community-AI RBAC', () => {
   it('returns capability permissions for roles', async () => {
     const cases = [
       { role: 'VIEW_ONLY', expected: { canApprove: false, canExecute: false, canSchedule: false, canSkip: false, canManageConnectors: false } },
-      { role: 'CONTENT_REVIEWER', expected: { canApprove: true, canExecute: false, canSchedule: true, canSkip: true, canManageConnectors: true } },
+      { role: 'CONTENT_REVIEWER', expected: { canApprove: true, canExecute: false, canSchedule: false, canSkip: true, canManageConnectors: true } },
       { role: 'CONTENT_PUBLISHER', expected: { canApprove: false, canExecute: true, canSchedule: false, canSkip: false, canManageConnectors: true } },
-      { role: 'COMPANY_ADMIN', expected: { canApprove: true, canExecute: true, canSchedule: true, canSkip: true, canManageConnectors: true } },
+      { role: 'COMPANY_ADMIN', expected: { canApprove: true, canExecute: true, canSchedule: false, canSkip: true, canManageConnectors: true } },
     ];
 
     for (const entry of cases) {

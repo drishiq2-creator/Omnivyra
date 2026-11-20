@@ -1,5 +1,4 @@
 import { executeAction as executeCommunityAction } from '../../services/communityAiActionExecutor';
-import { runCommunityAiScheduler } from '../../services/communityAiScheduler';
 import {
   actionLogStore,
   actionStore,
@@ -148,37 +147,5 @@ describe('Community-AI RPA Execution', () => {
     expect(result.ok).toBe(false);
     expect(result.error).toBe('Playbook limit exceeded');
     expect(executeRpaTask).not.toHaveBeenCalled();
-  });
-
-  it('scheduler triggers RPA execution path', async () => {
-    roleStore.push({ user_id: 'user-1', company_id: 'tenant-1', role: 'CONTENT_PUBLISHER', status: 'active' });
-    tokenStore.push({
-      tenant_id: 'tenant-1',
-      organization_id: 'tenant-1',
-      platform: 'reddit',
-      access_token: 'token-1',
-    });
-    const past = new Date(Date.now() - 1000).toISOString();
-    actionStore.set('rpa-5', {
-      id: 'rpa-5',
-      tenant_id: 'tenant-1',
-      organization_id: 'tenant-1',
-      platform: 'reddit',
-      action_type: 'reply',
-      target_id: 'https://reddit.com/r/test/comments/5',
-      suggested_text: 'Hello!',
-      playbook_id: 'playbook-1',
-      execution_mode: 'rpa',
-      status: 'approved',
-      // Approval of record, as stamped by POST /api/community-ai/actions/approve.
-      approved_at: '2026-01-01T00:00:00.000Z',
-      scheduled_at: past,
-      requires_human_approval: false,
-    });
-    await runCommunityAiScheduler(new Date());
-    expect(executeRpaTask).toHaveBeenCalled();
-    const updated = actionStore.get('rpa-5');
-    expect(updated.status).toBe('executed');
-    expect(actionLogStore.some((log) => log.event_type === 'executed')).toBe(true);
   });
 });

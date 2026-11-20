@@ -123,27 +123,8 @@ describe('community AI final execution boundary', () => {
     });
   });
 
-  describe('scheduled dispatch', () => {
-    it('refuses an approved row with no approval of record (approved_at)', async () => {
-      const result = await executeAction(action({ status: 'approved', approved_at: null }), true, { source: 'scheduler' });
-      expect(result).toMatchObject({ ok: false, status: 'skipped', reason: 'HUMAN_APPROVAL_REQUIRED' });
-      expect(sideEffects()).toBe(0);
-    });
-
-    it('refuses when the policy is unreadable, even with approved_at', async () => {
-      policy = { ...UNREADABLE };
-      const result = await executeAction(action({ approved_at: '2026-11-03T00:00:00Z' }), true, { source: 'scheduler' });
-      expect(result).toMatchObject({ ok: false, status: 'skipped', reason: 'PLATFORM_POLICY' });
-      expect(sideEffects()).toBe(0);
-    });
-
-    it('positive control: runs a row approved through the approve route (approved_at set), with or without a policy row', async () => {
-      policy = { ...MISSING_ROW };
-      const result = await executeAction(action({ approved_at: '2026-11-03T00:00:00Z' }), true, { source: 'scheduler' });
-      expect(result).toMatchObject({ ok: true, status: 'executed' });
-      expect(runApiExecution).toHaveBeenCalledTimes(1);
-    });
-  });
+  // 'scheduled dispatch' cases removed with the community AI scheduler (owner ruling 2026-11-20): nothing passes
+  // source 'scheduler' any more, and the executor's source union no longer admits it (a compile error, not a runtime path).
 
   describe('manual (human-initiated) execution is unchanged', () => {
     it('runs with no policy row configured', async () => {

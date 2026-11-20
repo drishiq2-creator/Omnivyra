@@ -1,5 +1,5 @@
 {
-  "selectStarTotal": 1067,
+  "selectStarTotal": 1066,
   "countExactTotal": 198,
   "files": [
     {
@@ -1621,11 +1621,6 @@
       "file": "backend/services/canonicalReport/reportJourneyOrchestrator.ts",
       "stars": 0,
       "exacts": 1
-    },
-    {
-      "file": "backend/services/communityAiScheduler.ts",
-      "stars": 1,
-      "exacts": 0
     },
     {
       "file": "backend/services/companyBootstrapService.ts",

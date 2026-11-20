@@ -254,7 +254,9 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       permissions: {
         canApprove: hasCommunityAiCapability(roleGate.role, 'APPROVE_ACTIONS'),
         canExecute: hasCommunityAiCapability(roleGate.role, 'EXECUTE_ACTIONS'),
-        canSchedule: hasCommunityAiCapability(roleGate.role, 'SCHEDULE_ACTIONS'),
+        // Scheduling is RETIRED (owner 2026-11-20): always false, so the current UI hides its Schedule control the moment
+        // this ships and never offers what POST refuses (422 SCHEDULING_NOT_SUPPORTED). The key stays until 04's UI drops it.
+        canSchedule: false,
         canSkip: hasCommunityAiCapability(roleGate.role, 'SCHEDULE_ACTIONS'),
         // Community-AI connectors are NOT Virality External APIs.
         // Connector OAuth does NOT imply access to the Virality API catalog.
@@ -297,33 +299,12 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       return res.status(403).json({ error: 'TENANT_SCOPE_VIOLATION' });
     }
 
+    // RETIRED (owner ruling 2026-11-20): community AI actions cannot be scheduled. Nothing ever executed a
+    // scheduled action (the scheduler was never wired), so accepting the request promised a send that would never
+    // happen. 422, not 410: this endpoint is alive (status 'skipped' still works) - the request is understood and
+    // refused because this VALUE is not supported. The row is not touched and no 'scheduled' event is logged.
     if (body.status === 'scheduled') {
-      if (!body.scheduled_at) {
-        return res.status(400).json({ error: 'scheduled_at is required' });
-      }
-      if (action.requires_human_approval && body.approved !== true) {
-        return res.status(403).json({ error: 'APPROVAL_REQUIRED' });
-      }
-      await supabase
-        .from('community_ai_actions')
-        .update({
-          scheduled_at: body.scheduled_at,
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', actionId);
-
-      await logCommunityAiActionEvent({
-        action_id: actionId,
-        tenant_id: scope.tenantId,
-        organization_id: scope.organizationId,
-        event_type: 'scheduled',
-        event_payload: { scheduled_at: body.scheduled_at },
-      });
-
-      return res.status(200).json({
-        status: action.status || 'pending',
-        scheduled_at: body.scheduled_at,
-      });
+      return res.status(422).json({ error: 'SCHEDULING_NOT_SUPPORTED' });
     }
 
     if (body.status === 'skipped') {

@@ -1,17 +1,21 @@
+/**
+ * Community-AI scheduling is RETIRED (owner ruling 2026-11-20; a9). The scheduler that would have executed a
+ * scheduled action was never wired, so POST /api/community-ai/actions { status: 'scheduled' } promised a send that
+ * never happened. It now answers 422 SCHEDULING_NOT_SUPPORTED and touches nothing. Tenant scoping still runs first,
+ * and the endpoint itself is alive (status 'skipped' still works) - which is why 422 and not 410.
+ */
 import type { NextApiRequest } from 'next';
+import fs from 'fs';
+import path from 'path';
 import actionsHandler from '../../../pages/api/community-ai/actions';
-import { runCommunityAiScheduler } from '../../services/communityAiScheduler';
-import { executeAction as executeLinkedinAction } from '../../services/platformConnectors/linkedinConnector';
 import {
   actionLogStore,
   actionStore,
   buildQuery,
   createMockRes,
-  playbookStore,
   resetCommunityAiStores,
   seedPlaybook,
   setRole,
-  tokenStore,
 } from './communityAiTestHarness';
 
 jest.mock('../../services/userContextService', () => ({
@@ -33,286 +37,64 @@ jest.mock('../../db/supabaseClient', () => ({
   supabase: { from: jest.fn(), rpc: jest.fn() },
 }));
 
-jest.mock('../../services/platformConnectors/linkedinConnector', () => ({
-  executeAction: jest.fn().mockResolvedValue({ ok: true, platform: 'linkedin' }),
-}));
-
-jest.mock('../../services/rpaWorker/rpaWorkerService', () => ({
-  executeRpaTask: jest.fn().mockResolvedValue({ success: true, screenshot_path: 'rpa-shot.png' }),
-}));
-
 const { supabase } = jest.requireMock('../../db/supabaseClient');
-const { executeRpaTask } = jest.requireMock('../../services/rpaWorker/rpaWorkerService');
 
-describe('Community-AI Scheduling', () => {
+const action = (id: string, tenant: string) => ({
+  id, tenant_id: tenant, organization_id: tenant, platform: 'linkedin', action_type: 'reply',
+  target_id: `post-${id}`, suggested_text: 'Thanks!', status: 'pending', requires_human_approval: false,
+});
+const post = (body: Record<string, unknown>) =>
+  ({ method: 'POST', body: { tenant_id: 'tenant-1', organization_id: 'tenant-1', ...body } } as unknown as NextApiRequest);
+
+describe('Community-AI scheduling is retired', () => {
   beforeEach(() => {
     (supabase.from as jest.Mock).mockImplementation((table: string) => buildQuery(table));
     resetCommunityAiStores();
-    (executeLinkedinAction as jest.Mock).mockClear();
-    (executeRpaTask as jest.Mock).mockClear();
     seedPlaybook();
-  });
-
-  it('schedules an action and logs event', async () => {
     setRole('CONTENT_REVIEWER');
-    actionStore.set('action-10', {
-      id: 'action-10',
-      tenant_id: 'tenant-1',
-      organization_id: 'tenant-1',
-      platform: 'linkedin',
-      action_type: 'reply',
-      target_id: 'post-10',
-      suggested_text: 'Thanks!',
-      status: 'pending',
-      requires_human_approval: false,
-    });
-    const scheduledAt = new Date(Date.now() + 60000).toISOString();
-    const req = {
-      method: 'POST',
-      body: {
-        tenant_id: 'tenant-1',
-        organization_id: 'tenant-1',
-        action_id: 'action-10',
-        status: 'scheduled',
-        scheduled_at: scheduledAt,
-        approved: true,
-      },
-    } as unknown as NextApiRequest;
+  });
+
+  it("status 'scheduled' -> 422 SCHEDULING_NOT_SUPPORTED; the row is untouched and no 'scheduled' event is logged", async () => {
+    actionStore.set('action-10', action('action-10', 'tenant-1'));
     const res = createMockRes();
-    await actionsHandler(req, res);
-    expect(res.status).toHaveBeenCalledWith(200);
-    const updated = actionStore.get('action-10');
-    expect(updated.status).toBe('pending');
-    expect(updated.scheduled_at).toBe(scheduledAt);
-    expect(actionLogStore.some((log) => log.event_type === 'scheduled')).toBe(true);
+    await actionsHandler(post({ action_id: 'action-10', status: 'scheduled', scheduled_at: new Date(Date.now() + 60000).toISOString(), approved: true }), res);
+    expect(res.status).toHaveBeenCalledWith(422);
+    expect(res.json).toHaveBeenCalledWith({ error: 'SCHEDULING_NOT_SUPPORTED' });
+    const row = actionStore.get('action-10');
+    expect(row.scheduled_at).toBeUndefined();
+    expect(row.status).toBe('pending');
+    expect(actionLogStore.some((log) => log.event_type === 'scheduled')).toBe(false);
   });
 
-  it('scheduler executes due actions and logs execution', async () => {
-    setRole('CONTENT_PUBLISHER');
-    tokenStore.push({
-      tenant_id: 'tenant-1',
-      organization_id: 'tenant-1',
-      platform: 'linkedin',
-      access_token: 'token-1',
-    });
-    const past = new Date(Date.now() - 1000).toISOString();
-    actionStore.set('action-11', {
-      id: 'action-11',
-      tenant_id: 'tenant-1',
-      organization_id: 'tenant-1',
-      platform: 'linkedin',
-      action_type: 'reply',
-      target_id: 'post-11',
-      suggested_text: 'Appreciate it!',
-      playbook_id: 'playbook-1',
-      status: 'approved',
-      // Approval of record, as stamped by POST /api/community-ai/actions/approve.
-      approved_at: '2026-01-01T00:00:00.000Z',
-      scheduled_at: past,
-      requires_human_approval: false,
-    });
-    await runCommunityAiScheduler(new Date());
-    const updated = actionStore.get('action-11');
-    expect(updated.status).toBe('executed');
-    expect(actionLogStore.some((log) => log.event_type === 'executed')).toBe(true);
-  });
-
-  it('scheduler executes RPA action without API token', async () => {
-    playbookStore.length = 0;
-    seedPlaybook({
-      id: 'playbook-rpa-enabled',
-      execution_modes: {
-        api_allowed: true,
-        rpa_allowed: true,
-        manual_only: false,
-      },
-    });
-    const past = new Date(Date.now() - 1000).toISOString();
-    actionStore.set('rpa-sched-1', {
-      id: 'rpa-sched-1',
-      tenant_id: 'tenant-1',
-      organization_id: 'tenant-1',
-      platform: 'reddit',
-      action_type: 'reply',
-      target_id: 'https://reddit.com/r/test/comments/a',
-      suggested_text: 'Hello!',
-      playbook_id: 'playbook-rpa-enabled',
-      execution_mode: 'rpa',
-      status: 'approved',
-      // Approval of record, as stamped by POST /api/community-ai/actions/approve.
-      approved_at: '2026-01-01T00:00:00.000Z',
-      scheduled_at: past,
-      requires_human_approval: false,
-    });
-    await runCommunityAiScheduler(new Date());
-    const updated = actionStore.get('rpa-sched-1');
-    expect(updated.status).toBe('executed');
-    expect(executeRpaTask).toHaveBeenCalled();
-  });
-
-  it('scheduler fails RPA action when playbook disallows rpa_allowed', async () => {
-    playbookStore.length = 0;
-    seedPlaybook({
-      id: 'playbook-rpa-disabled',
-      execution_modes: {
-        api_allowed: true,
-        rpa_allowed: false,
-        manual_only: false,
-      },
-    });
-    const past = new Date(Date.now() - 1000).toISOString();
-    actionStore.set('rpa-sched-2', {
-      id: 'rpa-sched-2',
-      tenant_id: 'tenant-1',
-      organization_id: 'tenant-1',
-      platform: 'reddit',
-      action_type: 'reply',
-      target_id: 'https://reddit.com/r/test/comments/b',
-      suggested_text: 'Hello!',
-      playbook_id: 'playbook-rpa-disabled',
-      execution_mode: 'rpa',
-      status: 'approved',
-      // Approval of record, as stamped by POST /api/community-ai/actions/approve.
-      approved_at: '2026-01-01T00:00:00.000Z',
-      scheduled_at: past,
-      requires_human_approval: false,
-    });
-    await runCommunityAiScheduler(new Date());
-    const updated = actionStore.get('rpa-sched-2');
-    expect(updated.status).toBe('failed');
-    expect(executeRpaTask).not.toHaveBeenCalled();
-  });
-
-  it('scheduler enforces limits for RPA actions', async () => {
-    playbookStore.length = 0;
-    seedPlaybook({
-      id: 'playbook-rpa-limit',
-      limits: { max_replies_per_hour: 0 },
-      execution_modes: {
-        api_allowed: true,
-        rpa_allowed: true,
-        manual_only: false,
-      },
-    });
-    const past = new Date(Date.now() - 1000).toISOString();
-    actionStore.set('rpa-sched-3', {
-      id: 'rpa-sched-3',
-      tenant_id: 'tenant-1',
-      organization_id: 'tenant-1',
-      platform: 'reddit',
-      action_type: 'reply',
-      target_id: 'https://reddit.com/r/test/comments/c',
-      suggested_text: 'Hello!',
-      playbook_id: 'playbook-rpa-limit',
-      execution_mode: 'rpa',
-      status: 'approved',
-      // Approval of record, as stamped by POST /api/community-ai/actions/approve.
-      approved_at: '2026-01-01T00:00:00.000Z',
-      scheduled_at: past,
-      requires_human_approval: false,
-    });
-    await runCommunityAiScheduler(new Date());
-    const updated = actionStore.get('rpa-sched-3');
-    expect(updated.status).toBe('failed');
-    expect(executeRpaTask).not.toHaveBeenCalled();
-  });
-
-  it('scheduler logs RPA execution result with screenshot', async () => {
-    playbookStore.length = 0;
-    seedPlaybook({
-      id: 'playbook-rpa-enabled-2',
-      execution_modes: {
-        api_allowed: true,
-        rpa_allowed: true,
-        manual_only: false,
-      },
-    });
-    (executeRpaTask as jest.Mock).mockResolvedValueOnce({
-      success: true,
-      screenshot_path: 'rpa-shot.png',
-    });
-    const past = new Date(Date.now() - 1000).toISOString();
-    actionStore.set('rpa-sched-4', {
-      id: 'rpa-sched-4',
-      tenant_id: 'tenant-1',
-      organization_id: 'tenant-1',
-      platform: 'reddit',
-      action_type: 'reply',
-      target_id: 'https://reddit.com/r/test/comments/d',
-      suggested_text: 'Hello!',
-      playbook_id: 'playbook-rpa-enabled-2',
-      execution_mode: 'rpa',
-      status: 'approved',
-      // Approval of record, as stamped by POST /api/community-ai/actions/approve.
-      approved_at: '2026-01-01T00:00:00.000Z',
-      scheduled_at: past,
-      requires_human_approval: false,
-    });
-    await runCommunityAiScheduler(new Date());
-    const updated = actionStore.get('rpa-sched-4');
-    expect(updated.execution_result?.response?.screenshot_path).toBe('rpa-shot.png');
-    expect(
-      actionLogStore.some(
-        (log) => log.event_type === 'executed' && log.event_payload?.response?.execution_mode === 'rpa'
-      )
-    ).toBe(true);
-  });
-
-  it('scheduler skips when token missing', async () => {
-    setRole('CONTENT_PUBLISHER');
-    const past = new Date(Date.now() - 1000).toISOString();
-    actionStore.set('action-11b', {
-      id: 'action-11b',
-      tenant_id: 'tenant-1',
-      organization_id: 'tenant-1',
-      platform: 'linkedin',
-      action_type: 'reply',
-      target_id: 'post-11b',
-      suggested_text: 'Appreciate it!',
-      execution_mode: 'api',
-      status: 'approved',
-      // Approval of record, as stamped by POST /api/community-ai/actions/approve.
-      approved_at: '2026-01-01T00:00:00.000Z',
-      scheduled_at: past,
-      requires_human_approval: false,
-      playbook_id: 'playbook-1',
-    });
-    await runCommunityAiScheduler(new Date());
-    const updated = actionStore.get('action-11b');
-    expect(updated.status).toBe('failed');
-    expect(
-      actionLogStore.some(
-        (log) => log.event_type === 'failed' && log.event_payload?.error === 'Platform not connected'
-      )
-    ).toBe(true);
-  });
-
-  it('rejects scheduling for tenant mismatch', async () => {
-    setRole('CONTENT_REVIEWER');
-    actionStore.set('action-12', {
-      id: 'action-12',
-      tenant_id: 'tenant-2',
-      organization_id: 'tenant-2',
-      platform: 'linkedin',
-      action_type: 'reply',
-      target_id: 'post-12',
-      suggested_text: 'Thanks!',
-      status: 'pending',
-      requires_human_approval: false,
-    });
-    const req = {
-      method: 'POST',
-      body: {
-        tenant_id: 'tenant-1',
-        organization_id: 'tenant-1',
-        action_id: 'action-12',
-        status: 'scheduled',
-        scheduled_at: new Date().toISOString(),
-        approved: true,
-      },
-    } as unknown as NextApiRequest;
+  it("tenant scoping still runs FIRST: a scheduling request for another tenant's action -> 403", async () => {
+    actionStore.set('action-12', action('action-12', 'tenant-2'));
     const res = createMockRes();
-    await actionsHandler(req, res);
+    await actionsHandler(post({ action_id: 'action-12', status: 'scheduled', scheduled_at: new Date().toISOString(), approved: true }), res);
     expect(res.status).toHaveBeenCalledWith(403);
+  });
+
+  it("CONTROL (why 422, not 410): the endpoint is alive - status 'skipped' still succeeds", async () => {
+    actionStore.set('action-13', action('action-13', 'tenant-1'));
+    const res = createMockRes();
+    await actionsHandler(post({ action_id: 'action-13', status: 'skipped' }), res);
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(actionStore.get('action-13').status).toBe('skipped');
+  });
+
+  it('GET still REPORTS an existing approved+scheduled row (scheduled_actions, status approved) and never offers scheduling', async () => {
+    actionStore.set('action-14', { ...action('action-14', 'tenant-1'), status: 'approved', scheduled_at: '2026-11-01T09:00:00.000Z' });
+    const res = createMockRes();
+    await actionsHandler({ method: 'GET', query: { tenant_id: 'tenant-1', organization_id: 'tenant-1' } } as unknown as NextApiRequest, res);
+    expect(res.status).toHaveBeenCalledWith(200);
+    const body = (res.json as jest.Mock).mock.calls[0][0];
+    expect(body.scheduled_actions.map((a: { id?: string; action_id?: string }) => a.action_id ?? a.id)).toEqual(['action-14']);
+    expect(body.scheduled_actions[0].status).toBe('approved');
+    expect(body.permissions.canSchedule).toBe(false);
+  });
+
+  it('nothing in the repo can execute a scheduled action: the scheduler and its script are gone', () => {
+    const root = path.resolve(__dirname, '../../..');
+    expect(fs.existsSync(path.join(root, 'backend/services/communityAiScheduler.ts'))).toBe(false);
+    expect(fs.existsSync(path.join(root, 'scripts/communityAiScheduler.ts'))).toBe(false);
   });
 });

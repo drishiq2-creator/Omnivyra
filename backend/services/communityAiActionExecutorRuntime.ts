@@ -289,7 +289,7 @@ export const executeAction = async (
   options?: {
     notify?: boolean;
     webhook?: boolean;
-    source?: 'manual' | 'auto' | 'scheduler' | 'bulk';
+    source?: 'manual' | 'auto' | 'bulk';
     /** If true, executeAction takes full responsibility for writing the
      *  terminal row state; callers must NOT write status/execution_mode/
      *  execution_result themselves. When false (default), the executor
@@ -450,7 +450,7 @@ export const executeAction = async (
 const runExecution = async (
   action: CommunityAiAction,
   approved: boolean,
-  options?: { notify?: boolean; webhook?: boolean; source?: 'manual' | 'auto' | 'scheduler' | 'bulk'; auto?: boolean }
+  options?: { notify?: boolean; webhook?: boolean; source?: 'manual' | 'auto' | 'bulk'; auto?: boolean }
 ): Promise<ExecutionResult> => {
   const policy = await getCommunityAiPlatformPolicy();
   if (!policy.execution_enabled) {
@@ -492,20 +492,6 @@ const runExecution = async (
       },
     });
     return { ok: false, status: 'skipped', reason: 'PLATFORM_POLICY' };
-  }
-
-  // Scheduled dispatch runs with no human present, so it needs an approval of
-  // record. Rows approved by an auto rule carry status 'approved' but no
-  // approved_at; only the approve route stamps it.
-  if (options?.source === 'scheduler' && !action.approved_at) {
-    await logCommunityAiActionEvent({
-      action_id: action.id,
-      tenant_id: action.tenant_id,
-      organization_id: action.organization_id,
-      event_type: 'skipped_due_to_platform_policy',
-      event_payload: { policy_flag: 'approval_of_record', source: 'scheduler' },
-    });
-    return { ok: false, status: 'skipped', reason: 'HUMAN_APPROVAL_REQUIRED' };
   }
 
   if (policy.require_human_approval && !action.approved_at) {

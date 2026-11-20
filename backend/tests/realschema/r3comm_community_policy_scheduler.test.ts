@@ -1,6 +1,8 @@
 /**
- * Round 3 (2026-11-03) — community AI policy default and scheduled-dispatch
- * approval of record, on real PostgreSQL.
+ * Round 3 (2026-11-03) — community AI policy default, on real PostgreSQL.
+ * (The scheduled-dispatch block was removed with the community AI scheduler, retired by owner ruling 2026-11-20:
+ *  nothing executes a scheduled action any more, and POST status:'scheduled' answers 422 SCHEDULING_NOT_SUPPORTED.
+ *  The executor guards kept here - the policy default and the automated-invocation refusal - are unaffected.)
  *
  * Real: community_ai_platform_policy, community_ai_playbooks,
  * community_ai_actions and the executor's row write, through the supabase
@@ -38,7 +40,6 @@ jest.mock('../../services/usageMeterService', () => ({ incrementUsageMeter: jest
 jest.mock('../../services/playbooks/playbookValidator', () => ({ validateActionAgainstPlaybook: jest.fn(() => ({ allowed: true })) }));
 // Not under test, and its import graph reaches '@/config', which
 // jest.realschema.config.js does not map.
-// The scheduler requires a connected platform before an API dispatch.
 jest.mock('../../services/platformTokenService', () => ({ getToken: jest.fn(async () => ({ access_token: 'test-token' })) }));
 jest.mock('../../services/rpaWorker/rpaWorkerService', () => ({ executeRpaTask: jest.fn(async () => ({ success: true })) }));
 jest.mock('../../services/telemetry/telemetryDispatcher', () => ({ trackEvent: jest.fn() }));
@@ -53,7 +54,6 @@ const {
   getCommunityAiPlatformPolicy,
   __resetCommunityAiPlatformPolicyCacheForTests,
 } = require('../../services/communityAiPlatformPolicyService');
-const { runCommunityAiScheduler } = require('../../services/communityAiScheduler');
 const { executeAction } = require('../../services/communityAiActionExecutorRuntime');
 const contracts = require('../../services/communityAiActionExecutorContracts');
 /* eslint-enable @typescript-eslint/no-var-requires */
@@ -81,24 +81,6 @@ async function seedPlaybook(): Promise<string> {
   );
   return r.rows[0].id;
 }
-
-// scheduled_at is timestamp WITHOUT time zone and the scheduler compares it
-// with a UTC ISO cutoff, so the fixture writes UTC wall-clock time.
-async function seedScheduledApproved(playbookId: string, approvedAt: string | null): Promise<string> {
-  const r = await q(
-    `INSERT INTO public.community_ai_actions
-       (tenant_id, organization_id, platform, action_type, target_id, suggested_text, risk_level,
-        requires_human_approval, status, scheduled_at, approved_at, execution_mode, playbook_id, playbook_name)
-     VALUES ($1, $1, 'linkedin', 'reply', 'comment-r3', 'Thanks!', 'low',
-             false, 'approved', (now() AT TIME ZONE 'UTC') - interval '1 minute', $2, 'api', $3, 'R3 playbook')
-     RETURNING id`,
-    [ORG, approvedAt, playbookId],
-  );
-  return r.rows[0].id;
-}
-
-const rowStatus = async (id: string) =>
-  (await q(`SELECT status, approved_at, execution_result FROM public.community_ai_actions WHERE id=$1`, [id])).rows[0];
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -136,46 +118,6 @@ describe('community_ai_platform_policy default (real table)', () => {
       );
       expect(result).toMatchObject({ ok: false, status: 'skipped', reason: 'PLATFORM_POLICY' });
       expect(dispatches()).toBe(0);
-    });
-  });
-});
-
-describe('scheduled dispatch needs an approval of record (real rows)', () => {
-  it('an approved, due row with no approved_at is not dispatched', async () => {
-    await inRollback(async () => {
-      await q(`DELETE FROM public.community_ai_platform_policy`);
-      await q(`INSERT INTO public.community_ai_platform_policy DEFAULT VALUES`);
-      const playbookId = await seedPlaybook();
-      const id = await seedScheduledApproved(playbookId, null);
-
-      const run = await runCommunityAiScheduler(new Date());
-
-      // The row was picked up (so the refusal is not vacuous) and not dispatched.
-      expect(run.processed).toBeGreaterThanOrEqual(1);
-      expect(dispatches()).toBe(0);
-      const row = await rowStatus(id);
-      expect(row.status).not.toBe('executed');
-      expect(row.approved_at).toBeNull();
-      // Terminal, like the existing require_human_approval refusal: not re-picked every tick.
-      expect(row.status).toBe('skipped');
-      expect(row.execution_result).toMatchObject({ status: 'skipped', reason: 'HUMAN_APPROVAL_REQUIRED' });
-    });
-  });
-
-  it('positive control: the same row with approved_at is dispatched once and recorded executed', async () => {
-    await inRollback(async () => {
-      await q(`DELETE FROM public.community_ai_platform_policy`);
-      await q(`INSERT INTO public.community_ai_platform_policy DEFAULT VALUES`);
-      const playbookId = await seedPlaybook();
-      const id = await seedScheduledApproved(playbookId, '2026-11-03T09:00:00Z');
-
-      const run = await runCommunityAiScheduler(new Date());
-
-      expect(JSON.stringify(await rowStatus(id))).toContain('"status":"executed"');
-      expect(run).toMatchObject({ executed: 1, failed: 0 });
-
-      expect(contracts.runApiExecution).toHaveBeenCalledTimes(1);
-      expect((await rowStatus(id)).status).toBe('executed');
     });
   });
 });
