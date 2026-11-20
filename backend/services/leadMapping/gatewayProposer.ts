@@ -111,7 +111,26 @@ export const LEAD_ATTRIBUTE_MAPPING_MODEL = 'gpt-4o-mini';
  */
 const OUTPUT_TOKENS_PER_HEADER = 40;
 const OUTPUT_TOKENS_FLOOR = 400;
-const OUTPUT_TOKENS_CEILING = 3_000;
+const OUTPUT_TOKENS_CEILING = 1_000;
+
+/**
+ * THE COST BOUND (c6 2026-11-20; 7c + b3 ruling: the fixed price must buy a BOUNDED unit of work).
+ *
+ * The proposal is a FIXED 2 credits (credit_cost_config 'lead_attribute_mapping'), so the real AI cost must be
+ * bounded here, not by the price. Owner rule: price >= 10x real cost. 2 credits x $0.007 = $0.014, so the call
+ * may cost at most $0.0014. At the repo's gpt-4o-mini rate card (llm_model_pricing seed 20260321 /
+ * blackHoleCostCapture: $0.00015 per 1k in, $0.0006 per 1k out):
+ *   input  <= 5,000 tokens  -> $0.00075
+ *   output <= 1,000 tokens  -> $0.00060 (max_tokens: a hard provider-side cap)
+ *   worst case               $0.00135  -> 10.4x at 2 credits.
+ * Output: 40 tokens/header is the sizing; 15 columns x a generous 60 = 900 fits under 1,000 without truncating
+ * the JSON mid-entry. Input: estimated CONSERVATIVELY at 3 chars/token (+600 headroom), not 4.
+ * Over either bound the proposer REFUSES before any billing or model call (MappingInputTooLargeError): the
+ * engine records one degraded entry, the import maps deterministically, the user is told why, nothing is charged.
+ */
+export const AI_MAPPING_MAX_COLUMNS = 15;
+export const AI_MAPPING_MAX_INPUT_TOKENS = 5_000;
+export const estimateInputTokens = (promptChars: number): number => Math.ceil(promptChars / 3) + 600;
 
 /** How much model prose we keep. Surfaced to a tenant as context, never scored. */
 const MAX_REASONING_CHARS = 240;
@@ -162,6 +181,14 @@ export class GatewayProposerError extends Error {
   }
 }
 
+/** Over the cost bound: refused before billing. Its NAME reaches the degraded cause the wizard keys its copy on. */
+export class MappingInputTooLargeError extends GatewayProposerError {
+  constructor(message: string) {
+    super(message, 'input_too_large');
+    this.name = 'MappingInputTooLargeError';
+  }
+}
+
 const SYSTEM_PROMPT = [
   'You map column headings from an imported prospect file onto a fixed list of',
   'destination fields. You are one opinion among several signals; a separate',
@@ -206,6 +233,18 @@ export function createGatewayMappingProposer(
     for (const values of Object.values(request.samples)) assertRedacted(values);
 
     const userPrompt = buildUserPrompt(request);
+    // The cost bound, checked BEFORE the billed call (nothing reserved, no model call). See AI_MAPPING_MAX_COLUMNS.
+    if (request.headers.length > AI_MAPPING_MAX_COLUMNS) {
+      throw new MappingInputTooLargeError(
+        `${request.headers.length} columns exceeds the ${AI_MAPPING_MAX_COLUMNS}-column AI mapping bound`,
+      );
+    }
+    const estimatedInput = estimateInputTokens(SYSTEM_PROMPT.length + userPrompt.length);
+    if (estimatedInput > AI_MAPPING_MAX_INPUT_TOKENS) {
+      throw new MappingInputTooLargeError(
+        `estimated ${estimatedInput} input tokens exceeds the ${AI_MAPPING_MAX_INPUT_TOKENS}-token AI mapping bound`,
+      );
+    }
     const maxOutputTokens = outputBudget(request.headers.length);
 
     let text: string;

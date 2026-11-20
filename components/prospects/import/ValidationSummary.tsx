@@ -20,6 +20,7 @@ import { AlertTriangle, Ban, CheckCircle2, Info } from 'lucide-react';
 import type { ColumnOutcome } from '@/lib/prospects/import/applyMapping';
 import type { DegradedFieldView } from '@/lib/prospects/import/types';
 import type { CsvDiagnostic } from '@/lib/leadIngestion/csvParser';
+import { AI_MAPPING_COLUMN_LIMIT, AI_MAPPING_TOO_LARGE_CAUSE } from './aiMappingNotices';
 
 /** Plain language for the applier's rule names. */
 const FAILURE_LABELS: Readonly<Record<string, string>> = {
@@ -71,6 +72,9 @@ export default function ValidationSummary({
   const proposerUnavailable = degraded.some(
     (d) => d.sourceField === '*' || d.cause.startsWith('proposer_unavailable'),
   );
+  // The cost bound (gatewayProposer AI_MAPPING_MAX_COLUMNS / _MAX_INPUT_TOKENS): refused before billing. Keyed on
+  // the error NAME the engine records - never on server text.
+  const proposerTooLarge = degraded.some((d) => d.cause === AI_MAPPING_TOO_LARGE_CAUSE);
   const degradedColumns = degraded.filter(
     (d) => d.sourceField !== '*' && !d.cause.startsWith('proposer_unavailable'),
   );
@@ -187,7 +191,9 @@ export default function ValidationSummary({
           <Info className="mt-0.5 h-4 w-4 shrink-0 text-gray-400" aria-hidden="true" />
           <span>
             These destinations were worked out from your column names and the shape of their values.
-            AI assistance was unavailable for this file, so nothing here was AI-assisted.
+            {proposerTooLarge
+              ? ` This file has too many or too long columns for AI suggestions (up to ${AI_MAPPING_COLUMN_LIMIT} columns), so none were requested and no credits were charged. You can set any destination yourself.`
+              : ' AI assistance was unavailable for this file, so nothing here was AI-assisted.'}
           </span>
         </p>
       ) : null}
