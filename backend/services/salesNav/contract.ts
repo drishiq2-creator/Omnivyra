@@ -1,5 +1,5 @@
 /**
- * SALES NAVIGATOR SHARED CONTRACT v2 (owner rulings 2026-11-20/21; c6 owns it; a9 r2-r6 + 7c review folded in).
+ * SALES NAVIGATOR SHARED CONTRACT v2.1 (owner rulings 2026-11-20/21; c6 owns it; a9 r2-r6 + 7c review folded in).
  *
  * v2 (owner, 2026-11-21): each company uses ITS OWN Sales Navigator account (we never supply LinkedIn access);
  * the daily cap is 150 (default) up to a HARD MAX of 200 per LinkedIn member; a run that reaches the cap is PAUSED
@@ -117,23 +117,42 @@ export function parseSalesNavUrl(raw: unknown):
   return { ok: false, refused: 'unsupported_kind' };
 }
 
+/** How a loaded page states its position: the `page` query parameter, 1-based; ABSENT means page 1. */
+export interface SalesNavPagePosition { readonly param: 'page'; readonly value: string }
+
 /**
- * The URL of page `pageIndex` (0-based) of an allowed Sales Navigator URL - built HERE and nowhere else (a9 ask).
- * Pages are addressed by the `page` query parameter (1-based on LinkedIn).
+ * The URL AND the position rule of page `pageIndex` (0-based) of an allowed Sales Navigator URL - built HERE and
+ * nowhere else (a9). Browser routes put `position` in each page command and verify the loaded page with
+ * isCommandedPage; they never derive a position themselves (a command without one is refused, POSITION_RULE_MISSING).
  *
- * UNVERIFIED PREMISE (a9, 2026-11-20): that every allowed kind honours `page` in the URL. It cannot be verified
- * without live LinkedIn, so it is made a RUNTIME CHECK instead of an assumption: a route that loads pageUrlFor(url, n)
- * MUST confirm the page it landed on shows page n+1 (the pagination control); if it does not, that page is 'unknown'
- * (code page_unconfirmed) and the run cannot close 'completed'. A kind that is shown NOT to page by URL is moved to
- * 'unsupported_kind' here, by contract change - never by a route clicking LinkedIn's 'next' control.
- * Returns null when `canonicalUrl` is not an allowed Sales Navigator URL or the index is not a safe integer >= 0.
+ * UNVERIFIED PREMISE (a9, 2026-11-20): that every allowed kind honours `page` in the URL. It is a RUNTIME CHECK, not
+ * an assumption: a loaded page that is not the commanded position is 'unknown' (page_position_mismatch) and the run
+ * cannot close 'completed'. A kind shown NOT to page by URL is moved to 'unsupported_kind' by contract change - never
+ * paged by clicking LinkedIn's 'next' control.
+ * Returns null when `canonicalUrl` is not an allowed Sales Navigator URL or the index is not a safe integer 0..999.
  */
-export function pageUrlFor(canonicalUrl: string, pageIndex: number): string | null {
+export function pageUrlFor(canonicalUrl: string, pageIndex: number):
+  { pageUrl: string; position: SalesNavPagePosition } | null {
   const parsed = parseSalesNavUrl(canonicalUrl);
   if (!parsed.ok || !Number.isSafeInteger(pageIndex) || pageIndex < 0 || pageIndex > 999) return null;
   const u = new URL(parsed.canonicalUrl);
   if (pageIndex > 0) u.searchParams.set('page', String(pageIndex + 1));
-  return u.toString();
+  return { pageUrl: u.toString(), position: { param: 'page', value: String(pageIndex + 1) } };
+}
+
+/**
+ * THE one answer to "is this the page we asked for" (extension + RPA): the loaded page's FINAL URL must be the SAME
+ * allowed list/search (equal canonical URL, page parameter excluded) AND state the commanded position (`page` equal to
+ * position.value; an absent `page` counts as '1'). Pure; anything unparseable is false.
+ */
+export function isCommandedPage(finalUrl: unknown, commandedPageUrl: string, position: SalesNavPagePosition): boolean {
+  if (!position || position.param !== 'page' || !/^\d{1,4}$/.test(String(position.value))) return false;
+  const loaded = parseSalesNavUrl(finalUrl);
+  const asked = parseSalesNavUrl(commandedPageUrl);
+  if (!loaded.ok || !asked.ok || loaded.canonicalUrl !== asked.canonicalUrl) return false;
+  let shown: string;
+  try { shown = new URL(String(finalUrl)).searchParams.get('page') ?? '1'; } catch { return false; }
+  return shown === String(position.value);
 }
 
 // -- 4. the canonical member id (the shared cap's key) ---------------------------------------------------------
