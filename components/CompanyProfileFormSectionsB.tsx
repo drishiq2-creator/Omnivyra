@@ -22,6 +22,9 @@ import { isValidCanonicalWebsite } from '../utils/companyProfileValidation';
 import { type ProfileState, type BrandAssetField, type InlineQuestionFieldKey, normalizeQuestionFieldKey, questionMatchesInlineField, questionMatchesAnyInlineField, formatBusinessClassificationLabel, BRAND_ASSET_SPECS, BRAND_ASSET_ACCEPT, SOCIAL_ACCOUNT_FIELDS, formatFileSize, prepareTransparentBrandAsset, StatCard, SectionCard, GuidedChatPanel } from './companyProfileFormSupportA';
 import { StatusChip, SavedHint, IntelligenceContextSections } from './companyProfileFormSupportB';
 import { useCompanyProfileFormController } from './companyProfileFormController';
+import { MirrorStatusList } from './company/profileWizard/MirrorStatusList';
+import { unionOfferings } from '../utils/profileMarketPulseMirror';
+import { splitToList as splitOfferings, joinList as joinOfferings } from '../pages/company-profile.types';
 
 // COMPETITOR-RESPONSE-001 — presentation-only formatters for the Competitor section.
 // Confidence is stored 0..1 (enrichment confidence); render as a percentage.
@@ -121,8 +124,15 @@ export default function CompanyProfileFormSectionsB({ f }: { f: ReturnType<typeo
     updateGuidedCompetitor, updateIntelligenceContext, updateOtherSocial, uploadBrandAsset, user,
     userGuidance, userRole,
   } = f;
+  const { showStep, showAnyStep, wizardStepTitle } = f;
+  // 6.4c: show the merged offerings list until the user edits it, then exactly what they typed.
+  const [offeringsEdited, setOfferingsEdited] = React.useState(false);
+  const offeringsText = offeringsEdited
+    ? (activeProfile.products_services ?? '')
+    : joinOfferings(unionOfferings(activeProfile.products_services_list, marketPulseSettings.core_offerings, activeProfile.products_services));
   return (
     <>
+            {showStep('basics') && (<>
             <SectionCard
               title="Company Facts"
               description="These confirmed business facts support competitor analysis, market positioning, and downstream recommendation quality."
@@ -190,23 +200,37 @@ export default function CompanyProfileFormSectionsB({ f }: { f: ReturnType<typeo
               </div>
             </div>
             </SectionCard>
+            </>)}
 
+            {showAnyStep(['offering', 'audience', 'voice', 'goals']) && (<>
             <SectionCard
-              title="Messaging & Audience"
+              title={wizardStepTitle ?? 'Messaging & Audience'}
               description="These are the main inputs Content Architect will keep revisiting when building messaging, themes, and competitor-aware campaign directions."
             >
             <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            {showStep('offering') && (<>
             <div>
-              <label className="text-sm font-medium text-gray-700">Products & Services</label>
+              {/* UI step 6.4c (S3): ONE "What you offer" list. Until edited it shows the union of
+                  products_services_list, Market Pulse core_offerings and the text; edits update
+                  the text AND the list together (fixes D1 here). Saving mirrors it into
+                  market_pulse.core_offerings (prepareMarketPulseForSave). */}
+              <label className="text-sm font-medium text-gray-700">What you offer</label>
               <textarea
-                value={displayFieldValue(activeProfile.products_services, activeProfile.products_services_list)}
-                onChange={(e) => handleChange('products_services', e.target.value)}
+                value={offeringsText}
+                onChange={(e) => {
+                  setOfferingsEdited(true);
+                  updateActiveProfile({ ...activeProfile, products_services: e.target.value, products_services_list: splitOfferings(e.target.value) });
+                }}
+                placeholder="Products and services, comma-separated"
                 rows={2}
                 className="mt-1 w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
               />
+              <MirrorStatusList items={splitOfferings(offeringsText)} existingMarketPulse={marketPulseSettings.core_offerings} />
               {!isEditing && <SavedHint value={displayFieldValue(activeProfile.products_services, activeProfile.products_services_list)} />}
               {renderInlineRefinementQuestions('products_services')}
             </div>
+            </>)}
+            {showStep('audience') && (<>
             <div>
               <label className="text-sm font-medium text-gray-700">Target Audience</label>
               <textarea
@@ -218,6 +242,8 @@ export default function CompanyProfileFormSectionsB({ f }: { f: ReturnType<typeo
               {!isEditing && <SavedHint value={displayFieldValue(activeProfile.target_audience, activeProfile.target_audience_list)} />}
               {renderInlineRefinementQuestions('target_audience')}
             </div>
+            </>)}
+            {showStep('voice') && (<>
             <div>
               <label className="text-sm font-medium text-gray-700">Brand Voice</label>
               <textarea
@@ -229,6 +255,8 @@ export default function CompanyProfileFormSectionsB({ f }: { f: ReturnType<typeo
               {!isEditing && <SavedHint value={displayFieldValue(activeProfile.brand_voice, activeProfile.brand_voice_list)} />}
               {renderInlineRefinementQuestions('brand_voice')}
             </div>
+            </>)}
+            {showStep('goals') && (<>
             <div>
               <label className="text-sm font-medium text-gray-700">Goals</label>
               <textarea
@@ -240,6 +268,8 @@ export default function CompanyProfileFormSectionsB({ f }: { f: ReturnType<typeo
               {!isEditing && <SavedHint value={displayFieldValue(activeProfile.goals, activeProfile.goals_list)} />}
               {renderInlineRefinementQuestions('goals')}
             </div>
+            </>)}
+            {showStep('audience') && (<>
             {(canViewStrategicSections || isCompanyAdmin) && (
               <div>
                 <div className="flex items-center justify-between gap-2">
@@ -556,6 +586,8 @@ export default function CompanyProfileFormSectionsB({ f }: { f: ReturnType<typeo
                 </div>
               </div>
             )}
+            </>)}
+            {showStep('offering') && (<>
             <div>
               <label className="text-sm font-medium text-gray-700">Unique Value</label>
               <textarea
@@ -567,6 +599,8 @@ export default function CompanyProfileFormSectionsB({ f }: { f: ReturnType<typeo
               {!isEditing && <SavedHint value={activeProfile.unique_value} />}
               {renderInlineRefinementQuestions('unique_value')}
             </div>
+            </>)}
+            {showStep('voice') && (<>
             <div>
               <label className="text-sm font-medium text-gray-700">Content Themes</label>
               <textarea
@@ -578,8 +612,10 @@ export default function CompanyProfileFormSectionsB({ f }: { f: ReturnType<typeo
               {!isEditing && <SavedHint value={displayFieldValue(activeProfile.content_themes, activeProfile.content_themes_list)} />}
               {renderInlineRefinementQuestions('content_themes')}
             </div>
+            </>)}
             </div>
             </SectionCard>
+            </>)}
     </>
   );
 }
