@@ -50,7 +50,13 @@ jest.mock('../../db/supabaseClient', () => ({
   },
 }));
 jest.mock('../../security/IdentityResolver', () => ({ resolvePrincipal: async () => ({ ok: true, principal: { userId: 'u1' } }) }));
-jest.mock('../../services/pricingConfigService', () => ({ getFxConfig: async () => ({}) }));
+// c6 2026-11-20: controllable, and it carries the error class the route matches on (a factory mock that omitted a new
+// export would make `instanceof` throw only on the failure path - the blind spot this avoids).
+let mockFx: () => Promise<unknown> = async () => ({});
+jest.mock('../../services/pricingConfigService', () => {
+  class PriceConfigUnavailableError extends Error { readonly code = 'PRICE_CONFIG_UNAVAILABLE'; }
+  return { getFxConfig: () => mockFx(), PriceConfigUnavailableError };
+});
 jest.mock('../../services/payments/orchestrator', () => ({
   createOrder: async () => {
     mockSinks.push('provider:createOrder');
@@ -73,13 +79,14 @@ function mockRes() {
   const r: any = { statusCode: 0, body: null };
   r.status = (c: number) => { r.statusCode = c; return r; };
   r.json = (b: unknown) => { r.body = b; return r; };
-  r.setHeader = () => r;
+  r.headers = {} as Record<string, string>;
+  r.setHeader = (k: string, v: string) => { r.headers[k] = v; return r; };
   return r;
 }
 const post = (body: unknown) => ({ method: 'POST', body, query: {}, headers: {} }) as any;
 const PKG_OK: Res = { data: { id: 'pkg', credits: 100, price: 500, sku: null, canonical_usd_price: null, is_active: true }, error: null };
 
-beforeEach(() => { mockScript = {}; mockWrites.length = 0; mockLogs.length = 0; mockSinks.length = 0; });
+beforeEach(() => { mockScript = {}; mockWrites.length = 0; mockLogs.length = 0; mockSinks.length = 0; mockFx = async () => ({}); });
 
 describe('checkout/verify', () => {
   it('purchase lookup error -> 503 retryable, NOT 404; nothing verified or settled', async () => {
@@ -167,5 +174,41 @@ describe('checkout/create-order', () => {
     await createOrder(post({ package_id: 'pkg' }), res);
     expect(res.statusCode).toBe(201);
     expect(res.body).toMatchObject({ ok: true, provider_order_id: 'order_1', key_id: 'rzp_key' });
+  });
+});
+
+// b3 ruling 2026-11-20 (PL-114 class, LIVE): a USD-priced pack is never charged from FX config we could not read.
+describe('checkout/create-order - unreadable price configuration', () => {
+  const PKG_USD: Res = { data: { id: 'pkg', credits: 100, price: 500, sku: 'credits_100', canonical_usd_price: 6, is_active: true }, error: null };
+  it('PriceConfigUnavailableError -> 503 PRICE_CONFIG_UNAVAILABLE + Retry-After; no purchase row, no provider order', async () => {
+    const { PriceConfigUnavailableError } = jest.requireMock('../../services/pricingConfigService');
+    mockScript['credit_packages:select'] = () => PKG_USD;
+    mockFx = async () => { throw new PriceConfigUnavailableError('billing_price_overrides: timeout'); };
+    const res = mockRes();
+    await createOrder(post({ package_id: 'pkg', currency: 'INR' }), res);
+    expect(res.statusCode).toBe(503);
+    expect(res.body).toEqual({ error: 'price_config_unavailable', code: 'PRICE_CONFIG_UNAVAILABLE' });
+    expect(res.headers['Retry-After']).toBe('60');
+    expect(JSON.stringify(res.body)).not.toMatch(/timeout|override/);
+    expect(mockWrites).toEqual([]);
+    expect(mockSinks).toEqual([]);
+  });
+  it('CONTROL: readable config -> priced from it (override applied) and the order is created', async () => {
+    mockScript['credit_packages:select'] = () => PKG_USD;
+    mockScript['credit_purchases:insert'] = () => ({ data: { id: PURCHASE }, error: null });
+    mockScript['credit_purchases:update'] = () => ({ data: [{ id: PURCHASE }], error: null });
+    mockFx = async () => ({ rates: { USD: 1, INR: 85, EUR: 0.9 }, overrides: { credits_100: { INR: 499 } } });
+    const res = mockRes();
+    await createOrder(post({ package_id: 'pkg', currency: 'INR' }), res);
+    expect(res.statusCode).toBe(201);
+    expect(mockWrites.find((w) => w.op === 'insert')?.payload).toMatchObject({ amount_paid: 499 });
+  });
+  it('CONTROL: any OTHER error is not mapped to 503 PRICE_CONFIG_UNAVAILABLE', async () => {
+    mockScript['credit_packages:select'] = () => PKG_USD;
+    mockFx = async () => { throw new Error('unrelated'); };
+    const res = mockRes();
+    await Promise.resolve(createOrder(post({ package_id: 'pkg', currency: 'INR' }), res)).catch(() => undefined);
+    expect(res.body?.code).not.toBe('PRICE_CONFIG_UNAVAILABLE');
+    expect(mockSinks).toEqual([]);
   });
 });

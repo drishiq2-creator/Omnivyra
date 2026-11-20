@@ -1,11 +1,11 @@
 import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeFactory';
 /**
  * GET /api/billing/fx — public read of the live FX config (rates + market
- * overrides) for multi-currency DISPLAY. Read-only; falls back to defaults
- * pre-migration. Charge currency is INR regardless of display.
+ * overrides) for multi-currency DISPLAY. Read-only. Empty config = defaults; an UNREADABLE config = 503
+ * PRICE_CONFIG_UNAVAILABLE (c6 2026-11-20). Charge currency is INR regardless of display.
  */
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { getFxConfig } from '@/backend/services/pricingConfigService';
+import { getFxConfig, PriceConfigUnavailableError } from '@/backend/services/pricingConfigService';
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'GET') return res.status(405).end();
@@ -14,7 +14,12 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     res.setHeader('Cache-Control', 'public, max-age=300');
     return res.status(200).json(fx);
   } catch (err: any) {
-    return res.status(500).json({ error: err?.message ?? 'fx_failed' });
+    // An unreadable config is 503 with a code - never the raw DB message, never default rates presented as live.
+    if (err instanceof PriceConfigUnavailableError) {
+      res.setHeader('Retry-After', '60');
+      return res.status(503).json({ error: 'price_config_unavailable', code: err.code });
+    }
+    return res.status(500).json({ error: 'fx_failed' });
   }
 }
 

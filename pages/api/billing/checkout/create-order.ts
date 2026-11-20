@@ -13,7 +13,7 @@ import { withOrgAccess } from '../../../../backend/middleware/withOrgAccess';
 import { logger } from '../../../../backend/services/logger';
 import { supabase } from '@/backend/db/supabaseClient';
 import { resolvePrincipal } from '@/backend/security/IdentityResolver';
-import { getFxConfig } from '@/backend/services/pricingConfigService';
+import { getFxConfig, PriceConfigUnavailableError } from '@/backend/services/pricingConfigService';
 import { resolvePrice, CURRENCIES, type Currency } from '@/lib/billing/currency';
 import { createOrder as orchestratorCreateOrder } from '@/backend/services/payments/orchestrator';
 import { getProviderCredentials, getActiveMode } from '@/backend/services/payments/orchestrator';
@@ -57,7 +57,18 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   const canonicalUsd = (pkg as any).canonical_usd_price;
   let amount = Number((pkg as any).price); // INR fallback (DB authoritative)
   if (canonicalUsd != null && Number.isFinite(Number(canonicalUsd))) {
-    const fx = await getFxConfig();
+    let fx;
+    try {
+      fx = await getFxConfig();
+    } catch (err) {
+      // b3 ruling 2026-11-20: never price a top-up from rates/overrides we could not read. Answered BEFORE any purchase
+      // row or provider order exists. State only (the client decides whether to retry).
+      if (err instanceof PriceConfigUnavailableError) {
+        res.setHeader('Retry-After', '60');
+        return res.status(503).json({ error: 'price_config_unavailable', code: err.code });
+      }
+      throw err;
+    }
     amount = resolvePrice(Number(canonicalUsd), currency, fx, (pkg as any).sku ?? undefined);
   } else if (currency !== 'INR') {
     // No canonical USD to convert from → can't price this pack in a non-INR currency.
