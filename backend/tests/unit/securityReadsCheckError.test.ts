@@ -20,7 +20,12 @@
  *       error-falls-through).
  * (c)-(f) are the SECOND shape (7c/04/cb 2026-11-20): the error IS seen and then its meaning is discarded.
  * EXEMPTION, by rule not by file name: a block containing a `security-read-exempt: <reason>` comment (the reason
- * must be written there - e.g. best-effort cleanup that is never an authentication decision). Catches around
+ * must be written there - e.g. best-effort cleanup that is never an authentication decision). THE TEST FOR AN
+ * EXEMPTION (7c 2026-11-20) is not "best-effort": it is that the dropped error cannot be mistaken for absence because
+ * the block hands NO answer to anybody - a WRITE returning void (last_seen_at / last_used_at touches, an audit insert,
+ * a vault delete) - or the answer it hands on is the FAILURE direction (schemaHealthCheck reports the column MISSING,
+ * never healthy). A best-effort READ that returns a default is the defect class itself and is never exemptable.
+ * The exemption is scoped to its own block: an inner block's marker never covers the outer one. Catches around
  * NON-query code (token decode, JSON.parse, signature checks: null = "invalid, reject") are not (d) by construction.
  */
 export {};

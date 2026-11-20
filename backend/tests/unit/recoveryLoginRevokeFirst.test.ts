@@ -11,6 +11,7 @@ jest.setTimeout(120_000); // real argon2id
 interface Row { id: string; user_id: string; code_hash: string; batch_id: string; used_at: string | null; used_ip: string | null }
 const table: Row[] = [];
 let seq = 0;
+let mockSelectFails = false;
 interface State { op: 'select' | 'insert' | 'update'; payload: any; eq: Record<string, unknown>; isNull: string[]; selectAfterUpdate: boolean }
 const matches = (r: Row, st: State) =>
   Object.entries(st.eq).every(([k, v]) => (r as any)[k] === v) && st.isNull.every((k) => (r as any)[k] == null);
@@ -20,6 +21,7 @@ function exec(st: State) {
     return { data: null, error: null };
   }
   const hit = table.filter((r) => matches(r, st));
+  if (st.op === 'select' && mockSelectFails) return { data: null, error: { message: 'recovery_codes read failed (test)' } };
   if (st.op === 'select') return { data: hit, error: null };
   for (const r of hit) Object.assign(r, st.payload);
   return { data: st.selectAfterUpdate ? hit.map((r) => ({ id: r.id })) : null, error: null };
@@ -74,7 +76,7 @@ async function recover(code: string) {
 }
 const unused = () => table.filter((r) => r.used_at === null).length;
 
-beforeEach(() => { table.length = 0; seq = 0; mockRevokeAll.mockReset(); mockMinted.length = 0; });
+beforeEach(() => { table.length = 0; seq = 0; mockSelectFails = false; mockRevokeAll.mockReset(); mockMinted.length = 0; });
 
 describe('recovery login: revoke every session BEFORE consuming the code', () => {
   it('revoke FAILS -> 503 SESSIONS_NOT_REVOKED, NO session minted, the code is NOT consumed (still usable)', async () => {
@@ -102,6 +104,19 @@ describe('recovery login: revoke every session BEFORE consuming the code', () =>
     expect(r.body).toMatchObject({ ok: true, revokedOtherSessions: 2 });
     expect(mockMinted).toEqual([USER]);
     expect(mockRevokeAll).toHaveBeenCalledTimes(1);
+  });
+
+  it('code READ fails -> 503 RECOVERY_UNAVAILABLE (not SESSIONS_NOT_REVOKED), nothing revoked, minted or consumed (7c)', async () => {
+    const { codes } = await regenerate({ userId: USER });
+    const before = unused();
+    mockSelectFails = true;
+    const r = await recover(codes[3]);
+    mockSelectFails = false;
+    expect(r.statusCode).toBe(503);
+    expect(r.body).toMatchObject({ code: 'RECOVERY_UNAVAILABLE' });
+    expect(mockRevokeAll).not.toHaveBeenCalled();
+    expect(mockMinted).toEqual([]);
+    expect(unused()).toBe(before);
   });
 
   it('a wrong code revokes nothing and mints nothing', async () => {
