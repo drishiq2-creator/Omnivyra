@@ -64,8 +64,10 @@ describe('source contract: the heavy pages branch on the shared reader', () => {
     expect(src).toMatch(/setReadiness\(\{ unavailable: true \}\)/);
     expect(src).toMatch(/readiness\?\.unavailable \?/);
   });
-  it('CONTROL: no caller still reads `.integrations || []` from an unchecked body', () => {
-    for (const rel of ['components/blog/blogsNewMain.tsx', 'pages/website-setup.tsx', 'hooks/useLeadsPage.tsx']) {
+  // The four files that GET /api/integrations (7c census: blogsNewMain, integrationsController, useLeadsPage,
+  // website-setup x2; useCompanyIntegrations reads /api/engagement/integrations, a different endpoint).
+  it('CONTROL: none of the four /api/integrations callers reads `.integrations || []` from an unchecked body', () => {
+    for (const rel of ['components/blog/blogsNewMain.tsx', 'pages/website-setup.tsx', 'hooks/useLeadsPage.tsx', 'components/integrationsController.tsx']) {
       expect(read(rel)).not.toMatch(/\.integrations \|\| \[\]/);
     }
   });
