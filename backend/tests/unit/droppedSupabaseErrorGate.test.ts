@@ -56,6 +56,12 @@ describe('scanSourceB: the error is read, then answered with an absence value', 
     expect(gate.scanSourceB(L("const r = await supabase.from('t').select();", "if (r.error) return { ok: false, reason: 'unreadable' };"))).toEqual([]);
     expect(gate.scanSourceB(L('try {', '  x = await fetch(u);', '} catch { return null; }'))).toEqual([]);
   });
+  it('CONTROL (TenantGuard.ts:672 shape): a block that SENDS a response then returns null is not an absence answer', () => {
+    expect(gate.scanSourceB(L(READ, 'if (error) {', "  res.setHeader('Retry-After', '5');",
+      "  res.status(503).json({ code: 'CONTENT_LOOKUP_FAILED' });", '  return null;', '}'))).toEqual([]);
+    // ...while the same block WITHOUT the response is still flagged
+    expect(gate.scanSourceB(L(READ, 'if (error) {', "  console.warn('x');", '  return null;', '}'))).toEqual([2]);
+  });
 });
 
 describe('scanSourceC: the error is tested, the branch neither refuses nor answers (falls through)', () => {

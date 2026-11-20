@@ -94,6 +94,9 @@ function blockReturnsAbsence(src, i, n) {
   for (let k = i + 1; k < Math.min(src.length, i + 1 + n); k++) {
     const l = src[k];
     if (/\bthrow\b/.test(l)) return false;
+    // The block already ANSWERED the HTTP request (e.g. res.status(503).json(...)); the trailing `return null` is the
+    // guard's "response sent" convention, not an absence answer (false positive found on TenantGuard.ts:672, 2026-11-20).
+    if (/\bres\.(status|json|send|end|writeHead)\s*\(/.test(l)) return false;
     if (RETURN_ABSENCE.test(l)) return true;
     if (/^\s*\}/.test(l)) return false;
     if (/\breturn\b/.test(l)) return false; // returns something real (a result object, a Response, a typed error)
