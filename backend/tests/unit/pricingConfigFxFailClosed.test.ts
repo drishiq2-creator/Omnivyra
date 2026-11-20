@@ -50,6 +50,19 @@ describe('getFxConfig - an unreadable config is never priced from defaults', () 
     expect(fx.overrides).toEqual({ credits_100: { INR: 499 } });
     expect(mockMetrics).toEqual([]);
   });
+  it('CONTROL (PROD SHAPE, cb C143): 3 rates + ZERO override rows -> live rates, no overrides, NOT a failure', async () => {
+    // Prod 2026-11-20: billing_price_overrides is EMPTY. Treating empty as unreadable would 503 every live top-up.
+    mockTables.billing_fx_rates = async () => ({ data: [
+      { currency: 'USD', rate: 1, updated_at: '2026-06-20' },
+      { currency: 'INR', rate: 84, updated_at: '2026-06-20' },
+      { currency: 'EUR', rate: 0.92, updated_at: '2026-06-20' },
+    ], error: null });
+    mockTables.billing_price_overrides = async () => ({ data: [], error: null });
+    const fx = await getFxConfig();
+    expect(fx.rates).toMatchObject({ USD: 1, INR: 84, EUR: 0.92 });
+    expect(fx.overrides).toEqual({});
+    expect(mockMetrics).toEqual([]);
+  });
   it('CONTROL: read OK but no rates configured -> DEFAULT_FX (unchanged: unconfigured, not unreadable)', async () => {
     mockTables.billing_fx_rates = async () => ({ data: [], error: null });
     await expect(getFxConfig()).resolves.toBe(DEFAULT_FX);
