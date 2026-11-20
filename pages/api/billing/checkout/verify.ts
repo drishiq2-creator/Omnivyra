@@ -40,6 +40,7 @@ import {
   closePurchaseFromClient,
   fulfillProviderConfirmedPurchase,
 } from '@/backend/services/billing/purchaseClosureService';
+import { payerOutcomeOf } from '@/backend/services/billing/payerOutcome';
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
@@ -95,14 +96,25 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     const closure = await closePurchaseFromClient({
       purchaseId, organizationId, reason: 'client_reported_failure',
     });
-    if (closure.action === 'fulfilled') {
+    // c6 2026-11-20 (7c/b3 BLOCKING): only a DEFINITIVE closure says "failed". It used to answer 400 'failed' for every
+    // action but 'fulfilled' - including deferred_unknown (the provider may have captured) and already_completed (paid AND
+    // credited). payerOutcomeOf defaults to 'unconfirmed', so a new action can never mean "not charged" by accident.
+    const outcome = payerOutcomeOf(closure.action);
+    if (outcome === 'paid') {
       return res.status(200).json({
         ok: true, purchase_id: purchaseId, status: 'paid',
         fulfillment_status: 'fulfilled', provider, recovered: true,
       });
     }
-    return res.status(400).json({
-      ok: false, purchase_id: purchaseId, status: 'failed', provider, action: closure.action,
+    if (outcome === 'not_charged') {
+      return res.status(400).json({
+        ok: false, purchase_id: purchaseId, status: 'failed', provider, action: closure.action,
+      });
+    }
+    logger.warn('checkout_verify_outcome_unconfirmed', { organizationId, purchaseId, action: closure.action, detail: closure.detail ?? null });
+    res.setHeader('Retry-After', '30');
+    return res.status(503).json({
+      ok: false, purchase_id: purchaseId, status: 'unconfirmed', provider, action: closure.action, retryable: true,
     });
   }
 

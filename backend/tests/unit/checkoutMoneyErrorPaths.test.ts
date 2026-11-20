@@ -55,7 +55,7 @@ jest.mock('../../security/IdentityResolver', () => ({ resolvePrincipal: async ()
 let mockFx: () => Promise<unknown> = async () => ({});
 jest.mock('../../services/pricingConfigService', () => {
   class PriceConfigUnavailableError extends Error { readonly code = 'PRICE_CONFIG_UNAVAILABLE'; }
-  return { getFxConfig: () => mockFx(), PriceConfigUnavailableError };
+  return { getChargeFxConfig: () => mockFx(), PriceConfigUnavailableError };
 });
 jest.mock('../../services/payments/orchestrator', () => ({
   createOrder: async () => {
@@ -67,8 +67,9 @@ jest.mock('../../services/payments/orchestrator', () => ({
   verifyPayment: async () => { mockSinks.push('provider:verifyPayment'); return { verified: true }; },
 }));
 jest.mock('../../services/billing/topupInvoiceService', () => ({ generateTopupInvoice: async () => null }));
+let mockClosure: { action: string; detail?: string } = { action: 'closed' };
 jest.mock('../../services/billing/purchaseClosureService', () => ({
-  closePurchaseFromClient: async () => { mockSinks.push('closePurchaseFromClient'); return { action: 'failed' }; },
+  closePurchaseFromClient: async () => { mockSinks.push('closePurchaseFromClient'); return mockClosure; },
   fulfillProviderConfirmedPurchase: async () => { mockSinks.push('fulfill'); return { ok: true, creditsGranted: 10 }; },
 }));
 
@@ -210,5 +211,50 @@ describe('checkout/create-order - unreadable price configuration', () => {
     await Promise.resolve(createOrder(post({ package_id: 'pkg', currency: 'INR' }), res)).catch(() => undefined);
     expect(res.body?.code).not.toBe('PRICE_CONFIG_UNAVAILABLE');
     expect(mockSinks).toEqual([]);
+  });
+});
+
+// 7c/b3 BLOCKING 2026-11-20: verify's signature-rejected branch answered 400 'failed' for EVERY closure action but
+// 'fulfilled'. Every action is now driven through the route, the set taken from CLOSURE_ACTIONS (the union, as a value).
+describe('checkout/verify - every closure action maps to what it means for the payer', () => {
+  const { CLOSURE_ACTIONS } = jest.requireActual('../../services/billing/purchaseClosureService');
+  // Hand-written expectations, keyed by action. The first test fails if CLOSURE_ACTIONS gains a member not listed here.
+  const EXPECTED: Record<string, { status: number; payer: string }> = {
+    fulfilled: { status: 200, payer: 'paid' },
+    already_completed: { status: 200, payer: 'paid' },
+    closed: { status: 400, payer: 'failed' },
+    already_closed: { status: 400, payer: 'failed' },
+    deferred_unknown: { status: 503, payer: 'unconfirmed' },
+    errored: { status: 503, payer: 'unconfirmed' },
+    not_found: { status: 503, payer: 'unconfirmed' },
+  };
+  const run = async () => {
+    mockScript['credit_purchases:select'] = () => ({ data: { id: PURCHASE, organization_id: ORG, provider_order_id: 'order_1' }, error: null });
+    jest.requireMock('../../services/payments/orchestrator').verifyPayment = async () => ({ verified: false });
+    const res = mockRes();
+    await verify(post({ purchase_id: PURCHASE, payment_id: 'pay_1', signature: 'bad' }), res);
+    return res;
+  };
+  afterEach(() => {
+    jest.requireMock('../../services/payments/orchestrator').verifyPayment = async () => { mockSinks.push('provider:verifyPayment'); return { verified: true }; };
+    mockClosure = { action: 'closed' };
+  });
+  it('the expectation table covers EXACTLY the closure union', () => {
+    expect(Object.keys(EXPECTED).sort()).toEqual([...CLOSURE_ACTIONS].sort());
+  });
+  it.each([...(jest.requireActual('../../services/billing/purchaseClosureService').CLOSURE_ACTIONS as string[])])(
+    'action %s', async (action) => {
+      mockClosure = { action };
+      const res = await run();
+      expect(res.statusCode).toBe(EXPECTED[action].status);
+      expect(res.body.status).toBe(EXPECTED[action].payer);
+      if (EXPECTED[action].payer === 'unconfirmed') expect(res.headers['Retry-After']).toBe('30');
+      if (EXPECTED[action].payer !== 'failed') expect(res.body.status).not.toBe('failed');
+    });
+  it('an action the union does not know yet -> 503 unconfirmed (never "failed")', async () => {
+    mockClosure = { action: 'some_future_action' };
+    const res = await run();
+    expect(res.statusCode).toBe(503);
+    expect(res.body.status).toBe('unconfirmed');
   });
 });

@@ -129,3 +129,52 @@ describe('top-up invoice', () => {
     expect(mockWrites.map((w) => `${w.table}:${w.op}`)).toEqual(['invoices:insert', 'invoice_line_items:insert', 'invoices:update']);
   });
 });
+
+// 04/7c 2026-11-20: a lost close-CAS means "no longer pending" - a concurrent completion OR a concurrent close. It used
+// to answer already_completed unconditionally; the row is now re-read and reported as what it is.
+describe('client close - CAS lost: re-read the row, never assume completion', () => {
+  const PENDING = { ...PAID_PURCHASE, status: 'pending', provider_order_id: 'order_1', provider_payload: {} };
+  const lostCas = (reread: Res) => {
+    mockScript['credit_purchases:select'] = (n) => (n === 1 ? { data: PENDING, error: null } : reread);
+    mockScript['credit_purchases:update'] = () => ({ data: null, error: null }); // CAS matched 0 rows
+    jest.requireMock('../../services/payments/orchestrator').resolveProviderOrderOutcome = async () => ({ outcome: 'unpaid' });
+  };
+  afterEach(() => {
+    jest.requireMock('../../services/payments/orchestrator').resolveProviderOrderOutcome = async () => ({ outcome: 'paid' });
+  });
+  it.each([
+    ['completed', 'completed', 'already_completed'],
+    ['completed', 'event_recorded', 'deferred_unknown'], // completed but credits not yet granted: NOT paid
+    ['failed', 'failed', 'already_closed'],
+    ['pending', 'pending', 'deferred_unknown'],
+  ])('re-read status %s / fulfillment %s -> %s', async (status, fulfillment_status, action) => {
+    lostCas({ data: { status, fulfillment_status }, error: null });
+    const r = await closePurchaseFromClient({ purchaseId: 'p1', organizationId: 'o1', reason: 'client_reported_failure' });
+    expect(r.action).toBe(action);
+    expect(mockCalls['credit_purchases:select']).toBe(2); // PREMISE: the re-read happened
+  });
+  it('re-read ERROR -> deferred_unknown (never already_completed)', async () => {
+    lostCas(DOWN());
+    const r = await closePurchaseFromClient({ purchaseId: 'p1', organizationId: 'o1', reason: 'client_reported_failure' });
+    expect(r).toMatchObject({ action: 'deferred_unknown', detail: 'reread_failed' });
+  });
+  it('CONTROL: CAS won -> closed, no re-read', async () => {
+    lostCas({ data: { status: 'completed' }, error: null });
+    mockScript['credit_purchases:update'] = () => ({ data: { id: 'p1' }, error: null });
+    const r = await closePurchaseFromClient({ purchaseId: 'p1', organizationId: 'o1', reason: 'client_reported_failure' });
+    expect(r.action).toBe('closed');
+    expect(mockCalls['credit_purchases:select']).toBe(1);
+  });
+});
+
+describe('client close - a row read as completed is "already_completed" only once the credits are granted', () => {
+  const close = () => closePurchaseFromClient({ purchaseId: 'p1', organizationId: 'o1', reason: 'client_reported_failure' });
+  it('status completed + fulfillment event_recorded -> deferred_unknown (credits not proven)', async () => {
+    mockScript['credit_purchases:select'] = () => ({ data: { ...PAID_PURCHASE, fulfillment_status: 'event_recorded' }, error: null });
+    expect((await close()).action).toBe('deferred_unknown');
+  });
+  it('CONTROL: status completed + fulfillment completed -> already_completed', async () => {
+    mockScript['credit_purchases:select'] = () => ({ data: { ...PAID_PURCHASE, fulfillment_status: 'completed' }, error: null });
+    expect((await close()).action).toBe('already_completed');
+  });
+});

@@ -196,7 +196,7 @@ jest.mock('../../services/billing/topupInvoiceService', () => ({
     return { invoiceNumber: 'INV-1' };
   }),
 }));
-jest.mock('../../services/pricingConfigService', () => ({ getFxConfig: jest.fn(async () => ({})) }));
+jest.mock('../../services/pricingConfigService', () => ({ getFxConfig: jest.fn(async () => ({})), getChargeFxConfig: jest.fn(async () => ({})) }));
 
 jest.mock('pdfkit', () => {
   return class FakeDoc {

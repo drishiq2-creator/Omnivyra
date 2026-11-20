@@ -46,14 +46,19 @@ const DEFAULT_SCAN_LIMIT = 200;
 
 export type ClosureReason = 'client_reported_failure' | 'client_cancelled' | 'stale_pending_expiry';
 
-export type ClosureAction =
-  | 'closed'              // provider said unpaid → purchase moved to failed
-  | 'fulfilled'           // provider said paid → credits granted instead
-  | 'deferred_unknown'    // provider could not be reached → left pending
-  | 'already_completed'   // terminal success, untouched
-  | 'already_closed'      // terminal failure, untouched (idempotent)
-  | 'errored'             // this row threw; isolated so the sweep continues
-  | 'not_found';
+/** Every closure action, as a VALUE (c6 2026-11-20): callers that classify outcomes enumerate this, so a new action
+ *  cannot silently fall into a default branch untested. */
+export const CLOSURE_ACTIONS = [
+  'closed',            // provider said unpaid → purchase moved to failed
+  'fulfilled',         // provider said paid → credits granted instead
+  'deferred_unknown',  // provider could not be reached / db error → left pending
+  'already_completed', // terminal success (row read as completed), untouched
+  'already_closed',    // terminal failure (row read as failed), untouched (idempotent)
+  'errored',           // this row threw; isolated so the sweep continues
+  'not_found',
+] as const;
+export type ClosureAction = (typeof CLOSURE_ACTIONS)[number];
+
 
 export interface ClosureOutcome {
   purchaseId: string;
@@ -201,7 +206,11 @@ async function closeOnePurchase(row: PurchaseRow, reason: ClosureReason): Promis
   // Terminal states are untouchable — a completed purchase must never be
   // downgraded, and a second close is a no-op, not an error.
   if (row.status === 'completed') {
-    return { purchaseId, action: 'already_completed' };
+    // completePurchase sets status=completed (fulfillment_status=event_recorded) BEFORE the grant: "completed" alone
+    // does not prove the credits arrived. already_completed means both (c6 2026-11-20); otherwise unknown.
+    return (row as { fulfillment_status?: string | null }).fulfillment_status === 'completed'
+      ? { purchaseId, action: 'already_completed' }
+      : { purchaseId, action: 'deferred_unknown', detail: 'completed_not_yet_fulfilled' };
   }
   if (row.status === 'failed') {
     return { purchaseId, action: 'already_closed' };
@@ -278,8 +287,22 @@ async function closeOnePurchase(row: PurchaseRow, reason: ClosureReason): Promis
   }
 
   if (!updated) {
-    // Someone completed it between our read and our write. Correct outcome.
-    return { purchaseId, action: 'already_completed', detail: 'raced_to_completion' };
+    // The CAS lost: the row is no longer pending - but a concurrent COMPLETION and a concurrent CLOSE both cause that
+    // (04/7c 2026-11-20: this used to answer already_completed unconditionally). Re-read and report what it is.
+    const { data: now, error: nowErr } = await supabase
+      .from('credit_purchases')
+      .select('status, fulfillment_status')
+      .eq('id', purchaseId)
+      .maybeSingle();
+    const cur = nowErr ? null : (now as { status?: string; fulfillment_status?: string | null } | null);
+    const st = cur?.status ?? null;
+    if (st === 'completed' && cur?.fulfillment_status === 'completed') {
+      return { purchaseId, action: 'already_completed', detail: 'raced_to_completion' };
+    }
+    if (st === 'completed') return { purchaseId, action: 'deferred_unknown', detail: 'raced_completed_not_yet_fulfilled' };
+    if (st === 'failed') return { purchaseId, action: 'already_closed', detail: 'raced_to_close' };
+    if (nowErr) logger.error('payment_close_reread_failed', { purchaseId, message: nowErr.message });
+    return { purchaseId, action: 'deferred_unknown', detail: nowErr ? 'reread_failed' : `raced_to_${st ?? 'missing'}` };
   }
 
   logger.info(reason === 'stale_pending_expiry' ? 'payment_pending_expired' : 'payment_cancelled', {
