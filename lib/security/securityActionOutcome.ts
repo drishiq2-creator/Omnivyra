@@ -7,11 +7,18 @@
  * status text leaked to the user. The section loaders showed `Request failed: <status> <server body>`.
  *
  * Now:
- *   done    - 2xx. For a REVOKE also 409 ("Already revoked" is the end state the user asked for).
- *   refused - any other 4xx: the server answered and did NOT make the change.
- *   unknown - no answer, 1xx/3xx/5xx, or the request threw (incl. a cancelled step-up): we cannot say. NEVER "failed".
+ *   done    - 2xx.
+ *   refused - a 4xx: the server answered and did NOT make the change. EXCEPT 409 on a revoke (below).
+ *   unknown - no answer, 1xx/3xx/5xx, the request threw (incl. a cancelled step-up), or a 409 on a REVOKE: we cannot
+ *             say. NEVER "failed". 409 is overloaded by the server: passkeys/revoke.ts answers 409 both for "Already
+ *             revoked" (the end state) and for "Credential could not be revoked" (a race OR a real failure; its own
+ *             comment says "re-fetch to confirm state"). So the client re-reads instead of concluding (7c, 2026-11-20).
+ *             The routes now tag each 409 with a code (shared/security/revokeCodes.ts): ALREADY_REVOKED is done;
+ *             REVOKE_UNCONFIRMED, or a 409 with no code, is unknown (b3 2026-11-20).
  * Every attempt RE-READS the list afterwards, so the screen shows the true current state whatever the outcome.
  */
+
+import { ALREADY_REVOKED } from '../../shared/security/revokeCodes';
 
 /** The outcome union AS A VALUE (b3 standard); the type derives from it. */
 export const SECURITY_ACTION_OUTCOMES = ['done', 'refused', 'unknown'] as const;
@@ -26,10 +33,10 @@ const REVOKE_KINDS: ReadonlySet<SecurityActionKind> = new Set<SecurityActionKind
   'passkey_revoke', 'totp_revoke', 'device_revoke', 'session_revoke', 'sessions_revoke_others',
 ]);
 
-/** `status` null = no answer (the request threw or step-up was cancelled). */
-export function classifySecurityAction(kind: SecurityActionKind, status: number | null): SecurityActionOutcome {
+/** `status` null = no answer (the request threw or step-up was cancelled). `code` = the response body's `code`, if any. */
+export function classifySecurityAction(kind: SecurityActionKind, status: number | null, code?: string | null): SecurityActionOutcome {
   if (status !== null && status >= 200 && status < 300) return 'done';
-  if (status === 409 && REVOKE_KINDS.has(kind)) return 'done';
+  if (status === 409 && REVOKE_KINDS.has(kind)) return code === ALREADY_REVOKED ? 'done' : 'unknown';
   if (status !== null && status >= 400 && status < 500) return 'refused';
   return 'unknown';
 }

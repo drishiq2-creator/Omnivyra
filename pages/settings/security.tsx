@@ -68,19 +68,14 @@ async function jsonOrThrow<T>(r: Response): Promise<T> {
   // an HTML body (rare but possible from upstream interceptors).
   const contentType = r.headers.get('content-type') ?? '';
   const isJson = /\bapplication\/(?:json|problem\+json)\b/i.test(contentType);
-  // 04 (2026-11-20, b3 (ii)): raw status codes and response bodies go to the CONSOLE, never the screen. A JSON body's
-  // own human `error` string (e.g. "Invalid code" on TOTP activation) is still shown, because the user needs it.
+  // 04 (2026-11-20, b3 (ii); 7c): raw status codes and response bodies go to the CONSOLE, never the screen. Server
+  // `error` text is NOT passed through either: it is developer-facing ("Provide one of: id, revokeOthers, revokeAll",
+  // "Bridge principals have no sessions to revoke", snake codes), and a shape filter cannot tell user copy from
+  // internal prose. If an endpoint needs user-facing text, map its CODE to client copy (see securityActionOutcome).
   if (!r.ok) {
     const detail = await r.text().catch(() => '');
     console.warn('[security] request failed', { status: r.status, contentType, detail: detail.slice(0, 500) });
-    let serverMessage: string | null = null;
-    if (isJson) {
-      try {
-        const b = JSON.parse(detail) as { error?: unknown };
-        if (typeof b.error === 'string' && b.error.trim() && !/^[A-Z0-9_]+$/.test(b.error.trim())) serverMessage = b.error.trim();
-      } catch { /* not JSON after all */ }
-    }
-    throw new Error(serverMessage ?? 'Something went wrong. Please try again.');
+    throw new Error('Something went wrong. Please try again.');
   }
   if (!isJson) {
     const snippet = await r.text().catch(() => '');
@@ -726,7 +721,15 @@ async function runSecurityAction(
     // No answer (network, or a cancelled step-up): unknown, never "failed".
     console.warn('[security] action did not complete', { kind, error: e instanceof Error ? e.message : String(e) });
   }
-  const outcome = classifySecurityAction(kind, response ? response.status : null);
+  // Read the body's `code` from a CLONE (regenerate still reads the original's codes). Only a 409 needs it.
+  let code: string | null = null;
+  if (response && response.status === 409) {
+    try {
+      const b = (await response.clone().json()) as { code?: unknown };
+      code = typeof b.code === 'string' ? b.code : null;
+    } catch { /* no JSON body: the code stays unknown */ }
+  }
+  const outcome = classifySecurityAction(kind, response ? response.status : null, code);
   if (outcome !== 'done') console.warn('[security] action outcome', { kind, outcome, status: response?.status ?? null });
   return { outcome, response, message: outcome === 'done' ? null : SECURITY_ACTION_COPY[kind][outcome] };
 }

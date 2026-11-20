@@ -1,4 +1,5 @@
 import { createApiRoute as __createApiRoute } from '../../../../lib/platform/routeFactory';
+import { ALREADY_REVOKED, REVOKE_UNCONFIRMED } from '../../../../shared/security/revokeCodes';
 /**
  * POST /api/auth/totp/revoke
  *
@@ -50,10 +51,10 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     : await findActiveForUser(p.userId);
 
   if (!target) return res.status(404).json({ error: 'No TOTP factor to revoke' });
-  if (target.revokedAt) return res.status(409).json({ error: 'Already revoked' });
+  if (target.revokedAt) return res.status(409).json({ error: 'Already revoked', code: ALREADY_REVOKED });
 
   const ok = await revokeFactor(target.id, p.userId, reason);
-  if (!ok) return res.status(409).json({ error: 'Could not revoke (race or already revoked)' });
+  if (!ok) return res.status(409).json({ error: 'Could not revoke (race or already revoked)', code: REVOKE_UNCONFIRMED });
 
   await logSecurityEvent({
     capability: 'mfa.revoke',

@@ -31,16 +31,23 @@ jest.mock('next/head', () => ({ __esModule: true, default: ({ children }: { chil
 jest.mock('../../../lib/client/dataKit', () => ({ useVisibilityPolling: () => undefined }));
 
 import SecuritySettingsPage from '../../../pages/settings/security';
+import fs from 'fs';
+import path from 'path';
+import { REVOKE_CODES, ALREADY_REVOKED, REVOKE_UNCONFIRMED } from '../../../shared/security/revokeCodes';
 import {
   SECURITY_ACTION_COPY, SECURITY_ACTION_KINDS, SECURITY_ACTION_OUTCOMES, classifySecurityAction,
 } from '../../../lib/security/securityActionOutcome';
 
 type Answer = { status: number; body?: unknown } | 'throw';
-const json = (a: { status: number; body?: unknown }) => ({
-  ok: a.status >= 200 && a.status < 300, status: a.status,
-  headers: { get: (k: string) => (k.toLowerCase() === 'content-type' ? 'application/json' : null) },
-  json: async () => a.body ?? {}, text: async () => JSON.stringify(a.body ?? {}),
-});
+const json = (a: { status: number; body?: unknown }): any => {
+  const r: any = {
+    ok: a.status >= 200 && a.status < 300, status: a.status,
+    headers: { get: (k: string) => (k.toLowerCase() === 'content-type' ? 'application/json' : null) },
+    json: async () => a.body ?? {}, text: async () => JSON.stringify(a.body ?? {}),
+  };
+  r.clone = () => json(a);
+  return r;
+};
 let revokeAnswer: Answer = { status: 200, body: { revoked: 1 } };
 let listMode: 'ok' | 'fail' = 'ok';
 let beginReg: { status: number; body?: unknown; html?: boolean } = { status: 200, body: {} };
@@ -93,6 +100,21 @@ describe('revoke outcomes (sessions: "sign out other sessions")', () => {
     await waitFor(() => expect(listCalls()).toBeGreaterThan(before));
   });
 
+  it.each<[string, Answer, string | null]>([
+    ['409 ALREADY_REVOKED (the end state)', { status: 409, body: { error: 'Already revoked', code: ALREADY_REVOKED } }, null],
+    ['409 REVOKE_UNCONFIRMED (could not confirm)', { status: 409, body: { error: 'x', code: REVOKE_UNCONFIRMED } }, SECURITY_ACTION_COPY.sessions_revoke_others.unknown],
+    ['409 with NO code (older server)', { status: 409, body: { error: 'Already revoked' } }, SECURITY_ACTION_COPY.sessions_revoke_others.unknown],
+  ])('%s → keyed on the CODE, never the status alone; list re-read', async (_n, answer, copy) => {
+    revokeAnswer = answer;
+    const before = await revokeOthers();
+    await waitFor(() => expect(listCalls()).toBeGreaterThan(before));
+    if (copy) expect(screen.getByText(copy)).toBeTruthy();
+    else {
+      expect(screen.queryByText(SECURITY_ACTION_COPY.sessions_revoke_others.unknown)).toBeNull();
+      expect(screen.queryByText(SECURITY_ACTION_COPY.sessions_revoke_others.refused)).toBeNull();
+    }
+  });
+
   it('control: 200 → no error, list re-read', async () => {
     const before = await revokeOthers();
     await waitFor(() => expect(listCalls()).toBeGreaterThan(before));
@@ -131,21 +153,25 @@ describe('request errors never show raw status or body (jsonOrThrow)', () => {
   it.each<[string, { status: number; body?: unknown; html?: boolean }, string]>([
     ['an HTML 502', { status: 502, html: true }, 'Something went wrong. Please try again.'],
     ['a JSON 500 with a code-like error', { status: 500, body: { error: 'INTERNAL_ERROR' } }, 'Something went wrong. Please try again.'],
-    ['a JSON 400 with a human error (kept: the user needs it)', { status: 400, body: { error: 'Passkeys are limited to 5 per account.' } }, 'Passkeys are limited to 5 per account.'],
+    ['a JSON 400 with developer prose (not passed through)', { status: 400, body: { error: 'Provide one of: id, revokeOthers, revokeAll' } }, 'Something went wrong. Please try again.'],
   ])('%s', async (_n, answer, copy) => {
     beginReg = answer;
     render(<SecuritySettingsPage />);
     const btn = await screen.findByRole('button', { name: 'Enroll new passkey' });
     await act(async () => { fireEvent.click(btn); });
     await waitFor(() => expect(screen.getByText(copy)).toBeTruthy());
-    expect(screen.queryByText(/Request failed|Expected JSON|502|500|400|Bad Gateway|INTERNAL_ERROR/)).toBeNull();
+    expect(screen.queryByText(/Request failed|Expected JSON|502|500|400|Bad Gateway|INTERNAL_ERROR|Provide one of/)).toBeNull();
   });
 });
 
 describe('outcome tables (union-coverage pattern)', () => {
-  it('classify: 2xx done; 409 done for revokes only; other 4xx refused; everything else unknown', () => {
+  it('classify: 2xx done; a revoke 409 is done ONLY with ALREADY_REVOKED, otherwise unknown; other 4xx refused; else unknown', () => {
     expect(classifySecurityAction('session_revoke', 200)).toBe('done');
-    expect(classifySecurityAction('session_revoke', 409)).toBe('done');
+    expect(classifySecurityAction('passkey_revoke', 409, ALREADY_REVOKED)).toBe('done');
+    expect(classifySecurityAction('passkey_revoke', 409, REVOKE_UNCONFIRMED)).toBe('unknown');
+    expect(classifySecurityAction('passkey_revoke', 409, null)).toBe('unknown');
+    expect(classifySecurityAction('passkey_revoke', 409, 'SOME_FUTURE_CODE')).toBe('unknown');
+    expect(classifySecurityAction('device_trust', 409, ALREADY_REVOKED)).toBe('refused');
     expect(classifySecurityAction('device_trust', 409)).toBe('refused');
     expect(classifySecurityAction('recovery_regenerate', 409)).toBe('refused');
     expect(classifySecurityAction('passkey_revoke', 403)).toBe('refused');
@@ -156,6 +182,25 @@ describe('outcome tables (union-coverage pattern)', () => {
     expect(Object.keys(SECURITY_ACTION_COPY).sort()).toEqual([...SECURITY_ACTION_KINDS].sort());
     const nonDone = SECURITY_ACTION_OUTCOMES.filter((o) => o !== 'done').sort();
     for (const k of SECURITY_ACTION_KINDS) expect(Object.keys(SECURITY_ACTION_COPY[k]).sort()).toEqual(nonDone);
+  });
+
+  it('REVOKE_CODES: every code is decided (ALREADY_REVOKED → done; every other code → unknown), both directions', () => {
+    const decided: Record<string, string> = {};
+    for (const c of REVOKE_CODES) decided[c] = classifySecurityAction('passkey_revoke', 409, c);
+    expect(Object.keys(decided).sort()).toEqual([...REVOKE_CODES].sort());
+    expect(decided).toEqual({ ALREADY_REVOKED: 'done', REVOKE_UNCONFIRMED: 'unknown' });
+  });
+
+  it('server contract: every 409 in the three revoke routes carries a code from REVOKE_CODES', () => {
+    const ROOT = path.resolve(__dirname, '../../..');
+    let total = 0;
+    for (const rel of ['pages/api/auth/passkeys/revoke.ts', 'pages/api/auth/sessions/revoke.ts', 'pages/api/auth/totp/revoke.ts']) {
+      const src = fs.readFileSync(path.join(ROOT, rel), 'utf8');
+      const sites = src.split(/\r?\n/).filter((l) => l.includes('status(409)'));
+      total += sites.length;
+      for (const l of sites) expect({ rel, l, coded: /code: (ALREADY_REVOKED|REVOKE_UNCONFIRMED)\b/.test(l) }).toMatchObject({ coded: true });
+    }
+    expect(total).toBe(5); // control: the scan found the sites it claims to check
   });
 
   it('every outcome is producible', () => {
