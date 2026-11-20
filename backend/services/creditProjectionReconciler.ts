@@ -190,29 +190,78 @@ export function computeFromLedger(rows: LedgerRow[]): ComputedWallet {
   };
 }
 
-/** Page through the org's ledger (immutable rows; order is irrelevant to the sum). */
+/**
+ * Page through the org's ledger by KEYSET on the primary key (05 review 2026-11-13): `WHERE id > last ORDER BY id
+ * LIMIT n`. OFFSET paging was unsafe twice over: without ORDER BY a page can skip / duplicate rows (fixed by ordering),
+ * and even ordered, the id is a RANDOM uuid (gen_random_uuid), so a ledger row INSERTED during the scan can land below
+ * the cursor and shift a later OFFSET page - a row counted twice in a money rebuild. credit_transactions is
+ * append-only (20260663 immutability triggers block UPDATE / DELETE), so deletions cannot shift pages today; keyset
+ * does not depend on that either. The sum over rows is order-independent.
+ */
 async function loadLedger(organizationId: string): Promise<LedgerRow[] | null> {
   const rows: LedgerRow[] = [];
-  for (let from = 0; ; from += LEDGER_PAGE) {
-    const { data, error } = await supabase
+  let lastId: string | null = null;
+  for (;;) {
+    let q = supabase
       .from('credit_transactions')
-      .select('execution_phase, free_delta, paid_delta, incentive_delta, idempotency_key')
-      .eq('organization_id', organizationId)
-      .range(from, from + LEDGER_PAGE - 1);
+      .select('id, execution_phase, free_delta, paid_delta, incentive_delta, idempotency_key')
+      .eq('organization_id', organizationId);
+    if (lastId !== null) q = q.gt('id', lastId);
+    const { data, error } = await q.order('id', { ascending: true }).limit(LEDGER_PAGE);
     if (error) {
       diag('ledger_read_failed', { organizationId, message: error.message });
       return null;
     }
-    const batch = (data ?? []) as LedgerRow[];
+    const batch = (data ?? []) as Array<LedgerRow & { id: string }>;
     rows.push(...batch);
     if (batch.length < LEDGER_PAGE) break;
+    lastId = batch[batch.length - 1].id;
   }
   return rows;
 }
 
+/**
+ * Optimistic-concurrency SNAPSHOT of the org's ledger (b3 2026-11-19, BLOCKING follow-up to the keyset fix): the exact
+ * row count, read before and after the scan. credit_transactions is APPEND-ONLY - 20260663's
+ * credit_transactions_immutable_update / _delete triggers raise on UPDATE/DELETE, and no application code updates or
+ * deletes ledger rows (the only writers are the SQL credit functions, which INSERT) - so the count is a COMPLETE change
+ * detector: any write during the scan changes it. (Whether the triggers are live in prod is on cb's read pack; if they
+ * were not, an in-place UPDATE would escape the count - no app path performs one.) Returns null on a read error.
+ */
+async function countLedger(organizationId: string): Promise<number | null> {
+  const { count, error } = await supabase
+    .from('credit_transactions')
+    .select('id', { count: 'exact', head: true })
+    .eq('organization_id', organizationId);
+  if (error || typeof count !== 'number') {
+    diag('ledger_count_failed', { organizationId, message: error?.message ?? 'no count' });
+    return null;
+  }
+  return count;
+}
+
 async function reconcileImpl(organizationId: string): Promise<ReconcileResult> {
+  const countBefore = await countLedger(organizationId);
+  if (countBefore === null) return { outcome: 'failed', organizationId };
   const ledger = await loadLedger(organizationId);
   if (ledger === null) {
+    return { outcome: 'failed', organizationId };
+  }
+  // The scan must describe ONE ledger state, or ABORT and write nothing. Two checks, and they are NOT redundant (7c):
+  //   1. countAfter === countBefore - DID THE POPULATION CHANGE. Append-only means the count only grows, so equal counts
+  //      imply no insert anywhere in the window spanning countBefore, every page of the scan, and countAfter - what a
+  //      transaction would give, without one. Do not drop either count read.
+  //   2. ledger.length === countAfter - DID WE SEE ALL OF IT. A completeness check on the scan itself: it catches a
+  //      keyset paging bug, a page-boundary off-by-one, a .limit() interaction or a row sorting before the cursor -
+  //      all of which give a SHORT sum over a STABLE ledger that check 1 can never see.
+  // Because the sum is taken over exactly the counted rows, a correct count implies a correct population (no sum check
+  // needed under append-only). The append-only premise is two layers: 20260663's immutability triggers (live-in-prod
+  // is cb read-pack #6) AND no application UPDATE/DELETE of ledger rows; if the triggers were not live, only the second
+  // layer would hold.
+  const countAfter = await countLedger(organizationId);
+  if (countAfter === null) return { outcome: 'failed', organizationId };
+  if (countAfter !== countBefore || ledger.length !== countAfter) {
+    diag('reconcile_aborted_ledger_changed', { organizationId, countBefore, countAfter, scanned: ledger.length });
     return { outcome: 'failed', organizationId };
   }
 
@@ -230,11 +279,18 @@ async function reconcileImpl(organizationId: string): Promise<ReconcileResult> {
   // to the caller. Re-read the row immediately before writing — if a healthy
   // row exists, the projection was never broken: skip the write entirely so
   // a live wallet is never clobbered by a rebuild.
-  const { data: existingRow } = await supabase
+  // A READ ERROR here is "unknown", never "absent" (e1 2026-11-12, BLOCKING money): the former code ignored the
+  // error, so a transient failure looked like a missing wallet and the guard let the rebuild overwrite a live one -
+  // the 2026-07-09 incident class inside the incident's own guard. Abort; write nothing.
+  const { data: existingRow, error: existingErr } = await supabase
     .from('organization_credits')
     .select('free_balance, paid_balance, incentive_balance, lifetime_purchased, lifetime_consumed')
     .eq('organization_id', organizationId)
     .maybeSingle();
+  if (existingErr) {
+    diag('reconcile_aborted_wallet_read_failed', { organizationId, message: existingErr.message });
+    return { outcome: 'failed', organizationId };
+  }
   if (existingRow && !projectionIsBroken(existingRow as Record<string, unknown>)) {
     diag('reconcile_skipped_row_healthy', { organizationId });
     return { outcome: 'skipped_healthy', organizationId };
