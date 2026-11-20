@@ -69,9 +69,14 @@ export async function getStrategyHistoryForCompany(
     return { ...EMPTY, campaigns_count, strategy_momentum: null };
   }
 
+  // TENANT SCOPE (b3 2026-11-20, BLOCKING cross-tenant read): the ids come from campaign snapshots, which store a
+  // client-supplied recommendation_id unvalidated (pages/api/campaigns/index.ts) - a stale or crafted id naming
+  // ANOTHER company's recommendation must not surface that company's trend_topic / category here. A foreign id reads
+  // like an unknown one (no aspect: falls back to the campaign's own counts).
   const { data: snapshotRows, error: snapError } = await supabase
     .from('recommendation_snapshots')
     .select('id, trend_topic, category')
+    .eq('company_id', companyId)
     .in('id', uniqueIds);
 
   if (snapError || !snapshotRows?.length) {
