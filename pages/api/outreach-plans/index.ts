@@ -29,14 +29,24 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     return res.status(401).json({ error: 'User not identified' });
   }
 
-  const { data: existing, error: existingError } = await supabase
-    .from('opportunity_items')
-    .select('id, company_id')
-    .eq('id', opportunityId)
-    .single();
   // A failed read is not "not found" (unread-error census). PGRST116 is the genuine no-row case.
-  if (existingError && existingError.code !== 'PGRST116') {
-    return res.status(500).json({ error: 'Failed to load opportunity' });
+  // b3 read-failure rule: 503 + Retry-After + a distinct code, for an error object AND a thrown rejection.
+  let existing: { id: string; company_id: string } | null = null;
+  let existingUnreadable = false;
+  try {
+    const r = await supabase
+      .from('opportunity_items')
+      .select('id, company_id')
+      .eq('id', opportunityId)
+      .single();
+    if (r.error && r.error.code !== 'PGRST116') existingUnreadable = true;
+    else existing = (r.data as { id: string; company_id: string } | null) ?? null;
+  } catch {
+    existingUnreadable = true;
+  }
+  if (existingUnreadable) {
+    res.setHeader('Retry-After', '5');
+    return res.status(503).json({ error: 'The opportunity could not be read', code: 'OPPORTUNITY_UNREADABLE' });
   }
 
   if (!existing) {

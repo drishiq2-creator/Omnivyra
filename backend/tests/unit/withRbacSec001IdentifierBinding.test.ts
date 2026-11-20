@@ -114,6 +114,7 @@ jest.mock('../../db/supabaseClient', () => {
     // PostgREST's own no-row answer carries code PGRST116; routes tell it apart from a failed read.
     b.single = () => {
       if (mockFailRead === table) { mockFailRead = null; return Promise.resolve({ data: null, error: { code: '08006', message: 'connection reset' } }); }
+      if (mockFailRead === `throw:${table}`) { mockFailRead = null; return Promise.reject(new Error('socket hang up')); }
       const r = resolve();
       return Promise.resolve({ data: r.data[0] ?? null, error: r.data.length ? null : { code: 'PGRST116', message: 'no rows' } });
     };
@@ -295,11 +296,19 @@ describe.each([
     expect(guard.length).toBeGreaterThan(0);
   });
 
-  it('a FAILED opportunity read is not "not found": 500, nothing written (unread-error census)', async () => {
-    mockFailRead = 'opportunity_items';
-    const res = await call(getHandler(), ADMIN_A, {
-      method: 'POST', body: { opportunityId: OPP_A, companyId: COMPANY_A } });
-    if (table === 'outreach_plans') expect(res.statusCode).toBe(500);
+  it.each([
+    ['an error object', 'opportunity_items'],
+    ['a thrown rejection', 'throw:opportunity_items'],
+  ])('a FAILED opportunity read (%s) is not "not found": nothing written; outreach-plans answers 503 OPPORTUNITY_UNREADABLE', async (_n, failMode) => {
+    mockFailRead = failMode;
+    // collaboration-plans (outside this slice) lets a THROWN read escape as a raw error - still nothing is written,
+    // which is the property under test here; its 503 is a separate dropped-error item.
+    const res: any = await call(getHandler(), ADMIN_A, {
+      method: 'POST', body: { opportunityId: OPP_A, companyId: COMPANY_A } }).catch((e: unknown) => ({ statusCode: 'threw', body: String(e) }));
+    if (table === 'outreach_plans') {
+      expect(res.statusCode).toBe(503);
+      expect(res.body).toMatchObject({ code: 'OPPORTUNITY_UNREADABLE' });
+    }
     expect(writes.filter(w => w.table === table)).toEqual([]);
     mockFailRead = null;
   });
