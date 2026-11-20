@@ -125,7 +125,6 @@ import { runReconciliationPass } from '../services/operationalReconciler';
 import { runIntelligenceEventCleanup } from '../jobs/intelligenceEventCleanup';
 import { runProspectRetryJob } from '../jobs/prospectRetryJob';
 import { runProspectScoreEvaluationJob } from '../jobs/prospectScoreEvaluationJob';
-import { runSettlementMetricsRetention, pruneRolledSettlementMetrics } from '../services/billing/payments/settlementMetricsRetention';
 import { runWeeklyPricingAnalysis } from '../jobs/weeklyPricingAnalysisJob';
 import { runSocialAccountTokenRefreshJob } from '../jobs/socialAccountTokenRefreshJob';
 import { runScheduledAnalyticsSync } from '../services/scheduledAnalyticsSync';
@@ -219,7 +218,6 @@ const PROSPECT_RETRY_INTERVAL_MS = 5 * 60 * 1000; // every 5 minutes
 const PROSPECT_SCORE_EVALUATION_INTERVAL_MS = 60 * 60 * 1000; // hourly
 // Settlement metrics rollup — compact closed time buckets of the append-only
 // operational metrics ledger. Deterministic + idempotent.
-const SETTLEMENT_METRICS_RETENTION_INTERVAL_MS = 24 * 60 * 60 * 1000; // once per day
 const WEEKLY_PRICING_ANALYSIS_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000; // weekly
 const ENGAGEMENT_DIGEST_INTERVAL_MS = 24 * 60 * 60 * 1000; // once per day
 const ENGAGEMENT_SIGNAL_SCHEDULER_INTERVAL_MS = 15 * 60 * 1000; // every 15 minutes
@@ -350,7 +348,6 @@ let lastDailyIntelligenceRun = 0;
 let lastIntelligenceEventCleanupRun = 0;
 let lastProspectRetryRun = 0;
 let lastProspectScoreEvaluationRun = 0;
-let lastSettlementMetricsRetentionRun = 0;
 let lastWeeklyPricingAnalysisRun = 0;
 let lastEngagementDigestRun = 0;
 let lastEngagementSignalSchedulerRun = 0;
@@ -1563,33 +1560,6 @@ async function runSchedulerCycleBody(opts: { includePublishSafetyNet?: boolean }
       }
     } catch (error: unknown) {
       console.error('❌ Prospect score evaluation error:', formatCaughtError(error));
-    }
-  }
-
-  // Settlement metrics rollup — compact closed buckets of the append-only
-  // settlement_operational_metrics ledger. Deterministic + idempotent (an
-  // already-rolled bucket is skipped); the open period is never touched.
-  if (shouldRunCronJob("settlementMetricsRetention", SETTLEMENT_METRICS_RETENTION_INTERVAL_MS, lastSettlementMetricsRetentionRun)) {
-    lastSettlementMetricsRetentionRun = Date.now();
-    try {
-      const result = await runSettlementMetricsRetention();
-      if (result.rollupRowsWritten > 0) {
-        console.log(
-          `✅ Settlement metrics retention: ${result.rollupRowsWritten} rollup row(s) across ${result.periodsRolledUp} period(s), ${result.rawRowsCompacted} raw row(s) compacted`
-        );
-      }
-      // Rollup-gated prune — retire raw rows for fully rolled-up periods via
-      // the sanctioned RPC. Deterministic + idempotent (a re-run prunes 0).
-      const pruned = await pruneRolledSettlementMetrics();
-      if (pruned.prunedRows > 0 || pruned.rejectedPartial > 0 || pruned.rejectedCorrupt > 0) {
-        console.log(
-          `✅ Settlement metrics prune: ${pruned.prunedRows} raw row(s) retired across ${pruned.eligiblePeriods} period(s)` +
-          (pruned.rejectedPartial > 0 ? `; ${pruned.rejectedPartial} partial rejected` : '') +
-          (pruned.rejectedCorrupt > 0 ? `; ${pruned.rejectedCorrupt} corrupt rejected` : '')
-        );
-      }
-    } catch (error: unknown) {
-      console.error('❌ Settlement metrics retention error:', formatCaughtError(error));
     }
   }
 
