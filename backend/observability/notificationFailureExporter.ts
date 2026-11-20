@@ -73,10 +73,41 @@ export async function exportNotificationFailures(now: number = Date.now()): Prom
   }
 }
 
+/**
+ * Checkout down (b3 / c6 PL-114): billingAmountResolver fails checkout CLOSED when hidden_billing_catalog is
+ * unreadable and records system_health_metrics (component 'billing', metric 'price_catalog_unavailable', value 1).
+ * Same durable-source pattern, in the SAME tick (no second exporter): sum of metric_value over the last 15 minutes,
+ * read via idx_system_health_metrics_name (metric_name, observed_at). A failed read sets
+ * billing_price_catalog_unavailable_unreadable = 1 and writes no count (never a false zero).
+ */
+export const BILLING_CATALOG_WINDOW_MS = 15 * 60_000;
+export async function exportBillingCatalogUnavailable(now: number = Date.now()): Promise<'exported' | 'unreadable'> {
+  try {
+    const since = new Date(now - BILLING_CATALOG_WINDOW_MS).toISOString();
+    const { data, error } = await ownedDbTable('system_health_metrics')
+      .select('metric_value')
+      .eq('metric_name', 'price_catalog_unavailable')
+      .eq('component', 'billing')
+      .gte('observed_at', since)
+      .limit(MAX_ROWS);
+    if (error) throw new Error(String(error.message ?? 'read error'));
+    const rows = (data ?? []) as Array<{ metric_value: number | string | null }>;
+    const total = rows.reduce((acc, r) => acc + (Number(r.metric_value) || 0), 0);
+    recordRawGauge('billing_price_catalog_unavailable_recent', total, { window: '15m' });
+    recordRawGauge('billing_price_catalog_unavailable_unreadable', 0);
+    return 'exported';
+  } catch (err) {
+    console.error('BILLING_CATALOG_SIGNAL_UNREADABLE', err instanceof Error ? err.message.slice(0, 200) : String(err).slice(0, 200));
+    try { recordRawGauge('billing_price_catalog_unavailable_unreadable', 1); } catch { /* never break the worker */ }
+    return 'unreadable';
+  }
+}
+
 /** Start the periodic export (one immediate tick, then every EXPORT_INTERVAL_MS). Returns a stop function. */
 export function startNotificationFailureExporter(intervalMs: number = EXPORT_INTERVAL_MS): () => void {
-  void exportNotificationFailures();
-  const timer = setInterval(() => { void exportNotificationFailures(); }, intervalMs);
+  const tick = () => { void exportNotificationFailures(); void exportBillingCatalogUnavailable(); };
+  tick();
+  const timer = setInterval(tick, intervalMs);
   if (typeof timer.unref === 'function') timer.unref();
   return () => clearInterval(timer);
 }

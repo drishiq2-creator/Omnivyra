@@ -1,0 +1,51 @@
+# Billing - Prometheus Alert Rules (a9, 2026-11-20; b3 ruling on c6's PL-114).
+# Operational IaC. Does NOT change application runtime.
+#
+# Load into Prometheus:
+#   Copy to: /etc/prometheus/rules/billing-alerts.yml
+#   Then in prometheus.yml:
+#     rule_files:
+#       - "rules/billing-alerts.yml"
+#
+# SOURCE - DURABLE, PROCESS-INDEPENDENT (the notification-alerts.yml pattern):
+#   backend/services/billing/payments/billingAmountResolver.ts fails checkout CLOSED when hidden_billing_catalog is
+#   unreadable (PL-114) and records one system_health_metrics row (component 'billing', metric
+#   'price_catalog_unavailable', value 1) via systemHealthMetricsService.recordMetric - which logs and counts a lost
+#   write (system_health_metric_write_failed). The WORKER's exporter
+#   (backend/observability/notificationFailureExporter.ts, same 60 s tick) publishes on its /metrics:
+#     billing_price_catalog_unavailable_recent{window="15m"}   gauge: sum of metric_value in the last 15 minutes
+#     billing_price_catalog_unavailable_unreadable             gauge: 1 = the last read FAILED
+#   Because the count comes from the database, a checkout refused on Vercel counts exactly like one in the worker.
+#   Rules read the worker scrape only (job="omnivyra-worker"); max() collapses several worker replicas.
+#
+# LIVENESS: the gauges exist only while the exporter runs. NotificationFailureExporterMissing
+#   (notifications-alerts.yml) fires when that same tick stops; BillingCatalogSignalUnreadable fires when this read
+#   fails - a stopped or blind exporter is never a silent all-clear.
+#
+# TEST-ALERT PATH (alerts are a release condition): Step 1 promtool (CI: monitoring-rules.yml, with a CONTROL that
+#   swaps the rule's > 0 for > 1 and requires failure); Step 2 the owner presses "Test" on the paging contact point;
+#   Step 3 owner-approved, cb executes: insert ONE system_health_metrics row (component 'billing', metric
+#   'price_catalog_unavailable', value 1, metadata {"test": true}), the owner confirms the page, cb deletes the row.
+---
+groups:
+  - name: billing_checkout
+    interval: 60s
+    rules:
+      # Checkout is DOWN: the price catalog could not be read, so checkout refused (503 PRICE_CATALOG_UNAVAILABLE).
+      # One occurrence in 15 minutes pages - nobody can buy credits while it lasts.
+      - alert: BillingPriceCatalogUnavailable
+        expr: max(billing_price_catalog_unavailable_recent{job="omnivyra-worker",window="15m"}) > 0
+        for: 0m
+        labels: { severity: critical, component: billing, category: money, page: sre }
+        annotations:
+          summary: "Checkout is failing: the price catalog is unreadable ({{ $value }} in 15m)"
+          description: "billingAmountResolver refused checkout because hidden_billing_catalog could not be read (PL-114). Check the database / hidden_billing_catalog and the BILLING error log lines; system_health_metrics billing/price_catalog_unavailable holds each occurrence."
+
+      # The exporter could not READ the checkout signal: a checkout outage would not be seen while this lasts.
+      - alert: BillingCatalogSignalUnreadable
+        expr: max(billing_price_catalog_unavailable_unreadable{job="omnivyra-worker"}) == 1
+        for: 5m
+        labels: { severity: critical, component: billing, category: money, page: sre }
+        annotations:
+          summary: "The checkout-outage signal cannot be read"
+          description: "The worker's exporter has failed to read system_health_metrics (billing/price_catalog_unavailable) for 5 minutes (BILLING_CATALOG_SIGNAL_UNREADABLE in the worker log). BillingPriceCatalogUnavailable cannot fire while this lasts."

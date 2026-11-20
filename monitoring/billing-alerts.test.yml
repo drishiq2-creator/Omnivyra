@@ -1,0 +1,60 @@
+# promtool unit tests for billing-alerts.yml (a9, 2026-11-20).
+#   promtool test rules monitoring/billing-alerts.test.yml
+# CI (monitoring-rules.yml) also swaps the outage rule's `> 0` for `> 1` and requires these tests to FAIL - one refused
+# checkout must page.
+rule_files:
+  - billing-alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  # ONE refused checkout in the 15m window pages at once (two replicas, one alert); back to 0 resolves it.
+  - interval: 1m
+    input_series:
+      - series: 'billing_price_catalog_unavailable_recent{job="omnivyra-worker",instance="w1",window="15m"}'
+        values: '0x3 1x15 0x10'
+      - series: 'billing_price_catalog_unavailable_recent{job="omnivyra-worker",instance="w2",window="15m"}'
+        values: '0x3 1x15 0x10'
+      - series: 'billing_price_catalog_unavailable_unreadable{job="omnivyra-worker",instance="w1"}'
+        values: '0x30'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: BillingPriceCatalogUnavailable
+        exp_alerts:
+          - exp_labels: { severity: critical, component: billing, category: money, page: sre }
+            exp_annotations:
+              summary: "Checkout is failing: the price catalog is unreadable (1 in 15m)"
+              description: "billingAmountResolver refused checkout because hidden_billing_catalog could not be read (PL-114). Check the database / hidden_billing_catalog and the BILLING error log lines; system_health_metrics billing/price_catalog_unavailable holds each occurrence."
+      - eval_time: 25m
+        alertname: BillingPriceCatalogUnavailable
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: BillingCatalogSignalUnreadable
+        exp_alerts: []
+
+  # The Vercel APP job is ignored (per-instance registries can miss and invent events).
+  - interval: 1m
+    input_series:
+      - series: 'billing_price_catalog_unavailable_recent{job="omnivyra-app",instance="www",window="15m"}'
+        values: '3x20'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: BillingPriceCatalogUnavailable
+        exp_alerts: []
+
+  # A READ FAILURE pages after 5 minutes; a recovered read clears it.
+  - interval: 1m
+    input_series:
+      - series: 'billing_price_catalog_unavailable_unreadable{job="omnivyra-worker",instance="w1"}'
+        values: '0x2 1x10 0x10'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: BillingCatalogSignalUnreadable
+        exp_alerts:
+          - exp_labels: { severity: critical, component: billing, category: money, page: sre }
+            exp_annotations:
+              summary: "The checkout-outage signal cannot be read"
+              description: "The worker's exporter has failed to read system_health_metrics (billing/price_catalog_unavailable) for 5 minutes (BILLING_CATALOG_SIGNAL_UNREADABLE in the worker log). BillingPriceCatalogUnavailable cannot fire while this lasts."
+      - eval_time: 20m
+        alertname: BillingCatalogSignalUnreadable
+        exp_alerts: []
