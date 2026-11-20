@@ -30,7 +30,8 @@ const base = {
   platform: 'linkedin', action_type: 'reply', risk_level: 'low', requires_human_approval: false, execution_mode: 'api', suggested_text: 'Thanks!',
   execution_modes_config: { manual_only: false, api_allowed: true, rpa_allowed: false },
 };
-const SCHEDULED = { ...base, action_id: 'a-sched', target_id: 't1', status: 'scheduled', scheduled_at: '2026-11-01T10:00:00Z', approved_at: '2026-10-31T09:00:00Z' };
+// The REAL API shape (a9): scheduled rows come in scheduled_actions with status 'approved' and scheduled_at set.
+const SCHEDULED = { ...base, action_id: 'a-sched', target_id: 't1', status: 'approved', scheduled_at: '2026-11-01T10:00:00Z', approved_at: '2026-10-31T09:00:00Z' };
 const PENDING = { ...base, action_id: 'a-pend', target_id: 't2', status: 'pending' };
 
 function okJson(body: unknown) {

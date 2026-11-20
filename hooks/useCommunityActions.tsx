@@ -99,6 +99,7 @@ export function useCommunityActions() {
         ...(data.scheduled_actions || []).map((action: PendingAction) => ({
           ...action,
           status: normalizeStatus(action, 'scheduled'),
+          retired_schedule: true,
         })),
         ...(data.completed_actions || []).map((action: PendingAction) => ({
           ...action,
@@ -164,12 +165,12 @@ export function useCommunityActions() {
     const tabMatches = actions.filter((action) => {
       const status = action.status.toLowerCase();
       // A row that was scheduled never ran (the scheduler never ran in prod): it is still pending a decision.
-      if (activeTab === 'Pending' && status === 'scheduled') return true;
+      if (action.retired_schedule) return activeTab === 'Pending';
       return status === activeTab.toLowerCase();
     });
     const statusFiltered =
       statusFilter === 'scheduled'
-        ? tabMatches.filter((action) => action.status.toLowerCase() === 'scheduled')
+        ? tabMatches.filter((action) => action.retired_schedule === true)
         : statusFilter === 'failed'
         ? tabMatches.filter((action) => action.status.toLowerCase() === 'failed')
         : statusFilter === 'executed'

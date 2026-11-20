@@ -195,10 +195,10 @@ export default function CommunityActionsView({ d }: { d: S }) {
                 );
                 const manualAllowedByPlaybook = manualExecutionCheck.allowed;
                 const hasManualConfig = Boolean(executionConfig);
-                // A retired-schedule row was approved when it was scheduled; the server executes from 'scheduled' and
-                // still enforces approved_at, so it gets the normal execute path (labelled Send now).
-                const isScheduledNotSent = status === 'scheduled';
-                const isApproved = status === 'approved' || isScheduledNotSent;
+                // A retired-schedule row (from GET scheduled_actions) arrives with status 'approved' (a9), so it already
+                // gets the normal execute path; the server still enforces approved_at. Its auto button reads "Send now".
+                const isScheduledNotSent = action.retired_schedule === true;
+                const isApproved = status === 'approved';
                 const isPending = status === 'pending';
                 const showApprove =
                   requiresApproval &&
@@ -286,7 +286,7 @@ export default function CommunityActionsView({ d }: { d: S }) {
                       </div>
                     </td>
                     <td className="px-3 py-2">
-                      {action.status.toLowerCase() === 'scheduled' ? (
+                      {action.retired_schedule ? (
                         <span className="text-xs text-amber-800">
                           {scheduledNotSentCopy(action.scheduled_at)}
                         </span>

@@ -76,6 +76,12 @@ export type PendingAction = TenantScoped & {
   status: string;
   execution_result?: any;
   scheduled_at?: string | null;
+  /**
+   * UI-only (2026-11-20): this row came from GET scheduled_actions. Scheduling is retired and the scheduler never
+   * ran, so it was NEVER sent. Keyed on the SOURCE list, not on `status`: the API returns these rows with
+   * status 'approved' (a9), so a status check can never find them.
+   */
+  retired_schedule?: boolean;
   execution_mode?: string | null;
   execution_modes_config?: {
     api_allowed: boolean;
