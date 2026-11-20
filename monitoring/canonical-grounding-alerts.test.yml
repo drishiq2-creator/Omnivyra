@@ -47,26 +47,30 @@ tests:
         alertname: CanonicalGroundingMetricsMissing
         exp_alerts: []
 
-  # A DEAD WORKER is visible even while the APP job emits everything (7c): only app series for 27h -> the
-  # worker-specific absence rule fires; the unscoped MetricsMissing stays quiet (someone IS emitting).
+  # A worker that STOPPED grounding is visible even while the APP job emits everything (7c). The worker emits for
+  # the first hour, then nothing; the app emits throughout. The rule reads the last 26h of DATA: at 20h the worker's
+  # last sample (1h) is still inside the window -> quiet; at 28h it has left the window (27h) and the 10m 'for' has
+  # passed -> fires. The unscoped MetricsMissing stays quiet throughout (someone IS emitting).
   # 1m samples (not 1h): an hourly series is stale between samples (5m lookback), which would let the global
   # absence check pass or fail by coincidence of the eval time.
   - interval: 1m
     input_series:
       - series: 'canonical_grounding_call{job="omnivyra-app",instance="www",mode="shadow"}'
         values: '0+10x1700'
+      - series: 'canonical_grounding_call{job="omnivyra-worker",instance="w1",mode="shadow"}'
+        values: '0+1x60'
     alert_rule_test:
-      - eval_time: 27h
+      - eval_time: 28h
         alertname: CanonicalGroundingWorkerMetricsMissing
         exp_alerts:
           - exp_labels: { severity: warning, component: canonical_grounding, category: observability, job: omnivyra-worker }
             exp_annotations:
               summary: "No worker-side canonical grounding calls for 26h"
               description: "The worker has emitted no canonical_grounding_call series for 26 hours: worker grounding (daily intelligence / BOLT) has stopped, or the worker is not scraped. The app job's series does not satisfy this check."
-      - eval_time: 27h
+      - eval_time: 28h
         alertname: CanonicalGroundingMetricsMissing
         exp_alerts: []
-      # inside the window (a quiet restart): not yet
+      # the worker's last sample is still inside the 26h window: not yet
       - eval_time: 20h
         alertname: CanonicalGroundingWorkerMetricsMissing
         exp_alerts: []

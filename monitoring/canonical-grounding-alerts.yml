@@ -119,9 +119,14 @@ groups:
       # invisible to both. This asks a different question ("is the WORKER emitting?") on a different window: the worker
       # series exists only after its first grounding call (daily intelligence, BOLT), so 26h rides out a restart plus
       # one quiet daily cycle without flapping. Warning, not a page: it means grounding stopped, not that data is wrong.
+      # The fast case (worker down / unscraped) is OmnivyraWorkerMetricsMissing below (5m, page); this carries only
+      # "worker up and scraped, but no longer grounding".
+      # The 26h lives in the DATA (absent_over_time), not in a 'for:' timer: a 'for:' is pending state in Prometheus and
+      # resets when Prometheus restarts, so a 26h 'for:' would never mature on a stack that restarts daily (7c).
+      # Requires TSDB retention >= 26h.
       - alert: CanonicalGroundingWorkerMetricsMissing
-        expr: absent(canonical_grounding_call{job="omnivyra-worker"})
-        for: 26h
+        expr: absent_over_time(canonical_grounding_call{job="omnivyra-worker"}[26h])
+        for: 10m
         labels: { severity: warning, component: canonical_grounding, category: observability }
         annotations:
           summary: "No worker-side canonical grounding calls for 26h"
