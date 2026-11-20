@@ -17,6 +17,8 @@ import { getFxConfig } from '@/backend/services/pricingConfigService';
 import { resolvePrice, CURRENCIES, type Currency } from '@/lib/billing/currency';
 import { createOrder as orchestratorCreateOrder } from '@/backend/services/payments/orchestrator';
 import { getProviderCredentials, getActiveMode } from '@/backend/services/payments/orchestrator';
+import { checkPaymentReadiness } from '@/backend/services/payments/paymentReadiness';
+import { recordMetric } from '@/backend/services/systemHealthMetricsService';
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
@@ -60,6 +62,18 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   }
   if (!Number.isFinite(credits) || credits <= 0 || !Number.isFinite(amount) || amount <= 0) {
     return res.status(400).json({ error: 'package_invalid' });
+  }
+
+  // Go-live readiness (b3 2026-11-20): an invalid PAYMENT_PROVIDER_MODE, or live mode with an enabled provider missing
+  // its live keys / webhook secret, is refused HERE - before any purchase row or provider order - with a clear code.
+  // Never a silent fallback to test keys. Names only are logged (never values).
+  const readiness = checkPaymentReadiness();
+  if (!readiness.ok) {
+    const fail = readiness as Extract<typeof readiness, { ok: false }>;
+    logger.error('checkout_payment_config_invalid', { organizationId, code: fail.code, detail: fail.detail });
+    void recordMetric('payments', 'checkout_config_invalid', 1, 'count', { code: fail.code });
+    res.setHeader('Retry-After', '300');
+    return res.status(503).json({ error: 'payments_unavailable', code: fail.code });
   }
 
   // M2: the purchase row must record the mode the order is ACTUALLY created in.

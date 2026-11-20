@@ -150,6 +150,47 @@ if (fs.existsSync(envPath)) {
   }
 }
 
+// ── Payment provider mode (go-live readiness, c6 2026-11-20) ────────────────
+// PAYMENT_PROVIDER_MODE must be unset/empty (= test), or EXACTLY 'test' / 'live'
+// (anything else is refused at checkout with PAYMENT_MODE_INVALID). In LIVE every
+// enabled provider's live names must be present. NAMES ONLY - values are never
+// printed; the mode value itself is not a secret. This list is pinned to
+// providerConfig.requiredEnvNames(*, 'live') by paymentLiveReadiness.test.ts.
+const PAYMENT_LIVE_REQUIRED = [
+  'RAZORPAY_LIVE_KEY_ID', 'RAZORPAY_LIVE_KEY_SECRET', 'RAZORPAY_LIVE_WEBHOOK_SECRET',
+  'CASHFREE_PROD_APP_ID', 'CASHFREE_PROD_SECRET_KEY',
+];
+{
+  const envFile = path.join(process.cwd(), '.env.local');
+  const fromFile = fs.existsSync(envFile) ? fs.readFileSync(envFile, 'utf8') : null;
+  const valueOf = (k) => {
+    if (fromFile !== null) {
+      const m = fromFile.match(new RegExp(`^${k}=(.*)$`, 'm'));
+      return m ? m[1].trim().replace(/^["']|["']$/g, '') : '';
+    }
+    return typeof process.env[k] === 'string' ? process.env[k].trim().replace(/^["']|["']$/g, '') : '';
+  };
+  const mode = valueOf('PAYMENT_PROVIDER_MODE');
+  if (mode !== '' && mode !== 'test' && mode !== 'live') {
+    process.stdout.write(`RESULT: BLOCKED — PAYMENT_PROVIDER_MODE must be 'test' or 'live' (checkout would refuse every order with PAYMENT_MODE_INVALID)
+`);
+    process.exit(1);
+  }
+  if (mode === 'live') {
+    const missing = PAYMENT_LIVE_REQUIRED.filter((k) => valueOf(k) === '');
+    if (missing.length > 0) {
+      process.stdout.write(`RESULT: BLOCKED — PAYMENT_PROVIDER_MODE=live but missing/empty: ${missing.join(', ')}
+`);
+      process.exit(1);
+    }
+    process.stdout.write(`  payment mode: live, ${PAYMENT_LIVE_REQUIRED.length} live names present
+`);
+  } else {
+    process.stdout.write(`  payment mode: ${mode || 'test (unset)'}
+`);
+  }
+}
+
 // ── Schema manifest freshness ────────────────────────────────────────────────
 // generated/schema-column-manifest.json is committed and shipped as-is; its
 // manifest_hash is what /api/health/version reports. Nothing regenerates it at

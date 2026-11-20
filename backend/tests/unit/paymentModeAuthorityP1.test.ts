@@ -46,9 +46,11 @@ describe('TEST 10 — getActiveMode is the single mode authority', () => {
   });
 
   it('does not fall into live on a near-miss value', () => {
+    // c6 2026-11-20 (b3 go-live readiness): a near-miss is still NEVER live, but it no longer silently means 'test'
+    // either (that ran test keys under a go-live config with no signal) - it is refused with PAYMENT_MODE_INVALID.
     for (const v of ['LIVE', 'production', 'prod', 'live ', '1', 'true']) {
       process.env.PAYMENT_PROVIDER_MODE = v;
-      expect(reloadOrchestrator().getActiveMode()).toBe('test');
+      expect(() => reloadOrchestrator().getActiveMode()).toThrow(/PAYMENT_PROVIDER_MODE must be 'test' or 'live'/);
     }
   });
 });

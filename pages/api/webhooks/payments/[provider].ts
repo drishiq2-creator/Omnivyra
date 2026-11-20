@@ -30,7 +30,8 @@ import { createApiRoute as __createApiRoute } from '../../../../lib/platform/rou
  * record.
  */
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { handleWebhook } from '@/backend/services/payments/orchestrator';
+import { handleWebhook, getProviderCredentials } from '@/backend/services/payments/orchestrator';
+import { recordMetric } from '@/backend/services/systemHealthMetricsService';
 import type { PaymentProviderId } from '@/backend/services/payments/orchestrator';
 import { logger } from '@/backend/services/logger';
 import { supabase } from '@/backend/db/supabaseClient';
@@ -111,7 +112,14 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
 
     const result = await handleWebhook(provider, raw, headers);
     if (!result.verified) {
-      logger.warn('payment_webhook_rejected', { provider, reason: 'signature_invalid' });
+      // Counted durably, with WHY (b3 2026-11-20): C144 could not tell "webhook not configured" from "signature always
+      // invalid". secret_unset = no webhook secret for the active mode (a configuration error, error level);
+      // signature_mismatch = a secret exists but this delivery did not verify (wrong secret, or not the provider).
+      let reason: 'secret_unset' | 'signature_mismatch' = 'signature_mismatch';
+      try { if (!getProviderCredentials(provider).webhookSecret) reason = 'secret_unset'; } catch { /* mode invalid: keep mismatch */ }
+      if (reason === 'secret_unset') logger.error('payment_webhook_rejected', { provider, reason });
+      else logger.warn('payment_webhook_rejected', { provider, reason });
+      void recordMetric('payments', 'webhook_signature_rejected', 1, 'count', { provider, reason });
       return res.status(401).json({ ok: false, error: 'signature_invalid' });
     }
 

@@ -12,9 +12,27 @@
  */
 import type { PaymentProvider, PaymentProviderId, ProviderMode } from './types';
 
-/** Active provider mode. Default 'test'. Live requires explicit env opt-in. */
+/** PAYMENT_PROVIDER_MODE holds something other than 'test' / 'live' (go-live readiness, c6 2026-11-20). */
+export class PaymentModeInvalidError extends Error {
+  readonly code = 'PAYMENT_MODE_INVALID';
+  constructor(raw: string) {
+    super(`PAYMENT_PROVIDER_MODE must be 'test' or 'live' (got ${JSON.stringify(raw.slice(0, 20))})`);
+    this.name = 'PaymentModeInvalidError';
+  }
+}
+
+/**
+ * Active provider mode. UNSET/empty = 'test' (unchanged default). Exactly 'test' or 'live' (no trim, case-sensitive) are
+ * accepted; ANY OTHER value THROWS PaymentModeInvalidError. It used to mean 'test' silently - so 'LIVE', 'production'
+ * or a typo in a go-live env ran TEST keys in production with no signal (b3: never silently fall back to test keys).
+ */
 export function getActiveMode(): ProviderMode {
-  return process.env.PAYMENT_PROVIDER_MODE === 'live' ? 'live' : 'test';
+  const raw = process.env.PAYMENT_PROVIDER_MODE;
+  if (raw === undefined || raw === '') return 'test';
+  // EXACT match - no trimming or case folding: 'live ' / 'LIVE' are near-misses and must neither become live (TEST 10)
+  // nor silently become test. They are refused with a code an operator can act on.
+  if (raw === 'test' || raw === 'live') return raw;
+  throw new PaymentModeInvalidError(raw);
 }
 
 export interface ProviderCredentials {
@@ -25,7 +43,7 @@ export interface ProviderCredentials {
 
 interface CredEnv { id: string; secret: string; webhook: string }
 
-const CRED_ENV: Record<ProviderMode, Partial<Record<PaymentProviderId, CredEnv>>> = {
+export const CRED_ENV: Record<ProviderMode, Partial<Record<PaymentProviderId, CredEnv>>> = {
   test: {
     razorpay: { id: 'RAZORPAY_TEST_KEY_ID', secret: 'RAZORPAY_TEST_KEY_SECRET', webhook: 'RAZORPAY_WEBHOOK_SECRET' },
     cashfree: { id: 'CASHFREE_TEST_APP_ID', secret: 'CASHFREE_TEST_SECRET_KEY', webhook: 'CASHFREE_WEBHOOK_SECRET' },
@@ -70,6 +88,19 @@ export interface ConfigValidation {
   missing: PaymentProviderId[];
 }
 
+/**
+ * Env NAMES (never values) a provider needs in `mode`. In LIVE a provider that signs webhooks with a SEPARATE secret
+ * (razorpay) also needs that webhook secret: without it every webhook is rejected and a paid order depends on the
+ * browser's verify call alone. Cashfree signs with its client secret by design, so its webhook name is optional.
+ */
+export function requiredEnvNames(id: PaymentProviderId, mode: ProviderMode): string[] {
+  const env = CRED_ENV[mode]?.[id];
+  if (!env) return [];
+  const names = [env.id, env.secret];
+  if (mode === 'live' && !WEBHOOK_SIGNED_WITH_CLIENT_SECRET.has(id)) names.push(env.webhook);
+  return names;
+}
+
 /** Validate each ENABLED provider has its required credentials for the active mode. */
 export function validateConfiguredProviders(providers: PaymentProvider[], mode: ProviderMode = getActiveMode()): ConfigValidation {
   const errors: string[] = [];
@@ -77,6 +108,18 @@ export function validateConfiguredProviders(providers: PaymentProvider[], mode: 
   const missing: PaymentProviderId[] = [];
 
   for (const p of providers.filter((x) => x.enabled)) {
+    const absent = requiredEnvNames(p.provider_id, mode).filter((n) => !(process.env[n] ?? '').trim());
+    if (mode === 'live' && absent.length > 0) {
+      missing.push(p.provider_id);
+      errors.push(`Provider '${p.provider_id}' enabled in live mode but missing: ${absent.join(', ')}`);
+      continue;
+    }
+    // Mirror of razorpayAdapter's test-mode guard: a TEST key in the LIVE slot is a misconfiguration, not a live setup.
+    if (mode === 'live' && p.provider_id === 'razorpay' && (process.env[CRED_ENV.live.razorpay!.id] ?? '').trim().startsWith('rzp_test_')) {
+      missing.push(p.provider_id);
+      errors.push(`Provider 'razorpay' in live mode has a TEST key id in ${CRED_ENV.live.razorpay!.id}`);
+      continue;
+    }
     if (isProviderConfigured(p.provider_id, mode)) {
       configured.push(p.provider_id);
     } else {
