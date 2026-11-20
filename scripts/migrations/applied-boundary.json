@@ -497,9 +497,9 @@
     "20270111000002_tenant_tables_client_privileges_revoked.sql": "616cec9904d779583d609fa0283c85cbabfa9cb6fa55df93e092bc4dca4658ff",
     "20270111000003_function_execute_classwide_hardening.sql": "f9e5c95a7498078c4c8234c1357eb9ffc314c629e76481a760221a2e195c1eca"
   },
-  "retired_unapplied": {
-    "$comment": "Files removed from the repo because they were NEVER applied in production (the pin above assumed every file at or below the boundary was applied; for 8-digit versions the ledger proves nothing). Retirement of the hidden-billing line, owner ruling 2026-11-20 via b3.",
-    "evidence": "C146 (2026-11-20T07:30Z, read-only): every object these files create is ABSENT in prod (to_regclass null for hidden_billing_catalog, hidden_billing_catalog_audit, billing_checkout_sessions, billing_settlement_events, settlement_operational_metrics, settlement_runtime_locks, settlement_metrics_rollup; functions raise_settlement_metrics_delete_guard, settlement_metrics_prune_rolled absent).",
+  "retired_objects_absent": {
+    "$comment": "Files removed from the repo because every object they create is ABSENT in production (applied-then-dropped would look identical, so this records \"objects absent\", not \"never applied\"). The pin above assumed every file at or below the boundary was applied; for 8-digit versions the ledger proves nothing. Retirement of the hidden-billing line, owner ruling 2026-11-20 via b3.",
+    "evidence": "C146 (2026-11-20T07:30Z, read-only): every object these files create is ABSENT in prod (to_regclass null for hidden_billing_catalog, hidden_billing_catalog_audit, billing_checkout_sessions, billing_settlement_events, settlement_operational_metrics, settlement_runtime_locks, settlement_metrics_rollup; functions raise_settlement_metrics_delete_guard, settlement_metrics_prune_rolled absent). C147 (2026-11-20T07:43Z, read-only): to_regprocedure NULL for settlement_metrics_prune_rolled(timestamptz[]) and raise_settlement_metrics_delete_guard(), 0 overloads by name, trigger som_retention_gated_delete absent (to_regclass cannot see functions).",
     "removed_digests": {
       "20260717_hidden_billing_catalog.sql": "3d7af4b1a78b1a991ecc8e71fd4de9ebe590fe43ccab77411c5150397cb06ccc",
       "20260718_hidden_billing_audit_and_checkout_sessions.sql": "1fabff3620fc34218020c799204bc1806a052784637874be2f5b8806182881e2",
@@ -507,6 +507,12 @@
       "20260720_settlement_locks_and_metrics.sql": "d638b2b7b06233e89c8f3cd971f67555c2b05d0bca5b30ff1ae69805d48d42fe",
       "20260721_settlement_metrics_rollup.sql": "160e67a7e79e0827152e88efdc387ef9a87d5bf62c9d16cae2ce134814b18366",
       "20260722_settlement_metrics_prune.sql": "afa60b7ba1a221f0cf591d7c7489a057be2ceda2d401df3c09184b52bdaf7edf"
+    },
+    "unshadowed_siblings": {
+      "$comment": "Deleting these collision members leaves the sibling as the SOLE file for its version. C147: NO ledger rows for 20260718 / 20260720 / 20260721, so each sibling is applicable to a bulk push (rule: never db:push; per-file applies only, PL-127).",
+      "20260718": "20260718_harden_fn_search_path.sql - C147: all 31 unguarded ALTER FUNCTION targets exist in prod; the 3 absent ones are on guarded lines 25/28/31 - applies cleanly.",
+      "20260720": "20260720_founding_member_program.sql - no credits/ledger/grant statements (7c).",
+      "20260721": "20260721_seed_topup_credit_packages.sql - fixed UUIDs + ON CONFLICT (id) DO NOTHING: a re-run duplicates nothing and resets no price (7c); its packs already exist in prod (C143)."
     }
   }
 }
