@@ -28,9 +28,12 @@ async function loadPostsWithoutSignals(): Promise<PostRow[]> {
 
   if (postList.length === 0) return [];
 
-  const { data: existing } = await ownedDbTable('engagement_signals')
+  const { data: existing, error: eErr } = await ownedDbTable('engagement_signals')
     .select('post_id')
     .in('post_id', postList.map((p) => p.id));
+  // A failed read is not "no post has signals": treating it so re-inserts placeholder rows for every post (dropped-error
+  // a9 :31). Refuse, like the posts read above; the scheduled job retries next cycle.
+  if (eErr) throw new Error(`Failed to load engagement_signals: ${eErr.message}`);
 
   const hasSignal = new Set((existing ?? []).map((r: { post_id: string }) => r.post_id));
   return postList.filter((p) => !hasSignal.has(p.id));
