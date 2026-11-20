@@ -292,6 +292,8 @@ export function useLeadsPage() {
   const [leads, setLeads] = useState<Lead[]>([]);
   const [forms, setForms] = useState<CaptureForm[]>([]);
   const [webhookIntegrations, setWebhookIntegrations] = useState<WebhookIntegration[]>([]);
+  // The server says whether this viewer may see webhook secrets (company admins only). Absent = not visible.
+  const [webhookSecretsVisible, setWebhookSecretsVisible] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [activeTab, setActiveTab] = useState<Tab>('leads');
@@ -346,6 +348,7 @@ export function useLeadsPage() {
       setLeads(leadsRes.leads || []);
       setForms(formsRes.forms || []);
       setWebhookIntegrations(intRes.integrations || []);
+      setWebhookSecretsVisible(intRes.secrets_visible === true);
     } catch { setError('Failed to load data. Please refresh.'); }
     finally { setLoading(false); }
   }, [selectedCompanyId]);
@@ -460,7 +463,7 @@ export function useLeadsPage() {
 
   function samplePayload(i: WebhookIntegration) {
     return JSON.stringify({
-      integration_id: i.id, webhook_secret: i.config.secret || 'YOUR_SECRET',
+      integration_id: i.id, webhook_secret: (webhookSecretsVisible && i.config.secret) || 'YOUR_SECRET',
       name: 'Jane Doe', email: 'jane@example.com', phone: '+1 555-0101', source: 'contact-form',
     }, null, 2);
   }
@@ -497,6 +500,7 @@ export function useLeadsPage() {
     fromForms,
     fromWebhooks,
     isAdmin,
+    webhookSecretsVisible,
     leadModal,
     leads,
     lmEmail,

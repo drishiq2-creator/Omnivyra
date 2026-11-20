@@ -707,18 +707,19 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       if (result.status === 'insufficient_credits') {
         return res.status(402).json({
           error:    'Insufficient credits to generate content',
+          code:     'INSUFFICIENT_CREDITS',
           required: result.required,
           balance:  result.available,
         });
       }
       if (result.status === 'not_a_member') {
-        return res.status(403).json({ error: 'ORG_SCOPE_VIOLATION' });
+        return res.status(403).json({ error: 'ORG_SCOPE_VIOLATION', code: 'ORG_SCOPE_VIOLATION' });
       }
       if (result.status === 'org_control_blocked') {
-        return res.status(403).json({ error: result.code, detail: result.reason });
+        return res.status(403).json({ error: result.code, code: 'ORG_CONTROL_BLOCKED', detail: result.reason });
       }
       if (result.status === 'no_credit_account') {
-        return res.status(402).json({ error: 'No credit account for org' });
+        return res.status(402).json({ error: 'No credit account for org', code: 'NO_CREDIT_ACCOUNT' });
       }
       if (result.status !== 'executed') {
         return res.status(500).json({ error: 'Failed to generate master content' });
@@ -1009,6 +1010,15 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   } catch (error) {
     if (error instanceof MonetizedWorkflowError) {
       return res.status(error.statusCode).json(error.payload);
+    }
+    // refine_variant bills through runBilledAiCompletion; its refusal used to fall to the generic 500 below, so the
+    // user was never told about credits (04, 2026-11-20).
+    const { isBillingRefusalError } = await import('@/backend/services/billing/runBilledAiCompletion');
+    if (isBillingRefusalError(error)) {
+      const { BILLING_REFUSAL_RETRY_AFTER_SECONDS } = await import('@/shared/billing/billingRefusalCodes');
+      const retryAfter = BILLING_REFUSAL_RETRY_AFTER_SECONDS[error.code];
+      if (retryAfter) res.setHeader('Retry-After', String(retryAfter));
+      return res.status(error.httpStatus).json({ error: 'Billing refused', code: error.code });
     }
     if ((error as Error & { code?: string })?.code === 'VARIANT_GENERATION_FAILED') {
       return res.status(500).json({

@@ -20,8 +20,13 @@ import {
   senderAccountRefusalResponse,
   type ContactInput,
 } from '../../../../backend/services/whatsappBroadcastService';
+import { refuseIfWhatsAppDisabled } from '../../../../backend/services/whatsappAvailability';
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
+  // Launch gate (b3, 11-18): every POST action (enqueue / retry / recipients) is refused while WhatsApp is
+  // disabled - first, before the broadcast is even read. GET (detail) is unaffected.
+  if (req.method === 'POST' && refuseIfWhatsAppDisabled(res)) return;
+
   const { id, action } = req.query as { id: string; action?: string };
 
   if (!id) return res.status(400).json({ error: 'Broadcast id required' });

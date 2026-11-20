@@ -1,6 +1,7 @@
 import { createApiRoute as __createApiRoute } from '../../../../../lib/platform/routeFactory';
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { saveToken } from '../../../../../backend/services/platformTokenService';
+import { isWhatsAppEnabled } from '../../../../../backend/services/whatsappAvailability';
 import { dualWriteSocialAccount } from '../../../../../backend/auth/tokenStore';
 import { requireManageConnectors, getCommunityAiConnectorCallbackUrl, readConnectorOAuthState, withQuery } from '../utils';
 import { getOAuthCredentialsForPlatform } from '../../../../../backend/auth/oauthCredentialResolver';
@@ -189,11 +190,13 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       connected_by_user_id: access.userId,
     };
 
-    // Save to engagement layer (community_ai_platform_tokens)
+    // Save to engagement layer (community_ai_platform_tokens).
+    // Launch gate (b3, 11-18): WhatsApp is NOT connected while it is disabled. Facebook and Instagram
+    // connect exactly as before; only the WhatsApp token save is skipped.
     await Promise.all([
       saveToken(tenantId, organizationId, 'facebook', tokenPayload),
       saveToken(tenantId, organizationId, 'instagram', tokenPayload),
-      saveToken(tenantId, organizationId, 'whatsapp', tokenPayload),
+      ...(isWhatsAppEnabled() ? [saveToken(tenantId, organizationId, 'whatsapp', tokenPayload)] : []),
     ]);
 
     // Dual-write Facebook to publishing layer (social_accounts).

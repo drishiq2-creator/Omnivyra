@@ -8,6 +8,7 @@ import type { MasterContentDocument } from './masterContentDocument';
 import { deriveGenerationBias } from '../intelligence/generationBias';
 import type { StrategicMemoryProfile } from '../intelligence/strategicMemory';
 import { apiFetch } from '../apiFetch';
+import { throwIfBillingRefusal } from '@/lib/billing/billingRefusalCopy';
 
 type ActivityLike = {
   id?: string;
@@ -122,6 +123,7 @@ export async function executeMasterContentPipeline({
 
   if (!resMaster.ok) {
     const err = await resMaster.json().catch(() => ({}));
+    throwIfBillingRefusal(resMaster.status, err);
     throw new Error(String(err?.message || err?.error || 'Failed to execute content pipeline (generate_master)'));
   }
 
@@ -153,6 +155,7 @@ export async function executeMasterContentPipeline({
 
   if (!resVariants.ok) {
     const err = await resVariants.json().catch(() => ({}));
+    throwIfBillingRefusal(resVariants.status, err);
     throw new Error(String(err?.message || err?.error || 'Failed to execute content pipeline (generate_variants)'));
   }
 
@@ -209,6 +212,7 @@ export async function executeVariantImprovement(
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
+    throwIfBillingRefusal(res.status, err);
     throw new Error(String(err?.message || err?.error || 'Variant improvement failed'));
   }
   const data = await res.json().catch(() => ({}));
@@ -245,6 +249,7 @@ export async function executeVariantImprovementAll(
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
+    throwIfBillingRefusal(res.status, err);
     throw new Error(String(err?.message || err?.error || 'Variant improvement failed'));
   }
   const data = await res.json().catch(() => ({}));
