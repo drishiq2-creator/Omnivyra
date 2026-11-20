@@ -678,6 +678,8 @@ export async function recoverStalePublishingJobs(workerId = 'stale-recovery'): P
   for (const job of data || []) {
     // S2: the cross-tenant stale scan above stays a read; each recovery WRITE is one row under that row's own
     // tenant (company_id read from the row). A row whose company cannot form a context is skipped, not counted.
+    // DEFENCE IN DEPTH, unreachable with real data: publishing_jobs.company_id is uuid NOT NULL (baseline), so every
+    // real row forms a context. Do not read the missing coverage of the skip as a gap, and do not remove the guard (7c).
     let jobs: PublishingJobRows;
     try {
       jobs = jobsOf(job as Pick<PublishingJob, 'company_id'>, 'publishing worker: stale-job recovery');
