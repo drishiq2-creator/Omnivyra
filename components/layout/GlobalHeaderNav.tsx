@@ -15,7 +15,6 @@ import {
   HelpCircle,
   Home,
   LifeBuoy,
-  Link2,
   LogOut,
   Megaphone,
   Menu,
@@ -67,7 +66,7 @@ type HeaderChildItem = {
   group?: string;
 };
 
-type HeaderNavItem = {
+export type HeaderNavItem = {
   // CREATOR-071: stable navigation id — identity no longer relies on display label.
   id?: string;
   label: string;
@@ -184,7 +183,7 @@ export const HEADER_NAV_ITEMS: HeaderNavItem[] = [
     children: [
       { label: 'Engagement Center', href: '/command-center/engagement', description: 'Conversation inbox and action queue.' },
       { label: 'Market Pulse', href: '/dashboard/intelligence?intelTab=market-pulse', description: 'Pulse, trend, and audience movement view.' },
-      { label: 'Active Leads', href: '/command-center/active-leads', description: 'Lead review and action workspace.' },
+      // Active Leads moved to Prospect (owner 2026-11-20); its route is unchanged.
       // BETA-008 (RULE 8): "Intelligence" (→ /intelligence) hidden for Beta — admin-gated shell.
     ],
   },
@@ -205,31 +204,20 @@ export const HEADER_NAV_ITEMS: HeaderNavItem[] = [
     // Website capture routes moved to Web & Capture, so '/integrations' and
     // '/leads' are no longer claimed here — they were the only source of a
     // double-active state between the two groups.
-    matchers: ['/prospects', '/lead-intelligence'],
+    // Owner 2026-11-20: Prospect is where a user sees their LEADS and the ACTIVITY on them (open a lead for its
+    // timeline, status, notes and tasks). Active Leads lives here only. ICP is added once its 403-safe page lands
+    // (c6 feat/pi-icp-menu-link-20261120); main's ICP page mis-renders a 403 today.
+    matchers: ['/prospects', '/lead-intelligence', '/command-center/active-leads'],
     children: [
       { label: 'Prospects', href: '/prospects', description: 'Every prospect this company has, newest first.' },
       { label: 'Overview', href: '/lead-intelligence', group: 'Lead Intelligence', description: 'Totals, intent, source and status distribution.' },
-      { label: 'All Leads', href: '/lead-intelligence?tab=leads', group: 'Lead Intelligence', description: 'Unified, searchable list across every source.' },
+      { label: 'All Leads', href: '/lead-intelligence?tab=leads', group: 'Lead Intelligence', description: 'Unified list across every source. Open a lead for its activity.' },
+      { label: 'Active Leads', href: '/command-center/active-leads', group: 'Work your leads', description: 'Lead review and action workspace.' },
     ],
   },
-  {
-    // Source plumbing, not prospect intelligence: these configure how leads are
-    // captured and which systems feed them. They sat under Lead Intelligence and
-    // made that menu two unrelated concerns at once.
-    id: 'website-capture',
-    label: 'Web & Capture',
-    href: '/website-setup',
-    icon: Link2,
-    description: 'Website connection, tracking, forms and lead capture.',
-    matchers: ['/website-setup', '/website-health', '/integrations', '/leads', '/lead-capture'],
-    children: [
-      { label: 'Website Setup', href: '/website-setup', description: 'Connect a website, verify your domain, install tracking, and activate lead capture.' },
-      { label: 'Website Health', href: '/website-health', description: 'Operational command center: integration, tracking, lead capture, intelligence & one-click validation.' },
-      { label: 'Website Integrations', href: '/integrations?focus=website', description: 'Manage CMS connections and lead webhooks.' },
-      { label: 'Forms', href: '/leads?tab=forms', description: 'Build and embed lead-capture forms.' },
-      { label: 'Lead Capture', href: '/lead-capture', description: 'Capture topology, attribution continuity, and activation readiness.' },
-    ],
-  },
+  // "Web & Capture" was removed from the header (owner 2026-11-20). Its five destinations live in the admin-only
+  // "Website & lead capture" section at the bottom of the Command Center (lib/nav/websiteLeadCapture.ts). Every
+  // route still resolves.
 ];
 
 export function getRoleLabel(role: string | null | undefined): string | null {
