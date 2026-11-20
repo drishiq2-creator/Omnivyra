@@ -28,11 +28,11 @@ const { resolveAuthenticatedUser } = require('../../services/authResolver');
 // RPC fakes by name; every call is recorded in order (with the sign-out) so ORDER is asserted, not assumed.
 const order: string[] = [];
 let invalidate: { data: unknown; error: unknown } = { data: 3, error: null };
-let gotrue: { data: unknown; error: unknown } = { data: { auth_identity: true, sessions_deleted: 2, legacy_refresh_tokens_revoked: 0 }, error: null };
+let gotrue: { data: unknown; error: unknown } = { data: { user_found: true, auth_identity: true, sessions_deleted: 2, legacy_refresh_tokens_revoked: 0 }, error: null };
 beforeEach(() => {
   mockRpc.mockReset(); mockSignOut.mockReset(); order.length = 0;
   invalidate = { data: 3, error: null };
-  gotrue = { data: { auth_identity: true, sessions_deleted: 2, legacy_refresh_tokens_revoked: 0 }, error: null };
+  gotrue = { data: { user_found: true, auth_identity: true, sessions_deleted: 2, legacy_refresh_tokens_revoked: 0 }, error: null };
   mockRpc.mockImplementation(async (name: string) => { order.push(name); return name === 'invalidate_user_sessions' ? invalidate : gotrue; });
   mockSignOut.mockImplementation(async () => { order.push('signOut'); return { error: null }; });
 });
@@ -70,6 +70,18 @@ describe('revokeAllAccessForUser', () => {
     gotrue = { data: null, error: { message: 'Could not find the function public.revoke_user_gotrue_sessions' } };
     await expect(revokeAllAccessForUser('user-1', 'r')).rejects.toMatchObject({ code: 'SECURITY_READ_FAILED' });
   });
+
+  it('NO SUCH USER (070 user_found:false) THROWS by name - never "0 revoked, done" (7c/b3)', async () => {
+    gotrue = { data: { user_found: false, auth_identity: false, sessions_deleted: 0, legacy_refresh_tokens_revoked: 0 }, error: null };
+    await expect(revokeAllAccessForUser('ghost', 'r')).rejects.toThrow(/^REVOKE_USER_NOT_FOUND/);
+  });
+
+  it('an answer WITHOUT user_found is unproven and throws too; a found user with no auth identity is fine', async () => {
+    gotrue = { data: { auth_identity: false, sessions_deleted: 0, legacy_refresh_tokens_revoked: 0 }, error: null };
+    await expect(revokeAllAccessForUser('user-1', 'r')).rejects.toThrow(/^REVOKE_USER_NOT_FOUND/);
+    gotrue = { data: { user_found: true, auth_identity: false, sessions_deleted: 0, legacy_refresh_tokens_revoked: 0 }, error: null };
+    await expect(revokeAllAccessForUser('user-1', 'r')).resolves.toEqual({ revokedAuthSessions: 3, refreshTokensRevoked: true });
+  });
 });
 
 describe('invalidateUserSessionsAndSignOut (force-logout / suspend)', () => {
@@ -87,6 +99,14 @@ describe('invalidateUserSessionsAndSignOut (force-logout / suspend)', () => {
     const r = await invalidateUserSessionsAndSignOut('user-1', 'force_logout:x');
     expect(r.supabaseSignOutOk).toBe(false);
     expect(r.supabaseSignOutError).toEqual(expect.stringContaining('revoke_user_gotrue_sessions'));
+  });
+
+  it('force-logout of an id NO users row has REPORTS REVOKE_USER_NOT_FOUND (a stale/mistyped id is not "done")', async () => {
+    invalidate = { data: 0, error: null };
+    gotrue = { data: { user_found: false, auth_identity: false, sessions_deleted: 0, legacy_refresh_tokens_revoked: 0 }, error: null };
+    const r = await invalidateUserSessionsAndSignOut('ghost', 'force_logout:x');
+    expect(r.supabaseSignOutOk).toBe(false);
+    expect(r.supabaseSignOutError).toEqual(expect.stringMatching(/^REVOKE_USER_NOT_FOUND/));
   });
 });
 

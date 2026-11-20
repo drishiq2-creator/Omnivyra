@@ -26,9 +26,16 @@ import { SecurityReadError } from '../security/SecurityReadError';
  * cascade) and marks legacy session-less refresh tokens revoked. Takes the PUBLIC users.id. Throws on any error.
  * DEPLOY ORDER: the migration must be applied before this ships - a missing function fails every revoke-all closed.
  */
+export const REVOKE_USER_NOT_FOUND = 'REVOKE_USER_NOT_FOUND';
 async function revokeGoTrueSessionsById(userId: string, op: string): Promise<void> {
-  const { error } = await supabase.rpc('revoke_user_gotrue_sessions', { p_user_id: userId });
+  const { data, error } = await supabase.rpc('revoke_user_gotrue_sessions', { p_user_id: userId });
   if (error) throw new SecurityReadError(op, 'revoke_user_gotrue_sessions', error.message ?? null);
+  // 070 answers user_found:false for an id no users row has (7c/b3 2026-11-20). That is NOT "done, nothing to
+  // revoke": whoever was meant may still hold live sessions. Thrown by name so force-logout / revoke-all report it.
+  // An answer without user_found at all is equally unproven - only an explicit true is a found user.
+  if ((data as { user_found?: unknown } | null)?.user_found !== true) {
+    throw new Error(`${REVOKE_USER_NOT_FOUND}:${op}`);
+  }
 }
 
 /**
