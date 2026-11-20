@@ -309,6 +309,10 @@ export function useExecutiveMarketPulseController(props: Props) {
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [people, setPeople] = useState<AssignablePerson[]>([]);
+  // A failed people read is NOT "nobody to assign" (b3 rule 2026-11-19): it is shown as a load failure.
+  const [peopleLoadFailed, setPeopleLoadFailed] = useState(false);
+  const [peopleReloadKey, setPeopleReloadKey] = useState(0);
+  const retryPeople = () => setPeopleReloadKey((key) => key + 1);
   const [peopleSearch, setPeopleSearch] = useState('');
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({
@@ -356,17 +360,23 @@ export function useExecutiveMarketPulseController(props: Props) {
         const response = await fetchWithAuth(`/api/market-pulse/people?companyId=${encodeURIComponent(companyId)}&search=${encodeURIComponent(peopleSearch)}`);
         if (!response.ok) throw new Error('Failed to load assignable people');
         const data = await response.json() as { people?: AssignablePerson[] };
-        if (!cancelled) setPeople(data.people ?? []);
+        if (!cancelled) {
+          setPeople(data.people ?? []);
+          setPeopleLoadFailed(false);
+        }
       } catch (error) {
         console.error('[MarketPulse executive] people load failed:', error);
-        if (!cancelled) setPeople([]);
+        if (!cancelled) {
+          setPeople([]);
+          setPeopleLoadFailed(true);
+        }
       }
     };
     void loadPeople();
     return () => {
       cancelled = true;
     };
-  }, [companyId, peopleSearch]);
+  }, [companyId, peopleSearch, peopleReloadKey]);
 
   const digestItems = useMemo(() => {
     const items = payload?.executiveExperience?.digestItems ?? [];
@@ -573,8 +583,8 @@ export function useExecutiveMarketPulseController(props: Props) {
     benchmarkingReadiness, busyAction, collaboration, comment, comparative, createInvestigation, criticalCount, decision,
     degradedContext, departmentFilter, digestItems, escalationEvents, expandedSections, governanceSafety, groupedThemes,
     heldEscalations, historicalTimeline, intentFilter, lifecycleFilter, loadContext, loadError, loading, operationalHealth,
-    opportunities, overview, overviewPayload, payload, people, peopleSearch, personById, postCollaboration, refinedDigest,
-    resilience, saveAnnotation, saveDecision, saveWatchlist, selectedAnnotations, selectedAssignmentHistory, selectedComments,
+    opportunities, overview, overviewPayload, payload, people, peopleLoadFailed, peopleSearch, personById, postCollaboration, refinedDigest,
+    resilience, retryPeople, saveAnnotation, saveDecision, saveWatchlist, selectedAnnotations, selectedAssignmentHistory, selectedComments,
     selectedDecisions, selectedId, selectedItem, selectedRef, selectedThreads, setActiveView, setAnnotation, setBusyAction,
     setComment, setDecision, setDepartmentFilter, setExpandedSections, setIntentFilter, setLifecycleFilter, setLoadError, setLoading,
     setPayload, setPeople, setPeopleSearch, setSelectedId, setSeverityFilter, setThreadForm, setWatchlistForm, severityFilter,

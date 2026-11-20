@@ -669,7 +669,13 @@ export async function requireContentTenantAccess(
     .select('company_id')
     .eq('id', contentId)
     .maybeSingle();
-  if (error || !data || !(data as { company_id?: string | null }).company_id) {
+  if (error) {
+    // A FAILED lookup is not "not found" (b3/7c 2026-11-20): retryable 503, never a 404 that reads as absence.
+    res.setHeader('Retry-After', '5');
+    res.status(503).json({ error: 'Content lookup failed. Try again.', code: 'CONTENT_LOOKUP_FAILED' });
+    return null;
+  }
+  if (!data || !(data as { company_id?: string | null }).company_id) {
     res.status(404).json({ error: 'Content not found', code: 'CONTENT_NOT_FOUND' });
     return null;
   }
