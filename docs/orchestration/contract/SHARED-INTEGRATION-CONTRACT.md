@@ -1,6 +1,6 @@
 # Omnivyra shared integration contract, v0.4.0
 
-**Status: RATIFIED on paper for ownership and sections C-G (2026-11-20): Outreach (virality-a9) ratified ownership and D; Orchestration (virality-89, contract owner) ratified ownership and C-G. Sections A and B await the PI lead (virality-c6).** Canonical ref: `fix/s-wa-combined` @ `409764959` (the stage-0 line; the older push `integration/s-wa-combined` @ `456a6ab35` is NOT canonical). 0.3.0 is commit `0ffc4a403` and 0.4.0 is commit `80555dc3d`, both on `409764959`. Not merged to main, not deployed, and `WORKFLOW_ORCHESTRATION_ENABLED` stays off; enablement is gated on section A's actor rule and the open owner decisions in `DECISION-REGISTER.md`.
+**Status: RATIFIED on paper for ownership and sections C-G (2026-11-20): Outreach (virality-a9) ratified ownership and D; Orchestration (virality-89, contract owner) ratified ownership and C-G. The PI lead reviewed sections A and B (virality-c6, 2026-11-20, notes A1-A3 below); the actor rule in A stays with the governance programme and is NOT ratified.** Canonical ref: `fix/s-wa-combined` @ `409764959` (the stage-0 line; the older push `integration/s-wa-combined` @ `456a6ab35` is NOT canonical). 0.3.0 is commit `0ffc4a403` and 0.4.0 is commit `80555dc3d`, both on `409764959`. Not merged to main, not deployed, and `WORKFLOW_ORCHESTRATION_ENABLED` stays off; enablement is gated on section A's actor rule and the open owner decisions in `DECISION-REGISTER.md`.
 
 Code of record: `backend/services/orchestration/executionContract.ts`, `engineCapabilities.ts`, `journeyEvents.ts`, `journeyGovernance.ts`, `journeyExit.ts`.
 
@@ -34,7 +34,13 @@ Orchestration creates no prospect table. Current lifecycle state is the latest `
 
 A lifecycle source key must match `^(outcome|evidence|governance|derivation|human):[A-Za-z0-9._-]{1,200}$`. Orchestration writes through PI's opener and producer only.
 
-`lead_intelligence*` is not read directly, except `lead_intelligence_profiles` for leads.
+`lead_intelligence*` is not read directly, except `lead_intelligence_profiles` for leads, and that exception reads through PI's port (`getPersistedLeadIntelligence` / `durableIntelligencePersistence`), never the table (PI note A3).
+
+**PI review notes (c6, 2026-11-20).**
+- **A1.** `meeting_scheduled` is unreachable today (`PROSPECT_STATES_UNREACHABLE_TODAY`, `stateModel.ts:103`); `meeting_booked` is evidence only (`outcomeInterpreter.ts:342-361`). No journey branch may wait for `meeting_scheduled`, and the builder does not offer it as a condition until it is reachable.
+- **A2.** `outreach_active`, `suppressed`, `outreach_ready`, `no_response` and `candidate` are NOT lifecycle states (`PROSPECT_STATES_NOT_MODELLED`, `stateModel.ts:90`). Never store them as lifecycle state.
+- **A3.** See above: the `lead_intelligence_profiles` exception goes through PI's port.
+- **G2 condition.** Orchestration adopts PI's port for `automationPlanning` only after its read-failure defect is fixed (`persistence.ts:111-113` records the failure, then returns null, read as "no envelope"). A failed read must reach the sweeper as UNKNOWN (`facts_unreadable`: the step is held, never skipped).
 
 ### Actor rule: DRAFT, UNRATIFIED
 
@@ -185,7 +191,7 @@ Produced from the `revoked` row that `revokeOutreachApproval` (`leadOutreachExec
 - the dispatch gate and the database claim trigger also refuse a task whose latest decision is `revoked`;
 - on the frozen base `7f2ca186f`, the next sweep reads the cancelled task as disposition `skipped`, the step settles `skipped` (decision `skipped`, outcome `cancelled`, shown as `decision.recorded`), and the journey moves to its next step.
 
-**RV-1, decided by the owner on 2026-11-05: a revocation PAUSES the run for human review.** Agent B implements the pause in the sweeper (not in this change). It is recorded as a `needs_human` decision whose outcome starts `approval_revoked:`, which the view reads as `journey.suspended` (E.4). The step-skipping behaviour above is superseded once that lands.
+**RV-1, decided by the owner on 2026-11-05: a revocation PAUSES the run for human review.** It is IMPLEMENTED in the sweeper on `409764959` (`workflowProgressionSweeper.ts`, the `needs_human` branch, `approval_revoked:` outcome -> run paused; once a person resumes, the revoked step is skipped as `approval_revoked_reviewed`). It is recorded as a `needs_human` decision whose outcome starts `approval_revoked:`, which the view reads as `journey.suspended` (E.4). The step-skipping behaviour above is SUPERSEDED.
 
 ### E.3 Delivery evidence, outcomes and the complaint marker (0.3.0)
 
@@ -302,6 +308,12 @@ Each layer is read from the store its owner already writes. No layer is stored t
 | Social publish | post status | `scheduled_posts` | `execution.accepted` or `decision.recorded` | completed, or needs a person; no per-person outcome |
 | Community | action `executed` / `sent_unverified` | `community_ai_actions.status` | `execution.accepted` | step completed |
 | Any | revocation of an approval | `outreach_approvals` `revoked` row | `approval.revoked`, then `journey.suspended` | the run is paused for review (RV-1; Agent B) |
+
+### Rules for builders (2026-11-20)
+
+- **A `no_response` elapsed window starts at `delivery.confirmed`, NEVER at `execution.accepted`** (PI condition G6). `sent_unverified` / accepted proves no delivery; starting the clock there moves an undelivered prospect to nurture.
+- **One approval surface (owner decisions A-E, 2026-11-20).** Every channel, WhatsApp included, uses one approval record. The shared API is `journeyApproval.ts` (begin / approve / resubmit / revoke: content-hash binding, self-approval off by default, passkey once per session, 7-day expiry). Approvers: COMPANY_ADMIN and CONTENT_REVIEWER (`OUTREACH_JOURNEY_APPROVE`); a SUPER_ADMIN only through a platform-authorised call into the same functions, never the operator override, which refuses journey-origin tasks (`JOURNEY_TASK_USE_TENANT_APPROVAL`). The single approval screen is Outreach's queue, deep link `/outreach/approvals?companyId=<uuid>&taskId=<outreach_tasks.id>` (both optional; the server authorises every read and approve; not-found and another tenant's are one "not available" state).
+- **Reply classification (SC7-R, owner 2026-11-20): AI suggests, a person confirms in one click.** No classifier output drives a journey by itself.
 
 ### Pending, not done
 
