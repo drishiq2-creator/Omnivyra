@@ -24,6 +24,10 @@ export const USER_PUBLISHER = 'user-w-00-0000-0000-00000000000p';
 export const USER_REVIEWER = 'user-w-00-0000-0000-00000000000r';
 /** Legacy alias rows ('VIEWER', 'CONTENT_ENGAGER') normalise to VIEW_ONLY. */
 export const USER_ENGAGER = 'user-w-00-0000-0000-00000000000e';
+/** Roles Approach A principals (opt-in rows: approachARoleRows()). */
+export const USER_MANAGER = 'user-w-00-0000-0000-00000000000m';
+export const USER_PLANNER = 'user-w-00-0000-0000-00000000000l';
+export const USER_VIEWER_ROLE = 'user-w-00-0000-0000-00000000000w';
 
 export const W2A_TOKENS = {
   A: 'tok-user-a',
@@ -34,6 +38,9 @@ export const W2A_TOKENS = {
   PUBLISHER: 'tok-w2a-publisher',
   REVIEWER: 'tok-w2a-reviewer',
   ENGAGER: 'tok-w2a-engager',
+  MANAGER: 'tok-w2a-manager',
+  PLANNER: 'tok-w2a-planner',
+  VIEWER_ROLE: 'tok-w2a-viewer-role',
 } as const;
 export type W2APrincipal = keyof typeof W2A_TOKENS;
 
@@ -46,6 +53,9 @@ const USERS_BY_TOKEN: Record<string, { id: string; email: string }> = {
   'tok-w2a-publisher': { id: USER_PUBLISHER, email: 'publisher@example.test' },
   'tok-w2a-reviewer': { id: USER_REVIEWER, email: 'reviewer@example.test' },
   'tok-w2a-engager': { id: USER_ENGAGER, email: 'engager@example.test' },
+  'tok-w2a-manager': { id: USER_MANAGER, email: 'manager@example.test' },
+  'tok-w2a-planner': { id: USER_PLANNER, email: 'planner@example.test' },
+  'tok-w2a-viewer-role': { id: USER_VIEWER_ROLE, email: 'viewer-role@example.test' },
 };
 
 /** Active company-A membership rows for the extra principals. */
@@ -56,6 +66,15 @@ export function roleRows(): Array<Record<string, unknown>> {
     { user_id: USER_PUBLISHER, company_id: CO_A, role: 'CONTENT_PUBLISHER', status: 'active' },
     { user_id: USER_REVIEWER, company_id: CO_A, role: 'CONTENT_REVIEWER', status: 'active' },
     { user_id: USER_ENGAGER, company_id: CO_A, role: 'CONTENT_ENGAGER', status: 'active' },
+  ];
+}
+
+/** OPT-IN company-A rows for the Approach A roles (kept out of roleRows() so existing suites are unchanged). */
+export function approachARoleRows(): Array<Record<string, unknown>> {
+  return [
+    { user_id: USER_MANAGER, company_id: CO_A, role: 'CONTENT_MANAGER', status: 'active' },
+    { user_id: USER_PLANNER, company_id: CO_A, role: 'CONTENT_PLANNER', status: 'active' },
+    { user_id: USER_VIEWER_ROLE, company_id: CO_A, role: 'VIEWER', status: 'active' },
   ];
 }
 

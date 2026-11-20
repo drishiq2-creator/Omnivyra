@@ -10,6 +10,15 @@
  * fallback can no longer move a known role.
  *
  * 'creative_operator' is the least-privileged persona (cannot approve, reject or bypass review).
+ *
+ * CONTENT_MANAGER -> 'compliance_reviewer' (b3 ruling 2026-11-20, STATED behaviour change vs main): the owner ruled
+ * CONTENT_MANAGER may "create, approve, publish". Of the two candidate personas, by their PERMISSIONS bodies
+ * (creativeReviewRoles.ts): compliance_reviewer = approve_qa, approve_governance, reject, escalate;
+ * campaign_manager = submit_for_review, reject, request_regeneration, manual_override, escalate, publish,
+ * archive, campaign_lock - and NO approve_* action at any stage. So compliance_reviewer is the only one that can
+ * approve, and the smaller set (it is also CONTENT_REVIEWER's persona, one of MANAGER's base tiers). On main a
+ * CONTENT_MANAGER was refused 403 on decide (it read as CONTENT_CREATOR). Not granted here: publish /
+ * manual_override (campaign_manager), approve_brand / approve_legal (no candidate has them).
  * The fallback applies ONLY to a value that is not a canonical role (null, the ADMIN alias, a stray string).
  */
 import type { CanonicalRole } from '../../security/capabilityRegistry';
@@ -21,7 +30,7 @@ export const GOVERNANCE_REVIEW_PERSONA: Readonly<Record<CanonicalRole, CreativeR
   CONTENT_REVIEWER:  'compliance_reviewer',
   CONTENT_PUBLISHER: 'campaign_manager',
   CONTENT_CREATOR:   'creative_operator',
-  CONTENT_MANAGER:   'creative_operator',
+  CONTENT_MANAGER:   'compliance_reviewer', // b3 ruling 2026-11-20 - see below
   CONTENT_PLANNER:   'creative_operator',
   CONTENT_ENGAGER:   'creative_operator',
   VIEWER:            'creative_operator',

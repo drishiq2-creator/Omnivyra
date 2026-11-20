@@ -21,7 +21,7 @@
  * onApprovalDecision answers skipped/flag_off → 503).
  */
 import { seed, invoke, CO_A, CO_B, USER_A, USER_SUPER } from '../helpers/routeAuthHarness';
-import { as, roleRows, USER_PUBLISHER, USER_CREATOR } from '../helpers/sec91W2AHarness';
+import { as, roleRows, approachARoleRows, USER_PUBLISHER, USER_CREATOR, USER_MANAGER } from '../helpers/sec91W2AHarness';
 
 jest.mock('@/config', () => ({ config: { DEV_USER_ID: '', NODE_ENV: 'production' } }));
 jest.mock('../../db/supabaseClient', () => require('../helpers/routeAuthHarness').supabaseModule());
@@ -162,4 +162,31 @@ describe('POST /api/enterprise-governance/approvals/comment', () => {
 afterEach(() => {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   require('../helpers/routeAuthHarness').assertNoHarnessConfigurationError();
+});
+
+// Roles Approach A on decide (b3 ruling 2026-11-20, STATED behaviour change vs main): the owner ruled
+// CONTENT_MANAGER may approve. It satisfies decide's list through its base tiers (PUBLISHER + REVIEWER) and acts
+// as the least-privileged persona that CAN approve (compliance_reviewer: approve_qa/approve_governance; it cannot
+// publish or manual_override). On main it was refused 403 (it read as CONTENT_CREATOR).
+describe('decide under roles Approach A', () => {
+  const { canPerform } = jest.requireActual('../../services/creator/creativeReviewRoles');
+  beforeEach(() => { seed({ user_company_roles: [...roleRows(), ...approachARoleRows()] }); });
+
+  it('CONTENT_MANAGER approves, as compliance_reviewer - a persona that can approve and cannot publish', async () => {
+    const r = await decideAs('MANAGER', CO_A);
+    expect(r.status).toBe(200);
+    const call = mockOnApprovalDecision.mock.calls[0][0];
+    expect(call).toMatchObject({ assetId: ASSET_A, to: 'approved', actorRole: 'compliance_reviewer', actorUserId: USER_MANAGER });
+    expect(canPerform(call.actorRole, 'approve_governance')).toBe(true);
+    expect(canPerform(call.actorRole, 'publish')).toBe(false);
+    expect(canPerform(call.actorRole, 'manual_override')).toBe(false);
+  });
+
+  it('control: CONTENT_PLANNER, CONTENT_ENGAGER and VIEWER still cannot decide (403, nothing runs)', async () => {
+    for (const who of ['PLANNER', 'ENGAGER', 'VIEWER_ROLE'] as const) {
+      const r = await decideAs(who, CO_A);
+      expect(r.status).toBe(403);
+    }
+    expect(mockOnApprovalDecision).not.toHaveBeenCalled();
+  });
 });

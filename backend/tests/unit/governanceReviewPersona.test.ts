@@ -16,7 +16,7 @@ const PINNED: Record<string, string> = {
   CONTENT_REVIEWER:  'compliance_reviewer',
   CONTENT_PUBLISHER: 'campaign_manager',
   CONTENT_CREATOR:   'creative_operator',
-  CONTENT_MANAGER:   'creative_operator',
+  CONTENT_MANAGER:   'compliance_reviewer',
   CONTENT_PLANNER:   'creative_operator',
   CONTENT_ENGAGER:   'creative_operator',
   VIEWER:            'creative_operator',
