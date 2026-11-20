@@ -4,6 +4,8 @@ import { useRouter } from 'next/router';
 import { useCompanyContext } from '@/components/CompanyContext';
 import { apiFetch } from '@/lib/apiFetch';
 import ReportJourneyGuide from '@/components/ReportJourneyGuide';
+import ReadFailureNotice from '@/components/common/ReadFailureNotice';
+import { REPORTS_LOAD_FAILED, REPORT_DELETE_REFUSED, REPORT_DELETE_UNKNOWN } from '@/lib/reports/reportsListCopy';
 
 interface ReportHubCard {
   id: string;
@@ -177,18 +179,31 @@ export default function ReportsHubPage() {
   const [reports, setReports] = React.useState<ExistingReport[] | null>(null);
   const [reportsLoading, setReportsLoading] = React.useState(true);
   const [deletingId, setDeletingId] = React.useState<string | null>(null);
+  // F1: a failed read is a failure (never "no reports"); F2: a delete outcome is said, never silent.
+  const [reportsLoadError, setReportsLoadError] = React.useState<string | null>(null);
+  const [deleteMessage, setDeleteMessage] = React.useState<string | null>(null);
+  const loadSeq = React.useRef(0);
 
   const loadReports = React.useCallback(async () => {
-    if (!selectedCompanyId) { setReports([]); setReportsLoading(false); return; }
+    const seq = ++loadSeq.current;
+    if (!selectedCompanyId) { setReports([]); setReportsLoadError(null); setReportsLoading(false); return; }
     setReportsLoading(true);
     try {
       const res = await apiFetch(`/api/reports?company_id=${encodeURIComponent(selectedCompanyId)}`);
-      const data = await res.json().catch(() => ({}));
-      setReports(Array.isArray(data?.reports) ? (data.reports as ExistingReport[]) : []);
-    } catch {
-      setReports([]);
+      if (!res.ok) throw new Error(`reports read failed (HTTP ${res.status})`);
+      const data = await res.json();
+      if (!Array.isArray(data?.reports)) throw new Error('reports read: unrecognised response shape');
+      if (seq !== loadSeq.current) return;
+      setReports(data.reports as ExistingReport[]);
+      setReportsLoadError(null);
+    } catch (err) {
+      if (seq !== loadSeq.current) return;
+      console.warn('[reports] list read failed:', err);
+      // Cleared so another company's reports can't stay listed; the failure (not an absent block) renders.
+      setReports(null);
+      setReportsLoadError(REPORTS_LOAD_FAILED);
     } finally {
-      setReportsLoading(false);
+      if (seq === loadSeq.current) setReportsLoading(false);
     }
   }, [selectedCompanyId]);
 
@@ -200,9 +215,19 @@ export default function ReportsHubPage() {
   };
   const deleteReport = async (r: ExistingReport) => {
     setDeletingId(r.id);
-    try { await apiFetch(`/api/reports/${r.id}`, { method: 'DELETE' }); await loadReports(); }
-    catch { /* non-destructive on failure — list is reloaded */ }
-    finally { setDeletingId(null); }
+    setDeleteMessage(null);
+    try {
+      const res = await apiFetch(`/api/reports/${r.id}`, { method: 'DELETE' }).catch(() => null);
+      if (!res || res.status >= 500) {
+        // Lost connection (apiFetch: a non-2xx, never a throw) or a server error: we can't know. Re-read.
+        setDeleteMessage(REPORT_DELETE_UNKNOWN);
+      } else if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setDeleteMessage(typeof data?.error === 'string' && data.error.trim() ? `${REPORT_DELETE_REFUSED} ${data.error}` : REPORT_DELETE_REFUSED);
+        return;
+      }
+      await loadReports();
+    } finally { setDeletingId(null); }
   };
   const hasReports = !!reports && reports.length > 0;
 
@@ -237,6 +262,10 @@ export default function ReportsHubPage() {
             <div className="mb-8 rounded-[24px] border border-gray-100 bg-white/80 p-6 text-sm text-gray-500">
               Loading your reports…
             </div>
+          ) : reportsLoadError ? (
+            <div className="mb-8">
+              <ReadFailureNotice message={reportsLoadError} onRetry={loadReports} />
+            </div>
           ) : hasReports ? (
             <div className="mb-8 rounded-[24px] border border-gray-100 bg-white p-6 shadow-[0_10px_30px_rgba(15,23,42,0.06)]">
               <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
@@ -248,6 +277,9 @@ export default function ReportsHubPage() {
                 </div>
                 <p className="text-sm text-gray-500">{canDeleteReports ? 'Open, export, or delete — or create a new report below.' : 'Open or export your reports below.'}</p>
               </div>
+              {deleteMessage && (
+                <div role="status" className="mb-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">{deleteMessage}</div>
+              )}
               <div className="divide-y divide-gray-100">
                 {reports!.map((r) => {
                   const when = r.completed_at || r.created_at;
