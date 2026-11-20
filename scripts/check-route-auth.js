@@ -1224,7 +1224,7 @@ function analyzeRouteSource(rel, raw, allowlist, methodExemptions, orderingSecti
   // STEP 3AH-118: a primitive that runs after the side effect protects nothing.
   const ord = applyOrdering({
     rel, code, evidenceCode: executable(srcRaw, true), entry, level, ids, campaignKeyed, sections: orderingSections, callRe,
-    analyze: (verifiers) => ordering().analyze({ rel: src.rel, raw: srcRaw, imports: ctx.imports }, src.handlerName, verifiers),
+    analyze: (verifiers, opts) => ordering().analyze({ rel: src.rel, raw: srcRaw, imports: ctx.imports }, src.handlerName, verifiers, opts),
   });
   violations.push(...ord.violations);
   const order = ord.order;

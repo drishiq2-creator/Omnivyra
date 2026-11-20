@@ -35,7 +35,7 @@ const SAFE_SEAMS = [
   // Append-only security audit trail: recording an unauthenticated / denied attempt IS the purpose.
   { name: 'logSecurityEvent', from: /^backend\/security\/audit\/SecurityAuditService$/ },
 ];
-const SUMMARY_DEPTH = 3;
+const { SUMMARY_DEPTH } = require('./route-auth-ordering-policy');
 const INLINE_DEPTH = 6;
 
 function createOrderingAnalyzer({ PRIMITIVES, AUTHZ_HELPERS, DELEGATION_ROOTS, resolveSpec, loadModule, parseImports }) {
@@ -46,6 +46,9 @@ function createOrderingAnalyzer({ PRIMITIVES, AUTHZ_HELPERS, DELEGATION_ROOTS, r
   const summaryCache = new WeakMap();
   // Verifier names that authenticate for the route being analysed (machine-token / webhook-signature entries).
   let extraAuth = new Set();
+  // The summary depth cut for the analysis in progress: SUMMARY_DEPTH, except when the policy verifies an
+  // orderingPatterns effectsBeyondDepth declaration (analyze(..., { summaryDepth })). Part of the cache key.
+  let summaryLimit = SUMMARY_DEPTH;
 
   function parsed(mod) {
     // Content-addressed: two sources at the same path (fixtures, mutants) never share a parse.
@@ -174,10 +177,10 @@ function createOrderingAnalyzer({ PRIMITIVES, AUTHZ_HELPERS, DELEGATION_ROOTS, r
    * bounded by the depth cut alone; memoising by (function, depth) keeps the cost linear.
    */
   function summarize(fn, m, depth) {
-    if (depth > SUMMARY_DEPTH) return [];
+    if (depth > summaryLimit) return [];
     let bySf = summaryCache.get(m.sf);
     if (!bySf) { bySf = new Map(); summaryCache.set(m.sf, bySf); }
-    const key = `${fn.pos}@${depth}`;
+    const key = `${fn.pos}@${depth}/${summaryLimit}`;
     if (bySf.has(key)) return bySf.get(key);
     const out = [];
     const visit = (n) => {
@@ -378,7 +381,7 @@ function createOrderingAnalyzer({ PRIMITIVES, AUTHZ_HELPERS, DELEGATION_ROOTS, r
    * selects a named default. `authEvents` names extra verifier calls that count
    * as authentication (machine-token / webhook-signature allowlist verifiers).
    */
-  function analyze(mod, handlerName, authEvents = []) {
+  function analyze(mod, handlerName, authEvents = [], { summaryDepth = SUMMARY_DEPTH } = {}) {
     const m = { ...parsed(mod), rel: mod.rel };
     let target = null;
     if (handlerName) target = m.top.get(handlerName) || null;
@@ -392,10 +395,12 @@ function createOrderingAnalyzer({ PRIMITIVES, AUTHZ_HELPERS, DELEGATION_ROOTS, r
     if (!h) return { shape: 'unresolved', events: [], auth: [] };
     const cx = { events: [], auth: [], depth: 0, stack: [] };
     extraAuth = new Set(authEvents);
+    summaryLimit = summaryDepth;
     try {
       interpretFunction(h.fn, h.m, { ...h.pre }, cx, null);
     } finally {
       extraAuth = new Set();
+      summaryLimit = SUMMARY_DEPTH;
     }
     return { shape: 'resolved', events: cx.events, auth: cx.auth, pre: h.pre };
   }
