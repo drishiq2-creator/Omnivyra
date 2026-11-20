@@ -167,6 +167,8 @@ export async function logSecurityEvent(event: SecurityAuditEvent): Promise<void>
       via_legacy_bridge:       !!event.viaLegacyBridge,
     });
     if (error) {
+      // security-read-exempt: an audit WRITE must never block the security action it records (callers fire it with
+      // `void`); the failure is logged at warn for alerting. Not a read and not an authorization decision.
       logger.warn('security_audit_insert_failed', { capability: event.capability, message: error.message });
     }
   } catch (err) {
