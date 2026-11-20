@@ -60,6 +60,8 @@ export async function getStrategyHistoryForCompany(
   // uuid; the access check upstream matches a uuid column, which accepts any casing. Canonicalise so a differently
   // cased id from a client neither empties this history nor slips past the company filter (b3 2026-11-20).
   const trimmed = rawCompanyId.trim();
+  // Only a uuid-shaped id is canonicalised. A non-uuid value is used as given - safe ONLY because such a value
+  // cannot pass enforceCompanyAccess upstream (company ids are uuids), so it never reaches here with access.
   const companyId = UUID_RE.test(trimmed) ? trimmed.toLowerCase() : trimmed;
 
   const { data: versionRows, error: versionError } = await supabase
