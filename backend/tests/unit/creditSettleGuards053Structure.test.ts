@@ -134,6 +134,9 @@ it('ENVELOPE (7c V1): the preflight reads prosecdef, proconfig and the ACL of bo
   // 7c M1: the effective-privilege form too (membership), not only ACL entries
   expect(pre).toContain("has_function_privilege('public', to_regprocedure(f.fn), 'EXECUTE')");
   expect(pre).toContain("AND has_function_privilege(r.oid, to_regprocedure(f.fn), 'EXECUTE')");
+  // the postcondition's client-role loop includes PUBLIC too (symmetric with the preflight)
+  const post = SQL.slice(SQL.indexOf('DO $verify$'), SQL.indexOf('$verify$;'));
+  expect(post).toContain("FOREACH r IN ARRAY ARRAY['public', 'anon', 'authenticated'] LOOP");
   // 7c M2: every forward REVOKE/GRANT pair sits directly under the ASSERTED NO-OP label
   const pairs = [...SQL.matchAll(/(.*)\nREVOKE ALL ON FUNCTION public\.apply_credit_\w+\([^)]*\) FROM PUBLIC, anon, authenticated;\nGRANT EXECUTE/g)];
   expect(pairs).toHaveLength(2);

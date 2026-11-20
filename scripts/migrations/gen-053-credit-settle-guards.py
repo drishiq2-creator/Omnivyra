@@ -491,7 +491,7 @@ BEGIN
      OR (SELECT proconfig FROM pg_proc WHERE oid = to_regprocedure('{PC_REG}')) IS DISTINCT FROM {PC_CFG} THEN
     RAISE EXCEPTION '053 postcondition: a credit function''s proconfig is not the pre-053 one';
   END IF;
-  FOREACH r IN ARRAY ARRAY['anon', 'authenticated'] LOOP
+  FOREACH r IN ARRAY ARRAY['public', 'anon', 'authenticated'] LOOP   -- 'public' = the PUBLIC pseudo-role (symmetric with the preflight, 7c)
     IF has_function_privilege(r, '{RES_REG}', 'EXECUTE') OR has_function_privilege(r, '{PC_REG}', 'EXECUTE') THEN
       RAISE EXCEPTION '053 postcondition: % can execute a credit settle function', r;
     END IF;

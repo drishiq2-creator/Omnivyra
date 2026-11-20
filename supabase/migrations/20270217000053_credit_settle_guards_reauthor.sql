@@ -783,7 +783,7 @@ BEGIN
      OR (SELECT proconfig FROM pg_proc WHERE oid = to_regprocedure('public.apply_credit_partial_confirm(uuid,uuid,integer,integer,integer,text,text,text,text,uuid)')) IS DISTINCT FROM ARRAY['search_path=public, extensions'] THEN
     RAISE EXCEPTION '053 postcondition: a credit function''s proconfig is not the pre-053 one';
   END IF;
-  FOREACH r IN ARRAY ARRAY['anon', 'authenticated'] LOOP
+  FOREACH r IN ARRAY ARRAY['public', 'anon', 'authenticated'] LOOP   -- 'public' = the PUBLIC pseudo-role (symmetric with the preflight, 7c)
     IF has_function_privilege(r, 'public.apply_credit_reservation(uuid,text,integer,integer,integer,text,text,text,text,uuid,uuid,text)', 'EXECUTE') OR has_function_privilege(r, 'public.apply_credit_partial_confirm(uuid,uuid,integer,integer,integer,text,text,text,text,uuid)', 'EXECUTE') THEN
       RAISE EXCEPTION '053 postcondition: % can execute a credit settle function', r;
     END IF;
