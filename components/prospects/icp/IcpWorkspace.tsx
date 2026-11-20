@@ -218,8 +218,15 @@ export default function IcpWorkspace({ icpKey = 'first-cut' }: { icpKey?: string
   const key = companyId
     ? `/api/prospect-icp/versions?company_id=${encodeURIComponent(companyId)}&icpKey=${encodeURIComponent(icpKey)}`
     : null;
+  // Only a 200 carries a Section (versions.ts:61, including state 'failed'). Any other status is an error body - it
+  // used to be parsed as workspace data and render as a broken page. Now it is an error carrying its status
+  // (c6 2026-11-20: the page is linked from the menu, so a user without PROSPECT_ICP_MANAGE reaches it).
   const { data, error, isLoading, mutate } = useSWR<Section<Workspace>>(
-    key, (u: string) => apiFetch(u).then((r) => r.json()));
+    key, async (u: string) => {
+      const r = await apiFetch(u);
+      if (!r.ok) throw Object.assign(new Error(`icp workspace read: ${r.status}`), { status: r.status });
+      return r.json();
+    });
 
   const [selectedVersion, setSelectedVersion] = React.useState<number | null>(null);
   const [editedTitles, setEditedTitles] = React.useState<string[] | null>(null);
@@ -229,6 +236,13 @@ export default function IcpWorkspace({ icpKey = 'first-cut' }: { icpKey?: string
 
   if (!companyId) return <p>Select a company to review its Ideal Customer Profile.</p>;
   if (isLoading) return <p>Loading ICP workspace…</p>;
+  const errStatus = (error as { status?: number } | undefined)?.status;
+  if (errStatus === 403) {
+    return <p data-testid="icp-forbidden">The Ideal Customer Profile is managed by company admins. Ask an admin to review or ratify it.</p>;
+  }
+  if (errStatus === 401) {
+    return <p data-testid="icp-unauthenticated">Your session has ended. Sign in again to review the Ideal Customer Profile.</p>;
+  }
   // A transport failure. NOT "no ICP" — the distinction is the point.
   if (error || !data) {
     return <p data-testid="icp-transport-error">The ICP workspace could not be read. Nothing has been changed — only unread.</p>;
@@ -252,7 +266,7 @@ export default function IcpWorkspace({ icpKey = 'first-cut' }: { icpKey?: string
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
         // The 422 refusal contract: a reason code plus what was refused.
-        setNotice(`Could not generate a proposal — ${body.code ?? res.status}: ${body.error ?? 'unknown reason'}`);
+        setNotice(res.status === 403 ? 'Only company admins can change the Ideal Customer Profile.' : `Could not generate a proposal — ${body.code ?? res.status}: ${body.error ?? 'unknown reason'}`);
       } else {
         setNotice(`Proposal generated as version ${body.version}. Review it before ratifying.`);
         await mutate();
@@ -290,7 +304,7 @@ export default function IcpWorkspace({ icpKey = 'first-cut' }: { icpKey?: string
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
-        setNotice(`Edit rejected — ${body.code ?? res.status}: ${body.error ?? 'unknown reason'}`);
+        setNotice(res.status === 403 ? 'Only company admins can change the Ideal Customer Profile.' : `Edit rejected — ${body.code ?? res.status}: ${body.error ?? 'unknown reason'}`);
       } else {
         setNotice(`Saved as version ${body.version}. Version ${active.version} is unchanged. Nothing is ratified yet.`);
         setEditedTitles(null);
@@ -311,7 +325,7 @@ export default function IcpWorkspace({ icpKey = 'first-cut' }: { icpKey?: string
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
-        setNotice(`Ratification failed — ${body.code ?? res.status}: ${body.error ?? 'unknown reason'}`);
+        setNotice(res.status === 403 ? 'Only company admins can change the Ideal Customer Profile.' : `Ratification failed — ${body.code ?? res.status}: ${body.error ?? 'unknown reason'}`);
       } else {
         setNotice(`Version ${body.version} is now the ratified ICP.`);
         await mutate();

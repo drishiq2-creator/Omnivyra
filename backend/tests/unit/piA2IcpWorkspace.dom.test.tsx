@@ -467,3 +467,18 @@ describe('A2 — tenant scoping', () => {
     }
   });
 });
+
+// c6 2026-11-20: the workspace is now linked from the Prospect menu, so a user WITHOUT PROSPECT_ICP_MANAGE reaches it.
+describe('a user without the ICP capability', () => {
+  it('a 403 read is shown as admin-managed - not as a broken page or a transport failure', async () => {
+    mockApiFetch.mockImplementation(() => Promise.resolve({ ok: false, status: 403, json: async () => ({ error: 'forbidden' }) }));
+    render(<SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}><IcpWorkspace /></SWRConfig>);
+    expect(await screen.findByTestId('icp-forbidden')).toHaveTextContent('managed by company admins');
+    expect(screen.queryByTestId('icp-transport-error')).toBeNull();
+  });
+  it('a non-200 that is not 401/403 is a read failure, never parsed as workspace data', async () => {
+    mockApiFetch.mockImplementation(() => Promise.resolve({ ok: false, status: 400, json: async () => ({ error: 'icpKey is required' }) }));
+    render(<SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}><IcpWorkspace /></SWRConfig>);
+    expect(await screen.findByTestId('icp-transport-error')).toBeInTheDocument();
+  });
+});
