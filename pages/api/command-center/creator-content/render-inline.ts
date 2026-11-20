@@ -46,6 +46,8 @@ import { enforceCompanyAccess } from '../../../../backend/services/userContextSe
 import { requireCampaignAccess } from '../../../../backend/services/campaignAccessService';
 import { supabase } from '../../../../backend/db/supabaseClient';
 import { ensureRenderFonts } from '../../../../backend/services/creatorRenderFonts';
+import { INLINE_IMAGE_REFUSAL_HTTP, runWithInlineImageBudget } from '../../../../backend/services/creator/inlineImageBudget';
+import { IMAGE_PROMPT_BLOCKED, moderateInlinePayload } from '../../../../backend/services/creator/inlineImageModeration';
 
 export const config = {
   api: {
@@ -143,6 +145,14 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     } catch { /* ownership unprovable → load nothing; system/default resolution is unaffected */ }
   }
 
+  // A8 step 2 (b3 2026-11-20) - PRE-RENDER MODERATION, before anything is generated: the same deterministic,
+  // fail-closed ruleset as the guarded render route, over every text field of the payload. Blocked or not
+  // positively clearable (no text at all) -> 422, no provider call.
+  const moderation = moderateInlinePayload(assetPayload);
+  if (moderation.decision !== 'allowed') {
+    return res.status(422).json({ success: false, error: 'This image request was blocked by content rules.', code: IMAGE_PROMPT_BLOCKED });
+  }
+
   try {
     // PART A — register a user template_id before render (canonical flow).
     if (loadUserTemplate) {
@@ -153,12 +163,20 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     }
     // Deferred import: loads sharp AFTER ensureRenderFonts() set FONTCONFIG_FILE.
     const { renderAsset } = await import('../../../../backend/services/creatorAssetRenderer');
-    const rendered = await renderAsset(assetPayload, {
+    // A8 step 2: every PAID image this render causes takes one unit of the company's daily budget (keyed by the
+    // user when no company is bound). A refusal is answered here, never hidden behind the non-AI fallback.
+    const budgetKey = companyId || `user:${user.id}`;
+    const { result: rendered, scope } = await runWithInlineImageBudget(budgetKey, () => renderAsset(assetPayload, {
       companyId: companyId || undefined,
       campaignId: campaignId || undefined,
       userId: user.id ?? null,
       ...(assetPayload.asset_kind === 'infographic' ? { skipInfographicCopyEnrichment: true } : {}),
-    });
+    }));
+    if (scope.refusal) {
+      const http = INLINE_IMAGE_REFUSAL_HTTP[scope.refusal];
+      if (http.retryAfterSeconds) res.setHeader('Retry-After', String(http.retryAfterSeconds));
+      return res.status(http.status).json({ success: false, error: http.message, code: scope.refusal });
+    }
     return res.status(200).json({
       success: true,
       rendered: {

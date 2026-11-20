@@ -44,6 +44,10 @@ const CAPABILITY_REGISTRY: Record<string, ProviderImageCapabilities> = {
   // `resolveProviderCapabilities(providerId, 'edit')` returns. Reading this row
   // as "gpt-image-1 cannot take images" was the misreading that made user
   // assets look impossible; it cannot, on `generate`.
+  //
+  // 'openai-gpt-image-1' is a CAPABILITY identifier, not a model name: nothing
+  // sends it to the API. The model actually called comes from
+  // creator/openAIImageModel.ts (gpt-image-2.6 since 2026-11-19).
   'openai-gpt-image-1': {
     providerId: 'openai-gpt-image-1',
     acceptsReferenceImages: false,
