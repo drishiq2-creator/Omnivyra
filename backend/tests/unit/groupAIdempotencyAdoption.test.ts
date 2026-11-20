@@ -42,6 +42,11 @@ const AUTHORIZED: Array<[string, string]> = [
   // A16). Its state-dependent refusals (404/409/503) are left uncached per route
   // (stateDependentStatuses); the global UNCACHED_DENIAL_STATUSES is NOT widened (owner, same day).
   ['pages/api/whatsapp/broadcasts/index.ts', 'whatsapp-broadcast-create'],
+  // PI-034 (owner-ratified; arrives with the stranded line, 89's 02cc5dfb4, sanctioned 2026-11-21 via 89): POST invokes ONE
+  // execution instance per caller Idempotency-Key (OR-09 caller-scoped, mandatory) so a retry replays the same instance
+  // instead of creating a second run; GET is not wrapped (methods: ['POST']); the store stays the single
+  // instance-mutation owner. Enrolled in the two wiring pins below like every entry (factory nesting, own authz).
+  ['pages/api/prospect-campaigns/[id]/execution-instances.ts', 'pi-execution-instance-invoke'],
 ];
 
 /** Blocked by OR-08 (Group B dormant) and ED-01 (billing held pending telemetry). */
@@ -74,8 +79,8 @@ describe('adoption gate — authorized endpoints', () => {
     expect(new Set(scopes).size).toBe(scopes.length);
   });
 
-  it('the authorized list is exactly the seven Group A endpoints, the release seam and the WhatsApp broadcast create (owner 2026-11-12)', () => {
-    expect(AUTHORIZED).toHaveLength(9);
+  it('the authorized list is exactly the seven Group A endpoints, the release seam, the WhatsApp broadcast create (owner 2026-11-12) and the PI execution-instance invoke (PI-034)', () => {
+    expect(AUTHORIZED).toHaveLength(10);
     AUTHORIZED.forEach(([rel]) => expect(exists(rel)).toBe(true));
   });
 });
