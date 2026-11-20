@@ -69,6 +69,25 @@ CREATE TABLE IF NOT EXISTS auth.users (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
+-- GoTrue's session store, in the shape production has (cb C138, 2026-11-20): the replay needs it for
+-- 20270217000070 revoke_user_gotrue_sessions (its preflight refuses on any other shape). refresh_tokens.user_id is
+-- VARCHAR in GoTrue; session_id is nullable (legacy tokens) and cascades from sessions.
+CREATE TABLE IF NOT EXISTS auth.sessions (
+  id uuid PRIMARY KEY,
+  user_id uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  created_at timestamptz,
+  not_after timestamptz
+);
+CREATE TABLE IF NOT EXISTS auth.refresh_tokens (
+  id bigserial PRIMARY KEY,
+  token varchar(255),
+  user_id varchar(255),
+  revoked boolean,
+  created_at timestamptz,
+  session_id uuid,
+  CONSTRAINT refresh_tokens_session_id_fkey FOREIGN KEY (session_id) REFERENCES auth.sessions(id) ON DELETE CASCADE
+);
+
 -- The RLS helper functions policies call. Under test they return NULL unless a
 -- test explicitly sets the corresponding GUC, which keeps policies parseable
 -- without pretending to reproduce GoTrue.
