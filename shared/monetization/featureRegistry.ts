@@ -659,7 +659,8 @@ const BASE_FEATURES: MonetizationFeatureRegistryEntry[] = [
       action_pricing_config: 'profile_extraction',
       usage_action_key: 'profile_extraction',
     },
-  },  // ── Fixed-price actions that had NO entry (b3/c6 2026-11-20, BLOCKING money) ───────────────────────────────
+  },
+  // ── Fixed-price actions that had NO entry (b3/c6 2026-11-20, BLOCKING money) ───────────────────────────────
   // Before this, these keys fell through to the report fallback and were priced as website_audit. ONE entry per
   // key (c6 shape): pricing_strategy credit_cost_config, pricing_keys {action_key, credit_cost_config,
   // usage_action_key} = the key itself, NO action_pricing_config (token path), NO process_type_mapping (except the

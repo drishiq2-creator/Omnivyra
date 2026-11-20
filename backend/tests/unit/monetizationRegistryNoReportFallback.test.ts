@@ -39,6 +39,24 @@ describe('no report fallback without report fields', () => {
     }
   });
 
+  it('REVERSE (7c NB3): every registry entry that names an action_key names a real CreditAction (closes the union both ways)', () => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { MONETIZATION_FEATURE_REGISTRY } = require('../../../shared/monetization/featureRegistry');
+    const actions = new Set(CREDIT_ACTIONS as string[]);
+    // An entry whose action_key is NOT a CreditAction is legitimate ONLY as an internal, TOKEN-priced operation
+    // (internal_only + action_pricing_config, and NO credit_cost_config): today external_api, embedding,
+    // blogAnalyticsInsight, profile_enrichment, profile_extraction. Keyed on SHAPE, not names, so a new stray that
+    // claims a fixed credit price, or is user-facing, fails here.
+    const nonActions = (MONETIZATION_FEATURE_REGISTRY as any[]).filter(
+      (e) => typeof e.pricing_keys?.action_key === 'string' && !actions.has(e.pricing_keys.action_key));
+    const misshapen = nonActions
+      .filter((e) => !(e.internal_only === true && e.pricing_keys.action_pricing_config && !e.pricing_keys.credit_cost_config))
+      .map((e) => e.pricing_keys.action_key);
+    expect(misshapen).toEqual([]);
+    // Control: the shape rule is not vacuous; these internal token-priced entries exist and pass it.
+    expect(nonActions.length).toBeGreaterThan(0);
+  });
+
   it('the month-plan gateway calls are attributed to the PLAN job, not the autonomous campaign agent (c6)', () => {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { resolveFeatureFromProcessType } = require('../../../shared/monetization/featureRegistry');
