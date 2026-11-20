@@ -12,15 +12,26 @@
  */
 let orchestratorStatus = 'executed';
 let orchestratorThrows: Error | null = null;
+/** When set, the mock runs the REAL executor (the provider call) first, then throws this: a SETTLEMENT-time failure. */
+let throwAfterExecutor: Error | null = null;
 jest.mock('../../services/billing/enterpriseBillingOrchestrator', () => ({
-  runBilledOperation: jest.fn(async () => { if (orchestratorThrows) throw orchestratorThrows; return ({
+  runBilledOperation: jest.fn(async (opts: any) => {
+    if (orchestratorThrows) throw orchestratorThrows;
+    if (throwAfterExecutor) { await opts.executor(); throw throwAfterExecutor; }
+    return ({
     operationId: 'op', correlationId: 'c', idempotencyKey: 'k',
     result: orchestratorStatus === 'executed'
       ? { status: 'executed', result: 'text', settlement: { actualUsage: { inputTokens: 1, outputTokens: 1 } } }
       : { status: orchestratorStatus },
   }); }),
 }));
-jest.mock('../../services/aiGateway', () => ({ runCompletionWithOperation: jest.fn() }));
+const providerCalls: number[] = [];
+jest.mock('../../services/aiGateway', () => ({
+  runCompletionWithOperation: jest.fn(async () => {
+    providerCalls.push(1);
+    return { output: 'AI TEXT', metadata: { token_usage: { prompt_tokens: 10, completion_tokens: 20, total_tokens: 30 }, provider: 'openai', model: 'gpt-4o-mini' } };
+  }),
+}));
 jest.mock('../../services/billing/aiGatewayBillingGuard', () => ({
   checkAiBillingGuard: jest.fn(), runWithCreditHandle: (_h: unknown, fn: () => unknown) => fn(),
 }));
@@ -74,7 +85,28 @@ describe('runBilledAiCompletion: a billing refusal is TYPED, anything else is un
 
 describe('a PRICE that cannot be resolved is PRICING_UNAVAILABLE (503 + Retry-After), never a generic 500 (7c)', () => {
   const named = (name: string, message: string) => Object.assign(new Error(message), { name });
-  afterEach(() => { orchestratorThrows = null; });
+  afterEach(() => { orchestratorThrows = null; throwAfterExecutor = null; providerCalls.length = 0; });
+
+  it.each<[string, Error]>([
+    ['PricingMissingError at settlement', Object.assign(new Error("No active pricing for provider='openai' model='gpt-4o-mini' kind='output'."), { name: 'PricingMissingError' })],
+    ['a model-pricing lookup error at settlement', new Error('[pricingService] Model pricing lookup failed for openai/gpt-4o-mini/output: timeout')],
+  ])('BLOCKING (7c): %s AFTER the provider call → the work is DELIVERED (settlementUnpriced), NEVER a retryable refusal', async (_n, err) => {
+    throwAfterExecutor = err;
+    const errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const out = await runBilledAiCompletion(ARGS).catch((x) => x);
+    expect(isBillingRefusalError(out)).toBe(false);          // no 503 / Retry-After / "try again"
+    expect(out).toMatchObject({ settlementUnpriced: true, text: 'AI TEXT' });
+    expect(providerCalls).toHaveLength(1);                   // the provider ran exactly once
+    expect(errSpy.mock.calls.some((c) => String(c[0]).includes('billed_ai_settlement_unpriced'))).toBe(true); // reconciliation signal
+    errSpy.mockRestore();
+  });
+
+  it('control: the SAME error BEFORE the provider call is still PRICING_UNAVAILABLE (nothing ran)', async () => {
+    orchestratorThrows = Object.assign(new Error('x'), { name: 'PricingMissingError' });
+    const e = await runBilledAiCompletion(ARGS).catch((x) => x);
+    expect(e).toMatchObject({ code: 'PRICING_UNAVAILABLE' });
+    expect(providerCalls).toHaveLength(0);
+  });
 
   it.each<[string, Error]>([
     ['PricingMissingError (no active model price)', named('PricingMissingError', "No active pricing for provider='openai' model='x' kind='input'.")],

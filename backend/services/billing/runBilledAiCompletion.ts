@@ -122,6 +122,12 @@ export interface RunBilledAiCompletionArgs {
 }
 
 export interface BilledAiCompletionResult {
+  /**
+   * true = the provider call RAN and produced `text`, but pricing the actual usage failed at settlement, so the
+   * charge is unsettled (logged for reconciliation). The work is delivered; it must never be answered with a retry
+   * (7c, 2026-11-20).
+   */
+  settlementUnpriced?: true;
   text:            string;
   operationId:     string;
   correlationId:   string;
@@ -139,6 +145,10 @@ export async function runBilledAiCompletion(
   // PRICING_UNAVAILABLE, the union's one retryable "unknown" (503 + Retry-After). It used to leave as a generic 500.
   // It is raised while the hold is being computed, before any reservation or provider call, so nothing was charged.
   let orchestratorResult: OrchestratorResult<string>;
+  // TIME AXIS (7c BLOCKING on 8ff86fd72): a price failure BEFORE the provider call means nothing happened (retry is
+  // right); AFTER it, the AI work exists and was paid for, so the answer must never invite a repeat.
+  let providerCallStarted = false;
+  let producedText: string | null = null;
   try {
     orchestratorResult = await runBilledOperation<string>({
       module:         args.module,
@@ -178,11 +188,13 @@ export async function runBilledAiCompletion(
         // SEC91-D2: the gateway re-checks the billing guard; the handle must be
         // visible there too, or this billed call is recorded as an untracked
         // violation (and blocked outright once BILLING_REQUIRE_AI_HANDLE=true).
+        providerCallStarted = true;
         const gatewayResp = await runWithCreditHandle(creditHandle, () => runCompletionWithOperation({
           ...args.completion,
         }));
   
         const text = typeof gatewayResp.output === 'string' ? gatewayResp.output : '';
+        producedText = text;
         const usage = gatewayResp.metadata?.token_usage ?? {};
   
         return {
@@ -198,7 +210,31 @@ export async function runBilledAiCompletion(
       },
     });
   } catch (err) {
-    if (isPriceResolutionError(err)) throw new BillingRefusalError('PRICING_UNAVAILABLE', 'pricing_unavailable');
+    if (isPriceResolutionError(err)) {
+      // BEFORE the provider call (the hold could not be priced): nothing ran, nothing was charged, retry is right.
+      if (!providerCallStarted) throw new BillingRefusalError('PRICING_UNAVAILABLE', 'pricing_unavailable');
+      // AFTER it (settlement could not price the actual usage): deliver the work that was done, flag it, and log it
+      // for reconciliation. NOT a refusal and no Retry-After: answering "try again" would spend on the provider twice.
+      if (producedText !== null) {
+        console.error('[runBilledAiCompletion] billed_ai_settlement_unpriced', JSON.stringify({
+          module: args.module, orgId: args.orgId, action: args.action, provider: args.llmPricing.provider,
+          model: args.llmPricing.model, error: err instanceof Error ? err.message : String(err),
+        }));
+        return {
+          settlementUnpriced: true,
+          text:             producedText,
+          operationId:      '',
+          correlationId:    '',
+          idempotencyKey:   '',
+          promptTokens:     0,
+          completionTokens: 0,
+          provider:         args.llmPricing.provider,
+          model:            args.llmPricing.model,
+        };
+      }
+      // The provider call started but produced nothing: not a pricing problem we can answer for, so propagate it
+      // (never PRICING_UNAVAILABLE, never a retry instruction).
+    }
     throw err;
   }
 
