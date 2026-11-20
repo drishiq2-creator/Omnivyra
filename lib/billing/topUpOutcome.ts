@@ -7,15 +7,23 @@
  *
  * verify outcomes (c6, pages/api/billing/checkout/verify.ts on origin/main):
  *   200 { ok:true } (incl. recovered:true)                -> credited
- *   400 { ok:false, status:'failed' }                     -> DEFINITIVE: the provider found no capture; not charged
+ *   400 { ok:false, status:'failed', action }             -> ONLY action 'closed' / 'already_closed' is definitive ("not
+ *        charged"). verify.ts:97 sends this SAME body for every closure action but 'fulfilled' (7c, 2026-11-20):
+ *        every other action -> unconfirmed: 'deferred_unknown' (provider unreachable / db error / fulfilment failed
+ *        after PAID), 'errored', 'not_found', no action, AND 'already_completed' (purchaseClosureService.ts:273 also
+ *        returns it when the pending CAS lost to ANY writer, so it does not prove credited). Never read status:'failed'
+ *        alone as "not charged".
  *   500 { ok:false, status:'paid', fulfillment_status:'failed' } -> PAID: payment taken, credits still being applied
  *   404 purchase_not_found                                -> NOT definitive today (a DB read failure lands here too)
  *   lost response / other 5xx / 400 missing ids           -> unknown
  * Re-calling verify is SAFE (c6): it re-asks the provider; completePurchase is a CAS with a UNIQUE credit key, so it
  * can never double-grant. So "Check again" re-calls verify.
  *
- * Copy makes NO promise of automatic crediting: a provider webhook also grants (webhooks/payments/[provider].ts), but
- * whether it is registered at the providers in prod is unconfirmed (c6/cb). Switch the copy only when it is.
+ * "your credits are being applied" (paid_pending) is backed by the checkout-expiry cron, NOT the webhook:
+ * expireStalePendingPurchases (backend/services/billing/purchaseClosureService.ts:333) fulfils provider-confirmed-paid
+ * rows, scheduled by vercel.json:59 /api/cron/billing-checkout-expiry (7,22,37,52 * * * *). It is TTL-gated, so "Check
+ * again" stays the fast path. The provider webhook also grants, but its prod registration is unconfirmed (PL-120), so
+ * the copy promises no timing.
  */
 export type VerifyOutcome =
   | { kind: 'credited'; credits: number | null }
@@ -37,7 +45,10 @@ export function classifyVerify(status: number | null, body: unknown): VerifyOutc
     return { kind: 'credited', credits: Number.isFinite(n) && n > 0 ? n : null };
   }
   if (b.status === 'paid') return { kind: 'paid_pending', message: TOPUP_PAID_PENDING };
-  if (status === 400 && b.ok === false && b.status === 'failed') return { kind: 'not_charged', message: TOPUP_NOT_CHARGED };
+  const action = typeof b.action === 'string' ? b.action : '';
+  if (status === 400 && b.ok === false && b.status === 'failed') {
+    if (action === 'closed' || action === 'already_closed') return { kind: 'not_charged', message: TOPUP_NOT_CHARGED };
+  }
   return { kind: 'unconfirmed', message: TOPUP_UNCONFIRMED };
 }
 

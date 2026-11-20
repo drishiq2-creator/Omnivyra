@@ -91,12 +91,21 @@ describe('top-up verify after payment', () => {
     expect(buyButton().disabled).toBe(false);
   });
 
-  it('a definitive refusal (400 status:failed) says "not charged" and allows a new purchase', async () => {
-    verifyAnswers = [{ status: 400, body: { ok: false, status: 'failed', action: 'closed' } }];
+  it.each(['closed', 'already_closed'])('a definitive refusal (400 status:failed, action %s) says "not charged" and allows a new purchase', async (action) => {
+    verifyAnswers = [{ status: 400, body: { ok: false, status: 'failed', action } }];
     render(<TopUpPanel orgId="co-a" />);
     await buy();
     await waitFor(() => expect(screen.getByText(TOPUP_NOT_CHARGED)).toBeTruthy());
     expect(buyButton().disabled).toBe(false);
+  });
+
+  it.each(['deferred_unknown', 'already_completed', 'errored', 'not_found', undefined])('400 status:failed with NON-definitive action %s -> unconfirmed, Buy DISABLED (never "not charged")', async (action) => {
+    verifyAnswers = [{ status: 400, body: { ok: false, status: 'failed', ...(action ? { action } : {}) } }];
+    render(<TopUpPanel orgId="co-a" />);
+    await buy();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Check again' })).toBeTruthy());
+    expect(screen.queryByText(TOPUP_NOT_CHARGED)).toBeNull();
+    expect(buyButton().disabled).toBe(true);
   });
 
   it('control: a success says credits were added', async () => {
@@ -123,7 +132,9 @@ describe('create-order failures (before any payment)', () => {
 
   it('classifier tables', () => {
     expect(classifyVerify(200, { ok: true, recovered: true }).kind).toBe('credited');
-    expect(classifyVerify(400, { ok: false, status: 'failed' }).kind).toBe('not_charged');
+    expect(classifyVerify(400, { ok: false, status: 'failed', action: 'closed' }).kind).toBe('not_charged');
+    expect(classifyVerify(400, { ok: false, status: 'failed' }).kind).toBe('unconfirmed');
+    expect(classifyVerify(400, { ok: false, status: 'failed', action: 'deferred_unknown' }).kind).toBe('unconfirmed');
     expect(classifyVerify(500, { ok: false, status: 'paid' }).kind).toBe('paid_pending');
     expect([null, 404, 400, 503].map((s) => classifyVerify(s, { error: 'x' }).kind)).toEqual(['unconfirmed', 'unconfirmed', 'unconfirmed', 'unconfirmed']);
     expect(createOrderMessage({ error: 'package_lookup_failed:timeout' })).toMatch(/weren't charged/);
