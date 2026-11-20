@@ -239,6 +239,11 @@ function seedExisting(l: CanonicalLead, scores: CanonicalLeadScores = BI_1): voi
   });
 }
 
+// c6 2026-11-20: these cases describe the lead_intelligence write AFTER the PI-LDB apply (display / origin_*
+// columns exist). Before it the columns are not written at all - pinned in piLdbRolloutGates.test.ts.
+beforeAll(() => { process.env.PI_LDB_SCHEMA_READY = 'true'; });
+afterAll(() => { delete process.env.PI_LDB_SCHEMA_READY; });
+
 describe('PI-LDB 2C · an uncertain protective read leaves a stored score alone', () => {
   it.each<[string, ReadFault]>([
     ['an authorization refusal', 'denied'],

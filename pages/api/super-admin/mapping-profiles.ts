@@ -1,6 +1,8 @@
 import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeFactory';
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { requireCapability } from '../../../backend/security/requireCapability';
+import { isLeadIngestionEnabled } from '../../../backend/services/leadIngestion/orchestrator';
+import { isPiLdbSchemaReady } from '../../../backend/services/leadIntelligence/piLdbSchemaReady';
 import { SUPER_ADMIN_DASHBOARD_VIEW } from '../../../shared/contracts/security';
 import { withIdempotency } from '../../../backend/middleware/withIdempotency';
 import { validateMappingApprovalBody } from '../../../backend/services/leadMapping/mappingApprovalValidation';
@@ -60,6 +62,12 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'GET' && req.method !== 'POST') {
     res.setHeader('Allow', 'GET, POST');
     return res.status(405).json({ error: 'Method not allowed' });
+  }
+
+  // Global gates FIRST (free, and they tell an unauthorised caller nothing): ingestion on AND the PI-LDB schema
+  // applied. Vendor profiles are platform-wide, so there is no per-tenant flag here.
+  if (!isLeadIngestionEnabled() || !isPiLdbSchemaReady()) {
+    return res.status(404).json({ error: 'Prospect import is not enabled.', code: 'PROSPECT_IMPORT_DISABLED' });
   }
 
   const guard = await requireCapability(req, res, {

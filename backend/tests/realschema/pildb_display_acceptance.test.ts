@@ -234,6 +234,11 @@ function leadWith(display: any, ref: string): CanonicalLead {
   } as unknown as CanonicalLead;
 }
 
+// c6 2026-11-20: this suite runs WITH the PI-LDB migrations applied, which is exactly when the switch is set
+// (piLdbSchemaReady.ts). Without it the repository writes no display / origin_* columns at all.
+beforeAll(() => { process.env.PI_LDB_SCHEMA_READY = 'true'; });
+afterAll(() => { delete process.env.PI_LDB_SCHEMA_READY; });
+
 describe('PI-LDB-4 — lead_intelligence.display: catalog', () => {
   it('the column exists, is jsonb, and is nullable with no default', async () => {
     const { rows } = await db.query(

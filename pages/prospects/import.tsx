@@ -26,6 +26,12 @@ import Head from 'next/head';
 import Link from 'next/link';
 import { useCompanyContext } from '@/components/CompanyContext';
 import ImportWizard from '@/components/prospects/import/ImportWizard';
+import type { GetServerSideProps } from 'next';
+import { isProspectImportUiEnabled } from '@/lib/prospects/import/prospectImportUi';
+
+/** Default OFF (b3 2026-11-20): the page does not exist until NEXT_PUBLIC_PROSPECT_IMPORT_ENABLED=true. */
+export const getServerSideProps: GetServerSideProps = async () =>
+  (isProspectImportUiEnabled() ? { props: {} } : { notFound: true });
 
 export default function ProspectImportPage() {
   const { selectedCompanyId } = useCompanyContext();
