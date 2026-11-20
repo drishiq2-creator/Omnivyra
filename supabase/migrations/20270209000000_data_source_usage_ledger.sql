@@ -30,9 +30,11 @@
 --                                 fact has one name across both ledgers (PI
 --                                 review (a)).
 --   funding              text     'tenant' (the tenant's own key; the vendor
---                                 bills the tenant) | 'platform' (Omnivyra's
---                                 central key; charged in Omnivyra credits).
---   credits_charged      integer  Omnivyra credits CONFIRMED for this call.
+--                                 bills the tenant). OWN KEY ONLY (owner
+--                                 2026-11-20): central access ('platform') is not
+--                                 offered; PL-171 widens this CHECK when it is.
+--   credits_charged      integer  Omnivyra credits charged for this call
+--                                 (always 0 while vendors are own-key only).
 --   initiated_by         uuid     the user who started it (GOV-H actor: no FK,
 --                                 writer-validated; NULL for a system action).
 -- prospect_discovery_attempts: the same funding, credits_charged, initiated_by
@@ -45,15 +47,8 @@
 -- us (units > 0) and the tenant was not charged (credits 0). That divergence is
 -- the reason both exist.
 --
--- ─── 2. prospect_capture_runs (NEW, small) ────────────────────────────────
--- Sales Navigator capture totals, one row per Outreach capture command.
--- PI review ruling: NOT prospect_discovery_attempts (its bounds and call-state
--- CHECKs would reject or falsify a push with no provider call). Counts and ids
--- only: no person data (refused_reason is a CODE, enforced by CHECK).
--- Key (organization_id, command_id). Outreach contract
--- EXTENSION-1.5.0-CONTRACT.md §5.3: "capture command_id is single-use; a repeat
--- is a retry of the same batch". The writer REPLACES on conflict, but only with
--- a COMPLETE run, so a failed retry never overwrites good totals.
+-- (A second section, the prospect_capture_runs table for Sales Navigator capture totals, was REMOVED on
+-- 2026-11-20 before this version was ever applied (cb C159: absent in production) - capture is PL-170.)
 
 BEGIN;
 
@@ -84,7 +79,7 @@ BEGIN
   -- enrichment attempts
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'pea_funding_valid') THEN
     ALTER TABLE public.prospect_enrichment_attempts ADD CONSTRAINT pea_funding_valid
-      CHECK (funding IS NULL OR funding IN ('tenant', 'platform')) NOT VALID;
+      CHECK (funding IS NULL OR funding IN ('tenant')) NOT VALID;
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'pea_cost_units_nonnegative') THEN
     ALTER TABLE public.prospect_enrichment_attempts ADD CONSTRAINT pea_cost_units_nonnegative
@@ -102,7 +97,7 @@ BEGIN
   -- discovery attempts
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'pda_funding_valid') THEN
     ALTER TABLE public.prospect_discovery_attempts ADD CONSTRAINT pda_funding_valid
-      CHECK (funding IS NULL OR funding IN ('tenant', 'platform')) NOT VALID;
+      CHECK (funding IS NULL OR funding IN ('tenant')) NOT VALID;
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'pda_credits_nonnegative') THEN
     ALTER TABLE public.prospect_discovery_attempts ADD CONSTRAINT pda_credits_nonnegative
@@ -127,102 +122,12 @@ BEGIN
 END
 $checks$;
 
-CREATE TABLE IF NOT EXISTS public.prospect_capture_runs (
-  id                 uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
-  organization_id    uuid        NOT NULL REFERENCES public.companies (id) ON DELETE CASCADE,
-  provider           text        NOT NULL,
-  command_id         text        NOT NULL,
-  initiated_by       uuid,
-  status             text        NOT NULL,
-  received           integer     NOT NULL DEFAULT 0,
-  accepted           integer     NOT NULL DEFAULT 0,
-  rejected           integer     NOT NULL DEFAULT 0,
-  created            integer     NOT NULL DEFAULT 0,
-  updated            integer     NOT NULL DEFAULT 0,
-  unchanged          integer     NOT NULL DEFAULT 0,
-  duplicates_parked  integer     NOT NULL DEFAULT 0,
-  refused_reason     text,
-  created_at         timestamptz NOT NULL DEFAULT now(),
-  completed_at       timestamptz,
-  CONSTRAINT pcr_provider_key CHECK (provider ~ '^[a-z][a-z0-9_]{0,39}$'),
-  CONSTRAINT pcr_command_id_len CHECK (length(btrim(command_id)) BETWEEN 1 AND 200),
-  CONSTRAINT pcr_status_valid CHECK (status IN ('complete', 'refused', 'failed')),
-  CONSTRAINT pcr_counts_nonnegative CHECK (received >= 0 AND accepted >= 0 AND rejected >= 0 AND created >= 0
-    AND updated >= 0 AND unchanged >= 0 AND duplicates_parked >= 0),
-  CONSTRAINT pcr_accepted_within_received CHECK (accepted + rejected <= received),
-  CONSTRAINT pcr_outcomes_within_accepted CHECK (created + updated + unchanged + duplicates_parked <= accepted),
-  -- A refused batch carries a reason CODE and no outcomes; a non-refused one carries no reason.
-  CONSTRAINT pcr_refusal_coherent CHECK (
-    (status = 'refused' AND refused_reason IS NOT NULL AND accepted = 0)
-    OR (status <> 'refused' AND refused_reason IS NULL)),
-  CONSTRAINT pcr_refused_reason_code CHECK (refused_reason IS NULL OR refused_reason ~ '^[a-z][a-z0-9_]{0,63}$'),
-  CONSTRAINT pcr_complete_has_time CHECK ((status = 'complete') = (completed_at IS NOT NULL)),
-  CONSTRAINT pcr_one_row_per_command UNIQUE (organization_id, command_id)
-);
-
-CREATE INDEX IF NOT EXISTS ix_pcr_tenant_time ON public.prospect_capture_runs (organization_id, created_at DESC);
-
-ALTER TABLE public.prospect_capture_runs ENABLE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS pcr_service_role ON public.prospect_capture_runs;
-CREATE POLICY pcr_service_role ON public.prospect_capture_runs
-  FOR ALL TO service_role USING (true) WITH CHECK (true);
-
-REVOKE ALL ON TABLE public.prospect_capture_runs FROM PUBLIC;
-DO $grants$
-DECLARE r text;
-BEGIN
-  FOREACH r IN ARRAY ARRAY['anon', 'authenticated'] LOOP
-    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) THEN
-      EXECUTE format('REVOKE ALL ON TABLE public.prospect_capture_runs FROM %I', r);
-    END IF;
-  END LOOP;
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role') THEN
-    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.prospect_capture_runs TO service_role;
-  END IF;
-END
-$grants$;
-
--- POSTCONDITIONS: as in 20270206000000, adapted (each RAISEs; trip input named).
+-- POSTCONDITIONS (each RAISEs; trip input named).
 DO $verify$
 DECLARE
-  r text; p text;
-  v_privs text[] := ARRAY['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER'];
-  v_col_privs text[] := ARRAY['SELECT', 'INSERT', 'UPDATE', 'REFERENCES'];
+  p text;
 BEGIN
-  IF current_setting('server_version_num')::int >= 170000 THEN v_privs := array_append(v_privs, 'MAINTAIN'); END IF;
-  -- (1) no client privilege on the new table (table- or column-level). Trips on any client GRANT.
-  FOREACH r IN ARRAY ARRAY['anon', 'authenticated'] LOOP
-    CONTINUE WHEN NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r);
-    FOREACH p IN ARRAY v_privs LOOP
-      IF has_table_privilege(r, 'public.prospect_capture_runs', p) THEN
-        RAISE EXCEPTION 'PCR postcondition: client role % holds % on prospect_capture_runs', r, p; END IF;
-    END LOOP;
-    FOREACH p IN ARRAY v_col_privs LOOP
-      IF has_any_column_privilege(r, 'public.prospect_capture_runs', p) THEN
-        RAISE EXCEPTION 'PCR postcondition: client role % holds column-level % on prospect_capture_runs', r, p; END IF;
-    END LOOP;
-  END LOOP;
-  -- (2) service_role has the four it needs. Trips on the GRANT removed.
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role') THEN
-    FOREACH p IN ARRAY ARRAY['SELECT', 'INSERT', 'UPDATE', 'DELETE'] LOOP
-      IF NOT has_table_privilege('service_role', 'public.prospect_capture_runs', p) THEN
-        RAISE EXCEPTION 'PCR postcondition: service_role lacks % on prospect_capture_runs', p; END IF;
-    END LOOP;
-  END IF;
-  -- (3) RLS on, (4) only the service-role policy.
-  IF NOT (SELECT relrowsecurity FROM pg_class WHERE oid = 'public.prospect_capture_runs'::regclass) THEN
-    RAISE EXCEPTION 'PCR postcondition: RLS is not enabled on prospect_capture_runs'; END IF;
-  IF EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = 'public' AND tablename = 'prospect_capture_runs'
-             AND (policyname <> 'pcr_service_role' OR roles <> ARRAY['service_role']::name[])) THEN
-    RAISE EXCEPTION 'PCR postcondition: a non-service-role policy exists on prospect_capture_runs'; END IF;
-  -- (5) shape: every named constraint exists (IF NOT EXISTS could keep another shape).
-  FOREACH p IN ARRAY ARRAY['pcr_status_valid', 'pcr_counts_nonnegative', 'pcr_accepted_within_received',
-      'pcr_outcomes_within_accepted', 'pcr_refusal_coherent', 'pcr_refused_reason_code', 'pcr_complete_has_time',
-      'pcr_one_row_per_command'] LOOP
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = p AND conrelid = 'public.prospect_capture_runs'::regclass) THEN
-      RAISE EXCEPTION 'PCR postcondition: constraint % is missing', p; END IF;
-  END LOOP;
-  -- (6) the new attempt-table constraints exist (NOT VALID here; validated by the
+  -- (1) the new attempt-table constraints exist (NOT VALID here; validated by the
   --     follow-on VALIDATE migration, whose postcondition checks convalidated).
   FOREACH p IN ARRAY ARRAY['pea_funding_valid', 'pea_cost_units_nonnegative', 'pea_credits_nonnegative',
       'pea_tenant_funding_uncharged', 'pda_funding_valid', 'pda_credits_nonnegative', 'pda_tenant_funding_uncharged',
@@ -230,11 +135,10 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = p) THEN
       RAISE EXCEPTION 'usage postcondition: constraint % is missing', p; END IF;
   END LOOP;
-  -- (7) initiated_by: no FK anywhere (GOV-H). Trips on any FK on those columns.
+  -- (2) initiated_by: no FK anywhere (GOV-H). Trips on any FK on those columns.
   IF EXISTS (SELECT 1 FROM pg_constraint c JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY (c.conkey)
              WHERE c.contype = 'f' AND a.attname = 'initiated_by'
-               AND c.conrelid IN ('public.prospect_enrichment_attempts'::regclass, 'public.prospect_discovery_attempts'::regclass,
-                                  'public.prospect_capture_runs'::regclass)) THEN
+               AND c.conrelid IN ('public.prospect_enrichment_attempts'::regclass, 'public.prospect_discovery_attempts'::regclass)) THEN
     RAISE EXCEPTION 'usage postcondition: initiated_by must not carry a foreign key'; END IF;
 END
 $verify$;

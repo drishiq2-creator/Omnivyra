@@ -85,23 +85,23 @@ describe('20270209 NOT VALID window: new rows are still enforced', () => {
       expect(await probe(
         `UPDATE public.prospect_enrichment_attempts SET funding = 'tenant', credits_charged = 1 WHERE id = $1`, [id],
       )).toBe('23514:pea_tenant_funding_uncharged');
-      // NEGATIVE CONTROLS: own key at 0 credits, and platform funding with credits, are admitted.
+      // NEGATIVE CONTROL: own key at 0 credits is admitted. ('platform' funding no longer exists - see below.)
       expect(await probe(
         `UPDATE public.prospect_enrichment_attempts SET funding = 'tenant', credits_charged = 0 WHERE id = $1`, [id],
-      )).toBe('ok');
-      expect(await probe(
-        `UPDATE public.prospect_enrichment_attempts SET funding = 'platform', credits_charged = 18, provider_cost_units = 1 WHERE id = $1`, [id],
       )).toBe('ok');
     });
   });
 
-  it('the other seven NOT VALID CHECKs also refuse one illegitimate value each', async () => {
+  it('the other seven NOT VALID CHECKs refuse an illegitimate value (funding: also the retired platform value)', async () => {
     await inRollback(async () => {
       await seedTenants();
       const e = await enrichmentRow();
       const d = await discoveryRow();
       const cases: Array<[string, string, string, string]> = [
         ['public.prospect_enrichment_attempts', 'pea_funding_valid', `funding = 'someone'`, e],
+        // Own key only (owner 2026-11-20; central access = PL-171): mode B's 'platform' is REFUSED, not admitted.
+        ['public.prospect_enrichment_attempts', 'pea_funding_valid', `funding = 'platform'`, e],
+        ['public.prospect_discovery_attempts', 'pda_funding_valid', `funding = 'platform'`, d],
         ['public.prospect_enrichment_attempts', 'pea_cost_units_nonnegative', `provider_cost_units = -1`, e],
         ['public.prospect_enrichment_attempts', 'pea_credits_nonnegative', `credits_charged = -1`, e],
         ['public.prospect_discovery_attempts', 'pda_funding_valid', `funding = 'someone'`, d],

@@ -1,7 +1,7 @@
 -- ROLLBACK for 20270209000000_data_source_usage_ledger.sql
 --
--- Drops prospect_capture_runs, then the usage constraints and columns added to
--- the two attempt tables. LOSSY: every recorded capture total, funding source,
+-- Drops the usage constraints and columns added to the two attempt tables.
+-- LOSSY: every recorded funding source,
 -- vendor-unit count (enrichment only), credits-charged figure, initiator and
 -- screening count is erased. The attempt rows themselves, and
 -- prospect_discovery_attempts.provider_cost_units (which predates this
@@ -11,8 +11,6 @@
 -- usage write is disabled (it is best-effort and tolerates missing columns).
 
 BEGIN;
-
-DROP TABLE IF EXISTS public.prospect_capture_runs;
 
 ALTER TABLE public.prospect_enrichment_attempts
   DROP CONSTRAINT IF EXISTS pea_funding_valid,
@@ -39,9 +37,6 @@ ALTER TABLE public.prospect_discovery_attempts
 
 DO $verify$
 BEGIN
-  IF to_regclass('public.prospect_capture_runs') IS NOT NULL THEN
-    RAISE EXCEPTION 'usage rollback postcondition: prospect_capture_runs still exists';
-  END IF;
   IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public'
              AND ((table_name = 'prospect_enrichment_attempts'
                    AND column_name IN ('provider_cost_units','funding','credits_charged','initiated_by'))
