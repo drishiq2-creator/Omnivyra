@@ -109,7 +109,8 @@ jest.mock('../../db/supabaseClient', () => {
       return { data: d, count: d.length, error: null };
     };
     b.maybeSingle = () => { const r = resolve(); return Promise.resolve({ data: r.data[0] ?? null, error: null }); };
-    b.single = () => { const r = resolve(); return Promise.resolve({ data: r.data[0] ?? null, error: r.data.length ? null : { message: 'no rows' } }); };
+    // PostgREST's own no-row answer carries code PGRST116; routes tell it apart from a failed read (PL-129).
+    b.single = () => { const r = resolve(); return Promise.resolve({ data: r.data[0] ?? null, error: r.data.length ? null : { code: 'PGRST116', message: 'no rows' } }); };
     b.then = (fn: any) => Promise.resolve(resolve()).then(fn);
     return b;
   };

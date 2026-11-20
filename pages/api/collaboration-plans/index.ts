@@ -29,11 +29,26 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     return res.status(401).json({ error: 'User not identified' });
   }
 
-  const { data: existing } = await supabase
-    .from('opportunity_items')
-    .select('id, company_id')
-    .eq('id', opportunityId)
-    .single();
+  // PL-129 (04, 2026-11-20; same shape as a9's outreach-plans fix 4d8fba601): a FAILED read is not "not found".
+  // PGRST116 is the genuine no-row case (404). An error object OR a thrown rejection answers 503 + Retry-After + a
+  // distinct code; before, a thrown read escaped the handler raw and an error object read as 404.
+  let existing: { id: string; company_id: string } | null = null;
+  let existingUnreadable = false;
+  try {
+    const r = await supabase
+      .from('opportunity_items')
+      .select('id, company_id')
+      .eq('id', opportunityId)
+      .single();
+    if (r.error && r.error.code !== 'PGRST116') existingUnreadable = true;
+    else existing = (r.data as { id: string; company_id: string } | null) ?? null;
+  } catch {
+    existingUnreadable = true;
+  }
+  if (existingUnreadable) {
+    res.setHeader('Retry-After', '5');
+    return res.status(503).json({ error: 'The opportunity could not be read', code: 'OPPORTUNITY_UNREADABLE' });
+  }
 
   if (!existing) {
     return res.status(404).json({ error: 'Opportunity not found' });
@@ -66,8 +81,9 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     .single();
 
   if (error) {
+    // Logged in full server-side; the client gets a code, never the raw database message.
     console.error('POST /api/collaboration-plans', error);
-    return res.status(500).json({ error: error.message });
+    return res.status(500).json({ error: 'The collaboration plan could not be created', code: 'COLLABORATION_PLAN_CREATE_FAILED' });
   }
 
   return res.status(201).json(plan);
