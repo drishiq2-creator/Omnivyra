@@ -15,11 +15,14 @@ import { logSecurityEvent } from '../../../backend/security/audit/SecurityAuditS
 import { incrementAuthMetric } from '../../../backend/services/authMetrics';
 
 /** set-password 200 with this code: the password changed but the OTHER sessions could not be signed out. */
-export const OTHER_SESSIONS_NOT_SIGNED_OUT = 'OTHER_SESSIONS_NOT_SIGNED_OUT';
+export const OTHER_SESSIONS_NOT_SIGNED_OUT = 'OTHER_SESSIONS_NOT_SIGNED_OUT' as const;
 import { validatePassword } from '../../../lib/auth/passwordPolicy';
 import { isInvitationExpired } from '../../../backend/services/invitationExpiry';
 
-type SuccessResponse = { success: true; route: string };
+type SuccessResponse =
+  | { success: true; route: string }
+  /** The password changed but the OTHER sessions could not be signed out (b3 ruling 1). */
+  | { success: true; route: string; otherSessionsSignedOut: false; code: typeof OTHER_SESSIONS_NOT_SIGNED_OUT };
 type ErrorResponse = { error: string; code?: string };
 
 async function handler(
