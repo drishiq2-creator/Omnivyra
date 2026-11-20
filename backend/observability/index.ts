@@ -16,7 +16,7 @@ export {
   recordApi, recordDb, recordAi, recordExternal,
   recordQueueJob, recordQueueDepth, recordScheduler, recordWorker,
   recordCache, recordCacheInvalidation, recordSystem, recordClient,
-  recordRawCounter, recordRawHistogram,
+  recordRawCounter, recordRawHistogram, recordRawGauge,
 } from './metrics';
 export { withApiObservability } from './apiObservability';
 export { observeTable, timedQuery } from './dbObservability';

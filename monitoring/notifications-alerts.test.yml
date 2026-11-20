@@ -1,84 +1,94 @@
-# promtool unit tests for notifications-alerts.yml (a9, 2026-11-20).
+# promtool unit tests for notifications-alerts.yml (a9, 2026-11-20; durable source, b3 ruling (B)).
 #   promtool test rules monitoring/notifications-alerts.test.yml
-# Run in CI by .github/workflows/monitoring-rules.yml, which ALSO runs the pre-fix expression and requires it to fail
-# "first event fires" - the control proving these cases can tell the two expressions apart.
+# Run in CI by .github/workflows/monitoring-rules.yml, which ALSO runs an off-by-one credit threshold (> 1) and
+# requires it to FAIL "one event fires" - the control proving these cases can tell a correct rule from a wrong one.
 #
-# Series notation: '_' = no sample (the series does not exist yet: the registry creates it at its first increment);
-# 'AxN' = the value A repeated N+1 times. Interval 1m, so the Nth value is at minute N.
+# Series notation: 'AxN' = the value A repeated N+1 times; '_' = no sample; '_xN' = N of them. Interval 1m, so the
+# Nth value is at minute N. The exporter publishes windowed GAUGES, so a series is simply the window's row count.
 rule_files:
   - notifications-alerts.yml
 
 evaluation_interval: 1m
 
 tests:
-  # FIRST EVENT FIRES: a credit_alert series that first appears at minute 4 with value 1 (one undeliverable alert).
-  # The pre-fix `increase(...[15m]) > 0` returns nothing here. FLAT DOES NOT FIRE: by minute 25 the series existed
-  # at the start of the window and has not moved.
+  # ONE undeliverable credit alert (count 1 in the 15m window) pages at once; when it leaves the window (count 0) the
+  # page resolves. The exporter-health gauge is present and 0 throughout (so the liveness rules stay quiet).
   - interval: 1m
     input_series:
-      - series: 'notification_undeliverable{job="omnivyra-worker",reason="no_active_recipient",type="credit_alert"}'
-        values: '_x4 1x25'
+      - series: 'notification_undeliverable_recent{job="omnivyra-worker",instance="w1",reason="no_active_recipient",type="credit_alert",window="15m"}'
+        values: '0x3 1x15 0x10'
+      - series: 'notification_undeliverable_recent_unreadable{job="omnivyra-worker",instance="w1"}'
+        values: '0x30'
     alert_rule_test:
-      - eval_time: 6m
+      - eval_time: 5m
         alertname: CreditAlertUndeliverable
         exp_alerts:
-          - exp_labels: { severity: critical, component: notifications, category: money, page: sre, job: omnivyra-worker, reason: no_active_recipient, type: credit_alert }
+          - exp_labels: { severity: critical, component: notifications, category: money, page: sre, reason: no_active_recipient, type: credit_alert }
             exp_annotations:
               summary: "A credit alert was not delivered to anyone (no_active_recipient)"
-              description: "notifyCompanyEvent could not deliver a credit_alert (reason=no_active_recipient). Find the company in the NOTIFICATION_UNDELIVERABLE log line; a company with zero active COMPANY_ADMINs is unreachable for every company-level alert."
+              description: "notifyCompanyEvent could not deliver a credit_alert (reason=no_active_recipient). The company is in notification_delivery_failures.company_id and in the NOTIFICATION_UNDELIVERABLE log line; a company with zero active COMPANY_ADMINs is unreachable for every company-level alert."
       - eval_time: 25m
         alertname: CreditAlertUndeliverable
         exp_alerts: []
-      # a credit alert is never ALSO reported by the generic rule
-      - eval_time: 6m
+      - eval_time: 5m
         alertname: NotificationUndeliverable
         exp_alerts: []
+      - eval_time: 25m
+        alertname: NotificationFailureExporterMissing
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: NotificationFailureSourceUnreadable
+        exp_alerts: []
 
-  # A LATER INCREMENT on a series that already existed fires (the increase branch); the flat stretch before it does not.
+  # TWO worker replicas export the same database count: ONE alert, not two (max by reason, type).
   - interval: 1m
     input_series:
-      - series: 'notification_undeliverable{job="omnivyra-worker",reason="membership_unreadable",type="credit_alert"}'
-        values: '1x30 2x30'
+      - series: 'notification_undeliverable_recent{job="omnivyra-worker",instance="w1",reason="membership_unreadable",type="credit_alert",window="15m"}'
+        values: '1x10'
+      - series: 'notification_undeliverable_recent{job="omnivyra-worker",instance="w2",reason="membership_unreadable",type="credit_alert",window="15m"}'
+        values: '1x10'
     alert_rule_test:
-      - eval_time: 20m
-        alertname: CreditAlertUndeliverable
-        exp_alerts: []
-      - eval_time: 35m
+      - eval_time: 2m
         alertname: CreditAlertUndeliverable
         exp_alerts:
-          - exp_labels: { severity: critical, component: notifications, category: money, page: sre, job: omnivyra-worker, reason: membership_unreadable, type: credit_alert }
+          - exp_labels: { severity: critical, component: notifications, category: money, page: sre, reason: membership_unreadable, type: credit_alert }
             exp_annotations:
               summary: "A credit alert was not delivered to anyone (membership_unreadable)"
-              description: "notifyCompanyEvent could not deliver a credit_alert (reason=membership_unreadable). Find the company in the NOTIFICATION_UNDELIVERABLE log line; a company with zero active COMPANY_ADMINs is unreachable for every company-level alert."
+              description: "notifyCompanyEvent could not deliver a credit_alert (reason=membership_unreadable). The company is in notification_delivery_failures.company_id and in the NOTIFICATION_UNDELIVERABLE log line; a company with zero active COMPANY_ADMINs is unreachable for every company-level alert."
 
-  # NotificationUndeliverable: the first non-credit event fires; 30 minutes of flat afterwards does not.
+  # NotificationUndeliverable reads the 30m window for every non-credit type, and a series from the Vercel APP job is
+  # ignored by every rule.
   - interval: 1m
     input_series:
-      - series: 'notification_undeliverable{job="omnivyra-worker",reason="no_active_recipient",type="campaign_auto_paused"}'
-        values: '_x4 1x45'
+      - series: 'notification_undeliverable_recent{job="omnivyra-worker",instance="w1",reason="no_active_recipient",type="campaign_auto_paused",window="30m"}'
+        values: '0x3 1x30 0x5'
+      - series: 'notification_undeliverable_recent{job="omnivyra-app",instance="www",reason="no_active_recipient",type="credit_alert",window="15m"}'
+        values: '1x30'
     alert_rule_test:
-      - eval_time: 6m
+      - eval_time: 5m
         alertname: NotificationUndeliverable
         exp_alerts:
-          - exp_labels: { severity: warning, component: notifications, category: correctness, job: omnivyra-worker, reason: no_active_recipient, type: campaign_auto_paused }
+          - exp_labels: { severity: warning, component: notifications, category: correctness, reason: no_active_recipient, type: campaign_auto_paused }
             exp_annotations:
               summary: "A company notification was not delivered (campaign_auto_paused, no_active_recipient)"
-              description: "notifyCompanyEvent dropped a campaign_auto_paused event (reason=no_active_recipient). See the NOTIFICATION_UNDELIVERABLE log line for the company."
-      - eval_time: 45m
+              description: "A campaign_auto_paused notification was not delivered (reason=no_active_recipient). See notification_delivery_failures / the NOTIFICATION_UNDELIVERABLE log line for the company."
+      - eval_time: 36m
         alertname: NotificationUndeliverable
         exp_alerts: []
-      - eval_time: 6m
+      - eval_time: 5m
         alertname: CreditAlertUndeliverable
         exp_alerts: []
 
-  # NotificationInsertFailing: 6 failed inserts in a series that appears at minute 1 -> over the threshold of 5, held
-  # for 5m -> firing by minute 9, and the count it reports includes the first sample.
+  # NotificationInsertFailing: 4 + 2 = 6 insert failures across two types in 15m, held 5m -> fires; the summed count is
+  # what it reports.
   - interval: 1m
     input_series:
-      - series: 'notification_undeliverable{job="omnivyra-worker",reason="insert_failed",type="campaign_approved"}'
-        values: '_x1 6x20'
+      - series: 'notification_undeliverable_recent{job="omnivyra-worker",instance="w1",reason="insert_failed",type="campaign_approved",window="15m"}'
+        values: '4x20'
+      - series: 'notification_undeliverable_recent{job="omnivyra-worker",instance="w1",reason="insert_failed",type="credit_granted",window="15m"}'
+        values: '2x20'
     alert_rule_test:
-      - eval_time: 9m
+      - eval_time: 7m
         alertname: NotificationInsertFailing
         exp_alerts:
           - exp_labels: { severity: critical, component: notifications, category: correctness, page: sre }
@@ -86,28 +96,58 @@ tests:
               summary: "Notification inserts are failing (6 in 15m)"
               description: "Repeated insert_failed: check the notifications columns / grants (20270217000035) and recent deploys."
 
-  # SCOPE: the same first event scraped from the Vercel APP job does not fire - the app job's per-instance counters
-  # can miss and invent events, so the rules read the worker only (see COVERAGE TODAY in the rules file).
-  - interval: 1m
-    input_series:
-      - series: 'notification_undeliverable{job="omnivyra-app",reason="no_active_recipient",type="credit_alert"}'
-        values: '_x4 1x25'
-      - series: 'notification_undeliverable{job="omnivyra-app",reason="no_active_recipient",type="campaign_auto_paused"}'
-        values: '_x4 1x25'
-    alert_rule_test:
-      - eval_time: 6m
-        alertname: CreditAlertUndeliverable
-        exp_alerts: []
-      - eval_time: 6m
-        alertname: NotificationUndeliverable
-        exp_alerts: []
-
   # ... and exactly 5 does not (the threshold is strict).
   - interval: 1m
     input_series:
-      - series: 'notification_undeliverable{job="omnivyra-worker",reason="insert_failed",type="campaign_approved"}'
-        values: '_x1 5x20'
+      - series: 'notification_undeliverable_recent{job="omnivyra-worker",instance="w1",reason="insert_failed",type="campaign_approved",window="15m"}'
+        values: '5x20'
     alert_rule_test:
       - eval_time: 9m
         alertname: NotificationInsertFailing
         exp_alerts: []
+
+  # A READ FAILURE pages after 5 minutes (stale counts are not zero); a recovered read clears it.
+  - interval: 1m
+    input_series:
+      - series: 'notification_undeliverable_recent_unreadable{job="omnivyra-worker",instance="w1"}'
+        values: '0x2 1x10 0x10'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: NotificationFailureSourceUnreadable
+        exp_alerts:
+          - exp_labels: { severity: critical, component: notifications, category: money, page: sre }
+            exp_annotations:
+              summary: "Undeliverable-notification counts cannot be read"
+              description: "The worker's exporter has failed to read notification_delivery_failures for 5 minutes (NOTIFICATION_FAILURE_EXPORT_UNREADABLE in the worker log). CreditAlertUndeliverable cannot fire while this lasts."
+      - eval_time: 20m
+        alertname: NotificationFailureSourceUnreadable
+        exp_alerts: []
+
+  # NO exporter output at all (not running / not scraped / flag off) pages after 10 minutes - the rules above would
+  # otherwise be silent for the wrong reason. Only the APP job reports here, which does not count.
+  - interval: 1m
+    input_series:
+      - series: 'notification_undeliverable_recent_unreadable{job="omnivyra-app",instance="www"}'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: NotificationFailureExporterMissing
+        exp_alerts:
+          - exp_labels: { severity: critical, component: notifications, category: money, page: sre, job: omnivyra-worker }
+            exp_annotations:
+              summary: "The undeliverable-notification exporter is not reporting"
+              description: "No notification_undeliverable_recent_unreadable series from job omnivyra-worker for 10 minutes: check the worker is up and scraped, the exporter started (backend/workers/main.ts), and OBSERVABILITY_ENABLED is not false."
+
+  # A truncated window warns.
+  - interval: 1m
+    input_series:
+      - series: 'notification_undeliverable_recent_truncated{job="omnivyra-worker",instance="w1"}'
+        values: '0x2 1x5'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: NotificationFailureWindowTruncated
+        exp_alerts:
+          - exp_labels: { severity: warning, component: notifications, category: correctness }
+            exp_annotations:
+              summary: "Undeliverable-notification counts are truncated (a floor, not exact)"
+              description: "More than 5000 undeliverable records in 30 minutes. Counts are lower bounds; investigate the volume."

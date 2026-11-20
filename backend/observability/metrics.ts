@@ -136,6 +136,10 @@ function safeIncr(name: string, value: number, labels?: Labels): void {
   if (!observabilityConfig.enabled) return;
   registry.incr(name, value, labels);
 }
+function safeGauge(name: string, value: number, labels?: Labels): void {
+  if (!observabilityConfig.enabled) return;
+  registry.gauge(name, value, labels);
+}
 
 // ── Domain recorders ────────────────────────────────────────────────────────────
 
@@ -280,5 +284,5 @@ export function recordClient(input: { kind: keyof typeof M.client; value: number
   else registry.observe(name, input.value, labels);
 }
 
-export { safeIncr as recordRawCounter, safeObserve as recordRawHistogram };
+export { safeIncr as recordRawCounter, safeObserve as recordRawHistogram, safeGauge as recordRawGauge };
 export type { Labels };

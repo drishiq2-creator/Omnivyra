@@ -59,7 +59,7 @@ export async function assignWeek(
       },
       is_read: false,
     });
-  reportNotificationInsertFailure('assignment', notificationError, 'backend/services/teamService.ts:48');
+  await reportNotificationInsertFailure('assignment', notificationError, 'backend/services/teamService.ts:48');
 
   // Log activity
   await logActivity(assignedByUserId, 'week_assigned', 'week', `${campaignId}-${weekNumber}`, {

@@ -98,7 +98,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
         is_read:  false,
       })),
     );
-    reportNotificationInsertFailure('feedback_submitted', notificationError, 'pages/api/credits/earn/feedback.ts:90');
+    await reportNotificationInsertFailure('feedback_submitted', notificationError, 'pages/api/credits/earn/feedback.ts:90');
   }
 
   return res.status(200).json({ success: true, feedbackId: (inserted as any).id });

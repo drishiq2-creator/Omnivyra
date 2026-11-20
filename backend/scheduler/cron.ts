@@ -123,6 +123,7 @@ import { runDailyIntelligence } from '../schedulers/intelligenceScheduler';
 import { sweepStaleExecutions } from '../services/queueHealth';
 import { runReconciliationPass } from '../services/operationalReconciler';
 import { runIntelligenceEventCleanup } from '../jobs/intelligenceEventCleanup';
+import { pruneNotificationFailures } from '../jobs/notificationFailurePrune';
 import { runSettlementExpirySweepJob } from '../jobs/settlementExpirySweepJob';
 import { runProspectRetryJob } from '../jobs/prospectRetryJob';
 import { runProspectScoreEvaluationJob } from '../jobs/prospectScoreEvaluationJob';
@@ -203,6 +204,8 @@ const PERFORMANCE_AGGREGATION_INTERVAL_MS = 24 * 60 * 60 * 1000; // once per day
 const CAMPAIGN_HEALTH_EVALUATION_INTERVAL_MS = 24 * 60 * 60 * 1000; // once per day
 const DAILY_INTELLIGENCE_INTERVAL_MS = 24 * 60 * 60 * 1000; // 3 AM daily (0 3 * * *)
 const INTELLIGENCE_EVENT_CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000; // once per day
+const NOTIFICATION_FAILURE_PRUNE_INTERVAL_MS = 24 * 60 * 60 * 1000; // once per day (90-day retention)
+const NOTIFICATION_FAILURE_PRUNE_RETRY_MS = 60 * 60 * 1000;         // after a FAILED run: retry in 1 h, not 24 h
 // Sandbox settlement-expiry sweep — transition stale created/pending checkout
 // sessions to `expired`. Deterministic + idempotent (re-entrancy lock + the
 // append-only event ledger), so a frequent interval is safe.
@@ -350,6 +353,7 @@ let lastPerformanceAggregationRun = 0;
 let lastCampaignHealthEvaluationRun = 0;
 let lastDailyIntelligenceRun = 0;
 let lastIntelligenceEventCleanupRun = 0;
+let lastNotificationFailurePruneRun = 0;
 let lastSettlementExpirySweepRun = 0;
 let lastProspectRetryRun = 0;
 let lastProspectScoreEvaluationRun = 0;
@@ -592,6 +596,7 @@ async function startCron(opts: { hostOwnsShutdown?: boolean } = {}) {
     lastCampaignHealthEvaluationRun     = saved.campaignHealthEvaluation    ?? 0;
     lastDailyIntelligenceRun            = saved.dailyIntelligence           ?? 0;
     lastIntelligenceEventCleanupRun     = saved.intelligenceEventCleanup    ?? 0;
+    lastNotificationFailurePruneRun     = saved.notificationFailurePrune    ?? 0;
     lastWeeklyPricingAnalysisRun        = saved.weeklyPricingAnalysis       ?? 0;
     lastEngagementDigestRun             = saved.engagementDigest            ?? 0;
     lastEngagementSignalSchedulerRun    = saved.engagementSignalScheduler   ?? 0;
@@ -1060,6 +1065,7 @@ async function runSchedulerCycleBody(opts: { includePublishSafetyNet?: boolean }
     campaignHealthEvaluation:     lastCampaignHealthEvaluationRun,
     dailyIntelligence:            lastDailyIntelligenceRun,
     intelligenceEventCleanup:     lastIntelligenceEventCleanupRun,
+    notificationFailurePrune:     lastNotificationFailurePruneRun,
     weeklyPricingAnalysis:        lastWeeklyPricingAnalysisRun,
     engagementDigest:             lastEngagementDigestRun,
     engagementSignalScheduler:    lastEngagementSignalSchedulerRun,
@@ -1530,6 +1536,23 @@ async function runSchedulerCycleBody(opts: { includePublishSafetyNet?: boolean }
     }
   }
 
+  // notification_delivery_failures retention (b3 (B), a9 2026-11-20): batched, idempotent. A FAILED run is not
+  // "done": it is logged by the job and retried in an hour instead of a day.
+  if (shouldRunCronJob("notificationFailurePrune", NOTIFICATION_FAILURE_PRUNE_INTERVAL_MS, lastNotificationFailurePruneRun)) {
+    lastNotificationFailurePruneRun = Date.now();
+    try {
+      const result = await pruneNotificationFailures();
+      if (!result.ok) {
+        lastNotificationFailurePruneRun = Date.now() - NOTIFICATION_FAILURE_PRUNE_INTERVAL_MS + NOTIFICATION_FAILURE_PRUNE_RETRY_MS;
+      } else if (result.deleted > 0) {
+        console.log(`✅ Notification failure prune: ${result.deleted} rows deleted${result.more ? ' (more remain; next run continues)' : ''}`);
+      }
+    } catch (error: unknown) {
+      lastNotificationFailurePruneRun = Date.now() - NOTIFICATION_FAILURE_PRUNE_INTERVAL_MS + NOTIFICATION_FAILURE_PRUNE_RETRY_MS;
+      console.error('❌ Notification failure prune error:', formatCaughtError(error));
+    }
+  }
+
   // Sandbox settlement-expiry sweep — stale created/pending checkout sessions
   // → expired. The job carries its own re-entrancy lock; CronGuard already
   // guarantees single-instance cron execution. Deterministic + idempotent.
@@ -1805,6 +1828,7 @@ async function runSchedulerCycleBody(opts: { includePublishSafetyNet?: boolean }
     campaignHealthEvaluation:     lastCampaignHealthEvaluationRun,
     dailyIntelligence:            lastDailyIntelligenceRun,
     intelligenceEventCleanup:     lastIntelligenceEventCleanupRun,
+    notificationFailurePrune:     lastNotificationFailurePruneRun,
     weeklyPricingAnalysis:        lastWeeklyPricingAnalysisRun,
     engagementDigest:             lastEngagementDigestRun,
     engagementSignalScheduler:    lastEngagementSignalSchedulerRun,
@@ -1842,6 +1866,7 @@ async function runSchedulerCycleBody(opts: { includePublishSafetyNet?: boolean }
     campaignHealthEvaluation:     lastCampaignHealthEvaluationRun,
     dailyIntelligence:            lastDailyIntelligenceRun,
     intelligenceEventCleanup:     lastIntelligenceEventCleanupRun,
+    notificationFailurePrune:     lastNotificationFailurePruneRun,
     weeklyPricingAnalysis:        lastWeeklyPricingAnalysisRun,
     engagementDigest:             lastEngagementDigestRun,
     engagementSignalScheduler:    lastEngagementSignalSchedulerRun,

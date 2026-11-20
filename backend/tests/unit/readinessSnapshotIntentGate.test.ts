@@ -70,11 +70,12 @@ describe('readinessSnapshot is exempt from the inactive-company gate', () => {
     expect(blocked).toHaveLength(7);
   });
 
-  test('the always-run set is exactly the previous ten jobs plus readinessSnapshot', () => {
+  test('the always-run set is exactly the previous ten jobs plus readinessSnapshot and notificationFailurePrune', () => {
+    // notificationFailurePrune (a9, 2026-11-20): retention for the alert source table - infrastructure, not feature work.
     expect([...ALWAYS_RUN_JOBS].sort()).toEqual([
       'confidenceCalibration', 'connectorTokenRefresh', 'conversationTriageWorker', 'engagementSignalArchive',
       'findDuePostsAndEnqueue', 'governanceAudit', 'intelligenceEventCleanup', 'leadThreadQueueCleanup',
-      'performanceAggregation', 'readinessSnapshot', 'staleExecutionSweep',
+      'notificationFailurePrune', 'performanceAggregation', 'readinessSnapshot', 'staleExecutionSweep',
     ].sort());
   });
 });

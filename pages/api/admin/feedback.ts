@@ -98,7 +98,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
         metadata: { feedback_id: id },
         is_read:  false,
       });
-      reportNotificationInsertFailure('feedback_rejected', notificationError, 'pages/api/admin/feedback.ts:92');
+      await reportNotificationInsertFailure('feedback_rejected', notificationError, 'pages/api/admin/feedback.ts:92');
     }
 
     return res.status(200).json({ success: true, action, creditsGranted });

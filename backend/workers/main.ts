@@ -20,6 +20,7 @@
 import { config } from '@/config';
 import { validateWorkerEnv } from '../utils/validateEnv';
 import { startHealthServer, setCronStatus }  from './healthServer';
+import { startNotificationFailureExporter } from '../observability/notificationFailureExporter';
 import { assertQueueConsumerRuntimeAllowed } from '../queue/queueNamespace';
 
 // Start health server immediately — before anything else so Railway healthchecks
@@ -28,6 +29,10 @@ startHealthServer(config.PORT ? parseInt(config.PORT, 10) : undefined);
 
 // Fail fast if any required env var is missing
 validateWorkerEnv();
+
+// The undeliverable-notification exporter (b3 (B)): windowed counts read from notification_delivery_failures and
+// published on THIS process's /metrics, which Prometheus scrapes. Started after env validation (it reads the DB). Not a cron job: cron may run in another service.
+startNotificationFailureExporter();
 
 // SEC-C2 (STEP 3AH-91): refuse to become a consumer of the shared production
 // BullMQ keyspace from a production-mode process that carries no deployment-

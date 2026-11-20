@@ -289,7 +289,7 @@ async function createNotification(params: {
       },
       is_read: false,
     });
-  reportNotificationInsertFailure(`report_${params.type}`, notificationError, 'backend/services/reportAutomationService.ts:278');
+  await reportNotificationInsertFailure(`report_${params.type}`, notificationError, 'backend/services/reportAutomationService.ts:278');
 
   // Was `return true` even when the insert failed: report what happened.
   return !notificationError;

@@ -93,7 +93,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       metadata: { company_id: companyId, role, confirmed_by: user.userId },
       is_read: false,
     });
-    reportNotificationInsertFailure('role_updated', notificationError, 'pages/api/team/self-joined.ts:87');
+    await reportNotificationInsertFailure('role_updated', notificationError, 'pages/api/team/self-joined.ts:87');
 
     return res.status(200).json({ success: true });
   }
@@ -120,7 +120,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       metadata: { company_id: companyId, removed_by: user.userId },
       is_read: false,
     });
-    reportNotificationInsertFailure('membership_removed', notificationError1, 'pages/api/team/self-joined.ts:114');
+    await reportNotificationInsertFailure('membership_removed', notificationError1, 'pages/api/team/self-joined.ts:114');
 
     return res.status(200).json({ success: true });
   }

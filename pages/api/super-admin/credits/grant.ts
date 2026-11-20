@@ -87,7 +87,7 @@ async function notifyOrgAdmin(
     metadata: { grant_id: grantId, credits_added: credits, reason },
     is_read:  false,
   });
-  reportNotificationInsertFailure('credit_granted', notificationError, 'pages/api/super-admin/credits/grant.ts:81');
+  await reportNotificationInsertFailure('credit_granted', notificationError, 'pages/api/super-admin/credits/grant.ts:81');
 }
 
 // ── Handler ───────────────────────────────────────────────────────────────────

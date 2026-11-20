@@ -16,6 +16,7 @@ jest.mock('../../observability', () => ({
 
 import { fakeDb, resetFakeDb, failNext } from '../helpers/fakeWhatsappDb';
 import { notifyCompanyEvent } from '../../services/userNotificationService';
+import { __resetNotificationFailureCoalesce } from '../../services/notificationFailureRecord';
 
 const CO = '11111111-1111-4111-8111-111111111111';
 const OTHER = '22222222-2222-4222-8222-222222222222';
@@ -45,7 +46,8 @@ const event = (extra: Record<string, unknown> = {}) => ({
 });
 const delivered = () => (fakeDb.tables.notifications ?? []).map((r) => r.user_id).sort();
 let err: jest.SpyInstance;
-beforeEach(() => { world(); counters.length = 0; err = jest.spyOn(console, 'error').mockImplementation(() => undefined); });
+beforeEach(() => { world(); counters.length = 0; __resetNotificationFailureCoalesce(); err = jest.spyOn(console, 'error').mockImplementation(() => undefined); });
+const failureRows = () => (fakeDb.tables.notification_delivery_failures ?? []) as Array<Record<string, unknown>>;
 afterEach(() => err.mockRestore());
 
 it('active admins (any casing) + the active creator, one row each, deduplicated; rows carry company_id and only real columns', async () => {
@@ -104,7 +106,38 @@ it('an unreadable membership list: nothing written, logged; an insert error: log
   expect(counters.map((c) => c[2].reason)).toEqual(['membership_unreadable', 'insert_failed']);
 });
 
-it('no company: refused as invalid input, nothing read', async () => {
+it('no company: refused as invalid input, nothing read - only the durable failure record is written', async () => {
   await expect(notifyCompanyEvent(event({ companyId: '  ' }))).resolves.toEqual({ delivered: 0, undeliverable: 'invalid_input' });
-  expect(fakeDb.calls).toEqual([]);
+  expect(fakeDb.calls).toEqual(['notification_delivery_failures:insert']); // no membership read, no notification insert
+  expect(failureRows()).toEqual([expect.objectContaining({ reason: 'invalid_input', type: 'campaign_auto_paused', company_id: null })]);
+});
+
+// ── DURABLE RECORD (b3 ruling (B), a9 2026-11-20): every undeliverable outcome is also a row the WORKER exporter
+// counts, so an event raised on Vercel is visible to the alerts. Delivered events write nothing.
+it('DURABLE: a company with no active recipient writes one failure row (reason, type, company_id)', async () => {
+  resetFakeDb({ notifications: [], user_company_roles: [] });
+  await expect(notifyCompanyEvent(event({ type: 'credit_alert' }))).resolves.toEqual({ delivered: 0, undeliverable: 'no_active_recipient' });
+  expect(failureRows()).toEqual([expect.objectContaining({ reason: 'no_active_recipient', type: 'credit_alert', company_id: CO })]);
+  // what the WRITER sends (the fake adds an id, as the column default does): no message, no PII beyond the company id
+  expect(Object.keys(failureRows()[0]).filter((k) => k !== 'id').sort()).toEqual(['company_id', 'reason', 'type']);
+});
+
+it('DURABLE: a delivered event writes NO failure row', async () => {
+  await expect(notifyCompanyEvent(event())).resolves.toEqual({ delivered: 2 });
+  expect(failureRows()).toEqual([]);
+});
+
+it('DURABLE: the record write failing does not change the delivery answer, and is logged + counted', async () => {
+  resetFakeDb({ notifications: [], user_company_roles: [] });
+  failNext('notification_delivery_failures', 'insert');
+  await expect(notifyCompanyEvent(event({ type: 'credit_alert' }))).resolves.toEqual({ delivered: 0, undeliverable: 'no_active_recipient' });
+  expect(err).toHaveBeenCalledWith('NOTIFICATION_FAILURE_RECORD_FAILED', expect.stringContaining('credit_alert'));
+  expect(counters).toContainEqual(['notification_failure_record_failed', 1, { reason: 'no_active_recipient' }]);
+});
+
+it('DURABLE: a loop of the same undeliverable event within a minute writes ONE row (coalesced; the counter counts all)', async () => {
+  resetFakeDb({ notifications: [], user_company_roles: [] });
+  for (let i = 0; i < 5; i++) await notifyCompanyEvent(event({ type: 'credit_alert' }));
+  expect(failureRows()).toHaveLength(1);
+  expect(counters.filter(([n]) => n === 'notification_undeliverable')).toHaveLength(5);
 });

@@ -113,7 +113,7 @@ export async function notifyEarnProgress(params: {
       is_read:  false,
     })),
   );
-  reportNotificationInsertFailure('earn_credits_nudge', notificationError, 'backend/services/earnCreditsService.ts:105');
+  await reportNotificationInsertFailure('earn_credits_nudge', notificationError, 'backend/services/earnCreditsService.ts:105');
 }
 
 // ── Get earn progress for an org ─────────────────────────────────────────────
@@ -227,5 +227,5 @@ async function notifyEarnCreditsGranted(
       is_read:  false,
     })),
   );
-  reportNotificationInsertFailure('earn_credits_granted', notificationError1, 'backend/services/earnCreditsService.ts:219');
+  await reportNotificationInsertFailure('earn_credits_granted', notificationError1, 'backend/services/earnCreditsService.ts:219');
 }

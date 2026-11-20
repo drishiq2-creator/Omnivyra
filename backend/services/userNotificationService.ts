@@ -14,6 +14,7 @@
 import { supabase } from '../db/supabaseClient';
 import { normalizeRole } from './rbacPrimitives';
 import { recordRawCounter } from '../observability';
+import { recordNotificationFailure } from './notificationFailureRecord';
 
 export type UserNotificationType =
   | 'post_published'
@@ -69,14 +70,17 @@ export type CompanyEventDelivery =
   | { delivered: number }
   | { delivered: 0; undeliverable: 'no_active_recipient' | 'membership_unreadable' | 'insert_failed' | 'invalid_input' };
 
-function undeliverable(
+async function undeliverable(
   reason: 'no_active_recipient' | 'membership_unreadable' | 'insert_failed' | 'invalid_input',
   type: unknown,
   detail: Record<string, unknown>,
-): CompanyEventDelivery {
+): Promise<CompanyEventDelivery> {
   console.error('NOTIFICATION_UNDELIVERABLE', JSON.stringify({ reason, type: type ?? null, ...detail }));
   // Bounded labels only (reason: 4 values; type: the event kinds) - never the company id (cardinality).
   try { recordRawCounter('notification_undeliverable', 1, { reason, type: String(type ?? 'unknown').slice(0, 60) }); } catch { /* metrics never break delivery */ }
+  // DURABLE record (b3 (B)): the in-memory counter above is per process and invisible on Vercel. Bounded by a
+  // timeout, coalesced, and never rejects - delivery's answer is unchanged whatever happens here.
+  await recordNotificationFailure({ reason, type, companyId: typeof detail.company_id === 'string' ? detail.company_id : null });
   return { delivered: 0, undeliverable: reason };
 }
 
@@ -90,7 +94,7 @@ export async function notifyCompanyEvent(input: {
 }): Promise<CompanyEventDelivery> {
   const companyId = typeof input.companyId === 'string' ? input.companyId.trim() : '';
   if (!companyId || !input.type || !input.title) {
-    return undeliverable('invalid_input', input.type, {});
+    return await undeliverable('invalid_input', input.type, {});
   }
   try {
     const { data: members, error: memberError } = await supabase
@@ -99,14 +103,14 @@ export async function notifyCompanyEvent(input: {
       .eq('company_id', companyId)
       .eq('status', 'active');
     if (memberError) {
-      return undeliverable('membership_unreadable', input.type, { company_id: companyId, message: memberError.message });
+      return await undeliverable('membership_unreadable', input.type, { company_id: companyId, message: memberError.message });
     }
     const active = ((members ?? []) as Array<{ user_id: string | null; role: string | null }>).filter((m) => typeof m.user_id === 'string' && m.user_id);
     const recipients = new Set<string>(active.filter((m) => normalizeRole(m.role) === 'COMPANY_ADMIN').map((m) => String(m.user_id)));
     const creator = typeof input.campaignCreatorUserId === 'string' ? input.campaignCreatorUserId : null;
     if (creator && active.some((m) => m.user_id === creator)) recipients.add(creator);
     if (recipients.size === 0) {
-      return undeliverable('no_active_recipient', input.type, { company_id: companyId });
+      return await undeliverable('no_active_recipient', input.type, { company_id: companyId });
     }
     const now = new Date().toISOString();
     const rows = [...recipients].map((userId) => ({
@@ -121,11 +125,11 @@ export async function notifyCompanyEvent(input: {
     }));
     const { error: insertError } = await supabase.from('notifications').insert(rows);
     if (insertError) {
-      return undeliverable('insert_failed', input.type, { company_id: companyId, message: insertError.message });
+      return await undeliverable('insert_failed', input.type, { company_id: companyId, message: insertError.message });
     }
     return { delivered: rows.length };
   } catch (err) {
-    return undeliverable('insert_failed', input.type, { company_id: companyId, message: err instanceof Error ? err.message.slice(0, 200) : String(err).slice(0, 200) });
+    return await undeliverable('insert_failed', input.type, { company_id: companyId, message: err instanceof Error ? err.message.slice(0, 200) : String(err).slice(0, 200) });
   }
 }
 
@@ -135,8 +139,11 @@ export async function notifyCompanyEvent(input: {
  * one that hid six undelivered alerts). Logs NOTIFICATION_INSERT_FAILED and counts it on the same metric
  * (notification_undeliverable{reason="insert_failed"}), so monitoring/notifications-alerts.yml covers every writer.
  */
-export function reportNotificationInsertFailure(type: string, error: { message?: string } | null | undefined, where: string): void {
+export async function reportNotificationInsertFailure(type: string, error: { message?: string } | null | undefined, where: string): Promise<void> {
   if (!error) return;
   console.error('NOTIFICATION_INSERT_FAILED', JSON.stringify({ type, where, message: String(error.message ?? '').slice(0, 200) }));
   try { recordRawCounter('notification_undeliverable', 1, { reason: 'insert_failed', type: String(type).slice(0, 60) }); } catch { /* never break the caller */ }
+  // DURABLE record (b3 (B)); never rejects. Callers AWAIT it: on Vercel an un-awaited write may be cut off when the
+  // function returns. No company id here (per-user writers), so it coalesces per (type, reason).
+  await recordNotificationFailure({ reason: 'insert_failed', type });
 }

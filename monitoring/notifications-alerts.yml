@@ -8,91 +8,95 @@
 #     rule_files:
 #       - "rules/notifications-alerts.yml"
 #
-# Metric provenance (backend/services/userNotificationService.ts, notifyCompanyEvent):
-#   notification_undeliverable{reason,type}   counter
-#     reason: no_active_recipient | membership_unreadable | insert_failed | invalid_input
-#     type:   the notification type (campaign_auto_paused, campaign_recovery_generated, campaign_pending_approval,
-#             campaign_approved, credit_alert, ...)
-# The LOG event NOTIFICATION_UNDELIVERABLE carries the company id for diagnosis; the metric deliberately does not
-# (label cardinality).
+# SOURCE (a9, 2026-11-20; b3 ruling (B)) - DURABLE, PROCESS-INDEPENDENT:
+#   Every undeliverable notification is written as one row of public.notification_delivery_failures
+#   (backend/services/notificationFailureRecord.ts, from notifyCompanyEvent and reportNotificationInsertFailure),
+#   at most one row per (company, type, reason) per minute per process. The WORKER reads that table every 60 s
+#   (backend/observability/notificationFailureExporter.ts) and publishes on ITS /metrics:
+#     notification_undeliverable_recent{reason,type,window="15m"|"30m"}   gauge: rows in that window
+#     notification_undeliverable_recent_unreadable                         gauge: 1 = the last read FAILED
+#     notification_undeliverable_recent_truncated                          gauge: 1 = the window hit the row cap
+#   reason: no_active_recipient | membership_unreadable | insert_failed | invalid_input
+#   type:   the notification type (campaign_auto_paused, credit_alert, ...; <= 60 chars). Never a company id.
+#   Because the count comes from the database, an event raised on Vercel (API routes, Vercel crons) counts exactly
+#   like one raised in the worker; a windowed count has no first-sample or deploy-reset blind spot. The rules read the
+#   WORKER scrape only (job="omnivyra-worker") and take max by (reason, type), so several worker replicas exporting
+#   the same database count raise ONE alert. The per-process counter notification_undeliverable still exists for
+#   dashboards; no rule reads it (the Vercel app scrape can both miss and invent its events).
 #
-# LIVENESS DEPENDENCY (05, 2026-11-13) - these rules are only as live as the counter behind them:
-#   recordRawCounter is safeIncr (backend/observability/metrics.ts), which DROPS every counter when
-#   observabilityConfig.enabled is false. That flag is env OBSERVABILITY_ENABLED (backend/observability/config.ts),
-#   DEFAULT TRUE. Production state: UNCONFIRMED - asked of virality-83 (an env fact; not read by 6f). Until it is
-#   confirmed true AND this file is loaded by the production Prometheus that scrapes the exporter, treat the rules
-#   as a RELEASE CONDITION, not a shipped control. Fallback that exists today regardless: the log lines
-#   NOTIFICATION_UNDELIVERABLE / NOTIFICATION_INSERT_FAILED - route CreditAlertUndeliverable through log-based
-#   alerting if the metric path is off (the one case where nobody noticing has a money consequence).
-#
-# FIRST-EVENT BLINDNESS, FIXED (a9, 2026-11-20): the registry creates a labelled counter series AT ITS FIRST
-# INCREMENT, with value 1 (backend/observability/registry.ts incr), and resets on every deploy. PromQL increase()
-# needs two samples, so a series whose first sample is already 1 shows NO increase: `increase(x[15m]) > 0` never
-# fired for the FIRST undeliverable credit alert in a process - only for a second one. Every rule below therefore
-# counts two disjoint cases: a series that existed at the start of the window (its increase), and a series that
-# APPEARED inside it (its whole value, since it started from 0). Proven by monitoring/notifications-alerts.test.yml
-# (promtool test rules); the CI job also runs the pre-fix expression and requires it to FAIL the first-event case.
+# LIVENESS: the gauges exist only while the exporter runs and OBSERVABILITY_ENABLED is not false (absent = ON,
+#   backend/observability/config.ts). NotificationFailureExporterMissing fires when they are absent, so a stopped
+#   exporter, a disabled flag or a lost scrape is itself an alert - never a silent all-clear.
 #
 # TEST-ALERT PATH (alerts are a release condition: a rule counts only once a test alert has LANDED):
-#   Step 1 - rule logic: `promtool test rules monitoring/notifications-alerts.test.yml` (CI: monitoring-rules.yml).
+#   Step 1 - rule logic: `promtool test rules monitoring/notifications-alerts.test.yml` (CI: monitoring-rules.yml),
+#            with a CONTROL that substitutes an off-by-one credit threshold and requires the tests to fail.
 #   Step 2 - routing: the owner presses "Test" on the Grafana contact point each rule routes to (page: sre ->
 #            the paging contact point; warnings -> the default one) and confirms the message arrives.
-#   Step 3 - end to end: WAITS for the durable source below (b3 ruling (B), 2026-11-20). Then: cb inserts ONE
-#            synthetic undeliverable record marked as a test, the owner confirms the page, cb deletes the record.
-#            No test company, no credit consumption. Not run before (B): it would certify worker-only coverage.
-#
-# COVERAGE TODAY - READ THIS BEFORE RELYING ON THESE RULES (a9, 2026-11-20; b3 option C wording):
-#   notification_undeliverable is an IN-MEMORY, PER-PROCESS counter. These rules read ONLY the Railway worker's
-#   scrape (job="omnivyra-worker"), so they see undeliverable events raised IN THE WORKER and nothing else.
-#   Events raised on Vercel (API routes, Vercel crons) are NOT covered: each serverless instance keeps its own
-#   counter, a scrape of www.omnivyra.com lands on whichever instance answers, and instances share one label set -
-#   so the app job both MISSES events (the instance is recycled unscraped) and can INVENT them (alternating
-#   instances read as counter resets). Credit alerts are raised from both sides (checkCreditAlerts callers:
-#   creditExecutionServiceContracts.ts, creditGuardService.ts, pages/api/cron/leverage-optimizer.ts), so a credit
-#   alert that reached nobody on Vercel does NOT page today. The fix is a DURABLE source (undeliverable events
-#   persisted, a worker-side exporter computing from the DB); until it ships these rules are worker-only.
-#   Until Steps 2-3 land, OBSERVABILITY_ENABLED is confirmed true in prod and this file is loaded by the prod
-#   Prometheus, these rules are a RELEASE CONDITION, not a shipped control.
+#   Step 3 - end to end, owner-approved, cb executes (the owner runs no SQL): cb inserts ONE row into
+#            notification_delivery_failures (type 'credit_alert', reason 'no_active_recipient', company_id NULL),
+#            the owner confirms the CreditAlertUndeliverable page within ~2 minutes, cb deletes that row. No test
+#            company and no credit consumption. NotificationInsertFailing (> 5 in 15 m) is covered by Steps 1-2 only.
+#   Until Steps 2-3 land, these rules are a RELEASE CONDITION, not a shipped control.
 ---
 groups:
   - name: notification_delivery
     interval: 60s
     rules:
-      # `x + 0` in each rule: arithmetic drops __name__, so both `or` branches carry IDENTICAL label sets. The
-      # branches are disjoint today (one needs `x offset W`, the other its absence), so removing `+ 0` would change
-      # nothing a test can see - KEEP IT: if an edit ever broke that disjointness, identical label sets make
-      # Prometheus fail loudly on a duplicate series instead of quietly raising two alerts for one event (7c).
       # A credit alert that reached NOBODY: the company has no active COMPANY_ADMIN (or its memberships could not be
       # read). Money-adjacent silence - credit exhaustion would go unannounced. Page.
       - alert: CreditAlertUndeliverable
-        expr: |
-          ((increase(notification_undeliverable{job="omnivyra-worker",type="credit_alert"}[15m]) and notification_undeliverable{job="omnivyra-worker",type="credit_alert"} offset 15m)
-          or (notification_undeliverable{job="omnivyra-worker",type="credit_alert"} + 0 unless notification_undeliverable{job="omnivyra-worker",type="credit_alert"} offset 15m)) > 0
+        expr: max by (reason, type) (notification_undeliverable_recent{job="omnivyra-worker",window="15m",type="credit_alert"}) > 0
         for: 0m
         labels: { severity: critical, component: notifications, category: money, page: sre }
         annotations:
           summary: "A credit alert was not delivered to anyone ({{ $labels.reason }})"
-          description: "notifyCompanyEvent could not deliver a credit_alert (reason={{ $labels.reason }}). Find the company in the NOTIFICATION_UNDELIVERABLE log line; a company with zero active COMPANY_ADMINs is unreachable for every company-level alert."
+          description: "notifyCompanyEvent could not deliver a credit_alert (reason={{ $labels.reason }}). The company is in notification_delivery_failures.company_id and in the NOTIFICATION_UNDELIVERABLE log line; a company with zero active COMPANY_ADMINs is unreachable for every company-level alert."
 
       # Any company event delivered to nobody.
       - alert: NotificationUndeliverable
-        expr: |
-          ((increase(notification_undeliverable{job="omnivyra-worker",type!="credit_alert"}[30m]) and notification_undeliverable{job="omnivyra-worker",type!="credit_alert"} offset 30m)
-          or (notification_undeliverable{job="omnivyra-worker",type!="credit_alert"} + 0 unless notification_undeliverable{job="omnivyra-worker",type!="credit_alert"} offset 30m)) > 0
+        expr: max by (reason, type) (notification_undeliverable_recent{job="omnivyra-worker",window="30m",type!="credit_alert"}) > 0
         for: 0m
         labels: { severity: warning, component: notifications, category: correctness }
         annotations:
           summary: "A company notification was not delivered ({{ $labels.type }}, {{ $labels.reason }})"
-          description: "notifyCompanyEvent dropped a {{ $labels.type }} event (reason={{ $labels.reason }}). See the NOTIFICATION_UNDELIVERABLE log line for the company."
+          description: "A {{ $labels.type }} notification was not delivered (reason={{ $labels.reason }}). See notification_delivery_failures / the NOTIFICATION_UNDELIVERABLE log line for the company."
 
       # Insert failures in bulk point at a schema / privilege regression (the original defect class: columns that do
       # not exist), not at one company.
       - alert: NotificationInsertFailing
-        expr: |
-          sum((increase(notification_undeliverable{job="omnivyra-worker",reason="insert_failed"}[15m]) and notification_undeliverable{job="omnivyra-worker",reason="insert_failed"} offset 15m)
-          or (notification_undeliverable{job="omnivyra-worker",reason="insert_failed"} + 0 unless notification_undeliverable{job="omnivyra-worker",reason="insert_failed"} offset 15m)) > 5
+        expr: sum(max by (reason, type) (notification_undeliverable_recent{job="omnivyra-worker",window="15m",reason="insert_failed"})) > 5
         for: 5m
         labels: { severity: critical, component: notifications, category: correctness, page: sre }
         annotations:
           summary: "Notification inserts are failing ({{ $value }} in 15m)"
           description: "Repeated insert_failed: check the notifications columns / grants (20270217000035) and recent deploys."
+
+      # The exporter could not READ the source: the counts above are stale, not zero. A read failure is never an
+      # all-clear. Page: while this fires, an undelivered credit alert would not be seen.
+      - alert: NotificationFailureSourceUnreadable
+        expr: max(notification_undeliverable_recent_unreadable{job="omnivyra-worker"}) == 1
+        for: 5m
+        labels: { severity: critical, component: notifications, category: money, page: sre }
+        annotations:
+          summary: "Undeliverable-notification counts cannot be read"
+          description: "The worker's exporter has failed to read notification_delivery_failures for 5 minutes (NOTIFICATION_FAILURE_EXPORT_UNREADABLE in the worker log). CreditAlertUndeliverable cannot fire while this lasts."
+
+      # No exporter output at all: the exporter is not running, the worker is not scraped, or OBSERVABILITY_ENABLED is
+      # false. Without this, every rule above would be silent for the wrong reason.
+      - alert: NotificationFailureExporterMissing
+        expr: absent(notification_undeliverable_recent_unreadable{job="omnivyra-worker"})
+        for: 10m
+        labels: { severity: critical, component: notifications, category: money, page: sre }
+        annotations:
+          summary: "The undeliverable-notification exporter is not reporting"
+          description: "No notification_undeliverable_recent_unreadable series from job omnivyra-worker for 10 minutes: check the worker is up and scraped, the exporter started (backend/workers/main.ts), and OBSERVABILITY_ENABLED is not false."
+
+      # The 30-minute window held more rows than one read returns: the counts are a FLOOR. Something is failing at volume.
+      - alert: NotificationFailureWindowTruncated
+        expr: max(notification_undeliverable_recent_truncated{job="omnivyra-worker"}) == 1
+        for: 0m
+        labels: { severity: warning, component: notifications, category: correctness }
+        annotations:
+          summary: "Undeliverable-notification counts are truncated (a floor, not exact)"
+          description: "More than 5000 undeliverable records in 30 minutes. Counts are lower bounds; investigate the volume."

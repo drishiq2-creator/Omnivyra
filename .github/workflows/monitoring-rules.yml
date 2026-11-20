@@ -1,10 +1,11 @@
 # Monitoring rules (a9, 2026-11-20): Prometheus alert rules are a RELEASE CONDITION, so their logic is tested.
 #
 # 1. `promtool check rules` - every rule file parses.
-# 2. `promtool test rules`  - monitoring/notifications-alerts.test.yml: first event fires, flat does not, thresholds.
-# 3. CONTROL - the pre-fix credit expression `increase(...[15m]) > 0` is substituted into a copy of the rules and
-#    the same tests are run; that run MUST FAIL (it cannot see a counter series whose first sample is already 1).
-#    If the control ever passes, the tests no longer distinguish the fix from the defect, and this job goes red.
+# 2. `promtool test rules`  - monitoring/notifications-alerts.test.yml: one event pages, resolution, replicas,
+#    thresholds, read failure, a missing exporter.
+# 3. CONTROL - the credit rule's `> 0` is replaced by `> 1` in a copy of the rules and the same tests are run; that
+#    run MUST FAIL (one undelivered credit alert must page). If the control ever passes, the tests no longer
+#    distinguish a correct rule from one that misses a single event, and this job goes red.
 #
 # Supply chain: promtool comes from the official Prometheus GitHub release; the tarball is verified against the
 # SHA-256 below before anything is executed; actions/checkout is pinned by full commit SHA (v4.2.2). No secret,
@@ -60,21 +61,20 @@ jobs:
       - name: Rule unit tests
         run: ./promtool test rules monitoring/notifications-alerts.test.yml
 
-      - name: CONTROL - the pre-fix expression must FAIL the first-event case
+      - name: CONTROL - an off-by-one credit threshold must FAIL the one-event case
         run: |
           set -uo pipefail
           d="$(mktemp -d)"
           cp monitoring/notifications-alerts.test.yml "$d/"
           python3 - monitoring/notifications-alerts.yml "$d/notifications-alerts.yml" <<'PY'
-          import re, sys
+          import sys
           s = open(sys.argv[1], encoding='utf-8').read()
-          new = re.compile(r'(- alert: CreditAlertUndeliverable\n\s+expr: )\|\n(?:[ ]{10}.*\n)+')
-          s2, n = new.subn(lambda m: m.group(1) + 'increase(notification_undeliverable{job="omnivyra-worker",type="credit_alert"}[15m]) > 0\n', s)
-          assert n == 1, n
-          open(sys.argv[2], 'w', encoding='utf-8').write(s2)
+          old = 'type="credit_alert"}) > 0\n'
+          assert s.count(old) == 1, s.count(old)
+          open(sys.argv[2], 'w', encoding='utf-8').write(s.replace(old, 'type="credit_alert"}) > 1\n'))
           PY
           grep -n -A1 'alert: CreditAlertUndeliverable' "$d/notifications-alerts.yml"
           if ./promtool test rules "$d/notifications-alerts.test.yml"; then
-            echo "::error::CONTROL PASSED: the tests cannot tell the pre-fix expression from the fix"; exit 1
+            echo "::error::CONTROL PASSED: the tests cannot tell a page on ONE undelivered credit alert from none"; exit 1
           fi
           echo "control failed as required"

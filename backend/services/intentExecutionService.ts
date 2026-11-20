@@ -176,6 +176,9 @@ const ALWAYS_RUN_JOBS = new Set([
   // inactive-company gate ONLY — the 24h interval, usage overlay and admin
   // override still apply.
   'readinessSnapshot',
+  // notification_delivery_failures retention (a9, 2026-11-20): infrastructure housekeeping for the alert source,
+  // not feature work - it must run on an idle platform too. Exempt from the inactive-company gate ONLY.
+  'notificationFailurePrune',
 ]);
 
 // Frequency tier → milliseconds
