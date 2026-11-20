@@ -12,6 +12,8 @@
 let __billingContextRow: any = null;
 let __companyProfileRow: any = null;
 let __throwOnTable: string | null = null;
+// c6 2026-11-20: a table-specific error OBJECT, as supabase-js really returns it (a missing relation does not reject).
+let __errorOnTable: { table: string; error: { code?: string; message: string } } | null = null;
 
 jest.mock('../../db/supabaseClient', () => ({
   supabase: {
@@ -23,6 +25,7 @@ jest.mock('../../db/supabaseClient', () => ({
         if (__throwOnTable === table) {
           return Promise.reject(new Error(`relation "${table}" does not exist`));
         }
+        if (__errorOnTable?.table === table) return Promise.resolve({ data: null, error: __errorOnTable.error });
         if (table === 'billing_context') return Promise.resolve({ data: __billingContextRow, error: null });
         if (table === 'company_billing_profiles') return Promise.resolve({ data: __companyProfileRow, error: null });
         return Promise.resolve({ data: null, error: null });
@@ -34,22 +37,37 @@ jest.mock('../../db/supabaseClient', () => ({
 
 import { resolveOrgBillingContext } from '../../services/billing/payments/orgBillingContextResolver';
 
-function reset() { __billingContextRow = null; __companyProfileRow = null; __throwOnTable = null; }
+function reset() { __billingContextRow = null; __companyProfileRow = null; __throwOnTable = null; __errorOnTable = null; }
 beforeEach(reset);
 
-describe('orgBillingContextResolver — never-throws fallback', () => {
+describe('orgBillingContextResolver — fallback (absence) vs unreadable (c6 2026-11-20: no longer never-throws)', () => {
   test('null organizationId → source=none, null fields', async () => {
     await expect(resolveOrgBillingContext(null))
       .resolves.toEqual({ country: null, currency: null, region: null, source: 'none' });
   });
 
-  test('billing_context table absent → falls through to company profile', async () => {
-    __throwOnTable = 'billing_context';
+  // Contract change (c6 2026-11-20, named): this case's NAME always said "falls through to company profile", but its
+  // assertion was EMPTY - the old catch swallowed the throw into "geography unknown". The name was the design.
+  test.each(['42P01', 'PGRST205'])('billing_context table absent (%s) → falls through to company profile', async (code) => {
+    __errorOnTable = { table: 'billing_context', error: { code, message: 'relation "billing_context" does not exist' } };
     __companyProfileRow = { billing_address: { country: 'US' }, currency_preference: 'USD' };
-    // The throw happens inside readLightweightContext; resolveOrgBillingContext
-    // wraps the whole chain so a throw → EMPTY (never-throws contract).
-    await expect(resolveOrgBillingContext('org-1'))
-      .resolves.toEqual({ country: null, currency: null, region: null, source: 'none' });
+    await expect(resolveOrgBillingContext('org-1')).resolves.toMatchObject({ country: 'US', source: 'company_billing_profile' });
+  });
+
+  test('billing_context READ ERROR (not an absent table) → throws BILLING_CONTEXT_UNREADABLE, never "unknown"', async () => {
+    __errorOnTable = { table: 'billing_context', error: { code: '08006', message: 'connection reset' } };
+    __companyProfileRow = { billing_address: { country: 'US' }, currency_preference: 'USD' };
+    await expect(resolveOrgBillingContext('org-1')).rejects.toMatchObject({ code: 'BILLING_CONTEXT_UNREADABLE' });
+  });
+
+  test('company_billing_profiles read error → throws (even "does not exist": that tier is canonical)', async () => {
+    __errorOnTable = { table: 'company_billing_profiles', error: { code: '42P01', message: 'relation does not exist' } };
+    await expect(resolveOrgBillingContext('org-1')).rejects.toMatchObject({ code: 'BILLING_CONTEXT_UNREADABLE' });
+  });
+
+  test('a THROWN client on billing_context → throws (not a fall-through)', async () => {
+    __throwOnTable = 'billing_context';
+    await expect(resolveOrgBillingContext('org-1')).rejects.toMatchObject({ code: 'BILLING_CONTEXT_UNREADABLE' });
   });
 
   test('no rows in either table → source=none', async () => {
