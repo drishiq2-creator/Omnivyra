@@ -11,7 +11,10 @@ import { apiFetch } from '@/lib/apiFetch';
 import { createIdempotentOperation } from '@/lib/idempotency';
 import { resolvePrice, currencySymbol, CURRENCIES, type Currency } from '@/lib/billing/currency';
 import { TOPUPS } from '@/lib/billing/commercialPlans';
-import { TOPUP_UNCONFIRMED, blocksNewPurchase, classifyVerify, createOrderMessage, isVerifyOutcomeKind } from '@/lib/billing/topUpOutcome';
+import {
+  TOPUP_UNCONFIRMED, blocksNewPurchase, classifyClose, classifyVerify, createOrderMessage, isVerifyOutcomeKind,
+  type VerifyOutcome,
+} from '@/lib/billing/topUpOutcome';
 
 const RAZORPAY_JS = 'https://checkout.razorpay.com/v1/checkout.js';
 const CASHFREE_JS = 'https://sdk.cashfree.com/js/v3/cashfree.js';
@@ -23,6 +26,7 @@ interface Purchase {
 }
 // 'unconfirmed' / 'paid_pending': the user may have PAID, and their credits are not confirmed. No new purchase is offered
 // (b3 2026-11-20, BLOCKING: a lost verify used to show "failed" and re-enable Buy, inviting a second payment).
+type CloseReason = 'client_reported_failure' | 'client_cancelled';
 type Status = { kind: 'idle' | 'creating' | 'paying' | 'verifying' | 'success' | 'failed' | 'cancelled' | 'unconfirmed' | 'paid_pending'; msg?: string };
 
 function loadScript(src: string, ready: () => boolean): Promise<boolean> {
@@ -94,7 +98,16 @@ export default function TopUpPanel({ orgId }: { orgId: string | null | undefined
   const [lastPackId, setLastPackId] = useState<string | null>(null);
   // The last verify call, so "Check again" re-verifies THE SAME payment (safe: verify re-asks the provider and the
   // grant is a CAS with a unique credit key, so it can never double-grant; c6).
-  const lastVerify = useRef<null | { order: any; orderId: string; paymentId: string; signature: string; headers: Record<string, string> }>(null);
+  // The last check whose answer the panel shows, so "Check again" re-asks the SAME question: re-verify the same payment,
+  // or re-close the same purchase (close is provider-first, so asking again is safe).
+  const lastCheck = useRef<
+    | null
+    | { type: 'verify'; order: any; orderId: string; paymentId: string; signature: string; headers: Record<string, string> }
+    | { type: 'close'; order: any; reason: CloseReason; notChargedKind: 'cancelled' | 'failed'; notChargedMsg: string }
+  >(null);
+  // Only the newest check may set the panel: a slow close answer must not overwrite a later verify (Razorpay can report
+  // payment.failed and then succeed on a retry inside the same modal).
+  const checkSeq = useRef(0);
   const [buckets, setBuckets] = useState<Bucket[]>([]);
   const [preselectId, setPreselectId] = useState<string | null>(null);
   const [currency, setCurrency] = useState<Currency>('INR');
@@ -141,6 +154,23 @@ export default function TopUpPanel({ orgId }: { orgId: string | null | undefined
     } catch { /* SSR / no window */ }
   }, [refreshHistory, refreshBreakdown]);
 
+  // The pass-through `{ kind: outcome.kind }` below, with Status listing ONLY 'unconfirmed' | 'paid_pending' among
+  // outcome kinds, is the mechanism, not style (7c 2026-11-20): a new VerifyOutcome kind is a compile error here until
+  // Status is widened and the panel decides how to show it. Do not rewrite it as a per-kind switch or widen Status['kind'].
+  const applyOutcome = useCallback((seq: number, outcome: VerifyOutcome, notChargedKind: 'cancelled' | 'failed') => {
+    if (seq !== checkSeq.current) return; // a newer check owns the panel
+    if (outcome.kind === 'credited') {
+      lastCheck.current = null;
+      setStatus({ kind: 'success', msg: outcome.credits ? `${outcome.credits.toLocaleString()} credits added` : 'Credits added' });
+    } else if (outcome.kind === 'not_charged') {
+      lastCheck.current = null;
+      setStatus({ kind: notChargedKind, msg: outcome.message });
+    } else {
+      // Paid or unknown: never "failed", no new purchase; the user re-checks the SAME payment.
+      setStatus({ kind: outcome.kind, msg: outcome.message });
+    }
+  }, []);
+
   /**
    * M5: tell the server the checkout failed or was cancelled, so the pending
    * purchase row does not linger indefinitely.
@@ -148,50 +178,48 @@ export default function TopUpPanel({ orgId }: { orgId: string | null | undefined
    * This is a REPORT, not a verdict. The server re-checks the provider before
    * closing anything, so if the payment actually succeeded the purchase is
    * fulfilled instead — the client can never talk a real payment into failure.
-   * Best-effort by design: the expiry sweep is the backstop if this call is
-   * lost, so a failure here must not disturb the UI.
+   * The panel shows the SERVER's answer (7c 2026-11-20): the browser event alone
+   * proves nothing about the charge. A lost close leaves the row to the expiry
+   * sweep and shows "couldn't confirm" with Buy disabled; "Check again" re-closes.
    */
   const reportClosure = useCallback(async (
     order: any,
-    reason: 'client_reported_failure' | 'client_cancelled',
+    reason: CloseReason,
+    notChargedKind: 'cancelled' | 'failed',
+    notChargedMsg: string,
   ) => {
-    if (!orgId || !order?.purchase_id) return;
-    try {
-      await postJson('/api/billing/checkout/close', {
-        org_id: orgId, purchase_id: order.purchase_id, reason,
-      });
-      refreshHistory();
-    } catch { /* the server-side expiry sweep will close it */ }
-  }, [orgId, refreshHistory]);
+    // The browser event is a claim, not the answer: close asks the PROVIDER and its action decides the copy
+    // (lib/billing/topUpOutcome.ts classifyClose). A lost close is "couldn't confirm", never "cancelled".
+    const seq = ++checkSeq.current;
+    lastCheck.current = { type: 'close', order, reason, notChargedKind, notChargedMsg };
+    setStatus({ kind: 'verifying' });
+    const { status: httpStatus, body } = orgId && order?.purchase_id
+      ? await postJsonWithStatus('/api/billing/checkout/close', { org_id: orgId, purchase_id: order.purchase_id, reason })
+      : { status: null, body: null };
+    applyOutcome(seq, classifyClose(httpStatus, body, notChargedMsg), notChargedKind);
+    refreshHistory();
+    refreshBreakdown();
+  }, [orgId, applyOutcome, refreshHistory, refreshBreakdown]);
 
   const runVerify = useCallback(async (
     order: any, orderId: string, paymentId: string, signature: string, reuseHeaders?: Record<string, string>,
   ) => {
+    const seq = ++checkSeq.current;
     setStatus({ kind: 'verifying' });
     // Re-verifying the SAME payment is safe because verify re-asks the PROVIDER and the grant is a CAS with a UNIQUE
     // credit key (c6, 2026-11-20); /checkout/verify has no withIdempotency, so the key is NOT what makes it safe.
     // (The old comment said the key was "derived rather than random"; createIdempotentOperation adds a random
     // suffix.) "Check again" still re-sends the first call's key, so the request is the same request.
     const verifyHeaders = reuseHeaders ?? createIdempotentOperation(`checkout-verify-${orderId}-${paymentId}`).headers;
-    lastVerify.current = { order, orderId, paymentId, signature, headers: verifyHeaders };
+    lastCheck.current = { type: 'verify', order, orderId, paymentId, signature, headers: verifyHeaders };
     const { status: httpStatus, body: v } = await postJsonWithStatus('/api/billing/checkout/verify', {
       org_id: orgId, purchase_id: order.purchase_id, provider: order.provider,
       order_id: orderId, payment_id: paymentId, signature,
     }, verifyHeaders);
-    const outcome = classifyVerify(httpStatus, v);
-    if (outcome.kind === 'credited') {
-      lastVerify.current = null;
-      setStatus({ kind: 'success', msg: outcome.credits ? `${outcome.credits.toLocaleString()} credits added` : 'Credits added' });
-    } else if (outcome.kind === 'not_charged') {
-      lastVerify.current = null;
-      setStatus({ kind: 'failed', msg: outcome.message });
-    } else {
-      // Paid or unknown: never "failed", no new purchase; the user re-checks the SAME payment.
-      setStatus({ kind: outcome.kind, msg: outcome.message });
-    }
+    applyOutcome(seq, classifyVerify(httpStatus, v), 'failed');
     refreshHistory();
     refreshBreakdown(); // top-up (paid) pool may have grown
-  }, [orgId, refreshHistory, refreshBreakdown]);
+  }, [orgId, applyOutcome, refreshHistory, refreshBreakdown]);
 
   const buy = useCallback(async (pack: Pack) => {
     if (!orgId) return;
@@ -221,15 +249,11 @@ export default function TopUpPanel({ orgId }: { orgId: string | null | undefined
           description: `${pack.credits} credits`,
           handler: (resp: any) => runVerify(order, resp.razorpay_order_id, resp.razorpay_payment_id, resp.razorpay_signature),
           modal: {
-            ondismiss: () => {
-              setStatus({ kind: 'cancelled', msg: 'Payment cancelled' });
-              void reportClosure(order, 'client_cancelled');
-            },
+            ondismiss: () => { void reportClosure(order, 'client_cancelled', 'cancelled', 'Payment cancelled'); },
           },
         });
         rzp.on('payment.failed', (e: any) => {
-          setStatus({ kind: 'failed', msg: e?.error?.description ?? 'Payment failed' });
-          void reportClosure(order, 'client_reported_failure');
+          void reportClosure(order, 'client_reported_failure', 'failed', e?.error?.description ?? 'Payment failed');
         });
         rzp.open();
       } else if (order.provider === 'cashfree') {
@@ -238,8 +262,10 @@ export default function TopUpPanel({ orgId }: { orgId: string | null | undefined
         const result = await cf.checkout({ paymentSessionId: order.client_token, redirectTarget: '_modal' });
         if (result?.error) {
           const cancelled = String(result.error?.message ?? '').toLowerCase().includes('cancel');
-          setStatus({ kind: cancelled ? 'cancelled' : 'failed', msg: result.error?.message ?? 'Payment failed' });
-          void reportClosure(order, cancelled ? 'client_cancelled' : 'client_reported_failure');
+          void reportClosure(
+            order, cancelled ? 'client_cancelled' : 'client_reported_failure',
+            cancelled ? 'cancelled' : 'failed', result.error?.message ?? 'Payment failed',
+          );
           return;
         }
         await runVerify(order, order.provider_order_id, result?.paymentDetails?.paymentId ?? '', '');
@@ -260,8 +286,9 @@ export default function TopUpPanel({ orgId }: { orgId: string | null | undefined
   // etc. are the panel's own states and never block.
   const purchaseBlocked = isVerifyOutcomeKind(status.kind) && blocksNewPurchase(status.kind);
   const checkAgain = () => {
-    const last = lastVerify.current;
-    if (last) void runVerify(last.order, last.orderId, last.paymentId, last.signature, last.headers);
+    const last = lastCheck.current;
+    if (last?.type === 'verify') void runVerify(last.order, last.orderId, last.paymentId, last.signature, last.headers);
+    else if (last?.type === 'close') void reportClosure(last.order, last.reason, last.notChargedKind, last.notChargedMsg);
     else { refreshHistory(); refreshBreakdown(); }
   };
 

@@ -73,9 +73,33 @@ export const BLOCKS_NEW_PURCHASE: Record<VerifyOutcomeKind, boolean> = {
   unconfirmed: true,
 };
 
-/** An outcome kind outside the union blocks: the safe default is "the user may already have paid". */
-export function blocksNewPurchase(kind: string): boolean {
-  return isVerifyOutcomeKind(kind) ? BLOCKS_NEW_PURCHASE[kind] : true;
+/** Typed to the union, not string (7c 2026-11-20): the table is total by type, so there is no runtime default to
+ * advertise. Callers narrow with isVerifyOutcomeKind first. */
+export function blocksNewPurchase(kind: VerifyOutcomeKind): boolean {
+  return BLOCKS_NEW_PURCHASE[kind];
+}
+
+/** Closure actions (POST /api/billing/checkout/close, 200) meaning the PROVIDER confirmed payment and credits were
+ * granted (purchaseClosureService closePurchaseFromClient: "Provider wins, always"; f.ok -> 'fulfilled'). */
+export const CLOSE_CREDITED_ACTIONS = ['fulfilled'] as const;
+
+/**
+ * The browser reported cancel / failure (Razorpay ondismiss or payment.failed, Cashfree error). That event is NOT the
+ * answer: /checkout/close asks the provider and returns the authoritative action (7c 2026-11-20). Before this, the panel
+ * showed "Payment cancelled"/"Payment failed" and re-enabled Buy without reading close's response, even when the server
+ * had just granted the credits.
+ *   200 { ok:true, action 'closed'|'already_closed' } -> not charged (the browser's cancelled/failed copy is honest)
+ *   200 { ok:true, action 'fulfilled' }                 -> credited
+ *   any other action (deferred_unknown, errored, already_completed, a future one), 404, 5xx, lost -> unconfirmed
+ */
+export function classifyClose(status: number | null, body: unknown, notChargedMessage: string): VerifyOutcome {
+  const b = (body && typeof body === 'object' ? body : {}) as Record<string, unknown>;
+  const action = typeof b.action === 'string' ? b.action : '';
+  if (status !== null && status >= 200 && status < 300 && b.ok === true) {
+    if ((NOT_CHARGED_ACTIONS as readonly string[]).includes(action)) return { kind: 'not_charged', message: notChargedMessage };
+    if ((CLOSE_CREDITED_ACTIONS as readonly string[]).includes(action)) return { kind: 'credited', credits: null };
+  }
+  return { kind: 'unconfirmed', message: TOPUP_UNCONFIRMED };
 }
 
 /** create-order runs BEFORE any payment: nothing can have been charged yet. Codes -> copy, never raw. */
