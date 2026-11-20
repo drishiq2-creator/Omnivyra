@@ -3,6 +3,7 @@ import { useCompanyContext } from '../../components/CompanyContext';
 import CommunityAiLayout from '../../components/community-ai/CommunityAiLayout';
 import SectionCard from '../../components/community-ai/SectionCard';
 import { fetchWithAuth } from '../../components/community-ai/fetchWithAuth';
+import { roleSatisfies } from '../../shared/rbac/tenantRoles';
 
 type DiscoveredUser = {
   id: string;
@@ -32,10 +33,9 @@ const CLASSIFICATION_OPTIONS = [
 const DISCOVERED_VIA_OPTIONS = ['all', 'api', 'rpa'] as const;
 const ELIGIBLE_OPTIONS = ['all', 'eligible', 'ineligible'] as const;
 
+// Approach A: the role OR its base tier (shared model) - CONTENT_MANAGER/PLANNER keep their identity now.
 const canEditRole = (role?: string | null) =>
-  ['CONTENT_CREATOR', 'CONTENT_REVIEWER', 'CONTENT_PUBLISHER', 'COMPANY_ADMIN', 'SUPER_ADMIN'].includes(
-    (role || '').toString()
-  );
+  roleSatisfies((role || '').toString(), ['CONTENT_CREATOR', 'CONTENT_REVIEWER', 'CONTENT_PUBLISHER', 'COMPANY_ADMIN', 'SUPER_ADMIN']);
 
 export default function DiscoveredUsersPage() {
   const { selectedCompanyId, userRole } = useCompanyContext();

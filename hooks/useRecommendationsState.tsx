@@ -27,6 +27,7 @@ import {
   TREND_SOURCE_LEGEND,
 } from '../pages/recommendations.types';
 import { getUserScopedLocalStorage, setUserScopedLocalStorage } from '../utils/authStorage';
+import { roleSatisfies } from '../shared/rbac/tenantRoles';
 
 type IntelligentMixState = import('@/pages/command-center/intelligent-mix-strategy').IntelligentMixState;
 
@@ -156,20 +157,20 @@ export function useRecommendationsState() {
   const [engineOverrides, setEngineOverrides] = useState<Record<string, string>>({});
   const isAdmin = useMemo(() => user?.role === 'admin', [user]);
   const canManageRecommendationState = useMemo(() => {
-    const role = (userRole || '').toUpperCase();
-    return ['COMPANY_ADMIN', 'CONTENT_CREATOR', 'SUPER_ADMIN'].includes(role);
+    // Approach A: the role OR its base tier (shared model) - CONTENT_MANAGER/PLANNER keep their identity now.
+    return roleSatisfies((userRole || '').toUpperCase(), ['COMPANY_ADMIN', 'CONTENT_CREATOR', 'SUPER_ADMIN']);
   }, [userRole]);
   const canSeeDetectedOpportunities = useMemo(() => {
-    const role = (userRole || '').toUpperCase();
-    return ['COMPANY_ADMIN', 'CONTENT_CREATOR', 'CONTENT_MANAGER', 'SUPER_ADMIN'].includes(role);
+    // Approach A: the role OR its base tier (shared model) - CONTENT_MANAGER/PLANNER keep their identity now.
+    return roleSatisfies((userRole || '').toUpperCase(), ['COMPANY_ADMIN', 'CONTENT_CREATOR', 'CONTENT_MANAGER', 'SUPER_ADMIN']);
   }, [userRole]);
   const canGenerateDetectedPlaybook = useMemo(() => {
-    const role = (userRole || '').toUpperCase();
-    return ['COMPANY_ADMIN', 'CONTENT_MANAGER'].includes(role);
+    // Approach A: the role OR its base tier (shared model) - CONTENT_MANAGER/PLANNER keep their identity now.
+    return roleSatisfies((userRole || '').toUpperCase(), ['COMPANY_ADMIN', 'CONTENT_MANAGER']);
   }, [userRole]);
   const canGroupRecommendations = useMemo(() => {
-    const role = (userRole || '').toUpperCase();
-    return ['COMPANY_ADMIN', 'CONTENT_MANAGER'].includes(role);
+    // Approach A: the role OR its base tier (shared model) - CONTENT_MANAGER/PLANNER keep their identity now.
+    return roleSatisfies((userRole || '').toUpperCase(), ['COMPANY_ADMIN', 'CONTENT_MANAGER']);
   }, [userRole]);
   const recommendedThisWeek = useMemo(() => {
     const withPriority = detectedOpportunities.map((item) => {
