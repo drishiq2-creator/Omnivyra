@@ -32,9 +32,15 @@ jest.mock('../../services/authResolver', () => ({
       ? { user: { id, supabaseUid: `sb-${id}`, email: 'invitee@example.test', status: 'active' }, error: null }
       : { user: null, error: 'NO_TOKEN' };
   },
+  extractAccessToken: () => 'test-user-jwt',
 }));
-jest.mock('../../security/SessionAuthorityService', () => ({
-  clearSessionCookie: jest.fn(), revokeAllSessionsForUser: jest.fn(async () => undefined),
+jest.mock('../../security/SessionAuthorityService', () => ({ clearSessionCookie: jest.fn() }));
+// PL-115: since #428 set-password revokes through lifecycleGovernance.revokeAllAccessForUser. The old mock of
+// SessionAuthorityService.revokeAllSessionsForUser no longer intercepted it, so the REAL revoke-all ran against the
+// harness (and threw on the unmocked extractAccessToken, swallowed by the route's catch).
+const mockRevokeAllAccess = jest.fn(async (..._a: unknown[]) => ({ revokedAuthSessions: 0, refreshTokensRevoked: true }));
+jest.mock('../../services/lifecycleGovernance', () => ({
+  revokeAllAccessForUser: (...a: unknown[]) => mockRevokeAllAccess(...a),
 }));
 jest.mock('../../security/stepup/StepUpSessionService', () => ({ revokeForUser: jest.fn(async () => undefined) }));
 jest.mock('../../security/audit/SecurityAuditService', () => ({ logSecurityEvent: jest.fn(async () => undefined) }));
@@ -89,9 +95,12 @@ describe('auth/set-password — invitation expiry (shared predicate)', () => {
   it('valid (1 s before expiry) → passes the expiry check and reaches activate_invitation_membership', async () => {
     jest.useFakeTimers({ now: T, doNotFake: ['nextTick', 'setImmediate', 'setTimeout', 'setInterval', 'queueMicrotask'] });
     world(new Date(T + 1000).toISOString());
-    await post();
+    const r = await post();
     expect(activationCalled()).toBe(true);
     expect(rows('invitations')[0].revoked_at ?? null).toBeNull();
+    // The revoke went through the MOCK (not the real revoke-all), and the route answered a plain success.
+    expect(mockRevokeAllAccess).toHaveBeenCalledWith(USER, 'credential_rotation:signup', { userJwt: 'test-user-jwt' });
+    expect(r.status).toBe(200);
   });
 });
 
