@@ -37,12 +37,20 @@
 #   Step 1 - rule logic: `promtool test rules monitoring/notifications-alerts.test.yml` (CI: monitoring-rules.yml).
 #   Step 2 - routing: the owner presses "Test" on the Grafana contact point each rule routes to (page: sre ->
 #            the paging contact point; warnings -> the default one) and confirms the message arrives.
-#   Step 3 - end to end, per rule, owner-run in production only (never by a session):
-#            CreditAlertUndeliverable  - one notifyCompanyEvent credit_alert for a company with no active
-#                                        COMPANY_ADMIN (a dedicated test company) -> page within ~2 min.
-#            NotificationUndeliverable - one non-credit company event for that same test company -> warning.
-#            NotificationInsertFailing - not triggered in prod on purpose (needs >5 failed inserts); covered by
-#                                        Steps 1-2 only, and that limit is stated here.
+#   Step 3 - end to end: WAITS for the durable source below (b3 ruling (B), 2026-11-20). Then: cb inserts ONE
+#            synthetic undeliverable record marked as a test, the owner confirms the page, cb deletes the record.
+#            No test company, no credit consumption. Not run before (B): it would certify worker-only coverage.
+#
+# COVERAGE TODAY - READ THIS BEFORE RELYING ON THESE RULES (a9, 2026-11-20; b3 option C wording):
+#   notification_undeliverable is an IN-MEMORY, PER-PROCESS counter. These rules read ONLY the Railway worker's
+#   scrape (job="omnivyra-worker"), so they see undeliverable events raised IN THE WORKER and nothing else.
+#   Events raised on Vercel (API routes, Vercel crons) are NOT covered: each serverless instance keeps its own
+#   counter, a scrape of www.omnivyra.com lands on whichever instance answers, and instances share one label set -
+#   so the app job both MISSES events (the instance is recycled unscraped) and can INVENT them (alternating
+#   instances read as counter resets). Credit alerts are raised from both sides (checkCreditAlerts callers:
+#   creditExecutionServiceContracts.ts, creditGuardService.ts, pages/api/cron/leverage-optimizer.ts), so a credit
+#   alert that reached nobody on Vercel does NOT page today. The fix is a DURABLE source (undeliverable events
+#   persisted, a worker-side exporter computing from the DB); until it ships these rules are worker-only.
 #   Until Steps 2-3 land, OBSERVABILITY_ENABLED is confirmed true in prod and this file is loaded by the prod
 #   Prometheus, these rules are a RELEASE CONDITION, not a shipped control.
 ---
@@ -58,8 +66,8 @@ groups:
       # read). Money-adjacent silence - credit exhaustion would go unannounced. Page.
       - alert: CreditAlertUndeliverable
         expr: |
-          ((increase(notification_undeliverable{type="credit_alert"}[15m]) and notification_undeliverable{type="credit_alert"} offset 15m)
-          or (notification_undeliverable{type="credit_alert"} + 0 unless notification_undeliverable{type="credit_alert"} offset 15m)) > 0
+          ((increase(notification_undeliverable{job="omnivyra-worker",type="credit_alert"}[15m]) and notification_undeliverable{job="omnivyra-worker",type="credit_alert"} offset 15m)
+          or (notification_undeliverable{job="omnivyra-worker",type="credit_alert"} + 0 unless notification_undeliverable{job="omnivyra-worker",type="credit_alert"} offset 15m)) > 0
         for: 0m
         labels: { severity: critical, component: notifications, category: money, page: sre }
         annotations:
@@ -69,8 +77,8 @@ groups:
       # Any company event delivered to nobody.
       - alert: NotificationUndeliverable
         expr: |
-          ((increase(notification_undeliverable{type!="credit_alert"}[30m]) and notification_undeliverable{type!="credit_alert"} offset 30m)
-          or (notification_undeliverable{type!="credit_alert"} + 0 unless notification_undeliverable{type!="credit_alert"} offset 30m)) > 0
+          ((increase(notification_undeliverable{job="omnivyra-worker",type!="credit_alert"}[30m]) and notification_undeliverable{job="omnivyra-worker",type!="credit_alert"} offset 30m)
+          or (notification_undeliverable{job="omnivyra-worker",type!="credit_alert"} + 0 unless notification_undeliverable{job="omnivyra-worker",type!="credit_alert"} offset 30m)) > 0
         for: 0m
         labels: { severity: warning, component: notifications, category: correctness }
         annotations:
@@ -81,8 +89,8 @@ groups:
       # not exist), not at one company.
       - alert: NotificationInsertFailing
         expr: |
-          sum((increase(notification_undeliverable{reason="insert_failed"}[15m]) and notification_undeliverable{reason="insert_failed"} offset 15m)
-          or (notification_undeliverable{reason="insert_failed"} + 0 unless notification_undeliverable{reason="insert_failed"} offset 15m)) > 5
+          sum((increase(notification_undeliverable{job="omnivyra-worker",reason="insert_failed"}[15m]) and notification_undeliverable{job="omnivyra-worker",reason="insert_failed"} offset 15m)
+          or (notification_undeliverable{job="omnivyra-worker",reason="insert_failed"} + 0 unless notification_undeliverable{job="omnivyra-worker",reason="insert_failed"} offset 15m)) > 5
         for: 5m
         labels: { severity: critical, component: notifications, category: correctness, page: sre }
         annotations:
