@@ -18,6 +18,10 @@ on:
       - 'supabase/migrations/**'
       - 'supabase/_schema/**'
       - 'scripts/ci/**'
+      # PL-84 (7c): the actor-FK acknowledgements (set-null-known-defects.json) and the actor-field registry are
+      # read by the --db detector below; an edit touching ONLY them must re-run that detector and the realschema
+      # tests that justify each acknowledgement.
+      - 'scripts/migrations/**'
       - 'backend/tests/realschema/**'
       - 'backend/db/**'
       - 'backend/services/prospectIdentity/**'
@@ -49,6 +53,10 @@ on:
       - 'supabase/migrations/**'
       - 'supabase/_schema/**'
       - 'scripts/ci/**'
+      # PL-84 (7c): the actor-FK acknowledgements (set-null-known-defects.json) and the actor-field registry are
+      # read by the --db detector below; an edit touching ONLY them must re-run that detector and the realschema
+      # tests that justify each acknowledgement.
+      - 'scripts/migrations/**'
       - 'backend/tests/realschema/**'
   workflow_dispatch:
 

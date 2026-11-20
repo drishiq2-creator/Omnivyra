@@ -403,15 +403,15 @@ describe('actor-FK compatibility detector — catalog level', () => {
 
   it('a frozen catalog entry that stops reproducing FAILS as stale', () => {
     const cat = actorFk.parseBaselineCatalog('CREATE TABLE public.t (\n    a uuid\n);', { source: 'pg_catalog' });
-    const r = actorFk.detect(cat, { columns: [] }, [{ key: 't.a', owner: 'x', classification: 'y' }]);
-    expect(r.stale_known).toEqual(['t.a']);
+    const r = actorFk.detect(cat, { columns: [] }, [{ key: 't.a', rule: 'set_null_on_not_null', owner: 'x', classification: 'y' }]);
+    expect(r.stale_known).toEqual(['t.a (set_null_on_not_null)']);
     expect(r.counts.error).toBe(1);
   });
 
   it('a frozen entry for a table absent from a point-in-time dump is NOT called stale', () => {
     // Absence in a boundary-limited dump proves nothing.
     const cat = actorFk.parseBaselineCatalog('CREATE TABLE public.other (\n    a uuid\n);', { source: 'baseline', boundary: '20260916000000' });
-    const r = actorFk.detect(cat, { columns: [] }, [{ key: 'missing_table.a', owner: 'x', classification: 'y' }]);
+    const r = actorFk.detect(cat, { columns: [] }, [{ key: 'missing_table.a', rule: 'set_null_on_not_null', owner: 'x', classification: 'y' }]);
     expect(r.stale_known).toEqual([]);
     expect(r.counts.error).toBe(0);
   });
@@ -498,6 +498,76 @@ ALTER TABLE ONLY public.t
     );
     expect(items).toHaveLength(3);
     expect(items[1]).toContain("'y'");
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// PL-84 (a9, 2026-11-20; b3 / 7c / cb): an acknowledgement covers table.column AND rule. Keyed on table.column
+// alone, the G-11 entry (contact_opt_out_reviews.person_id, set_null_vs_check, trigger-repaired) would also have
+// silenced any FUTURE rule on person_id - e.g. set_null_on_not_null if the column became NOT NULL - with nobody
+// reviewing it. One column below emits BOTH rules, so acknowledging one must leave the other open.
+describe('catalog_known is matched on table.column AND rule (PL-84)', () => {
+  const BOTH = `CREATE TABLE public.t (
+    id uuid NOT NULL,
+    status text NOT NULL,
+    p uuid NOT NULL,
+    CONSTRAINT t_c CHECK (((status = 'x'::text) = (p IS NOT NULL)))
+);
+ALTER TABLE ONLY public.t
+    ADD CONSTRAINT t_p_fkey FOREIGN KEY (p) REFERENCES public.t(id) ON DELETE SET NULL;`;
+  const cat = () => actorFk.parseBaselineCatalog(BOTH, { source: 'test' });
+  const ack = (rule: unknown) => ({ key: 't.p', rule, owner: 'x', classification: 'y', detail: 'z' });
+  const rulesOf = (fs_: Array<{ rule: string }>) => fs_.map((f) => f.rule).sort();
+
+  it('PREMISE: the synthetic column emits both rules as errors, with nothing acknowledged', () => {
+    const r = actorFk.detect(cat());
+    expect(rulesOf(r.findings)).toEqual(['set_null_on_not_null', 'set_null_vs_check']);
+    expect(r.counts.error).toBe(2);
+  });
+
+  it('acknowledging ONE rule leaves the OTHER rule on the same column open (the control)', () => {
+    const r = actorFk.detect(cat(), { columns: [] }, [ack('set_null_vs_check')]);
+    expect(rulesOf(r.known_open)).toEqual(['set_null_vs_check']);
+    expect(rulesOf(r.findings)).toEqual(['set_null_on_not_null']);
+    expect(r.counts.error).toBe(1);
+    expect(r.stale_known).toEqual([]);
+  });
+
+  it('acknowledging both rules (two entries) clears both', () => {
+    const r = actorFk.detect(cat(), { columns: [] }, [ack('set_null_vs_check'), ack('set_null_on_not_null')]);
+    expect(rulesOf(r.known_open)).toEqual(['set_null_on_not_null', 'set_null_vs_check']);
+    expect(r.counts.error).toBe(0);
+  });
+
+  it('an acknowledgement for a rule the column does NOT emit is stale (and counted), never a match', () => {
+    const r = actorFk.detect(cat(), { columns: [] }, [ack('immutable_actor_set_null_fk')]);
+    expect(r.stale_known).toEqual(['t.p (immutable_actor_set_null_fk)']);
+    expect(r.counts.error).toBe(3);
+  });
+
+  it.each([
+    ['no rule', undefined],
+    ['an empty rule', ''],
+    ['an unknown rule', 'set_null_anything'],
+  ])('an entry with %s FAILS the run (it would otherwise suppress every rule on the column)', (_n, rule) => {
+    expect(() => actorFk.detect(cat(), { columns: [] }, [ack(rule)])).toThrow(/must name the rule it acknowledges/);
+  });
+
+  it('a duplicate acknowledgement FAILS the run', () => {
+    expect(() => actorFk.detect(cat(), { columns: [] }, [ack('set_null_vs_check'), ack('set_null_vs_check')])).toThrow(/twice/);
+  });
+
+  it('RULES is exactly the set of rules detect() can emit (content-keyed: a new rule must be listed to be acknowledgeable)', () => {
+    const src = fs.readFileSync(path.join(REPO, 'scripts/ci/check-actor-fk-compatibility.js'), 'utf8');
+    const emitted = [...new Set([...src.matchAll(/\brule: '([a-z_]+)'/g)].map((m) => m[1]))].sort();
+    expect(emitted.length).toBeGreaterThan(0);
+    expect([...actorFk.RULES].sort()).toEqual(emitted);
+  });
+
+  it('every committed catalog_known entry names a valid rule (the strictness lands green, not as a surprise)', () => {
+    const ids = actorFk.loadKnown().map(actorFk.knownIdentity);
+    expect(ids.length).toBeGreaterThan(0);
+    expect(new Set(ids).size).toBe(ids.length);
   });
 });
 

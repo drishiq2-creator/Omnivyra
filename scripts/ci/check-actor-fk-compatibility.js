@@ -353,6 +353,33 @@ async function readPgCatalog(url) {
 const SEVERITY_ORDER = { error: 2, warn: 1, info: 0 };
 
 /**
+ * Every rule detect() can emit. A catalog_known acknowledgement must name ONE of these: it is matched on
+ * table.column AND rule (PL-84, a9 2026-11-20). Keyed on table.column alone, an acknowledgement written for one
+ * rule silently suppressed EVERY error-severity rule on that column, including one that did not exist when the
+ * entry was reviewed. The constraint stays evidence only (it is renamed more often than the defect changes).
+ */
+const RULES = Object.freeze([
+  'immutable_actor_cascade_fk', 'immutable_actor_set_null_fk', 'immutable_actor_unexpected_fk',
+  'registry_column_missing', 'registry_nullability_mismatch', 'registry_table_not_in_catalog',
+  'set_null_on_not_null', 'set_null_vs_check', 'undeclared_actor_fk',
+]);
+
+/**
+ * The acknowledgement's identity: `<table>.<column> (<rule>)`. THROWS on an entry without a known rule, or on a
+ * duplicate - the inverted default: a malformed acknowledgement fails the run, it never matches everything.
+ */
+function knownIdentity(k) {
+  if (!k || typeof k.key !== 'string' || !/^[a-z0-9_]+\.[a-z0-9_]+$/.test(k.key)) {
+    throw new Error(`catalog_known entry has no valid table.column key: ${JSON.stringify(k && k.key)}`);
+  }
+  if (!RULES.includes(k.rule)) {
+    throw new Error(`catalog_known entry '${k.key}' must name the rule it acknowledges (one of: ${RULES.join(', ')}); ` +
+      `got ${JSON.stringify(k.rule)}. An acknowledgement without a rule would suppress every rule on the column.`);
+  }
+  return `${k.key} (${k.rule})`;
+}
+
+/**
  * Column names a CHECK constraint requires to be non-NULL for at least some
  * rows. `<col> IS NOT NULL` anywhere in a CHECK means there is a row shape the
  * constraint will reject once the column is NULL. That is exactly the
@@ -587,17 +614,24 @@ function detect(catalog, registry = { columns: [] }, known = []) {
   //    actually see the table. On a point-in-time baseline, a table that is
   //    absent proves nothing, so `stale` is reported only for tables present in
   //    this catalog.
-  const knownMap = new Map((known || []).map((k) => [k.key, k]));
+  //    Matched on table.column AND rule (PL-84): an acknowledgement covers exactly the finding it was reviewed for.
+  const knownMap = new Map();
+  for (const k of known || []) {
+    const id = knownIdentity(k);
+    if (knownMap.has(id)) throw new Error(`catalog_known lists ${id} twice`);
+    knownMap.set(id, k);
+  }
+  const findingIdentity = (f) => `${f.table}.${f.column} (${f.rule})`;
   const open = [];
   const knownSeen = [];
   for (const f of findings) {
-    const k = f.severity === 'error' ? knownMap.get(`${f.table}.${f.column}`) : null;
+    const k = f.severity === 'error' ? knownMap.get(findingIdentity(f)) : null;
     if (k) knownSeen.push({ ...f, owner: k.owner, classification: k.classification });
     else open.push(f);
   }
-  const seenKeys = new Set(knownSeen.map((f) => `${f.table}.${f.column}`));
+  const seenIds = new Set(knownSeen.map(findingIdentity));
   const staleKnown = [...knownMap.keys()].filter(
-    (key) => !seenKeys.has(key) && catalog.tables.has(key.split('.')[0]),
+    (id) => !seenIds.has(id) && catalog.tables.has(id.split('.')[0]),
   );
 
   const counts = { error: 0, warn: 0, info: 0 };
@@ -768,6 +802,8 @@ if (require.main === module) {
 }
 
 module.exports = {
+  RULES,
+  knownIdentity,
   loadKnown,
   loadNotModelled,
   reportCoverageLimits,
