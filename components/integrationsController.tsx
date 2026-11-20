@@ -24,6 +24,7 @@ import {
 import { useCompanyContext } from '../components/CompanyContext';
 import { fetchWithAuth } from '../components/community-ai/fetchWithAuth';
 import { emitSetupChanged } from '../lib/setup/setupEvents';
+import { readIntegrationsList } from '../shared/integrations/integrationsReadCodes';
 
 import { type IntegrationType, type FocusArea, type TestResultState, type Integration, type Website, type CategoryCard, type GoogleAnalyticsStatusResponse, type GoogleSearchConsoleStatusResponse, type TrackingAssistResponse, TYPE_LABELS, IntegrationModal } from './integrationsSupportA';
 import { ConnectionCard, EmptyConnections, CategoryAction, type WorkflowStatus, WebsiteCommandCenter, CmsDiagnosticsPanel } from './integrationsSupportB';
@@ -104,13 +105,15 @@ export function useIntegrationsPageController() {
       ]);
       const data = await integrationResponse.json();
       const websiteData = await websiteResponse.json();
-      if (!integrationResponse.ok) {
-        throw new Error(data.error || 'Failed to load integrations');
+      // A usable list only (7c NB1): a 503 AND a 200 without the array are both "couldn't load", never an empty page.
+      const integrationList = readIntegrationsList(integrationResponse.ok, data);
+      if (integrationList === null) {
+        throw new Error(data?.error || 'Failed to load integrations');
       }
       if (!websiteResponse.ok) {
         throw new Error(websiteData.error || 'Failed to load websites');
       }
-      setIntegrations(data.integrations || []);
+      setIntegrations(integrationList as Integration[]);
       setWebsites(websiteData.websites || []);
     } catch (err: any) {
       setError(err.message);
