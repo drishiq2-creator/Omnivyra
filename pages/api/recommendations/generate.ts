@@ -7,7 +7,7 @@ import { enforceCompanyAccess } from '../../../backend/services/userContextServi
 import { getCanonicalProfile as getProfile } from '@/backend/services/context/canonicalProfileAdapter';
 import { generateRecommendation } from '../../../backend/services/aiGateway';
 import { resolveCompanyGroundingGuard } from '../../../backend/services/context/canonicalContentContextResolver';
-import { getStrategyHistoryForCompany } from '../../../backend/services/strategyHistoryService';
+import { getStrategyMemoryOrNull } from '../../../backend/services/strategyHistoryService';
 import { formatForUserOutput } from '../../../backend/utils/refineUserFacingResponse';
 import { createHash } from 'crypto';
 import { wirePhase2Route } from '../../../backend/services/billing/phase2RouteWiring';
@@ -100,13 +100,8 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     const resolvedSelection = Array.isArray(selected_api_ids) ? selected_api_ids : defaultApiIds;
     const manualContext =
       manual_context && typeof manual_context === 'object' ? manual_context : null;
-    let strategyMemory: Awaited<ReturnType<typeof getStrategyHistoryForCompany>> | null = null;
-    try {
-      strategyMemory = await getStrategyHistoryForCompany(companyId);
-      if (strategyMemory.campaigns_count === 0) strategyMemory = null;
-    } catch {
-      strategyMemory = null;
-    }
+    // Optional input: a read failure degrades to null but is LOGGED (strategy_memory_unavailable), never silent (7c).
+    const strategyMemory = await getStrategyMemoryOrNull(companyId);
     const resolvedInsightSource =
       insight_source === 'api' || insight_source === 'llm' || insight_source === 'hybrid'
         ? insight_source

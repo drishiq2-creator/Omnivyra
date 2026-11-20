@@ -124,3 +124,25 @@ describe('a differently-cased company id neither empties the history nor crosses
     expect(JSON.stringify(r)).not.toMatch(/UA Category|UA topic/);
   });
 });
+
+describe('strategy memory as an OPTIONAL input (generate.ts): degrades to null, never INVISIBLY (7c)', () => {
+  const { getStrategyMemoryOrNull } = require('../../services/strategyHistoryService');
+  let warn: jest.SpyInstance;
+  beforeEach(() => { warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined); });
+  afterEach(() => warn.mockRestore());
+
+  it('a failed read -> null AND a strategy_memory_unavailable warning naming the stage', async () => {
+    mockDb.campaign_versions = [campaignOf(CO_B, REC_B)];
+    mockFail.recommendation_snapshots = true;
+    await expect(getStrategyMemoryOrNull(CO_B)).resolves.toBeNull();
+    expect(warn).toHaveBeenCalledWith('strategy_memory_unavailable', expect.objectContaining({ companyId: CO_B, stage: 'recommendation_snapshots' }));
+  });
+
+  it('CONTROL: an empty history -> null with NO warning; a real history is returned as is', async () => {
+    mockDb.campaign_versions = [];
+    await expect(getStrategyMemoryOrNull(CO_B)).resolves.toBeNull();
+    mockDb.campaign_versions = [campaignOf(CO_B, REC_B)];
+    await expect(getStrategyMemoryOrNull(CO_B)).resolves.toMatchObject({ campaigns_count: 1 });
+    expect(warn).not.toHaveBeenCalled();
+  });
+});

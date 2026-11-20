@@ -58,7 +58,9 @@ export async function getStrategyHistoryForCompany(
   if (!rawCompanyId?.trim()) return EMPTY;
   // campaign_versions.company_id and recommendation_snapshots.company_id are TEXT holding the canonical (lowercase)
   // uuid; the access check upstream matches a uuid column, which accepts any casing. Canonicalise so a differently
-  // cased id from a client neither empties this history nor slips past the company filter (b3 2026-11-20).
+  // cased id does not read as a FALSE EMPTY history (b3 2026-11-20). Casing was never a leak vector: a mis-cased id
+  // under .eq('company_id', ...) matches nothing (fail-closed). The TENANT SCOPE (that filter) prevents the leak;
+  // this canonicalisation only prevents the false empty (7c).
   const trimmed = rawCompanyId.trim();
   // Only a uuid-shaped id is canonicalised. A non-uuid value is used as given - safe ONLY because such a value
   // cannot pass enforceCompanyAccess upstream (company ids are uuids), so it never reaches here with access.
@@ -170,4 +172,23 @@ export async function getStrategyHistoryForCompany(
     underused_aspects,
     strategy_momentum,
   };
+}
+
+/**
+ * Strategy memory as an OPTIONAL input (recommendations/generate): a read failure degrades to null, as before, but is
+ * never INVISIBLE (7c 2026-11-20) - a persistent failure would otherwise show only as 503s on the strategy-history
+ * route while generation silently ran without memory. An empty history is also null (nothing to add).
+ */
+export async function getStrategyMemoryOrNull(companyId: string): Promise<StrategyHistoryResult | null> {
+  try {
+    const memory = await getStrategyHistoryForCompany(companyId);
+    return memory.campaigns_count === 0 ? null : memory;
+  } catch (err) {
+    console.warn('strategy_memory_unavailable', {
+      companyId,
+      stage: err instanceof StrategyHistoryReadError ? err.stage : null,
+      message: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
 }
