@@ -126,6 +126,10 @@ function isStale(result: CheckResult): boolean {
 }
 
 
+/** a9's server text for a company-less Facebook / Instagram connect. */
+export const CHOOSE_COMPANY_FIRST = 'Choose a company first';
+export const META_AUTH_PATH = /^\/api\/auth\/(facebook|instagram)(\/|\?|$)/;
+
 export function useSocialPlatforms() {
   const router = useRouter();
   const { selectedCompanyId } = useCompanyContext();
@@ -530,6 +534,14 @@ export function useSocialPlatforms() {
     }
 
     if (!p.auth_path) return;
+
+    // b3 ruling (a9's server change): the Facebook / Instagram auth routes REQUIRE a company and answer a raw
+    // 400 without one. This is a full-page navigation, so refuse here with the same sentence instead of
+    // sending the user to a JSON error. Covers Facebook, Instagram and Threads (which uses the Instagram path).
+    if (!selectedCompanyId && META_AUTH_PATH.test(p.auth_path)) {
+      notify('error', CHOOSE_COMPANY_FIRST);
+      return;
+    }
 
     if (selectedCompanyId) {
       params.set('companyId', selectedCompanyId);
