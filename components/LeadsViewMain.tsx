@@ -46,6 +46,7 @@ export default function LeadsView({ d }: { d: S }) {
     fromWebhooks,
     isAdmin,
     webhookSecretsVisible,
+    webhookIntegrationsUnavailable,
     leadModal,
     leads,
     lmEmail,
@@ -399,7 +400,12 @@ export default function LeadsView({ d }: { d: S }) {
                   <p>Already have a form on your website? Point it to <code className="bg-blue-100 px-1 rounded">POST /api/leads</code> with your credentials. Works with any platform — WordPress, Webflow, Squarespace, custom code.</p>
                 </div>
 
-                {webhookIntegrations.length === 0 ? (
+                {webhookIntegrationsUnavailable ? (
+                  <div role="alert" data-testid="webhooks-unavailable" className="rounded-xl border border-red-200 bg-red-50 p-5 text-sm text-red-800">
+                    <p className="font-semibold">Couldn't load your webhook connections.</p>
+                    <button onClick={() => fetchAll()} className="mt-3 rounded-lg bg-white px-3 py-1.5 text-sm font-semibold text-red-700 ring-1 ring-red-200 hover:bg-red-100">Retry</button>
+                  </div>
+                ) : webhookIntegrations.length === 0 ? (
                   <div className="text-center py-16">
                     <Webhook className="h-10 w-10 mx-auto mb-3 text-gray-300" />
                     <p className="font-medium text-gray-600">No webhook connections configured</p>
