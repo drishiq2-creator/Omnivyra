@@ -40,6 +40,13 @@ const REFUSED_FALLBACK: Record<TeamMutationKind, string> = {
   remove: 'Failed to remove user',
 };
 
+/** withIdempotency's own refusals (backend/middleware/withIdempotency.ts); nothing ran for any of them. */
+const MIDDLEWARE_REFUSAL_COPY: Record<string, string> = {
+  IDEMPOTENCY_CONFLICT: "That change didn't go through. Reload the page and try it again.",
+  IDEMPOTENCY_KEY_REQUIRED: "That change didn't go through. Reload the page and try it again.",
+  IDEMPOTENCY_PRINCIPAL_REQUIRED: 'Please log in again to manage your team.',
+};
+
 const LOAD_REFUSAL_COPY: Record<string, string> = {
   FORBIDDEN_ROLE:
     "You don't have permission to view this company's team. If you were invited, accept the invite first. Otherwise select a company you belong to or contact your admin.",
@@ -68,7 +75,12 @@ export function classifyTeamMutation(
   if (status === null) return { kind: 'unknown', reason: 'no_answer' };
   if (status >= 200 && status < 300) return { kind: 'done', body: b };
   if (status === 409 && b.code === 'IDEMPOTENCY_IN_PROGRESS') return { kind: 'unknown', reason: 'in_progress' };
+  // ORDER MATTERS: this stays ABOVE the message extraction below, so the middleware's own 5xx sentences
+  // ("Failed to initialize idempotency state", ...) become the honest unknown notice, never user copy.
   if (status >= 500) return { kind: 'unknown', reason: 'no_answer' };
+  // The middleware's 4xx sentences are developer text, not user copy (7c F2).
+  const code = typeof b.code === 'string' ? b.code : '';
+  if (MIDDLEWARE_REFUSAL_COPY[code]) return { kind: 'refused', message: MIDDLEWARE_REFUSAL_COPY[code] };
   const message = typeof b.error === 'string' && b.error.trim() ? b.error : REFUSED_FALLBACK[kind];
   return { kind: 'refused', message };
 }
@@ -77,9 +89,21 @@ export function unknownOutcomeMessage(kind: TeamMutationKind, outcome: TeamMutat
   return outcome.kind === 'unknown' && outcome.reason === 'in_progress' ? TEAM_IN_PROGRESS_COPY : TEAM_UNKNOWN_COPY[kind];
 }
 
-/** The request identity withIdempotency hashes: method + body (query is empty for these calls). */
+/** Mirrors stableStringify in backend/middleware/withIdempotency.ts (keys sorted with localeCompare). EDIT BOTH. */
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b));
+  return `{${entries.map(([key, val]) => `${JSON.stringify(key)}:${stableStringify(val)}`).join(',')}}`;
+}
+
+/**
+ * The request identity withIdempotency hashes (buildRequestHash: method + query + body; query is empty for these
+ * calls). Computed the SAME way as the server, from the body as it arrives (JSON round-trip drops undefined fields),
+ * so two bodies the server treats as one submission always share a held key, whatever order their fields were built in.
+ */
 export function submissionSignature(method: string, body: Record<string, unknown>): string {
-  return `${method.toUpperCase()} ${JSON.stringify(body)}`;
+  return `${method.toUpperCase()} ${stableStringify(JSON.parse(JSON.stringify(body)))}`;
 }
 
 /**

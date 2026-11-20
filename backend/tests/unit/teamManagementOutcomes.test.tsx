@@ -164,10 +164,14 @@ async function openAndSendInvite(email = 'new@acme.test') {
   fireEvent.change(screen.getByPlaceholderText('colleague@omnivyra.com'), { target: { value: email } });
   await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Send Invitation' })); });
 }
+const emailInput = () => screen.getByPlaceholderText('colleague@omnivyra.com') as HTMLInputElement;
+const checkAndSend = async () => {
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Check and send' })); });
+};
 
-describe('/team-management invite outcome + key lifetime (F24/F25)', () => {
-  it('a lost response: "not sure" notice, roster re-read, form kept; the re-send carries the SAME key', async () => {
-    route([{ status: 200, body: { users: [] } }], [{ status: 503, body: { error: 'Network unreachable' } }, { status: 200, body: { message: 'Invitation sent' } }]);
+describe('/team-management invite lock after an unknown outcome (F24/F25, b3 design)', () => {
+  it('unknown: "not sure" in the modal, roster re-read, form READ-ONLY, and edits are impossible', async () => {
+    route([{ status: 200, body: { users: [] } }], [{ status: 503, body: { error: 'Network unreachable' } }]);
     render(<TeamManagement />);
     await waitFor(() => screen.getByText(/No users yet/));
     const readsBefore = readCalls().length;
@@ -175,12 +179,80 @@ describe('/team-management invite outcome + key lifetime (F24/F25)', () => {
     await waitFor(() => expect(screen.getByRole('status').textContent).toContain(TEAM_UNKNOWN_COPY.invite));
     expect(screen.queryByText(/Failed to invite user/)).toBeNull();
     await waitFor(() => expect(readCalls().length).toBe(readsBefore + 1));
-    // Modal closed; reopening shows the kept form, and sending again reuses the key.
-    fireEvent.click(screen.getByRole('button', { name: /Invite Member/ }));
-    expect((screen.getByPlaceholderText('colleague@omnivyra.com') as HTMLInputElement).value).toBe('new@acme.test');
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Send Invitation' })); });
+    expect(emailInput().readOnly).toBe(true);
+    fireEvent.change(emailInput(), { target: { value: 'someone-else@acme.test' } });
+    expect(emailInput().value).toBe('new@acme.test');
+    expect(screen.queryByRole('button', { name: 'Send Invitation' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Check and send' })).toBeTruthy();
+  });
+
+  it('unknown -> Check and send answers 2xx: SAME key and body, "Invitation sent", modal closed, form reset', async () => {
+    route([{ status: 200, body: { users: [] } }], [{ status: 503 }, { status: 201, body: { success: true } }]);
+    render(<TeamManagement />);
+    await waitFor(() => screen.getByText(/No users yet/));
+    await openAndSendInvite();
+    await waitFor(() => screen.getByRole('button', { name: 'Check and send' }));
+    await checkAndSend();
+    await waitFor(() => expect(screen.getByText('Invitation sent')).toBeTruthy());
+    expect(screen.queryByPlaceholderText('colleague@omnivyra.com')).toBeNull();
     const [first, second] = writeCalls();
     expect(keyOf(second)).toBe(keyOf(first));
+    expect(JSON.parse(String((second[1] as RequestInit).body))).toEqual(JSON.parse(String((first[1] as RequestInit).body)));
+    fireEvent.click(screen.getByRole('button', { name: /Invite Member/ }));
+    expect(emailInput().value).toBe('');
+    expect(emailInput().readOnly).toBe(false);
+  });
+
+  it('unknown -> Check and send answers 4xx: refusal shown, form editable again', async () => {
+    route([{ status: 200, body: { users: [] } }], [{ status: 503 }, { status: 400, body: { error: 'Invalid email' } }]);
+    render(<TeamManagement />);
+    await waitFor(() => screen.getByText(/No users yet/));
+    await openAndSendInvite();
+    await waitFor(() => screen.getByRole('button', { name: 'Check and send' }));
+    await checkAndSend();
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toBe('Invalid email'));
+    expect(emailInput().readOnly).toBe(false);
+    fireEvent.change(emailInput(), { target: { value: 'fixed@acme.test' } });
+    expect(emailInput().value).toBe('fixed@acme.test');
+  });
+
+  it.each<[string, Answer]>([
+    ['lost again', 'throw'],
+    ['5xx again', { status: 500 }],
+    ['still in progress', { status: 409, body: { code: 'IDEMPOTENCY_IN_PROGRESS' } }],
+  ])('unknown -> Check and send %s: STILL locked, same key', async (_n, again) => {
+    route([{ status: 200, body: { users: [] } }], [{ status: 503 }, again]);
+    render(<TeamManagement />);
+    await waitFor(() => screen.getByText(/No users yet/));
+    await openAndSendInvite();
+    await waitFor(() => screen.getByRole('button', { name: 'Check and send' }));
+    await checkAndSend();
+    await waitFor(() => expect(writeCalls().length).toBe(2));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Check and send' })).toBeTruthy());
+    expect(emailInput().readOnly).toBe(true);
+    const [first, second] = writeCalls();
+    expect(keyOf(second)).toBe(keyOf(first));
+  });
+
+  it('Cancel keeps the lock: reopening is still read-only with the notice', async () => {
+    route([{ status: 200, body: { users: [] } }], [{ status: 503 }]);
+    render(<TeamManagement />);
+    await waitFor(() => screen.getByText(/No users yet/));
+    await openAndSendInvite();
+    await waitFor(() => screen.getByRole('button', { name: 'Check and send' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    fireEvent.click(screen.getByRole('button', { name: /Invite Member/ }));
+    expect(emailInput().readOnly).toBe(true);
+    expect(screen.getByRole('status').textContent).toContain(TEAM_UNKNOWN_COPY.invite);
+  });
+
+  it('409 IDEMPOTENCY_IN_PROGRESS on the first send says still being processed, and locks', async () => {
+    route([{ status: 200, body: { users: [] } }], [{ status: 409, body: { code: 'IDEMPOTENCY_IN_PROGRESS' } }]);
+    render(<TeamManagement />);
+    await waitFor(() => screen.getByText(/No users yet/));
+    await openAndSendInvite();
+    await waitFor(() => expect(screen.getByRole('status').textContent).toContain(TEAM_IN_PROGRESS_COPY));
+    expect(emailInput().readOnly).toBe(true);
   });
 
   it('after a confirmed send, the next invite gets a NEW key', async () => {
@@ -194,29 +266,14 @@ describe('/team-management invite outcome + key lifetime (F24/F25)', () => {
     expect(keyOf(second)).not.toBe(keyOf(first));
   });
 
-  it('a thrown fetch is unknown too (not "failed")', async () => {
-    route([{ status: 200, body: { users: [] } }], ['throw']);
-    render(<TeamManagement />);
-    await waitFor(() => screen.getByText(/No users yet/));
-    await openAndSendInvite();
-    await waitFor(() => expect(screen.getByRole('status').textContent).toContain(TEAM_UNKNOWN_COPY.invite));
-  });
-
-  it('409 IDEMPOTENCY_IN_PROGRESS says still being processed', async () => {
-    route([{ status: 200, body: { users: [] } }], [{ status: 409, body: { code: 'IDEMPOTENCY_IN_PROGRESS' } }]);
-    render(<TeamManagement />);
-    await waitFor(() => screen.getByText(/No users yet/));
-    await openAndSendInvite();
-    await waitFor(() => expect(screen.getByRole('status').textContent).toContain(TEAM_IN_PROGRESS_COPY));
-  });
-
-  it('control: a 400 refusal shows the server sentence and no "not sure" notice; the key is dropped', async () => {
+  it('control: a 400 refusal on the first send shows the sentence, never locks, and drops the key', async () => {
     route([{ status: 200, body: { users: [] } }], [{ status: 400, body: { error: 'Invalid email' } }]);
     render(<TeamManagement />);
     await waitFor(() => screen.getByText(/No users yet/));
     await openAndSendInvite();
-    await waitFor(() => expect(screen.getByText('Invalid email')).toBeTruthy());
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toBe('Invalid email'));
     expect(screen.queryByRole('status')).toBeNull();
+    expect(emailInput().readOnly).toBe(false);
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Send Invitation' })); });
     const [first, second] = writeCalls();
     expect(keyOf(second)).not.toBe(keyOf(first));
@@ -229,5 +286,28 @@ describe('/team-management invite outcome + key lifetime (F24/F25)', () => {
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Reinvite' })); });
     await waitFor(() => expect(screen.getByRole('status').textContent).toContain(TEAM_UNKNOWN_COPY.reinvite));
     expect(screen.queryByText(/Failed to reinvite/)).toBeNull();
+  });
+});
+
+describe("7c F1/F2: signature mirrors the server's stableStringify; middleware sentences are not user copy", () => {
+  it('field order does not change the signature (server hashes key-sorted); undefined fields drop like the wire', () => {
+    expect(submissionSignature('POST', { email: 'a@b.c', role: 'X' })).toBe(submissionSignature('POST', { role: 'X', email: 'a@b.c' }));
+    expect(submissionSignature('POST', { email: 'a@b.c', name: undefined })).toBe(submissionSignature('POST', { email: 'a@b.c' }));
+    expect(submissionSignature('POST', { email: 'a@b.c' })).not.toBe(submissionSignature('PUT', { email: 'a@b.c' }));
+  });
+
+  it.each([
+    ['IDEMPOTENCY_CONFLICT', 'Idempotency key reused with different payload'],
+    ['IDEMPOTENCY_KEY_REQUIRED', 'Idempotency-Key header required'],
+    ['IDEMPOTENCY_PRINCIPAL_REQUIRED', 'Unauthorized'],
+  ])('%s never shows its developer sentence', (code, devText) => {
+    const status = code === 'IDEMPOTENCY_PRINCIPAL_REQUIRED' ? 401 : code === 'IDEMPOTENCY_CONFLICT' ? 409 : 400;
+    const out = classifyTeamMutation('invite', status, { code, error: devText });
+    expect(out.kind).toBe('refused');
+    expect(out.kind === 'refused' && out.message).not.toBe(devText);
+  });
+
+  it('middleware 5xx sentences stay the unknown notice (5xx branch is above the message extraction)', () => {
+    expect(classifyTeamMutation('invite', 500, { error: 'Failed to initialize idempotency state' }).kind).toBe('unknown');
   });
 });

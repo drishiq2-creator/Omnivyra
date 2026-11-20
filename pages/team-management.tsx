@@ -64,6 +64,9 @@ export default function TeamManagement() {
   // F25: an unknown mutation outcome stays on screen until the user acts (the toast auto-dismisses in 4s).
   const [outcomeNotice, setOutcomeNotice] = useState('');
   const heldKeys = useRef(new HeldIdempotencyKeys(newIdempotencyKey));
+  // The exact invite body whose outcome is unknown; non-null = the invite form is locked (see sendInvitation).
+  const [pendingInvite, setPendingInvite] = useState<Record<string, unknown> | null>(null);
+  const [inviteModalMessage, setInviteModalMessage] = useState<{ tone: 'error' | 'unknown'; text: string } | null>(null);
 
   const { selectedCompanyId, selectedCompanyName, userRole, isAuthenticated, refreshCompanies } = useCompanyContext();
   const canManage =
@@ -165,38 +168,55 @@ export default function TeamManagement() {
     }
     const outcome = classifyTeamMutation(kind, status, payload);
     heldKeys.current.record(signature, outcome);
-    if (outcome.kind === 'refused') setToastMessage(outcome.message);
+    // The invite modal shows its own outcome (it sits over the page toast and notice).
+    if (outcome.kind === 'refused' && kind !== 'invite') setToastMessage(outcome.message);
     if (outcome.kind === 'unknown') {
-      setOutcomeNotice(unknownOutcomeMessage(kind, outcome));
+      if (kind !== 'invite') setOutcomeNotice(unknownOutcomeMessage(kind, outcome));
       loadUsers();
     }
     return outcome;
   };
 
+  /**
+   * Invite lock (b3, 2026-11-20). After an UNKNOWN outcome the exact submitted body is kept in `pendingInvite` and
+   * the form is read-only: the only action is "Check and send", which re-sends THAT body with the held key. The
+   * server then replays (completed row) or re-runs; createInvitation and the email job are both keyed off the
+   * request key (invitationService findExistingByIdempotencyKey, emailJobsService `${key}:email:magic_link`), so a
+   * keyed re-run does not send a second email. Only a definitive answer (2xx done, 4xx refused) unlocks. Editing
+   * would change the body, mint a new key, and run normalizeInvitationState + a second email, so it is impossible
+   * while locked. Cancel closes the modal and keeps the lock.
+   */
   const sendInvitation = async () => {
-    if (!inviteForm.email || !inviteForm.role || !selectedCompanyId) return;
+    const body = pendingInvite ?? (inviteForm.email && inviteForm.role && selectedCompanyId
+      ? { name: inviteForm.name, email: inviteForm.email, role: inviteForm.role, companyId: selectedCompanyId }
+      : null);
+    if (!body) return;
     setIsLoading(true);
+    setInviteModalMessage(null);
     try {
-      const outcome = await runTeamMutation('invite', 'POST', {
-        name: inviteForm.name,
-        email: inviteForm.email,
-        role: inviteForm.role,
-        companyId: selectedCompanyId,
-      });
+      const outcome = await runTeamMutation('invite', 'POST', body);
       if (outcome.kind === 'done') {
+        setPendingInvite(null);
         setInviteForm({ name: '', email: '', role: 'CONTENT_CREATOR' });
         setShowInviteModal(false);
         setOutcomeNotice('');
         setToastMessage(typeof outcome.body.message === 'string' ? outcome.body.message : 'Invitation sent');
         loadUsers();
-      } else if (outcome.kind === 'unknown') {
-        // Close so the notice and the re-read list are visible; the form is KEPT, so sending it again
-        // carries the same body and therefore the same held key.
-        setShowInviteModal(false);
+      } else if (outcome.kind === 'refused') {
+        setPendingInvite(null);
+        setInviteModalMessage({ tone: 'error', text: outcome.message });
+      } else {
+        setPendingInvite(body);
+        setInviteModalMessage({ tone: 'unknown', text: unknownOutcomeMessage('invite', outcome) });
       }
     } finally {
       setIsLoading(false);
     }
+  };
+  const inviteLocked = pendingInvite !== null;
+  const editInviteForm = (patch: Partial<typeof inviteForm>) => {
+    if (inviteLocked) return; // read-only while the outcome is unknown
+    setInviteForm((prev) => ({ ...prev, ...patch }));
   };
 
   const updateUserRole = async (userId: string, role: string) => {
@@ -279,7 +299,9 @@ export default function TeamManagement() {
             <div className="flex items-center gap-3">
               <button
                 onClick={() => {
-                  if (canManage) setShowInviteModal(true);
+                  if (!canManage) return;
+                  if (!inviteLocked) setInviteModalMessage(null); // a locked invite keeps its notice
+                  setShowInviteModal(true);
                 }}
                 disabled={!canManage}
                 className="bg-gradient-to-r from-indigo-500 to-purple-600 hover:from-indigo-600 hover:to-purple-700 text-white px-6 py-3 rounded-xl font-semibold shadow-lg hover:shadow-xl transform hover:scale-105 transition-all duration-200 flex items-center gap-2 disabled:opacity-50"
@@ -516,7 +538,8 @@ export default function TeamManagement() {
                 <input
                   type="text"
                   value={inviteForm.name}
-                  onChange={(e) => setInviteForm((prev) => ({ ...prev, name: e.target.value }))}
+                  onChange={(e) => editInviteForm({ name: e.target.value })}
+                  readOnly={inviteLocked}
                   className="w-full border border-gray-200 rounded-lg px-3 py-2 focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
                   placeholder="Alex Johnson"
                 />
@@ -527,7 +550,8 @@ export default function TeamManagement() {
                 <input
                   type="email"
                   value={inviteForm.email}
-                  onChange={(e) => setInviteForm((prev) => ({ ...prev, email: e.target.value }))}
+                  onChange={(e) => editInviteForm({ email: e.target.value })}
+                  readOnly={inviteLocked}
                   className="w-full border border-gray-200 rounded-lg px-3 py-2 focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
                   placeholder="colleague@omnivyra.com"
                 />
@@ -537,7 +561,8 @@ export default function TeamManagement() {
                 <label className="block text-sm font-medium text-gray-700 mb-2">Role</label>
                 <select
                   value={inviteForm.role}
-                  onChange={(e) => setInviteForm((prev) => ({ ...prev, role: e.target.value }))}
+                  onChange={(e) => editInviteForm({ role: e.target.value })}
+                  disabled={inviteLocked}
                   className="w-full border border-gray-200 rounded-lg px-3 py-2 focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
                 >
                   {roleOptions.map((role) => (
@@ -549,6 +574,19 @@ export default function TeamManagement() {
               </div>
             </div>
 
+            {inviteModalMessage && (
+              <div
+                role={inviteModalMessage.tone === 'error' ? 'alert' : 'status'}
+                className={`mt-4 rounded-lg p-3 text-sm ${
+                  inviteModalMessage.tone === 'error'
+                    ? 'border border-red-200 bg-red-50 text-red-800'
+                    : 'border border-amber-200 bg-amber-50 text-amber-900'
+                }`}
+              >
+                {inviteModalMessage.text}
+              </div>
+            )}
+
             <div className="flex items-center gap-3 mt-6">
               <button
                 onClick={() => setShowInviteModal(false)}
@@ -558,10 +596,10 @@ export default function TeamManagement() {
               </button>
               <button
                 onClick={sendInvitation}
-                disabled={isLoading || !inviteForm.email}
+                disabled={isLoading || (!inviteLocked && !inviteForm.email)}
                 className="flex-1 bg-gradient-to-r from-indigo-500 to-purple-600 hover:from-indigo-600 hover:to-purple-700 disabled:opacity-50 text-white px-4 py-2 rounded-lg font-medium transition-all duration-200"
               >
-                {isLoading ? 'Sending...' : 'Send Invitation'}
+                {isLoading ? 'Sending...' : inviteLocked ? 'Check and send' : 'Send Invitation'}
               </button>
             </div>
           </div>
