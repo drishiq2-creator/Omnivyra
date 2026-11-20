@@ -176,10 +176,9 @@ describe('A3X — 2. no unrelated monetization action can be billed', () => {
     expect(CREDIT_ACTIONS as readonly string[]).not.toContain(PROSPECT_ENRICHMENT_ACTION);
   });
 
-  it('the registry STILL resolves it by fallback to something else — the hazard is real', () => {
-    const resolved = resolveMonetizationFeature({ action_key: PROSPECT_ENRICHMENT_ACTION });
-    expect(resolved).not.toBeNull();
-    expect(resolved?.action_key).not.toBe(PROSPECT_ENRICHMENT_ACTION);
+  it('the registry answers NULL for it - the report fallback no longer runs without report fields (hazard closed, 89/b3 2026-11-20)', () => {
+    // Was: resolved by fallback to another, credit-holding action (website_audit). Fixed in featureRegistry.ts.
+    expect(resolveMonetizationFeature({ action_key: PROSPECT_ENRICHMENT_ACTION })).toBeNull();
   });
 
   it('the credit port still refuses that fallback, naming the wrong cost centre', async () => {
