@@ -197,3 +197,48 @@ describe('waiting replies show their AGE prominently; no bulk send (7c)', () => 
     expect(document.querySelector('input[type="checkbox"]')).toBeNull();
   });
 });
+
+describe('execute outcomes: a concurrent press, a lost response, a refusal (never a raw code)', () => {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { EXECUTE_ALREADY_HANDLED, EXECUTE_UNKNOWN, classifyExecute } = require('../../../lib/communityAi/executeOutcome');
+
+  function routeExecute(answer: { status: number; body?: unknown } | 'throw') {
+    fetchWithAuth.mockImplementation((url: string) => {
+      if (url === '/api/community-ai/actions/execute') {
+        if (answer === 'throw') return Promise.reject(new TypeError('Failed to fetch'));
+        return Promise.resolve({ ok: answer.status >= 200 && answer.status < 300, status: answer.status, json: async () => answer.body ?? {} });
+      }
+      return okJson({ pending_actions: [], scheduled_actions: [SCHEDULED], completed_actions: [], skipped_actions: [], permissions: { canApprove: true, canExecute: true, canSkip: true, canManageConnectors: false } });
+    });
+  }
+  const loads = () => fetchWithAuth.mock.calls.filter(([u]) => String(u).startsWith('/api/community-ai/actions?')).length;
+
+  it.each<[string, { status: number; body?: unknown } | 'throw', string, boolean]>([
+    ['another tab/operator won the claim (409 ACTION_NOT_PENDING)', { status: 409, body: { error: 'ACTION_NOT_PENDING', current_status: 'executing' } }, 'already', true],
+    ['a lost connection (apiFetch 503)', { status: 503 }, 'unknown', true],
+    ['a thrown fetch', 'throw', 'unknown', true],
+    ['a refusal (403 APPROVAL_REQUIRED)', { status: 403, body: { error: 'APPROVAL_REQUIRED', reason: 'NOT_APPROVED' } }, 'refused', false],
+  ])('%s', async (_n, answer, kind, rereads) => {
+    routeExecute(answer);
+    render(<Harness />);
+    await waitFor(() => screen.getByRole('button', { name: SEND_NOW_LABEL }));
+    const before = loads();
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: SEND_NOW_LABEL })); });
+    const expected = kind === 'already' ? EXECUTE_ALREADY_HANDLED : kind === 'unknown' ? EXECUTE_UNKNOWN : "This reply wasn't sent: it needs approval first.";
+    await waitFor(() => expect(screen.getByText(expected)).toBeTruthy());
+    expect(screen.queryByText('ACTION_NOT_PENDING')).toBeNull();
+    expect(screen.queryByText('Execution failed')).toBeNull();
+    if (rereads) await waitFor(() => expect(loads()).toBeGreaterThan(before));
+  });
+
+  it('classifyExecute table', () => {
+    expect(classifyExecute(200, {}).kind).toBe('done');
+    expect(classifyExecute(409, { error: 'ACTION_NOT_PENDING' }).kind).toBe('already');
+    expect(classifyExecute(409, { error: 'OTHER' }).kind).toBe('refused');
+    expect([null, 500, 503, 599].map((s) => classifyExecute(s, {}).kind)).toEqual(['unknown', 'unknown', 'unknown', 'unknown']);
+    expect(classifyExecute(400, { error: 'PLAYBOOK_VIOLATION', reason: 'Too long.' })).toEqual({ kind: 'refused', message: "This reply wasn't sent: Too long." });
+    expect(classifyExecute(403, { error: 'TENANT_SCOPE_VIOLATION' }).kind === 'refused' && classifyExecute(403, { error: 'TENANT_SCOPE_VIOLATION' })).toEqual({ kind: 'refused', message: "This reply wasn't sent: it doesn't belong to the selected company." });
+    expect(classifyExecute(403, { error: 'APPROVAL_REQUIRED', reason: 'NOT_APPROVED' })).toEqual({ kind: 'refused', message: "This reply wasn't sent: it needs approval first." });
+    expect(classifyExecute(418, { error: 'SOME_FUTURE_CODE' })).toEqual({ kind: 'refused', message: "This reply wasn't sent." });
+  });
+});

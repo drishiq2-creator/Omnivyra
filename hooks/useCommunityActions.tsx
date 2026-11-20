@@ -5,6 +5,7 @@ import CommunityAiLayout from '../components/community-ai/CommunityAiLayout';
 import SectionCard from '../components/community-ai/SectionCard';
 import { fetchWithAuth } from '../components/community-ai/fetchWithAuth';
 import type { PendingAction } from '../components/community-ai/types';
+import { ExecuteOutcomeError, classifyExecute, executeErrorMessage } from '../lib/communityAi/executeOutcome';
 import {
   validateActionAgainstPlaybook,
   type PlaybookValidationInput,
@@ -245,9 +246,13 @@ export function useCommunityActions() {
         }),
       });
       const data = await response.json().catch(() => null);
-      if (!response.ok) {
-        throw new Error(data?.error || 'Execution failed');
+      const outcome = classifyExecute(response.status, data);
+      if (outcome.kind === 'already' || outcome.kind === 'unknown') {
+        // Never "failed": someone else sent it, or we can't know. Show the server's truth.
+        void loadActions();
+        throw new ExecuteOutcomeError(outcome.message);
       }
+      if (outcome.kind === 'refused') throw new ExecuteOutcomeError(outcome.message);
       setActions((prev) =>
         prev.map((entry) =>
           entry.action_id === action.action_id
@@ -261,7 +266,9 @@ export function useCommunityActions() {
       );
       await loadActions();
     } catch (error: any) {
-      setErrorMessage(error?.message || 'Execution failed');
+      const shown = executeErrorMessage(error);
+      if (shown.reread) void loadActions();
+      setErrorMessage(shown.message);
     } finally {
       setExecutingActionId(null);
     }
@@ -344,9 +351,13 @@ export function useCommunityActions() {
         }),
       });
       const data = await response.json().catch(() => null);
-      if (!response.ok) {
-        throw new Error(data?.error || 'Execution failed');
+      const outcome = classifyExecute(response.status, data);
+      if (outcome.kind === 'already' || outcome.kind === 'unknown') {
+        // Never "failed": someone else sent it, or we can't know. Show the server's truth.
+        void loadActions();
+        throw new ExecuteOutcomeError(outcome.message);
       }
+      if (outcome.kind === 'refused') throw new ExecuteOutcomeError(outcome.message);
       setActions((prev) =>
         prev.map((entry) =>
           entry.action_id === manualAction.action_id
@@ -362,7 +373,9 @@ export function useCommunityActions() {
       closeManualExecute();
       await loadActions();
     } catch (error: any) {
-      setManualError(error?.message || 'Execution failed');
+      const shown = executeErrorMessage(error);
+      if (shown.reread) void loadActions();
+      setManualError(shown.message);
     } finally {
       setManualSending(false);
       setExecutingActionId(null);
@@ -410,9 +423,13 @@ export function useCommunityActions() {
         }),
       });
       const data = await response.json().catch(() => null);
-      if (!response.ok) {
-        throw new Error(data?.error || 'Execution failed');
+      const outcome = classifyExecute(response.status, data);
+      if (outcome.kind === 'already' || outcome.kind === 'unknown') {
+        // Never "failed": someone else sent it, or we can't know. Show the server's truth.
+        void loadActions();
+        throw new ExecuteOutcomeError(outcome.message);
       }
+      if (outcome.kind === 'refused') throw new ExecuteOutcomeError(outcome.message);
       setActions((prev) =>
         prev.map((entry) =>
           entry.action_id === platformViewAction.action_id
@@ -428,7 +445,9 @@ export function useCommunityActions() {
       closePlatformView();
       await loadActions();
     } catch (error: any) {
-      setPlatformReplyError(error?.message || 'Execution failed');
+      const shown = executeErrorMessage(error);
+      if (shown.reread) void loadActions();
+      setPlatformReplyError(shown.message);
     } finally {
       setPlatformReplySending(false);
       setExecutingActionId(null);
