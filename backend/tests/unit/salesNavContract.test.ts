@@ -1,6 +1,6 @@
 /** Sales Navigator shared contract v1.1 - the pure parts every route depends on (c6). */
 import {
-  parseSalesNavUrl, pageUrlFor, canonicalMemberId, isAllowedClose, isRepeatedPage, pageReservationRequest,
+  parseSalesNavUrl, pageUrlFor, canonicalMemberId, isAllowedClose, isRepeatedPage, pageReservationRequest, isCommandedPage,
   SALESNAV_STATUS_CODES, SALESNAV_TERMINAL_STATUSES, SALESNAV_RUN_STATUSES, SALESNAV_TRANSPORTS, SALESNAV_SOURCE,
   MAX_SALESNAV_PAGE, DEFAULT_SALESNAV_DAILY_CAP, MAX_SALESNAV_DAILY_CAP, resolveDailyCap, parseListTotal,
   isAllowedPause, SALESNAV_RESUMABLE_STATUSES,
@@ -38,19 +38,46 @@ describe('parseSalesNavUrl - the one allowlist', () => {
   });
 });
 
-describe('pageUrlFor - page URLs are built here and nowhere else', () => {
+describe('pageUrlFor - page URLs AND position rules are built here and nowhere else (v2.1)', () => {
   const base = 'https://www.linkedin.com/sales/search/people?query=x';
-  it('page 0 is the canonical URL; page n sets page=n+1', () => {
-    expect(pageUrlFor(base, 0)).toBe(base);
-    expect(pageUrlFor(base, 1)).toBe(`${base}&page=2`);
-    expect(pageUrlFor('https://www.linkedin.com/sales/lists/people/70', 3)).toBe('https://www.linkedin.com/sales/lists/people/70?page=4');
+  it('page 0 is the canonical URL with position 1; page n sets page=n+1', () => {
+    expect(pageUrlFor(base, 0)).toEqual({ pageUrl: base, position: { param: 'page', value: '1' } });
+    expect(pageUrlFor(base, 1)).toEqual({ pageUrl: `${base}&page=2`, position: { param: 'page', value: '2' } });
+    expect(pageUrlFor('https://www.linkedin.com/sales/lists/people/70', 3))
+      .toEqual({ pageUrl: 'https://www.linkedin.com/sales/lists/people/70?page=4', position: { param: 'page', value: '4' } });
   });
   it('re-validates: a non-allowed URL or a bad index yields null (never a URL)', () => {
     expect(pageUrlFor('https://evil.example/sales/search/people', 1)).toBeNull();
     for (const i of [-1, 1.5, Number.NaN, 1000]) expect(pageUrlFor(base, i)).toBeNull();
   });
   it('an incoming page parameter cannot survive into a different page', () => {
-    expect(pageUrlFor(`${base}&page=9`, 1)).toBe(`${base}&page=2`);
+    expect(pageUrlFor(`${base}&page=9`, 1)!.pageUrl).toBe(`${base}&page=2`);
+  });
+});
+
+describe('isCommandedPage - the one position check for the browser routes', () => {
+  const base = 'https://www.linkedin.com/sales/search/people?query=x';
+  const p2 = pageUrlFor(base, 1)!;
+  const p0 = pageUrlFor(base, 0)!;
+  it('control: the commanded page is recognised (and page 1 with no parameter)', () => {
+    expect(isCommandedPage(p2.pageUrl, p2.pageUrl, p2.position)).toBe(true);
+    expect(isCommandedPage(base, p0.pageUrl, p0.position)).toBe(true);
+  });
+  it('LinkedIn served page 1 for page 2 (parameter dropped on redirect) -> false', () => {
+    expect(isCommandedPage(base, p2.pageUrl, p2.position)).toBe(false);
+  });
+  it('a different page number -> false', () => {
+    expect(isCommandedPage(`${base}&page=3`, p2.pageUrl, p2.position)).toBe(false);
+  });
+  it('a different search or list, or off the allowlist -> false', () => {
+    expect(isCommandedPage('https://www.linkedin.com/sales/search/people?query=y&page=2', p2.pageUrl, p2.position)).toBe(false);
+    expect(isCommandedPage('https://www.linkedin.com/feed/?page=2', p2.pageUrl, p2.position)).toBe(false);
+    expect(isCommandedPage('https://www.linkedin.com/checkpoint/challenge', p2.pageUrl, p2.position)).toBe(false);
+  });
+  it('a malformed position rule or URL is false, never a throw', () => {
+    expect(isCommandedPage(p2.pageUrl, p2.pageUrl, { param: 'page', value: 'two' } as never)).toBe(false);
+    expect(isCommandedPage(p2.pageUrl, p2.pageUrl, null as never)).toBe(false);
+    expect(isCommandedPage(42, p2.pageUrl, p2.position)).toBe(false);
   });
 });
 
