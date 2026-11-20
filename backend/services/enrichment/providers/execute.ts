@@ -71,9 +71,6 @@ export interface ExecuteEnrichmentPorts {
     providerId: string;
     attributes: readonly string[];
     correlationId: string;
-    /** Which subject the call is about. */
-    subject?: 'person' | 'account';
-    entityId?: string;
   }): Promise<CostDecision>;
 
   /** Release a reservation when the call produced nothing billable. */
@@ -280,7 +277,6 @@ export async function executeEnrichment(
   const funding: CredentialFunding = 'tenant';
   const decision = await ports.authorizeCost({
     organizationId, providerId: adapter.id, attributes: supported, correlationId: request.correlationId,
-    subject: request.subject, entityId: request.entityId,
   });
   // `'reason' in decision`, not `!decision.authorized`: the root tsconfig sets
   // `strict: false`, which disables union narrowing on a negated discriminant.

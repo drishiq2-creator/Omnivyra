@@ -97,6 +97,16 @@ function mockGet(payload: unknown) {
     if (url.startsWith('/api/prospect-icp/versions')) {
       return Promise.resolve({ ok: true, json: async () => payload });
     }
+    // A ratified version renders the ICP discovery panel (a5f2e9647), which shows the data-controller notice and
+    // reads its status (54928556e). Answered as acknowledged; this suite tests version handling, not the notice
+    // (its own suite is tenantDataNotice.dom). Every OTHER url still fails loudly.
+    if (url.startsWith('/api/compliance/tenant-data-ack')) {
+      const cat = { state: 'current', allowed: true, acceptedAt: '2026-11-01T00:00:00.000Z', graceEndsAt: null };
+      return Promise.resolve({ ok: true, json: async () => ({
+        notice: { version: 'v', status: 's', title: 't', intro: 'i', categories: { vendor_data: 'V', contact_data: 'C' }, textSha256: 'h' },
+        readable: true, categories: { vendor_data: cat, contact_data: cat },
+      }) });
+    }
     throw new Error(`unexpected request: ${url}`);
   });
 }
