@@ -173,8 +173,10 @@ export async function touchLastSeen(id: string): Promise<void> {
   const { error: secErr5 } = await ownedDbTable('trusted_devices')
     .update({ last_seen_at: new Date().toISOString() })
     .eq('id', id);
-  // Best-effort timestamp: a failure is logged, never thrown (it must not block a login).
-  if (secErr5) logger.warn('security_touch_failed', { table: 'trusted_devices', op: 'touchLastSeen', message: secErr5.message });
+  if (secErr5) {
+    // security-read-exempt: best-effort timestamp touch - a failure is logged, never thrown (it must not block a login).
+    logger.warn('security_touch_failed', { table: 'trusted_devices', op: 'touchLastSeen', message: secErr5.message });
+  }
 }
 
 export async function revokeDevice(

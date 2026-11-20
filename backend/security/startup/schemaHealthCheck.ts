@@ -98,6 +98,8 @@ async function probeSchema(): Promise<SchemaHealthResult> {
       .in('table_name', tables);
 
     if (error) {
+      // security-read-exempt: boot-time schema diagnostic, not an authorization decision; the error triggers a
+      // per-column probe FALLBACK whose own failures are reported as MISSING (conservative), never as healthy.
       // information_schema may not be queryable through PostgREST. Fall
       // back to per-column probes — try selecting each column with limit 0.
       // A missing column surfaces as PGRST204; existing columns return 200.

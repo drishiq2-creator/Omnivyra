@@ -127,8 +127,10 @@ export async function touchLastUsed(factorId: string): Promise<void> {
   const { error: secErr3 } = await ownedDbTable('totp_factors')
     .update({ last_used_at: new Date().toISOString() })
     .eq('id', factorId);
-  // Best-effort timestamp: a failure is logged, never thrown (it must not block a login).
-  if (secErr3) logger.warn('security_touch_failed', { table: 'totp_factors', op: 'touchLastUsed', message: secErr3.message });
+  if (secErr3) {
+    // security-read-exempt: best-effort timestamp touch - a failure is logged, never thrown (it must not block a login).
+    logger.warn('security_touch_failed', { table: 'totp_factors', op: 'touchLastUsed', message: secErr3.message });
+  }
 }
 
 export async function revokeFactor(

@@ -179,8 +179,10 @@ export async function touchLastUsed(credentialId: string): Promise<void> {
   const { error: secErr4 } = await ownedDbTable('webauthn_credentials')
     .update({ last_used_at: new Date().toISOString() })
     .eq('credential_id', credentialId);
-  // Best-effort timestamp: a failure is logged, never thrown (it must not block a login).
-  if (secErr4) logger.warn('security_touch_failed', { table: 'webauthn_credentials', op: 'touchLastUsed', message: secErr4.message });
+  if (secErr4) {
+    // security-read-exempt: best-effort timestamp touch - a failure is logged, never thrown (it must not block a login).
+    logger.warn('security_touch_failed', { table: 'webauthn_credentials', op: 'touchLastUsed', message: secErr4.message });
+  }
 }
 
 export async function revokeCredential(

@@ -45,7 +45,7 @@ export interface AuthSessionRow {
 
 export type SessionLookupResult =
   | { ok: true; session: AuthSessionRow }
-  | { ok: false; reason: 'NO_COOKIE' | 'BAD_FORMAT' | 'BAD_SIGNATURE' | 'NOT_FOUND' | 'REVOKED' | 'EXPIRED' };
+  | { ok: false; reason: 'NO_COOKIE' | 'BAD_FORMAT' | 'BAD_SIGNATURE' | 'NOT_FOUND' | 'REVOKED' | 'EXPIRED' | 'LOOKUP_FAILED' };
 
 // ── Cookie signing ───────────────────────────────────────────────────────────
 
@@ -223,8 +223,12 @@ export async function resolveSessionFromRequest(req: NextApiRequest): Promise<Se
     .maybeSingle();
 
   if (error) {
+    // A FAILED read is LOOKUP_FAILED, never NOT_FOUND (7c 2026-11-20): callers that only check `.ok` stay
+    // fail-closed exactly as before (no session -> no step-up / no canonical principal), but a read failure no longer
+    // reads as a genuinely absent session. Not a throw: buildPrincipalFromAuth runs this on EVERY bearer request and
+    // must tolerate a missing session row.
     logger.warn('session_authority_lookup_failed', { sessionId: parsed.sessionId, message: error.message });
-    return { ok: false, reason: 'NOT_FOUND' };
+    return { ok: false, reason: 'LOOKUP_FAILED' };
   }
 
   if (!data) return { ok: false, reason: 'NOT_FOUND' };
@@ -251,8 +255,10 @@ export async function touchSession(sessionId: string): Promise<void> {
   const { error: secErr1 } = await ownedDbTable('auth_sessions')
     .update({ last_seen_at: new Date().toISOString() })
     .eq('id', sessionId);
-  // Best-effort timestamp: a failure is logged, never thrown (it must not block a login).
-  if (secErr1) logger.warn('security_touch_failed', { table: 'auth_sessions', op: 'touchSession', message: secErr1.message });
+  if (secErr1) {
+    // security-read-exempt: best-effort timestamp touch - a failure is logged, never thrown (it must not block a login).
+    logger.warn('security_touch_failed', { table: 'auth_sessions', op: 'touchSession', message: secErr1.message });
+  }
 }
 
 /**
