@@ -26,6 +26,20 @@
 #   cache_miss{cache="omnivyra:canonical_ctx"}    counter
 # (RF-2 forensic exemplar is a LOG event `canonical_grounding.shadow_overwrite`,
 #  not a metric — alert on it via the log pipeline; see ALERT-CG-001 note.)
+#
+# COVERAGE - WORKER CALLS ONLY (a9, 2026-11-20; b3 ruling): every metric above is an IN-MEMORY, PER-PROCESS
+#   counter / summary. canonicalProfileAdapter runs in BOTH processes: Vercel API routes (e.g. detected
+#   opportunities, campaign AI orchestration) and the Railway worker (daily intelligence, the BOLT pipeline). The
+#   Vercel app scrape lands on whichever serverless instance answers and all instances share one label set, so the
+#   app job both MISSES events (an instance is recycled unscraped) and can INVENT them (alternating instances read as
+#   counter resets; a quantile is one instance's). The rules below therefore read job="omnivyra-worker" ONLY:
+#   THESE RULES COVER WORKER CALLS ONLY. API-PATH GROUNDING EVENTS (overwrites, errors, fallbacks, latency) ARE NOT
+#   ALERTED. These are shadow / quality signals (not money or sending), so no durable source is built for them.
+#   Exception: CanonicalGroundingMetricsMissing stays UNSCOPED - it is an absence check (is ANY process emitting the
+#   series?), which instance alternation cannot falsify; scoping it to the worker would page after every quiet
+#   worker restart (the series exists only after the first grounding call). The recording rules in
+#   canonical-grounding-recording-rules.yml feed dashboards and are not scoped: read them with the same limit.
+#   Proven by monitoring/canonical-grounding-alerts.test.yml (an app-job series does not match).
 ---
 groups:
   - name: canonical_grounding_safety
@@ -35,7 +49,7 @@ groups:
       # Canonical overwrote a value legacy already held. Must be ZERO in shadow.
       # Any nonzero HALTS promotion and requires RF-2 diagnostic investigation.
       - alert: CanonicalGroundingOverwriteViolation
-        expr: increase(canonical_grounding_shadow{result="overwrote"}[5m]) > 0
+        expr: increase(canonical_grounding_shadow{job="omnivyra-worker",result="overwrote"}[5m]) > 0
         for: 0m
         labels: { severity: critical, component: canonical_grounding, category: correctness, page: sre }
         annotations:
@@ -50,7 +64,7 @@ groups:
 
       # ── PRIORITY 2 — SHADOW ERROR / FALLBACK / LATENCY / CACHE ────────────
       - alert: CanonicalGroundingErrorSpike
-        expr: increase(canonical_grounding_error[5m]) > 5
+        expr: increase(canonical_grounding_error{job="omnivyra-worker"}[5m]) > 5
         for: 5m
         labels: { severity: warning, component: canonical_grounding, category: errors }
         annotations:
@@ -60,9 +74,9 @@ groups:
       - alert: CanonicalGroundingFallbackSpike
         # Fallback (context unavailable → legacy used) as a share of grounded calls.
         expr: |
-          (sum(increase(canonical_grounding_fallback[10m])))
+          (sum(increase(canonical_grounding_fallback{job="omnivyra-worker"}[10m])))
           /
-          clamp_min(sum(increase(canonical_grounding_call{mode=~"shadow|enforce"}[10m])), 1) > 0.05
+          clamp_min(sum(increase(canonical_grounding_call{job="omnivyra-worker",mode=~"shadow|enforce"}[10m])), 1) > 0.05
         for: 10m
         labels: { severity: warning, component: canonical_grounding, category: availability }
         annotations:
@@ -70,7 +84,7 @@ groups:
           description: "Context unavailable too often — canonical adds no value for these reads. Check contextAssimilationEngine sources / cache health."
 
       - alert: CanonicalGroundingLatencyRegression
-        expr: canonical_grounding_total_ms{quantile="0.95"} > 1500
+        expr: canonical_grounding_total_ms{job="omnivyra-worker",quantile="0.95"} > 1500
         for: 10m
         labels: { severity: warning, component: canonical_grounding, category: latency }
         annotations:
@@ -79,9 +93,9 @@ groups:
 
       - alert: CanonicalGroundingCacheMissHigh
         expr: |
-          sum(rate(cache_miss{cache="omnivyra:canonical_ctx"}[10m]))
+          sum(rate(cache_miss{job="omnivyra-worker",cache="omnivyra:canonical_ctx"}[10m]))
           /
-          clamp_min(sum(rate(cache_hit{cache="omnivyra:canonical_ctx"}[10m])) + sum(rate(cache_miss{cache="omnivyra:canonical_ctx"}[10m])), 1) > 0.6
+          clamp_min(sum(rate(cache_hit{job="omnivyra-worker",cache="omnivyra:canonical_ctx"}[10m])) + sum(rate(cache_miss{job="omnivyra-worker",cache="omnivyra:canonical_ctx"}[10m])), 1) > 0.6
         for: 15m
         labels: { severity: warning, component: canonical_grounding, category: cache }
         annotations:
@@ -91,6 +105,7 @@ groups:
       # ── PRIORITY 3 — PIPELINE / WORKER AVAILABILITY ──────────────────────
       # canonical_grounding_call is emitted for EVERY grounded read incl. mode=off,
       # so its absence means the metrics pipeline (or the whole app) is down.
+      # UNSCOPED on purpose (see COVERAGE): an absence check is not falsified by instance alternation.
       - alert: CanonicalGroundingMetricsMissing
         expr: absent(canonical_grounding_call)
         for: 10m

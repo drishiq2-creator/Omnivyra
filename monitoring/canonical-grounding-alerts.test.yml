@@ -1,0 +1,64 @@
+# promtool unit tests for canonical-grounding-alerts.yml (a9, 2026-11-20; b3 ruling: worker calls only).
+#   promtool test rules monitoring/canonical-grounding-alerts.test.yml
+# Each scoped rule is fed an APP-job series that WOULD have fired under the pre-scope expression, and must stay
+# silent; one WORKER-job series proves the rules still fire. MetricsMissing stays unscoped (an absence check).
+# Series notation: 'AxN' = the value A repeated N+1 times; '_xN' = N missing samples. Interval 1m.
+rule_files:
+  - canonical-grounding-alerts.yml
+
+evaluation_interval: 30s
+
+tests:
+  # APP job: an overwrite, an error spike, a fallback spike, a slow p95 and a cache-miss storm - none alerts.
+  - interval: 1m
+    input_series:
+      - series: 'canonical_grounding_shadow{job="omnivyra-app",instance="www",result="overwrote"}'
+        values: '0+1x30'
+      - series: 'canonical_grounding_error{job="omnivyra-app",instance="www",mode="shadow"}'
+        values: '0+10x30'
+      - series: 'canonical_grounding_fallback{job="omnivyra-app",instance="www",mode="shadow"}'
+        values: '0+10x30'
+      - series: 'canonical_grounding_call{job="omnivyra-app",instance="www",mode="shadow"}'
+        values: '0+10x30'
+      - series: 'canonical_grounding_total_ms{job="omnivyra-app",instance="www",mode="shadow",quantile="0.95"}'
+        values: '5000x30'
+      - series: 'cache_miss{job="omnivyra-app",instance="www",cache="omnivyra:canonical_ctx"}'
+        values: '0+100x30'
+      - series: 'cache_hit{job="omnivyra-app",instance="www",cache="omnivyra:canonical_ctx"}'
+        values: '0+1x30'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: CanonicalGroundingOverwriteViolation
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: CanonicalGroundingErrorSpike
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: CanonicalGroundingFallbackSpike
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: CanonicalGroundingLatencyRegression
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: CanonicalGroundingCacheMissHigh
+        exp_alerts: []
+      # unscoped absence check: the app job's call series is present, so nothing is missing
+      - eval_time: 25m
+        alertname: CanonicalGroundingMetricsMissing
+        exp_alerts: []
+
+  # WORKER job: the same slow p95 alerts (the scoped rules still fire where they can be trusted).
+  - interval: 1m
+    input_series:
+      - series: 'canonical_grounding_total_ms{job="omnivyra-worker",instance="w1",mode="shadow",quantile="0.95"}'
+        values: '2000x30'
+      - series: 'canonical_grounding_call{job="omnivyra-worker",instance="w1",mode="shadow"}'
+        values: '0+1x30'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: CanonicalGroundingLatencyRegression
+        exp_alerts:
+          - exp_labels: { severity: warning, component: canonical_grounding, category: latency, job: omnivyra-worker, instance: w1, mode: shadow, quantile: "0.95" }
+            exp_annotations:
+              summary: "Canonical grounding p95 total latency 2000ms (>1500ms)"
+              description: "Grounded read latency budget breached. Check assembly_ms p95 and cache hit rate."
