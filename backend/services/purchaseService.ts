@@ -18,7 +18,7 @@ import { getRequestContext } from './requestContext';
 
 export type PurchaseResult =
   | { success: true; purchaseId: string; creditsGranted: number }
-  | { success: false; reason: 'not_found' | 'already_completed' | 'already_failed' | 'error'; detail?: string };
+  | { success: false; reason: 'not_found' | 'no_longer_pending' | 'already_failed' | 'error'; detail?: string };
 
 type PurchaseRow = {
   id: string;
@@ -155,7 +155,10 @@ export async function completePurchase(
       .maybeSingle();
 
     if (completionErr) return { success: false, reason: 'error', detail: completionErr.message };
-    if (!updated) return { success: false, reason: 'already_completed', detail: 'Purchase is no longer pending' };
+    // The CAS lost: all this proves is the row LEFT pending - a concurrent completion OR a concurrent close (7c
+    // 2026-11-20). Was reason 'already_completed', which asserted the former; a future consumer keying on it would
+    // have inherited the false-"paid" bug fixed in purchaseClosureService.
+    if (!updated) return { success: false, reason: 'no_longer_pending', detail: 'Purchase is no longer pending' };
   }
 
   try {

@@ -22,7 +22,7 @@ import { createApiRoute as __createApiRoute } from '../../../../lib/platform/rou
  * Duplicate/concurrent settlement cannot double-credit. Two guards, the outer
  * one enforced by Postgres:
  *   1. CAS — the pending → completed flip is `.eq('status','pending')`, so only
- *      one caller can perform it; a loser gets `already_completed`.
+ *      one caller can perform it; a loser gets `no_longer_pending` (not proof of completion).
  *   2. `createCredit` uses a deterministic idempotency key
  *      (org + 'credit_purchase' + purchaseId) and `credit_transactions` carries
  *      UNIQUE INDEX `credit_transactions_idempotency_key_lockdown_unique`, so a
@@ -100,6 +100,9 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     // action but 'fulfilled' - including deferred_unknown (the provider may have captured) and already_completed (paid AND
     // credited). payerOutcomeOf defaults to 'unconfirmed', so a new action can never mean "not charged" by accident.
     const outcome = payerOutcomeOf(closure.action);
+    // VOCABULARY (7c 2026-11-20): `fulfillment_status: 'fulfilled'` in THIS route's responses is a payer-facing word.
+    // The credit_purchases.fulfillment_status COLUMN never holds 'fulfilled' - credited is 'completed'. Do not key a
+    // stored-state check on the response word (or vice versa).
     if (outcome === 'paid') {
       return res.status(200).json({
         ok: true, purchase_id: purchaseId, status: 'paid',
@@ -138,6 +141,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   try { invoiceNumber = (await generateTopupInvoice(purchaseId))?.invoiceNumber ?? null; }
   catch (e: any) { logger.warn('checkout_invoice_failed', { purchaseId, message: e?.message }); }
 
+  // 'fulfilled' is the payer-facing word (column value: 'completed') - see the VOCABULARY note above.
   return res.status(200).json({
     ok: true,
     purchase_id: purchaseId,
