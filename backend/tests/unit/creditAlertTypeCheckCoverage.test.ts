@@ -1,0 +1,87 @@
+/**
+ * Coverage invariant (7c N1 on 064, 2026-11-20): the AlertType union that creditAlertService WRITES and the
+ * credit_alert_log.alert_type CHECK that the database ENFORCES must be the SAME set.
+ *   - a code type with no CHECK value = every insert of it is refused (a real org's warning silently missing until the
+ *     runtime alarm fires);
+ *   - a CHECK value no code writes = a dead entry.
+ * The CHECK is the one defined by the HIGHEST-versioned migration that adds credit_alert_log_alert_type_check (the
+ * effective definition after a replay). The union is read from source; every alternative must be a plain string
+ * literal, and the number of alternatives must equal the number of literals read - so a member added as a type
+ * reference or computed union cannot hide from the extractor.
+ */
+import * as fs from 'fs';
+import * as path from 'path';
+
+const ROOT = process.cwd();
+const SERVICE = fs.readFileSync(path.join(ROOT, 'backend/services/creditAlertService.ts'), 'utf8');
+const MIG_DIR = path.join(ROOT, 'supabase/migrations');
+
+/** The union's alternatives (comments stripped) and the string literals among them. */
+export function unionMembers(src: string): { alternatives: string[]; literals: string[] } {
+  const start = src.indexOf('export type AlertType =');
+  expect(start).toBeGreaterThanOrEqual(0);
+  // Strip comments FIRST: a ';' inside a member's comment must not end the union (it did: "2026-11-14; c6").
+  const rest = src.slice(start + 'export type AlertType ='.length)
+    .replace(/\/\/[^\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '');
+  const body = rest.slice(0, rest.indexOf(';'));
+  const alternatives = body.split('|').map((a) => a.trim()).filter(Boolean);
+  const literals = alternatives.filter((a) => /^'[a-z0-9_]+'$/.test(a)).map((a) => a.slice(1, -1));
+  return { alternatives, literals };
+}
+
+/** The literal values of the CHECK in the highest-versioned migration that (re)defines it. */
+export function effectiveCheckValues(dir: string): { file: string; values: string[] } {
+  const files = fs.readdirSync(dir).filter((f) => f.endsWith('.sql')).sort();
+  let last: { file: string; values: string[] } | null = null;
+  for (const f of files) {
+    const sql = fs.readFileSync(path.join(dir, f), 'utf8');
+    const m = sql.match(/ADD CONSTRAINT credit_alert_log_alert_type_check CHECK \(alert_type IN \(([\s\S]*?)\)\)/);
+    if (m) last = { file: f, values: [...m[1].matchAll(/'([a-z0-9_]+)'/g)].map((x) => x[1]) };
+  }
+  expect(last).not.toBeNull();
+  return last!;
+}
+
+const union = unionMembers(SERVICE);
+const check = effectiveCheckValues(MIG_DIR);
+
+it('the effective CHECK is 064 (the newest definition)', () => {
+  expect(check.file).toBe('20270217000064_credit_alert_log_runway_3d.sql');
+});
+
+it('every AlertType alternative is a plain string literal (nothing invisible to the extractor)', () => {
+  expect(union.alternatives.length).toBeGreaterThan(0);
+  expect(union.literals).toHaveLength(union.alternatives.length);
+});
+
+it('the union and the CHECK are the SAME set (both directions), with no duplicates on either side', () => {
+  expect(new Set(union.literals).size).toBe(union.literals.length);
+  expect(new Set(check.values).size).toBe(check.values.length);
+  expect([...union.literals].sort()).toEqual([...check.values].sort());
+});
+
+it('control: a union member written as a type reference is caught by the alternative count', () => {
+  const mutated = SERVICE.replace("| 'runway_3d' | 'runway_3d_cleared';", "| 'runway_3d' | 'runway_3d_cleared' | ExtraAlert;");
+  expect(mutated).not.toBe(SERVICE);
+  const u = unionMembers(mutated);
+  expect(u.literals.length).not.toBe(u.alternatives.length);
+});
+
+it('control: a code-only type (no CHECK value) breaks set equality', () => {
+  const mutated = SERVICE.replace("| 'runway_3d' | 'runway_3d_cleared';", "| 'runway_3d' | 'runway_3d_cleared' | 'runway_1d';");
+  expect([...unionMembers(mutated).literals].sort()).not.toEqual([...check.values].sort());
+});
+
+it('control: a migration that DROPS one value (runway_3d_cleared) breaks set equality', () => {
+  const sql = fs.readFileSync(path.join(MIG_DIR, check.file), 'utf8');
+  const dropped = sql.replace("'runway_3d', 'runway_3d_cleared'", "'runway_3d'");
+  expect(dropped).not.toBe(sql);
+  const m = dropped.match(/ADD CONSTRAINT credit_alert_log_alert_type_check CHECK \(alert_type IN \(([\s\S]*?)\)\)/);
+  const values = [...m![1].matchAll(/'([a-z0-9_]+)'/g)].map((x) => x[1]);
+  expect(values).toHaveLength(check.values.length - 1);
+  expect([...union.literals].sort()).not.toEqual([...values].sort());
+});
+
+it('control: a CHECK-only value (dead entry) breaks set equality', () => {
+  expect([...union.literals].sort()).not.toEqual([...check.values, 'never_written'].sort());
+});

@@ -295,13 +295,14 @@ async function sendAlert(orgId: string, alertType: AlertType, message: string): 
  *   runway_days = balance (free + paid + incentive) / (burn7 / 7), burn7 = the trailing 7-day SETTLED consumption
  *   (confirm + confirm_partial: getWeeklyConsumption, the shared vocabulary). Fires when balance > 0 AND burn7 > 0 AND
  *   runway_days <= RUNWAY_WARN_DAYS.
- * Dedup / re-arm: at most once per RUNWAY_DEDUP_HOURS; a later evaluation that finds the condition GONE (a top-up)
+ * Dedup / re-arm: while the condition PERSISTS, at most one warning per RUNWAY_REPEAT_SUPPRESS_HOURS (a repeat
+ * suppressor, NOT the forecast horizon - that is RUNWAY_WARN_DAYS); a later evaluation that finds the condition GONE (a top-up)
  * writes runway_3d_cleared, so the next breach warns again even inside the window.
  * A read failure (balance, consumption, the alert log) sends NOTHING and logs - never a false "you're fine", never a
  * duplicate.
  */
 export const RUNWAY_WARN_DAYS = 3;
-const RUNWAY_DEDUP_HOURS = 72;
+const RUNWAY_REPEAT_SUPPRESS_HOURS = 72;
 
 export function runwayDays(balance: number, burn7: number): number | null {
   if (!(balance > 0) || !(burn7 > 0)) return null;
@@ -324,7 +325,7 @@ async function runwayArmState(orgId: string): Promise<{ armed: boolean; lastWasW
   if (!last) return { armed: true, lastWasWarning: false };
   if (last.alert_type === 'runway_3d_cleared') return { armed: true, lastWasWarning: false };
   const ageMs = Date.now() - Date.parse(last.notified_at);
-  return { armed: Number.isFinite(ageMs) && ageMs >= RUNWAY_DEDUP_HOURS * 3600_000, lastWasWarning: true };
+  return { armed: Number.isFinite(ageMs) && ageMs >= RUNWAY_REPEAT_SUPPRESS_HOURS * 3600_000, lastWasWarning: true };
 }
 
 async function resolveCompanyName(orgId: string): Promise<string | null> {
