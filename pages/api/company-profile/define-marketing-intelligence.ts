@@ -3,6 +3,8 @@ import { NextApiRequest, NextApiResponse } from 'next';
 import { runCompletion } from '../../../backend/services/aiGateway';
 import { getCanonicalProfile as getProfile } from '@/backend/services/context/canonicalProfileAdapter';
 import { resolveCompanyAccess } from '../../../backend/services/contentArchitectService';
+import { MARKETING_INTELLIGENCE_FIELDS } from '../../../lib/companyProfile/aiOutputFields';
+import { finalizeConversationFields } from '../../../backend/services/companyProfile/aiProfileMerge';
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'POST') {
@@ -29,15 +31,8 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       : 'Company not yet profiled.';
 
     const companyName = profile?.name || 'the company';
-    const FIELD_ORDER = [
-      'marketing_channels',
-      'content_strategy',
-      'campaign_focus',
-      'key_messages',
-      'brand_positioning',
-      'competitive_advantages',
-      'growth_priorities',
-    ] as const;
+    // One definition shared with the client's advisory merge (lib/companyProfile/aiOutputFields).
+    const FIELD_ORDER = MARKETING_INTELLIGENCE_FIELDS;
     const FIELD_QUESTIONS: Record<string, string> = {
       marketing_channels: `Which marketing channels does ${companyName} rely on most (social, email, events, paid, SEO, community)?`,
       content_strategy: `What is ${companyName}'s content approach — main formats, themes, and cadence?`,
@@ -105,17 +100,20 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
 
     // Deterministic guard: never lose a field. If the model left one empty, fall
     // back to the user's answer, else the current value; "keep" forces current.
-    const finalFields: Record<string, string> = {};
-    FIELD_ORDER.forEach((field, i) => {
-      const cur = String(currentFields?.[field] ?? '').trim();
-      const ans = (userAnswers[i] ?? '').trim();
-      const modelVal = String(structuredFields?.[field] ?? '').trim();
-      if (KEEP.test(ans)) finalFields[field] = cur || modelVal;
-      else if (modelVal) finalFields[field] = modelVal;
-      else if (ans) finalFields[field] = ans;
-      else finalFields[field] = cur;
+    // The shared guard (aiProfileMerge): "current" = the caller's value, else the STORED profile's, so a
+    // caller short a field can no longer blank a stored value; an all-empty field is omitted, never ''.
+    const finalFields = finalizeConversationFields({
+      fields: FIELD_ORDER,
+      userAnswers,
+      modelFields: structuredFields,
+      callerCurrent: currentFields,
+      stored: profile as unknown as Record<string, unknown> | null,
+      keep: KEEP,
     });
 
+    // CONTRACT (7c): a field with no value anywhere is OMITTED, never ''. Callers must treat an ABSENT key as
+    // "unchanged" (the profile client skips keys not in the response); spreading this blindly over a profile
+    // is safe only because absent keys are absent, not empty.
     return res.status(200).json({ done: true, structuredFields: finalFields });
   } catch (err: any) {
     console.error('Define marketing intelligence failed:', err);

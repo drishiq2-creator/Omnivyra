@@ -173,12 +173,24 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
 
   // ── Cancel the post (and, for a thread, its children), then its queue job.
   // The queue lock taken below is NOT an exclusion guarantee (its fallback
-  // always acquires — see tryAcquireScheduledPostQueueLock); a concurrent
-  // reschedule is ordered by the post compare-and-set, which runs first ──
+  // grants without excluding, and refuses only when the database cannot be
+  // read — see tryAcquireScheduledPostQueueLock); a concurrent reschedule is
+  // ordered by the post compare-and-set, which runs first ──
   let queueResult: Awaited<ReturnType<typeof cancelScheduledPostQueueEntry>> = { db_cancelled: 0, queue_removed: 0, errors: [] };
   let threadChildrenCancelled = 0;
   if (linkedPost) {
     const lock = await tryAcquireScheduledPostQueueLock(linkedPost.id);
+    if (!lock.acquired && lock.mode === 'none') {
+      // The database could not be read (CLASS-2 fail-closed): NOT a concurrent mutation, and nothing was
+      // changed - say so, instead of the contention message (7c). Retry-After: b3 standing rule (2026-11-19).
+      res.setHeader('Retry-After', '5');
+      return res.status(503).json({
+        error: "We couldn't reach the database, so nothing was changed. Please try again.",
+        code: 'QUEUE_LOCK_STATE_UNREADABLE',
+        scheduled_post_id: linkedPost.id,
+        retryable: true,
+      });
+    }
     if (!lock.acquired) {
       return res.status(409).json({
         error: 'Another reschedule / unschedule is in progress for this post. Refresh and retry.',
