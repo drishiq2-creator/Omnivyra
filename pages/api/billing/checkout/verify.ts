@@ -104,6 +104,13 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   // Reopen-safe: if an expiry sweep closed this row moments earlier, a genuine
   // provider-verified success still fulfills.
   const fulfillment = await fulfillProviderConfirmedPurchase(purchaseId, paymentId || undefined);
+  if (!fulfillment.ok && fulfillment.detail === 'test_mode_no_grant') {
+    // A TEST-mode payment in production grants nothing (purchaseService.completePurchase). State only: no real money
+    // moved and no credits were added - never "paid, credits pending".
+    return res.status(409).json({
+      ok: false, purchase_id: purchaseId, status: 'test_payment', code: 'TEST_MODE_PAYMENT_NO_CREDITS', provider,
+    });
+  }
   if (!fulfillment.ok) {
     const reason = fulfillment.detail ?? 'fulfillment_failed';
     logger.error('checkout_fulfillment_failed', { organizationId, purchaseId, reason });
