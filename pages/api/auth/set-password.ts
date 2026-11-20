@@ -12,6 +12,10 @@ import {
 } from '../../../backend/security/SessionAuthorityService';
 import { revokeForUser as revokeStepUpForUser } from '../../../backend/security/stepup/StepUpSessionService';
 import { logSecurityEvent } from '../../../backend/security/audit/SecurityAuditService';
+import { incrementAuthMetric } from '../../../backend/services/authMetrics';
+
+/** set-password 200 with this code: the password changed but the OTHER sessions could not be signed out. */
+export const OTHER_SESSIONS_NOT_SIGNED_OUT = 'OTHER_SESSIONS_NOT_SIGNED_OUT';
 import { validatePassword } from '../../../lib/auth/passwordPolicy';
 import { isInvitationExpired } from '../../../backend/services/invitationExpiry';
 
@@ -156,18 +160,31 @@ async function handler(
   // logged loudly so an operator can investigate.
   let revokedCount = 0;
   let revokedStepUpCount = 0;
+  // The password change itself IS done and must not read as failed. But if the session revoke fails the user must
+  // be TOLD - a password change is often a response to compromise (b3 2026-11-20): 200 + otherSessionsSignedOut:false
+  // + a code the client renders prominently, a security event, and a metric to alert on. The cookie is ALWAYS cleared.
+  let otherSessionsSignedOut = true;
   try {
     // Revoke-ALL (b3 2026-11-20): canonical sessions + the JWT epoch (every bearer issued before now) + this user's
     // refresh tokens via the caller's own token. The page's own bearer dies too: it re-authenticates (04).
     revokedCount = (await revokeAllAccessForUser(user.id, `credential_rotation:${flow}`, { userJwt: extractAccessToken(req) })).revokedAuthSessions;
     revokedStepUpCount = await revokeStepUpForUser(user.id, `credential_rotation:${flow}`);
-    clearSessionCookie(res);
   } catch (err) {
-    logger.warn('auth_set_password_session_revoke_failed', {
-      userId: user.id,
-      message: err instanceof Error ? err.message : String(err),
+    otherSessionsSignedOut = false;
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error('auth_set_password_session_revoke_failed', { userId: user.id, message });
+    incrementAuthMetric('auth_set_password_session_revoke_failed', { flow });
+    void logSecurityEvent({
+      capability: 'mfa.view_factors',
+      decision: 'auth_session_revoke_failed',
+      actorUserId: user.id,
+      principalUserId: user.id,
+      reason: `password_changed_flow=${flow}; other sessions NOT signed out: ${message.slice(0, 200)}`,
+      ip: clientIp(req),
+      userAgent: userAgent(req),
     });
   }
+  clearSessionCookie(res);
 
   void logSecurityEvent({
     capability: 'mfa.view_factors',
@@ -179,7 +196,9 @@ async function handler(
     userAgent: userAgent(req),
   });
 
-  return res.status(200).json({ success: true, route });
+  return res.status(200).json(otherSessionsSignedOut
+    ? { success: true, route }
+    : { success: true, route, otherSessionsSignedOut: false, code: OTHER_SESSIONS_NOT_SIGNED_OUT });
 }
 
 // SEC91-W2B-3: platform-trusted client IP (lib/security/clientIp), never the

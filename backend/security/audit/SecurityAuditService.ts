@@ -60,6 +60,8 @@ export type AuditDecision =
   | 'auth_session_created'
   | 'auth_session_rotated'
   | 'auth_session_revoked'
+  /** A session revoke that was REQUIRED (credential rotation) FAILED - the other sessions stay live (b3 2026-11-20). */
+  | 'auth_session_revoke_failed'
   | 'auth_session_expired'
   | 'suspicious_session_invalidated'
   | 'concurrent_session_detected'
