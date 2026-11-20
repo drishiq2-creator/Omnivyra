@@ -70,8 +70,10 @@ describe('readinessSnapshot is exempt from the inactive-company gate', () => {
     expect(blocked).toHaveLength(7);
   });
 
-  test('the always-run set is exactly the previous ten jobs plus readinessSnapshot and notificationFailurePrune', () => {
-    // notificationFailurePrune (a9, 2026-11-20): retention for the alert source table - infrastructure, not feature work.
+  // TITLE KEPT AS ON MAIN on purpose: the T2 parity gate keys tests by title, and other branches add jobs to this set
+  // too - renaming it per branch needs a rename ack that cannot point at two replacements. The ASSERTION is the exact
+  // set; notificationFailurePrune (a9, 2026-11-20) is the alert-source retention job - infrastructure, not feature work.
+  test('the always-run set is exactly the previous ten jobs plus readinessSnapshot', () => {
     expect([...ALWAYS_RUN_JOBS].sort()).toEqual([
       'confidenceCalibration', 'connectorTokenRefresh', 'conversationTriageWorker', 'engagementSignalArchive',
       'findDuePostsAndEnqueue', 'governanceAudit', 'intelligenceEventCleanup', 'leadThreadQueueCleanup',
