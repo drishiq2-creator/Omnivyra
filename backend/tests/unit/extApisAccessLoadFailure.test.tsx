@@ -55,6 +55,23 @@ describe('useExtApisAccess: request queue read', () => {
     expect(result.current.requests).toEqual([]);
   });
 
+  it('records WHY (7c): each failed load warns with the HTTP status or the thrown error', async () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      route(['throw'], [{ status: 503 }]);
+      const { result } = renderHook(() => useExtApisAccess());
+      await waitFor(() => expect(result.current.requestsLoadError).toBe(REQUESTS_LOAD_FAILED));
+      await waitFor(() => expect(result.current.apisLoadError).toBe(APIS_LOAD_FAILED));
+      const lines = warn.mock.calls.map(([tag, err]) => `${tag} ${String((err as Error)?.message ?? err)}`);
+      expect(lines).toEqual(expect.arrayContaining([
+        '[external-apis-access] request queue load failed: Failed to load requests (HTTP 503)',
+        '[external-apis-access] API list load failed: Failed to fetch',
+      ]));
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it('control: an empty success is empty, with no failure', async () => {
     route([ACCESS_OK], [{ status: 200, body: { requests: [] } }]);
     const { result } = renderHook(() => useExtApisAccess());

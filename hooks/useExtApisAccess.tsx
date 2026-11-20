@@ -340,7 +340,7 @@ export function useExtApisAccess() {
       const response = await fetchWithAuth(
         `/api/external-apis/access?companyId=${encodeURIComponent(selectedCompanyId)}`
       );
-      if (!response.ok) throw new Error('Failed to load APIs');
+      if (!response.ok) throw new Error(`Failed to load APIs (HTTP ${response.status})`);
       const data = await response.json();
       const available = data.availableApis || data.apis || [];
       const defaults = Array.isArray(data.companyDefaultApis) ? data.companyDefaultApis : [];
@@ -351,6 +351,7 @@ export function useExtApisAccess() {
       setGlobalPresets(data.global_presets || []);
       setApisLoadError(null);
     } catch (error) {
+      console.warn('[external-apis-access] API list load failed:', error);
       // Clear what is shown: after a company switch it would be the PREVIOUS company's APIs.
       setApis([]);
       setDrafts({});
@@ -372,11 +373,12 @@ export function useExtApisAccess() {
       const response = await fetchWithAuth(
         `/api/external-apis/requests?companyId=${encodeURIComponent(selectedCompanyId)}`
       );
-      if (!response.ok) throw new Error('Failed to load requests');
+      if (!response.ok) throw new Error(`Failed to load requests (HTTP ${response.status})`);
       const data = await response.json();
       setRequests(data.requests || []);
       setRequestsLoadError(null);
-    } catch {
+    } catch (error) {
+      console.warn('[external-apis-access] request queue load failed:', error);
       setRequests([]);
       setRequestsLoadError(REQUESTS_LOAD_FAILED);
     }
