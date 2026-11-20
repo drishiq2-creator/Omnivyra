@@ -1,0 +1,97 @@
+# promtool unit tests for notifications-alerts.yml (a9, 2026-11-20).
+#   promtool test rules monitoring/notifications-alerts.test.yml
+# Run in CI by .github/workflows/monitoring-rules.yml, which ALSO runs the pre-fix expression and requires it to fail
+# "first event fires" - the control proving these cases can tell the two expressions apart.
+#
+# Series notation: '_' = no sample (the series does not exist yet: the registry creates it at its first increment);
+# 'AxN' = the value A repeated N+1 times. Interval 1m, so the Nth value is at minute N.
+rule_files:
+  - notifications-alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  # FIRST EVENT FIRES: a credit_alert series that first appears at minute 4 with value 1 (one undeliverable alert).
+  # The pre-fix `increase(...[15m]) > 0` returns nothing here. FLAT DOES NOT FIRE: by minute 25 the series existed
+  # at the start of the window and has not moved.
+  - interval: 1m
+    input_series:
+      - series: 'notification_undeliverable{reason="no_active_recipient",type="credit_alert"}'
+        values: '_x4 1x25'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: CreditAlertUndeliverable
+        exp_alerts:
+          - exp_labels: { severity: critical, component: notifications, category: money, page: sre, reason: no_active_recipient, type: credit_alert }
+            exp_annotations:
+              summary: "A credit alert was not delivered to anyone (no_active_recipient)"
+              description: "notifyCompanyEvent could not deliver a credit_alert (reason=no_active_recipient). Find the company in the NOTIFICATION_UNDELIVERABLE log line; a company with zero active COMPANY_ADMINs is unreachable for every company-level alert."
+      - eval_time: 25m
+        alertname: CreditAlertUndeliverable
+        exp_alerts: []
+      # a credit alert is never ALSO reported by the generic rule
+      - eval_time: 6m
+        alertname: NotificationUndeliverable
+        exp_alerts: []
+
+  # A LATER INCREMENT on a series that already existed fires (the increase branch); the flat stretch before it does not.
+  - interval: 1m
+    input_series:
+      - series: 'notification_undeliverable{reason="membership_unreadable",type="credit_alert"}'
+        values: '1x30 2x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: CreditAlertUndeliverable
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: CreditAlertUndeliverable
+        exp_alerts:
+          - exp_labels: { severity: critical, component: notifications, category: money, page: sre, reason: membership_unreadable, type: credit_alert }
+            exp_annotations:
+              summary: "A credit alert was not delivered to anyone (membership_unreadable)"
+              description: "notifyCompanyEvent could not deliver a credit_alert (reason=membership_unreadable). Find the company in the NOTIFICATION_UNDELIVERABLE log line; a company with zero active COMPANY_ADMINs is unreachable for every company-level alert."
+
+  # NotificationUndeliverable: the first non-credit event fires; 30 minutes of flat afterwards does not.
+  - interval: 1m
+    input_series:
+      - series: 'notification_undeliverable{reason="no_active_recipient",type="campaign_auto_paused"}'
+        values: '_x4 1x45'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: NotificationUndeliverable
+        exp_alerts:
+          - exp_labels: { severity: warning, component: notifications, category: correctness, reason: no_active_recipient, type: campaign_auto_paused }
+            exp_annotations:
+              summary: "A company notification was not delivered (campaign_auto_paused, no_active_recipient)"
+              description: "notifyCompanyEvent dropped a campaign_auto_paused event (reason=no_active_recipient). See the NOTIFICATION_UNDELIVERABLE log line for the company."
+      - eval_time: 45m
+        alertname: NotificationUndeliverable
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: CreditAlertUndeliverable
+        exp_alerts: []
+
+  # NotificationInsertFailing: 6 failed inserts in a series that appears at minute 1 -> over the threshold of 5, held
+  # for 5m -> firing by minute 9, and the count it reports includes the first sample.
+  - interval: 1m
+    input_series:
+      - series: 'notification_undeliverable{reason="insert_failed",type="campaign_approved"}'
+        values: '_x1 6x20'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: NotificationInsertFailing
+        exp_alerts:
+          - exp_labels: { severity: critical, component: notifications, category: correctness, page: sre }
+            exp_annotations:
+              summary: "Notification inserts are failing (6 in 15m)"
+              description: "Repeated insert_failed: check the notifications columns / grants (20270217000035) and recent deploys."
+
+  # ... and exactly 5 does not (the threshold is strict).
+  - interval: 1m
+    input_series:
+      - series: 'notification_undeliverable{reason="insert_failed",type="campaign_approved"}'
+        values: '_x1 5x20'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: NotificationInsertFailing
+        exp_alerts: []

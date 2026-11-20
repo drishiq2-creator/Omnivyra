@@ -1,0 +1,76 @@
+# Monitoring rules (a9, 2026-11-20): Prometheus alert rules are a RELEASE CONDITION, so their logic is tested.
+#
+# 1. `promtool check rules` - every rule file parses.
+# 2. `promtool test rules`  - monitoring/notifications-alerts.test.yml: first event fires, flat does not, thresholds.
+# 3. CONTROL - the pre-fix credit expression `increase(...[15m]) > 0` is substituted into a copy of the rules and
+#    the same tests are run; that run MUST FAIL (it cannot see a counter series whose first sample is already 1).
+#    If the control ever passes, the tests no longer distinguish the fix from the defect, and this job goes red.
+#
+# Supply chain: promtool comes from the official Prometheus GitHub release; the tarball is verified against the
+# SHA-256 below before anything is executed; actions/checkout is pinned by full commit SHA (v4.2.2). No secret,
+# no third-party action.
+name: monitoring-rules
+
+on:
+  pull_request:
+    paths:
+      - 'monitoring/**'
+      - '.github/workflows/monitoring-rules.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'monitoring/**'
+      - '.github/workflows/monitoring-rules.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  promtool:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PROM_VERSION: 2.53.3
+      # sha256 of prometheus-2.53.3.linux-amd64.tar.gz from the release's sha256sums.txt
+      PROM_SHA256: __PIN_BEFORE_MERGE__
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Install promtool (verified)
+        run: |
+          set -euo pipefail
+          tgz="prometheus-${PROM_VERSION}.linux-amd64.tar.gz"
+          curl -sSfL -o "$tgz" "https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/${tgz}"
+          got="$(sha256sum "$tgz" | cut -d' ' -f1)"
+          echo "sha256 ${got}"
+          if [ "$got" != "$PROM_SHA256" ]; then echo "::error::promtool tarball sha256 mismatch (got ${got})"; exit 1; fi
+          tar -xzf "$tgz" --strip-components=1 "prometheus-${PROM_VERSION}.linux-amd64/promtool"
+          ./promtool --version
+
+      - name: Check every rule file parses
+        run: ./promtool check rules monitoring/notifications-alerts.yml
+
+      - name: Rule unit tests
+        run: ./promtool test rules monitoring/notifications-alerts.test.yml
+
+      - name: CONTROL - the pre-fix expression must FAIL the first-event case
+        run: |
+          set -uo pipefail
+          d="$(mktemp -d)"
+          cp monitoring/notifications-alerts.test.yml "$d/"
+          python3 - monitoring/notifications-alerts.yml "$d/notifications-alerts.yml" <<'PY'
+          import re, sys
+          s = open(sys.argv[1], encoding='utf-8').read()
+          new = re.compile(r'(- alert: CreditAlertUndeliverable\n\s+expr: )\|\n(?:[ ]{10}.*\n)+')
+          s2, n = new.subn(lambda m: m.group(1) + 'increase(notification_undeliverable{type="credit_alert"}[15m]) > 0\n', s)
+          assert n == 1, n
+          open(sys.argv[2], 'w', encoding='utf-8').write(s2)
+          PY
+          grep -n -A1 'alert: CreditAlertUndeliverable' "$d/notifications-alerts.yml"
+          if ./promtool test rules "$d/notifications-alerts.test.yml"; then
+            echo "::error::CONTROL PASSED: the tests cannot tell the pre-fix expression from the fix"; exit 1
+          fi
+          echo "control failed as required"

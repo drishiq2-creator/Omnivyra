@@ -24,6 +24,27 @@
 #   as a RELEASE CONDITION, not a shipped control. Fallback that exists today regardless: the log lines
 #   NOTIFICATION_UNDELIVERABLE / NOTIFICATION_INSERT_FAILED - route CreditAlertUndeliverable through log-based
 #   alerting if the metric path is off (the one case where nobody noticing has a money consequence).
+#
+# FIRST-EVENT BLINDNESS, FIXED (a9, 2026-11-20): the registry creates a labelled counter series AT ITS FIRST
+# INCREMENT, with value 1 (backend/observability/registry.ts incr), and resets on every deploy. PromQL increase()
+# needs two samples, so a series whose first sample is already 1 shows NO increase: `increase(x[15m]) > 0` never
+# fired for the FIRST undeliverable credit alert in a process - only for a second one. Every rule below therefore
+# counts two disjoint cases: a series that existed at the start of the window (its increase), and a series that
+# APPEARED inside it (its whole value, since it started from 0). Proven by monitoring/notifications-alerts.test.yml
+# (promtool test rules); the CI job also runs the pre-fix expression and requires it to FAIL the first-event case.
+#
+# TEST-ALERT PATH (alerts are a release condition: a rule counts only once a test alert has LANDED):
+#   Step 1 - rule logic: `promtool test rules monitoring/notifications-alerts.test.yml` (CI: monitoring-rules.yml).
+#   Step 2 - routing: the owner presses "Test" on the Grafana contact point each rule routes to (page: sre ->
+#            the paging contact point; warnings -> the default one) and confirms the message arrives.
+#   Step 3 - end to end, per rule, owner-run in production only (never by a session):
+#            CreditAlertUndeliverable  - one notifyCompanyEvent credit_alert for a company with no active
+#                                        COMPANY_ADMIN (a dedicated test company) -> page within ~2 min.
+#            NotificationUndeliverable - one non-credit company event for that same test company -> warning.
+#            NotificationInsertFailing - not triggered in prod on purpose (needs >5 failed inserts); covered by
+#                                        Steps 1-2 only, and that limit is stated here.
+#   Until Steps 2-3 land, OBSERVABILITY_ENABLED is confirmed true in prod and this file is loaded by the prod
+#   Prometheus, these rules are a RELEASE CONDITION, not a shipped control.
 ---
 groups:
   - name: notification_delivery
@@ -32,7 +53,9 @@ groups:
       # A credit alert that reached NOBODY: the company has no active COMPANY_ADMIN (or its memberships could not be
       # read). Money-adjacent silence - credit exhaustion would go unannounced. Page.
       - alert: CreditAlertUndeliverable
-        expr: increase(notification_undeliverable{type="credit_alert"}[15m]) > 0
+        expr: |
+          ((increase(notification_undeliverable{type="credit_alert"}[15m]) and notification_undeliverable{type="credit_alert"} offset 15m)
+          or (notification_undeliverable{type="credit_alert"} + 0 unless notification_undeliverable{type="credit_alert"} offset 15m)) > 0
         for: 0m
         labels: { severity: critical, component: notifications, category: money, page: sre }
         annotations:
@@ -41,7 +64,9 @@ groups:
 
       # Any company event delivered to nobody.
       - alert: NotificationUndeliverable
-        expr: increase(notification_undeliverable{type!="credit_alert"}[30m]) > 0
+        expr: |
+          ((increase(notification_undeliverable{type!="credit_alert"}[30m]) and notification_undeliverable{type!="credit_alert"} offset 30m)
+          or (notification_undeliverable{type!="credit_alert"} + 0 unless notification_undeliverable{type!="credit_alert"} offset 30m)) > 0
         for: 0m
         labels: { severity: warning, component: notifications, category: correctness }
         annotations:
@@ -51,7 +76,9 @@ groups:
       # Insert failures in bulk point at a schema / privilege regression (the original defect class: columns that do
       # not exist), not at one company.
       - alert: NotificationInsertFailing
-        expr: sum(increase(notification_undeliverable{reason="insert_failed"}[15m])) > 5
+        expr: |
+          sum((increase(notification_undeliverable{reason="insert_failed"}[15m]) and notification_undeliverable{reason="insert_failed"} offset 15m)
+          or (notification_undeliverable{reason="insert_failed"} + 0 unless notification_undeliverable{reason="insert_failed"} offset 15m)) > 5
         for: 5m
         labels: { severity: critical, component: notifications, category: correctness, page: sre }
         annotations:
