@@ -12,7 +12,7 @@ import { getUserRole, isPlatformSuperAdmin } from '@/backend/services/rbacServic
 import { refreshExpiringSocialAccountsForCompany } from '@/backend/auth/tokenRefresh';
 import { getOAuthCredentialsForPlatform } from '@/backend/auth/oauthCredentialResolver';
 
-const SUPPORTED_PLATFORMS = [
+export const SUPPORTED_PLATFORMS = [
   // Social media platforms
   { key: 'linkedin',       label: 'LinkedIn',       authPath: '/api/auth/linkedin',  category: 'social' },
   { key: 'x',              label: 'X',              authPath: '/api/auth/x',         category: 'social' },

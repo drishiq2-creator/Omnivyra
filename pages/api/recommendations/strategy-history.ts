@@ -3,7 +3,7 @@ import { NextApiRequest, NextApiResponse } from 'next';
 import { enforceCompanyAccess } from '../../../backend/services/userContextService';
 import { withRBAC } from '../../../backend/middleware/withRBAC';
 import { Role } from '../../../backend/services/rbacService';
-import { getStrategyHistoryForCompany } from '../../../backend/services/strategyHistoryService';
+import { getStrategyHistoryForCompany, STRATEGY_HISTORY_UNAVAILABLE } from '../../../backend/services/strategyHistoryService';
 
 /**
  * GET /api/recommendations/strategy-history?companyId=...
@@ -33,14 +33,12 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     const result = await getStrategyHistoryForCompany(companyId);
     return res.status(200).json(result);
   } catch (e) {
+    // A failed read is NOT an empty history (b3 2026-11-20, read-failure rule): retryable 503 with a distinct code.
     console.warn('strategy-history error', e);
-    return res.status(200).json({
-      campaigns_count: 0,
-      aspect_counts: {},
-      intent_tag_counts: {},
-      dominant_aspects: [],
-      underused_aspects: [],
-      strategy_momentum: null,
+    res.setHeader('Retry-After', '5');
+    return res.status(503).json({
+      code: STRATEGY_HISTORY_UNAVAILABLE,
+      error: 'Strategy history could not be loaded. Try again.',
     });
   }
 }

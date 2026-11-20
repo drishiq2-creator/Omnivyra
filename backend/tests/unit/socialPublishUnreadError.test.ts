@@ -1,0 +1,108 @@
+/**
+ * Unread-error census: POST /api/social/publish. Two F sites before any publish:
+ *   - resolving the connected account: a FAILED read answered 422 "No connected account";
+ *   - saving the resolved account onto the post: a FAILED write went unread and the publish went
+ *     ahead with the row not naming its account.
+ * Both now answer 500 BEFORE publishNow is reached.
+ */
+const mockDb = { acctFails: false, patchFails: false, patched: [] as unknown[] };
+const mockPublishNow = jest.fn(async () => ({ status: 'PUBLISHED' }));
+
+jest.mock('../../../lib/platform/routeFactory', () => ({ createApiRoute: (h: unknown) => h }));
+jest.mock('../../middleware/withIdempotency', () => ({ withIdempotency: (h: unknown) => h }));
+jest.mock('../../services/supabaseAuthService', () => ({ getSupabaseUserFromRequest: async () => ({ user: { id: 'u1' }, error: null }) }));
+jest.mock('../../services/rbacService', () => ({ isSuperAdmin: async () => false }));
+jest.mock('../../db/queries', () => ({
+  getScheduledPost: async () => ({ id: 'p1', user_id: 'u1', platform: 'linkedin', content: 'hello', media_urls: [], campaign_id: null, social_account_id: null, status: 'scheduled' }),
+}));
+const mockStatusWrites: Array<Record<string, unknown>> = [];
+// Main resolves a post's account through resolvePostSocialAccount (campaign company, NOT the user's account in any
+// company). Its own suites prove it; this suite is about the D8 status writes around it, so it is controlled here.
+type MockResolution = { ok: boolean; socialAccountId: string | null; companyId: string | null; code: string | null; message: string | null; retryable: boolean };
+let mockResolution: MockResolution;
+const RESOLVE_NONE: MockResolution = { ok: false, socialAccountId: null, companyId: null, code: 'NO_ACCOUNT', message: 'No connected account', retryable: false };
+jest.mock('../../services/postSocialAccountResolver', () => ({ resolvePostSocialAccount: async () => mockResolution }));
+jest.mock('../../db/scheduledPostsStore', () => ({ updatePostPublishStatus: async (i: Record<string, unknown>) => { mockStatusWrites.push(i); return true; } }));
+jest.mock('../../services/publishNowService', () => ({ publishNow: (...a: unknown[]) => (mockPublishNow as any)(...a) }));
+jest.mock('../../../lib/campaign/publishAuthorization', () => ({ authorizePostPublish: () => ({ authorized: true }) }));
+jest.mock('../../services/engagementCapabilityMap', () => ({ resolveEngagementCapability: () => ({ status: 'api_verified' }) }));
+jest.mock('../../services/auditLoggingService', () => ({ logAuditEvent: async () => undefined }));
+jest.mock('../../services/publishReadinessValidator', () => ({
+  validatePublishReadiness: () => ({ ok: true, warnings: [] }),
+  assertMediaAccessible: async () => null,
+}));
+jest.mock('../../db/supabaseClient', () => ({
+  supabase: {
+    from: (table: string) => {
+      const b: any = {};
+      for (const m of ['select', 'eq', 'in', 'limit']) b[m] = () => b;
+      b.maybeSingle = async () => (table === 'social_accounts' && mockDb.acctFails
+        ? { data: null, error: { message: 'connection reset' } }
+        : { data: { id: 'sa1' }, error: null });
+      b.update = (p: unknown) => {
+        mockDb.patched.push(p);
+        const u: any = { eq: () => Promise.resolve(mockDb.patchFails ? { error: { message: 'write refused' } } : { error: null }) };
+        return u;
+      };
+      return b;
+    },
+  },
+}));
+
+import handler from '../../../pages/api/social/publish';
+
+async function call(body: Record<string, unknown>) {
+  const res: any = { statusCode: 0, body: undefined };
+  res.setHeader = () => res;
+  res.status = (c: number) => { res.statusCode = c; return res; };
+  res.json = (p: unknown) => { res.body = p; return res; };
+  await (handler as any)({ method: 'POST', body, headers: {} }, res);
+  return res;
+}
+
+beforeEach(() => {
+  mockDb.acctFails = false; mockDb.patchFails = false; mockDb.patched.length = 0;
+  mockResolution = { ok: true, socialAccountId: 'sa1', companyId: 'org-1', code: null, message: null, retryable: false };
+  mockPublishNow.mockClear();
+  mockStatusWrites.length = 0;
+  jest.spyOn(console, 'error').mockImplementation(() => undefined);
+});
+afterEach(() => jest.restoreAllMocks());
+
+// Retargeted to MAIN's contract: the lookup now runs in resolvePostSocialAccount, which answers a failed read as a
+// retryable ACCOUNT_LOOKUP_FAILED -> 503 (this commit's original 500 hunk is superseded by it). Still never 422.
+it('the connected-account lookup FAILS: 503 retryable (main resolver), not 422 "no connected account"; nothing published', async () => {
+  mockResolution = { ok: false, socialAccountId: null, companyId: null, code: 'ACCOUNT_LOOKUP_FAILED', message: 'Could not check your connected accounts; try again.', retryable: true };
+  const res = await call({ post_id: 'p1' });
+  expect(res.statusCode).toBe(503);
+  expect(res.body).toMatchObject({ code: 'ACCOUNT_LOOKUP_FAILED' });
+  expect(mockPublishNow).not.toHaveBeenCalled();
+});
+
+it('saving the resolved account FAILS: 500 before any publish', async () => {
+  mockDb.patchFails = true;
+  const res = await call({ post_id: 'p1' });
+  expect(res.statusCode).toBe(500);
+  expect(mockPublishNow).not.toHaveBeenCalled();
+});
+
+it('NEGATIVE CONTROL (dry run): the account is resolved and saved, 200 DRY_RUN', async () => {
+  const res = await call({ post_id: 'p1', dry_run: true });
+  expect(res.statusCode).toBe(200);
+  expect(res.body).toMatchObject({ status: 'DRY_RUN', social_account_id: 'sa1' });
+  expect(mockDb.patched).toEqual([{ social_account_id: 'sa1' }]);
+});
+
+describe('CLASS-2 D8: the status writes of the route name the status they expect', () => {
+  it('the result mirror lands only on the status publishNow wrote', async () => {
+    (mockPublishNow as jest.Mock).mockResolvedValueOnce({ status: 'FAILED', message: 'token expired' });
+    await call({ post_id: 'p1' });
+    expect(mockStatusWrites).toEqual([expect.objectContaining({ status: 'FAILED', expectedFromStatus: 'failed' })]);
+  });
+
+  it('publishNow threw: failed only over the status this request read', async () => {
+    (mockPublishNow as jest.Mock).mockRejectedValueOnce(new Error('boom'));
+    await call({ post_id: 'p1' });
+    expect(mockStatusWrites).toEqual([expect.objectContaining({ status: 'FAILED', expectedFromStatus: 'scheduled' })]);
+  });
+});
