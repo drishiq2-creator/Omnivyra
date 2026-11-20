@@ -24,16 +24,21 @@ const REPO = path.join(__dirname, '..', '..', '..');
 const read = (rel: string) => fs.readFileSync(path.join(REPO, rel), 'utf8');
 const exists = (rel: string) => fs.existsSync(path.join(REPO, rel));
 /**
- * ADOPTION = the middleware is imported AND called in CODE (PL-128, 2026-11-20). The gate used to match the bare
- * substring 'withIdempotency', so a route whose COMMENT explains why it is NOT wrapped (person erasure, prospect
- * problems) or that names the middleware's bookkeeping table (admin idempotency list) counted as an adopter: 40
- * "adopters" where 37 adopt. Comments are blanked before the call is looked for.
- * [Detector taken from 89's eeb32d5d9 (superseded branch), hunk unchanged.]
+ * PL-128 (c6 2026-11-20): an ADOPTION is a call `withIdempotency(` in code - not the word in a comment. The gate used
+ * `includes('withIdempotency')` on raw source, so two routes whose comments explain why they deliberately do NOT adopt
+ * (prospects/[id]/problems.ts, prospect-identity/erasure-requests/index.ts: a unique constraint / the ledger is their
+ * idempotency) read as unauthorized adopters and kept this suite red on main since 2026-10-30/31.
  */
-const IMPORT_RE = /import \{ withIdempotency \} from '[^']*backend\/middleware\/withIdempotency'/;
-const stripComments = (src: string) => src.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/.*$/gm, ' ');
-const adoptsSrc = (src: string): boolean => IMPORT_RE.test(src) && /withIdempotency\(/.test(stripComments(src));
-const adopts = (rel: string): boolean => adoptsSrc(read(rel));
+const stripComments = (src: string) => src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:'"`])\/\/[^\n]*/g, '$1');
+/**
+ * 89 (PL-128 delta): the detector works on SOURCE so its own cases can pin it. It deliberately keys on the CALL only,
+ * not import+call: a route that reimplements or re-exports withIdempotency locally still calls it and must still count
+ * as an adopter here; the SHARED import is separately required of every sanctioned route (the wiring proofs below).
+ * A third comment-only false positive existed besides problems / erasure: admin/credits/idempotency/list.ts names the
+ * middleware's table (masked by the admin prefix). Real adopters on main at 7a31852bd: 37 of 40 substring hits.
+ */
+const adoptsSource = (src: string) => stripComments(src).includes('withIdempotency(');
+const adopts = (rel: string) => adoptsSource(read(rel));
 
 /** OR-08 Group A — the ONLY endpoints authorized to adopt. */
 const AUTHORIZED: Array<[string, string]> = [
@@ -105,28 +110,29 @@ describe('adoption gate — authorized endpoints', () => {
 describe('adoption gate — unauthorized endpoints must NOT adopt', () => {
   it.each(MUST_NOT_ADOPT)('%s remains unadopted', (rel) => {
     if (!exists(rel)) return; // route removed by a lifecycle decision
-    // Substring on purpose (89, eeb32d5d9): here a false hit fails RED - the safe direction.
+    // SUBSTRING on purpose (89/c6): for a must-NOT list a false hit (a comment) fails RED - the safe direction.
     expect({ file: rel, adopted: read(rel).includes('withIdempotency') })
       .toEqual({ file: rel, adopted: false });
   });
 });
 
-describe('adoption detector (PL-128; cases from 89 eeb32d5d9)', () => {
+describe('adoption detector (PL-128)', () => {
   const IMP = "import { withIdempotency } from '../../backend/middleware/withIdempotency';\n";
-  it('a real adoption (import + call) is detected', () => {
-    expect(adoptsSrc(`${IMP}export default __createApiRoute(withIdempotency(handler, { scope: 'x' }), {});`)).toBe(true);
+  it('a real adoption (call in code) is detected - with the shared import or a local one', () => {
+    expect(adoptsSource(`${IMP}export default __createApiRoute(withIdempotency(handler, { scope: 'x' }), {});`)).toBe(true);
+    expect(adoptsSource('const withIdempotency = (h: any) => h;\nexport default withIdempotency(handler);')).toBe(true);
   });
-  it('a COMMENT naming the middleware is not an adoption (the erasure / problems false positives)', () => {
-    expect(adoptsSrc('/**\n * Not wrapped in `withIdempotency(`: the ledger IS the mechanism.\n */\nexport default h;')).toBe(false);
-    expect(adoptsSrc(`${IMP}// withIdempotency(handler) deliberately not used\nexport default h;`)).toBe(false);
+  it('a COMMENT naming the middleware is not an adoption (block and line comments)', () => {
+    expect(adoptsSource('/**\n * Not wrapped in `withIdempotency(`: the ledger IS the mechanism.\n */\nexport default h;')).toBe(false);
+    expect(adoptsSource(`${IMP}// withIdempotency(handler) deliberately not used\nexport default h;`)).toBe(false);
   });
-  it('an import with no call, or a call with no import, is not an adoption', () => {
-    expect(adoptsSrc(`${IMP}export default h;`)).toBe(false);
-    expect(adoptsSrc('export default withIdempotency(handler);')).toBe(false);
+  it('an import with no call is not an adoption', () => {
+    expect(adoptsSource(`${IMP}export default h;`)).toBe(false);
   });
-  it('the real tree: the two comment-only routes are not adopters; discovery is', () => {
+  it('the real tree: the three comment-only routes are not adopters; discovery is', () => {
     expect(adopts('pages/api/prospect-identity/erasure-requests/index.ts')).toBe(false);
     expect(adopts('pages/api/prospects/[id]/problems.ts')).toBe(false);
+    expect(adopts('pages/api/admin/credits/idempotency/list.ts')).toBe(false);
     expect(adopts('pages/api/prospect-sources/discovery.ts')).toBe(true);
   });
 });
@@ -153,8 +159,8 @@ describe('adoption gate — no adoption outside the sanctioned set', () => {
 
   it('the pre-existing adopter count has not shrunk', () => {
     const all = walk('pages/api').filter(adopts);
-    // 29 pre-existing + 7 Group A.
-    expect(all.length).toBeGreaterThanOrEqual(36);
+    // 29 pre-existing + 7 Group A + 1 reviewed later adoption (discovery) = 37 REAL adopters (comment hits excluded).
+    expect(all.length).toBeGreaterThanOrEqual(37);
   });
 });
 
