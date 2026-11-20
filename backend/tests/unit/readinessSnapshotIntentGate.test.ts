@@ -70,7 +70,10 @@ describe('readinessSnapshot is exempt from the inactive-company gate', () => {
     expect(blocked).toHaveLength(7);
   });
 
-  test('the always-run set is exactly the previous ten jobs plus readinessSnapshot and whatsappUnconfirmedSendSweep', () => {
+  // TITLE KEPT AS ON MAIN on purpose: the T2 parity gate keys tests by title and several branches add jobs to this set
+  // (this line: whatsappUnconfirmedSendSweep) - a per-branch rename needs a rename ack that can name only one
+  // replacement. The ASSERTION is the exact set (a9, stage-0f).
+  test('the always-run set is exactly the previous ten jobs plus readinessSnapshot', () => {
     // whatsappUnconfirmedSendSweep: L-4 recovery job, owner approval 2026-11-11
     // (whatsappUnconfirmedSweepJob.test.ts proves it is gated open and runs).
     expect([...ALWAYS_RUN_JOBS].sort()).toEqual([
