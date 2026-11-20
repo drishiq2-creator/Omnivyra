@@ -212,12 +212,15 @@ async function handleSelfServeResend(
   let resentId: string | null = null;
 
   if (invitation) {
-    // Revoke the old row + issue a fresh one with a new token.
+    // Revoke the old row + issue a fresh one with a new token. revoked_at is set ONCE (as the sibling path at the
+    // top of this file does): an already-revoked row keeps its original revocation time - overwriting it destroys
+    // the record of when it was first revoked (7c 2026-11-20).
     await supabase
       .from('invitations')
       .update({ revoked_at: new Date().toISOString() })
       .eq('id', (invitation as { id: string }).id)
-      .is('accepted_at', null);
+      .is('accepted_at', null)
+      .is('revoked_at', null);
 
     try {
       const fresh = await createAndSendInvitation({
