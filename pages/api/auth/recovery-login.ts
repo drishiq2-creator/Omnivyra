@@ -26,6 +26,7 @@ import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeF
  *     active-codes count (default 10).
  */
 
+import { revokeAllAccessForUser } from '../../../backend/services/lifecycleGovernance';
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { authRequestIpOrNull } from '../../../backend/auth/requestClientIp';
 import { supabase } from '../../../backend/db/supabaseClient';
@@ -33,7 +34,6 @@ import { verifyAndConsume as verifyRecoveryCode } from '../../../backend/securit
 import {
   createSession,
   attachSessionCookie,
-  revokeAllSessionsForUser,
 } from '../../../backend/security/SessionAuthorityService';
 import { revokeForAuthSession } from '../../../backend/security/stepup/StepUpSessionService';
 import { clearMfaIntent } from '../../../backend/security/MfaIntent';
@@ -119,7 +119,8 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   // then mint the new one. Step-up sessions cascade.
   let revoked = 0;
   try {
-    revoked = await revokeAllSessionsForUser(userId, 'recovery_code_login_revoke_all');
+    // Canonical sessions + the JWT epoch (b3 2026-11-20). Refresh tokens survive until step 2 (no user JWT here).
+    revoked = (await revokeAllAccessForUser(userId, 'recovery_code_login_revoke_all')).revokedAuthSessions;
   } catch (err) {
     logger.warn('recovery_login_revoke_all_failed', {
       userId,

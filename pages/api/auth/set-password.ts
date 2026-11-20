@@ -2,13 +2,13 @@ import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeF
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { authRequestIpOrNull } from '../../../backend/auth/requestClientIp';
 import { supabase } from '../../../backend/db/supabaseClient';
-import { resolveAuthenticatedUser } from '../../../backend/services/authResolver';
+import { resolveAuthenticatedUser, extractAccessToken } from '../../../backend/services/authResolver';
+import { revokeAllAccessForUser } from '../../../backend/services/lifecycleGovernance';
 import { logger } from '../../../backend/services/logger';
 import { seedRequestContextFromRequest } from '../../../backend/services/requestContext';
 import { getPostLoginRoute as getUserPreferenceRoute } from '../../../backend/services/userPreferencesService';
 import {
   clearSessionCookie,
-  revokeAllSessionsForUser,
 } from '../../../backend/security/SessionAuthorityService';
 import { revokeForUser as revokeStepUpForUser } from '../../../backend/security/stepup/StepUpSessionService';
 import { logSecurityEvent } from '../../../backend/security/audit/SecurityAuditService';
@@ -157,7 +157,9 @@ async function handler(
   let revokedCount = 0;
   let revokedStepUpCount = 0;
   try {
-    revokedCount = await revokeAllSessionsForUser(user.id, `credential_rotation:${flow}`);
+    // Revoke-ALL (b3 2026-11-20): canonical sessions + the JWT epoch (every bearer issued before now) + this user's
+    // refresh tokens via the caller's own token. The page's own bearer dies too: it re-authenticates (04).
+    revokedCount = (await revokeAllAccessForUser(user.id, `credential_rotation:${flow}`, { userJwt: extractAccessToken(req) })).revokedAuthSessions;
     revokedStepUpCount = await revokeStepUpForUser(user.id, `credential_rotation:${flow}`);
     clearSessionCookie(res);
   } catch (err) {
