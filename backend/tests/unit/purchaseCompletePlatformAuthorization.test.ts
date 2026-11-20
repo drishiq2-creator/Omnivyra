@@ -102,6 +102,13 @@ jest.mock('../../security/audit/SecurityAuditService', () => ({
 jest.mock('../../services/logger', () => ({ logger: { warn: jest.fn(), info: jest.fn(), error: jest.fn(), debug: jest.fn() } }));
 jest.mock('../../services/userColumnProjection', () => ({ tolerantUserSelect: jest.fn() }));
 jest.mock('../../../lib/platform/routeFactory', () => ({ createApiRoute: (h: unknown) => h }));
+// Production toggle for the test-mode guard (purchaseService completePurchase). Default false = every existing case
+// below runs exactly as before; only the G cases switch it on.
+let mockIsProd = false;
+jest.mock('../../services/config/productionFlags', () => ({
+  ...jest.requireActual('../../services/config/productionFlags'),
+  isProduction: () => mockIsProd,
+}));
 
 import route from '../../../pages/api/super-admin/purchases/complete';
 import { capabilitiesForRole } from '../../security/capabilityRegistry';
@@ -231,6 +238,30 @@ describe('E — SUPER_ADMIN (platform capability, passkey + trusted device)', ()
   it('without a step-up session → 401 STEP_UP_REQUIRED, nothing touched', async () => expectDenied(await call(U.SUPER_NO_STEPUP, { purchase_id: 'pur-b' }), 401, 'STEP_UP_REQUIRED'));
   it('on an untrusted device → 401 STEP_UP_REQUIRED, nothing touched', async () => expectDenied(await call(U.SUPER_UNTRUSTED, { purchase_id: 'pur-b' }), 401, 'STEP_UP_REQUIRED'));
   it('unauthenticated → 401, nothing touched', async () => expectDenied(await call(null, { purchase_id: 'pur-b' }), 401, 'NOT_AUTHENTICATED'));
+});
+
+// 04 (2026-11-20; c6 handover item 1, 7c): completePurchase now refuses ANY non-'live' row in production, and this
+// route is one of its callers (pages/api/super-admin/purchases/complete.ts). A super-admin manual complete of a
+// test-mode row in prod is refused with NO credits (c6 and 7c: intended), as a 409 with a code, never a 500.
+describe('G — super-admin complete vs the production test-mode guard', () => {
+  afterEach(() => { mockIsProd = false; });
+
+  it.each<[string, unknown]>([['test', 'test'], ['no recorded mode', null]])(
+    'production + provider_mode %s → 409 TEST_MODE_PAYMENT_NO_CREDITS, NO credits, row closed', async (_n, mode) => {
+      mockIsProd = true;
+      Object.assign(row('pur-b'), { provider_mode: mode });
+      const res = await call(U.SUPER, { purchase_id: 'pur-b' });
+      expect(res.statusCode).toBe(409);
+      expect(res.body).toMatchObject({ error: 'test_mode_no_grant', code: 'TEST_MODE_PAYMENT_NO_CREDITS' });
+      expect(mockRpc).toEqual([]);
+      expect(row('pur-b')).toMatchObject({ status: 'failed', fulfillment_error: 'test_mode_payment_no_grant' });
+    });
+
+  it('CONTROL: production + provider_mode live → credited as before', async () => {
+    mockIsProd = true;
+    Object.assign(row('pur-b'), { provider_mode: 'live' });
+    expectCredited(await call(U.SUPER, { purchase_id: 'pur-b' }), B, 5000);
+  });
 });
 
 describe('F — create', () => {

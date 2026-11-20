@@ -57,7 +57,22 @@ describe('a TEST-mode payment in production grants nothing', () => {
     await completePurchase('p1', 'pay_1');
     expect(mockState.credits).toHaveLength(1);
   });
-  it('CONTROL: a row with no recorded mode (created before the column) is not affected', async () => {
+  // INVERTED (04, 2026-11-20; c6's handover item 1, cb C151): the guard now fails CLOSED. Only 'live' grants in
+  // production; this used to pin "a row with no recorded mode is not affected". C151 found 0 completable NULL/unknown
+  // rows in prod, so the inversion changes no real purchase.
+  it.each<[string, unknown]>([
+    ['NULL (created before the column)', null],
+    ["'unknown' (checkoutSessionStore's normalisation)", 'unknown'],
+    ['an empty string', ''],
+    ['an unexpected value', 'sandbox'],
+  ])('production + provider_mode %s -> refused, NO credits (only live grants)', async (_n, mode) => {
+    mockState.row = row({ provider_mode: mode });
+    const r = await completePurchase('p1', 'pay_1');
+    expect(r).toMatchObject({ success: false, reason: 'test_mode_no_grant' });
+    expect(mockState.credits).toEqual([]);
+  });
+  it('CONTROL: NOT production + NULL mode still grants (dev/QA)', async () => {
+    mockState.isProd = false;
     mockState.row = row({ provider_mode: null });
     await completePurchase('p1', 'pay_1');
     expect(mockState.credits).toHaveLength(1);
