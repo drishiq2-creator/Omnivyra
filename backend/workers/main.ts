@@ -639,7 +639,7 @@ async function main(): Promise<void> {
   const cronServiceMode = String(process.env.CRON_SERVICE_MODE ?? 'colocated').toLowerCase();
   if (cronServiceMode === 'worker-only') {
     console.info('[main] CRON_SERVICE_MODE=worker-only — scheduler runs in the dedicated cron service');
-    setCronStatus('ok', 'external cron service (CRON_SERVICE_MODE=worker-only)');
+    setCronStatus('ok'); // the scheduler runs in the dedicated cron service (logged above)
   } else
   // SEC-C6: the worker owns process exit (bounded drain below); the
   // scheduler must not process.exit() underneath it on SIGTERM.
@@ -655,7 +655,7 @@ async function main(): Promise<void> {
       // the health endpoint so it's immediately visible without
       // crash-looping the pod (workers themselves are unaffected).
       const reason = (err && (err.message ?? String(err))) || 'unknown';
-      setCronStatus('degraded', reason);
+      setCronStatus('degraded'); // the reason is logged below, never served (public /health)
       console.error('[main] startCron failed (non-fatal — token refresh/crons will NOT run):', reason);
     });
 

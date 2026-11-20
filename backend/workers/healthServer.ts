@@ -41,15 +41,17 @@ function presentedMetricsToken(req: http.IncomingMessage): string | undefined {
 // operators an immediate signal without crash-looping the pod.
 type CronStatus = 'ok' | 'degraded' | 'initializing';
 let _cronStatus: CronStatus = 'initializing';
-let _cronDegradedReason: string | null = null;
 
 /**
  * Worker-side setter for cron health. Called by main.ts from the
  * startCron() failure handler. Idempotent — successive calls overwrite.
+ *
+ * STATUS ONLY, by signature: there is deliberately no reason/message parameter. /health is served on a PUBLIC port,
+ * and the reason a caller has is a raw error message (it can name hosts or connection details). Do NOT add one to
+ * store or serve it - log it where it is raised (main.ts does). CronStatus is a closed union for the same reason.
  */
-export function setCronStatus(status: CronStatus, reason?: string | null): void {
+export function setCronStatus(status: CronStatus): void {
   _cronStatus = status;
-  _cronDegradedReason = reason ?? null;
 }
 
 export function startHealthServer(port = 8080): http.Server {
@@ -63,9 +65,10 @@ export function startHealthServer(port = 8080): http.Server {
     // Dark by default: 404 when OBSERVABILITY_EXPORT_TOKEN is unset — identical
     // to the API and indistinguishable from a missing route.
     if (path === '/metrics') {
-      if (req.method !== 'GET') { res.writeHead(405, { Allow: 'GET' }); res.end(); return; }
+      // Dark check FIRST, for every method: a 405 before it would confirm the route exists (public port).
       const expected = process.env.OBSERVABILITY_EXPORT_TOKEN;
       if (!expected) { res.writeHead(404); res.end(); return; }
+      if (req.method !== 'GET') { res.writeHead(405, { Allow: 'GET' }); res.end(); return; }
       // SEC-C4: constant-time comparison (no prefix-timing oracle).
       if (!constantTimeEqual(presentedMetricsToken(req), expected)) {
         res.writeHead(401, { 'Content-Type': 'application/json' });
@@ -101,9 +104,10 @@ export function startHealthServer(port = 8080): http.Server {
     // Dark by default: 404 when ADS_ACQUISITION_TRIGGER_TOKEN is unset — same convention as
     // /metrics, indistinguishable from a missing route.
     if (path === '/internal/ads-acquisition') {
-      if (req.method !== 'POST') { res.writeHead(405, { Allow: 'POST' }); res.end(); return; }
+      // Dark check FIRST, for every method (see /metrics).
       const expected = process.env.ADS_ACQUISITION_TRIGGER_TOKEN;
       if (!expected) { res.writeHead(404); res.end(); return; }
+      if (req.method !== 'POST') { res.writeHead(405, { Allow: 'POST' }); res.end(); return; }
       // SEC-C4: constant-time comparison (no prefix-timing oracle). The presented value is
       // never logged and never echoed into a response body.
       if (!constantTimeEqual(presentedToken(req, 'x-ads-trigger-secret'), expected)) {
@@ -135,17 +139,19 @@ export function startHealthServer(port = 8080): http.Server {
       return;
     }
 
-    if (req.url === '/health' && req.method === 'GET') {
+    if (path === '/health' && req.method === 'GET') {
       // HTTP status remains 200 even when cron is degraded — Railway's
       // healthcheck only restarts on 5xx, and a crash-loop here would
       // hurt more than the degraded scheduler. Operators read the
       // cron_status field; alerts can be configured on it directly.
+      // PUBLIC (the worker's port gets a public domain so the metrics scraper can reach it): status only.
+      // The free-text degraded reason is a raw startCron error message - it can name hosts or connection
+      // details - so it is NOT served or stored here; main.ts logs it where it is raised.
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
         status: 'ok',
         uptime: Math.floor((Date.now() - _startedAt) / 1000),
         cron_status: _cronStatus,
-        cron_degraded_reason: _cronDegradedReason,
         ts:     Date.now(),
       }));
     } else {
