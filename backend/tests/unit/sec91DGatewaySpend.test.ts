@@ -103,7 +103,8 @@ const mockRunBilledOperation = jest.fn(async (args: any) => {
   const r = await args.executor();
   return {
     operationId: 'op-1', correlationId: 'c-1', idempotencyKey: 'k-1',
-    result: { status: 'executed', result: r.result, settlement: { actualUsage: { inputTokens: 1, outputTokens: 1 } } },
+    // TOKEN mode's executor returns {result, usage}; FIXED mode's returns the value itself.
+    result: { status: 'executed', result: args.llmPricing ? r.result : r, settlement: { actualUsage: { inputTokens: 1, outputTokens: 1 } } },
   };
 });
 jest.mock('../../services/billing/enterpriseBillingOrchestrator', () => ({ runBilledOperation: (a: unknown) => mockRunBilledOperation(a) }));
@@ -290,6 +291,38 @@ describe('SEC91-D2 credit handle reaches the gateway billing guard', () => {
   it('enforced: an UNBILLED call with no handle is blocked before the provider', async () => {
     process.env.BILLING_REQUIRE_AI_HANDLE = 'true';
     await expect(ops.runCompletionWithOperation({ ...req(CO_PLATFORM), operation: 'refineVariant' })).rejects.toThrow(/BILLING_REQUIRED/);
+    expect(mockCallProvider).not.toHaveBeenCalled();
+  });
+
+  // FIXED mode (c6 2026-11-20, owner: no new token-priced billing). Same guard + handle scope as token mode.
+  const fixedArgs = () => {
+    const { llmPricing: _drop, ...rest } = billedArgs();
+    return { ...rest, fixedPricing: { provider: 'openai', model: 'gpt-4o-mini' } };
+  };
+
+  it('FIXED: a billed call executes under enforcement, and the orchestrator is asked for its FIXED path', async () => {
+    process.env.BILLING_REQUIRE_AI_HANDLE = 'true';
+    const out = await runBilledAiCompletion(fixedArgs());
+    expect(out.text).toBe('generated');
+    expect(mockCallProvider).toHaveBeenCalledTimes(1);
+    // runBilledOperation's fixed path is selected by llmPricing being ABSENT (OrchestratedFixed).
+    expect(mockRunBilledOperation.mock.calls[0][0].llmPricing).toBeUndefined();
+  });
+
+  it('FIXED: the handle still binds the org (org A handle never vouches for org B)', async () => {
+    process.env.BILLING_REQUIRE_AI_HANDLE = 'true';
+    const args = fixedArgs();
+    args.completion.companyId = CO_BYOK;
+    await expect(runBilledAiCompletion(args)).rejects.toThrow(/BILLING_REQUIRED/);
+    expect(mockCallProvider).not.toHaveBeenCalled();
+  });
+
+  it('exactly one pricing mode: neither, or both, is refused before any billing or provider call', async () => {
+    const { llmPricing: _drop, ...neither } = billedArgs();
+    await expect(runBilledAiCompletion(neither)).rejects.toThrow(/exactly one of llmPricing \/ fixedPricing/);
+    await expect(runBilledAiCompletion({ ...billedArgs(), fixedPricing: { provider: 'openai', model: 'gpt-4o-mini' } }))
+      .rejects.toThrow(/exactly one of llmPricing \/ fixedPricing/);
+    expect(mockRunBilledOperation).not.toHaveBeenCalled();
     expect(mockCallProvider).not.toHaveBeenCalled();
   });
 

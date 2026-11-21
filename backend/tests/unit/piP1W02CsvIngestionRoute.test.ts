@@ -40,7 +40,7 @@ jest.mock('../../services/leadIngestion/orchestrator', () => ({
   // Tenant-scoped gate, doubled ALLOW: this suite tests the CSV route, not the
   // gate. Every deny path lives in piTenantScopedIngestionGate.test.ts.
   resolveLeadIngestionGate: async () => ({ allowed: tenantGateAllowed, reason: 'test' }),
-  MAX_BATCH_SIZE: 1000,
+  MAX_BATCH_SIZE: 100,
 }));
 
 jest.mock('../../services/leadIngestion', () => ({
@@ -49,6 +49,12 @@ jest.mock('../../services/leadIngestion', () => ({
 
 jest.mock('../../../lib/platform/routeFactory', () => ({
   createApiRoute: (h: unknown) => h,
+}));
+
+// PI-LDB D: the route re-verifies a submitted mapping against the stored profile.
+const loadActiveProfile = jest.fn();
+jest.mock('../../services/leadMapping/mappingProfileStore', () => ({
+  loadActiveProfile: (...a: unknown[]) => loadActiveProfile(...a),
 }));
 
 import handler from '../../../pages/api/lead-ingestion/csv';
@@ -81,7 +87,16 @@ const call = async (over: Partial<NextApiRequest> = {}) => {
   return res;
 };
 
-const OK = { source: 'csv', total: 1, succeeded: 1, failed: 0, outcomes: [{ externalId: 'csv:abc', status: 'ingested' }] };
+// `projected`/`notProjected` are REQUIRED by `IngestionBatchResult`, and the
+// double is an untyped `jest.fn`, so omitting them type-checks nowhere and
+// made the route serialise `undefined` for both — which `toEqual` ignores and
+// `JSON.stringify` strips, so every assertion below passed without the
+// counters ever carrying a value. Honouring the contract is what makes the
+// delivery assertions mean anything. 1 = 1 + 0 + 0 per the stated identity.
+const OK = {
+  source: 'csv', total: 1, succeeded: 1, failed: 0, projected: 1, notProjected: 0,
+  outcomes: [{ externalId: 'csv:abc', status: 'ingested' }],
+};
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -220,7 +235,9 @@ describe('PI-P1-W02 — the response and telemetry', () => {
     await call();
     expect(trackEvent).toHaveBeenCalledTimes(1);
     const meta = trackEvent.mock.calls[0][0].metadata;
-    expect(meta).toEqual({ source: 'csv', total: 1, succeeded: 1, failed: 0 });
+    expect(meta).toEqual({
+      source: 'csv', total: 1, succeeded: 1, failed: 0, projected: 1, notProjected: 0,
+    });
     expect(JSON.stringify(trackEvent.mock.calls[0][0])).not.toContain('dana@example.com');
   });
 
@@ -246,5 +263,43 @@ describe('PI-P1-W02 — the response and telemetry', () => {
     expect(res._status).toBe(200);
     expect(res._json.failed).toBe(1);
     expect(res._json.succeeded).toBe(1);
+  });
+});
+
+
+describe('PI-LDB D - field-level mapping provenance is VERIFIED before it reaches ingestion', () => {
+  const FP = 'c'.repeat(64);
+  beforeEach(() => {
+    loadActiveProfile.mockReset();
+    loadActiveProfile.mockResolvedValue({
+      profileId: 'prof-9', version: 1, sourceSchemaFingerprint: FP, headers: ['Designation'],
+      entries: [{ sourceField: 'Designation', target: 'jobTitle', transformation: 'trim', approvedBy: 'u-approver', approvedAt: '2026-11-01T00:00:00Z' }],
+    });
+  });
+
+  it('no mapping in the request -> no provenance passed (and no profile read)', async () => {
+    await call();
+    expect(ingestLeadBatch.mock.calls[0][0]).not.toHaveProperty('mappingProvenance');
+    expect(loadActiveProfile).not.toHaveBeenCalled();
+  });
+
+  it('a verified pair reaches ingestion stamped with the SERVER-loaded profile, for THIS tenant', async () => {
+    await call({ body: { records: [{ email: 'dana@example.com' }], mapping: {
+      schemaFingerprint: FP, profileId: 'forged-id', fields: [{ sourceField: 'Designation', target: 'jobTitle', method: 'approved_profile_match' }],
+    } } } as never);
+    expect(loadActiveProfile).toHaveBeenCalledWith({ organizationId: ORG_A, source: 'csv', schemaFingerprint: FP });
+    expect(ingestLeadBatch.mock.calls[0][0].mappingProvenance.person.job_title).toMatchObject({
+      mappingMethod: 'approved_profile_match', mappingProfileId: 'prof-9', approvedBy: 'u-approver',
+    });
+  });
+
+  it('an unverifiable claim is downgraded to tenant_confirmed by the VERIFIED principal - and the import still runs', async () => {
+    loadActiveProfile.mockRejectedValue(new Error('read_failed'));
+    const res = await call({ body: { records: [{ email: 'dana@example.com' }], mapping: {
+      schemaFingerprint: FP, fields: [{ sourceField: 'Designation', target: 'jobTitle', method: 'approved_profile_match' }],
+    } } } as never);
+    expect(res._status).toBe(200);
+    expect(ingestLeadBatch.mock.calls[0][0].mappingProvenance.person.job_title).toMatchObject({ mappingMethod: 'tenant_confirmed', approvedBy: 'u-1' });
+    expect(ingestLeadBatch.mock.calls[0][0].mappingProvenance.person.job_title.mappingProfileId).toBeUndefined();
   });
 });

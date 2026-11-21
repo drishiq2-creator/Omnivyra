@@ -45,18 +45,111 @@ describe('LI-2 — schema shape', () => {
     }
   });
 
-  it('has 6 composite tenant-safe foreign keys', async () => {
+  it('the PI-LDB platform profile reference is a SCOPE-binding composite FK, not a tenant leg', async () => {
+    const { rows } = await db.query(
+      `SELECT pg_get_constraintdef(oid) d FROM pg_constraint
+        WHERE conname = 'source_assertions_platform_mapping_profile_fk' AND conrelid = 'public.source_assertions'::regclass`);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].d).toMatch(/FOREIGN KEY \(platform_mapping_profile_id, platform_mapping_profile_scope\) REFERENCES source_mapping_profiles\(id, scope\)/);
+    expect(rows[0].d).toMatch(/ON DELETE SET NULL \(platform_mapping_profile_id, platform_mapping_profile_scope\)/);
+  });
+
+  it('PREMISE for set_null_vs_check (actor-FK CI): deleting a CITED platform profile nulls BOTH columns and leaves a valid row', async () => {
+    // The actor-FK detector flags any CHECK containing `<col> IS NOT NULL` under
+    // an ON DELETE SET NULL FK. Here the FK's column list nulls BOTH columns and
+    // source_assertions_platform_profile_scope's first branch admits
+    // (NULL, NULL), so the delete must succeed - and the insert-only guard on
+    // source_assertions must not block the referential UPDATE. Executed, not
+    // argued: this deletes a real cited profile.
+    await inRollback(async () => {
+      await seedTenants();
+      const fp = 'f'.repeat(64);
+      const { rows: p } = await db.query(
+        `INSERT INTO public.source_mapping_profiles (scope, organization_id, source, schema_fingerprint, version, status, header_count, headers)
+         VALUES ('platform', NULL, 'apollo', $1, 1, 'active', 1, '["Title"]'::jsonb) RETURNING id`, [fp]);
+      const rec = await insertSource(ORG_A, { source_record_id: 'REC-SETNULL' });
+      const { rows: a } = await db.query(
+        `INSERT INTO public.source_assertions (organization_id,source_record_id,entity_type,attribute,raw_value,normalized_value,value_hash,provider,
+                                               source_field, mapping_method, platform_mapping_profile_id, platform_mapping_profile_scope)
+         VALUES ($1,$2,'person','job_title','CTO','CTO',$3,'testprov','Title','approved_profile_match',$4,'platform') RETURNING id`,
+        [ORG_A, rec, h('CTO-setnull'), p[0].id]);
+      await db.query('DELETE FROM public.source_mapping_profiles WHERE id = $1', [p[0].id]);
+      const { rows: after } = await db.query(
+        'SELECT platform_mapping_profile_id, platform_mapping_profile_scope FROM public.source_assertions WHERE id = $1', [a[0].id]);
+      expect(after[0]).toEqual({ platform_mapping_profile_id: null, platform_mapping_profile_scope: null });
+    });
+  });
+
+  it('SCOPE GUARD for the catalog_known entry: both platform-profile columns stay NULLABLE', async () => {
+    // The entry in scripts/migrations/set-null-known-defects.json covers ONLY
+    // set_null_vs_check; the detector matches it by table.column, so if either
+    // column ever became NOT NULL (set_null_on_not_null - a REAL defect) the
+    // entry would silently suppress it. Assert the negation of that hypothetical
+    // here, so the cause fails, not a later gate run (virality-05, 2026-11-11).
+    const { rows } = await db.query(
+      `SELECT column_name, is_nullable FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'source_assertions'
+          AND column_name IN ('platform_mapping_profile_id', 'platform_mapping_profile_scope')
+        ORDER BY column_name`);
+    expect(rows).toEqual([
+      { column_name: 'platform_mapping_profile_id', is_nullable: 'YES' },
+      { column_name: 'platform_mapping_profile_scope', is_nullable: 'YES' },
+    ]);
+  });
+
+  it('REMOVAL CONTROL: with a SET NULL that nulls only the id, the same delete is REFUSED by the CHECK', async () => {
+    await inRollback(async () => {
+      await seedTenants();
+      await db.query('ALTER TABLE public.source_assertions DROP CONSTRAINT source_assertions_platform_mapping_profile_fk');
+      await db.query(`ALTER TABLE public.source_assertions ADD CONSTRAINT source_assertions_platform_mapping_profile_fk
+        FOREIGN KEY (platform_mapping_profile_id, platform_mapping_profile_scope) REFERENCES public.source_mapping_profiles (id, scope)
+        ON DELETE SET NULL (platform_mapping_profile_id)`);
+      const fp = 'f'.repeat(64);
+      const { rows: p } = await db.query(
+        `INSERT INTO public.source_mapping_profiles (scope, organization_id, source, schema_fingerprint, version, status, header_count, headers)
+         VALUES ('platform', NULL, 'apollo', $1, 1, 'active', 1, '["Title"]'::jsonb) RETURNING id`, [fp]);
+      const rec = await insertSource(ORG_A, { source_record_id: 'REC-SETNULL-CTL' });
+      await db.query(
+        `INSERT INTO public.source_assertions (organization_id,source_record_id,entity_type,attribute,raw_value,normalized_value,value_hash,provider,
+                                               source_field, mapping_method, platform_mapping_profile_id, platform_mapping_profile_scope)
+         VALUES ($1,$2,'person','job_title','CTO','CTO',$3,'testprov','Title','approved_profile_match',$4,'platform')`,
+        [ORG_A, rec, h('CTO-setnull-ctl'), p[0].id]);
+      // (id NULL, scope 'platform') violates the CHECK: the column list is what makes the real FK safe.
+      expect(await attempt('DELETE FROM public.source_mapping_profiles WHERE id = $1', [p[0].id])).toBe('23514');
+    });
+  });
+
+  it('has 7 composite tenant-safe foreign keys', async () => {
     const { rows } = await db.query(`
       SELECT con.conname, pg_get_constraintdef(con.oid) d
         FROM pg_constraint con JOIN pg_class s ON s.oid=con.conrelid
        WHERE con.contype='f' AND s.relname IN ('source_records','source_assertions')
-         AND array_length(con.conkey,1)=2 ORDER BY con.conname`);
-    // Six since migration 20261122000000 added
-    // `source_assertions_relationship_tenant_fk`, the relationship SUBJECT. The
-    // invariant below is what this test is really for and it is unchanged: the
-    // loop still runs over every composite FK, so widening the count strengthens
-    // the coverage rather than relaxing it.
-    expect(rows).toHaveLength(6);
+         AND array_length(con.conkey,1)=2
+         AND EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = con.conrelid AND a.attnum = ANY (con.conkey) AND a.attname = 'organization_id')
+       ORDER BY con.conname`);
+    // TENANT legs only (the FK includes organization_id). The PI-LDB platform
+    // profile reference (20270211000001) is composite but binds SCOPE, not
+    // tenant - a platform profile belongs to no tenant - and is pinned by name
+    // in its own test below.
+    // SEVEN, and neither branch said so.
+    //
+    // This conflict LOOKED already resolved: main and the sprint both land on
+    // `6`, so picking either comment leaves the number alone and the test fails
+    // against the merged schema. They are counting different keys.
+    //   * main   +1: `source_assertions_relationship_tenant_fk` (20261122000000),
+    //                the relationship SUBJECT.
+    //   * sprint +1: `source_assertions_mapping_profile_tenant_fk`
+    //                (20270211000001), so an assertion can cite the exact mapping
+    //                profile version that decided its field.
+    // Both are composite and tenant-second, both are present once merged, and
+    // this query spans source_records AND source_assertions — so 5 + 1 + 1 = 7.
+    //
+    // The sprint's own comment asked for this: "if a seventh appears without
+    // this comment changing, ask why." It appeared because two branches each
+    // added one. The invariant below is what the test is really for and it is
+    // untouched: the loop runs over every composite FK, so a widened count
+    // strengthens coverage rather than relaxing it.
+    expect(rows).toHaveLength(7);
     for (const r of rows as any[]) {
       expect(r.d).toMatch(/, organization_id\)/);   // tenant is always the second leg
     }

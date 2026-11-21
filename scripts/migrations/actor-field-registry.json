@@ -171,6 +171,42 @@
       "evidence": "CODE_VERIFIED",
       "status": "remediating",
       "note": "Column added without an FK in 20270209000000. No writer sets it yet. Same sequencing commitment as prospect_enrichment_attempts.initiated_by."
+    },
+    {
+      "table": "source_mapping_profiles",
+      "column": "created_by",
+      "immutable_actor": true,
+      "fk_into_users": "absent",
+      "nullable": true,
+      "check_constraint": null,
+      "writer_validation": "backend/services/leadMapping/mappingProfileStore.ts:saveProfileVersion (caller pages/api/lead-ingestion/mapping-approval.ts verifies an ACTIVE tenant membership first)",
+      "evidence": "CODE_VERIFIED",
+      "status": "enforced",
+      "note": "20270211000000 (renumbered from 20270201000000, never applied; FK into users DROPPED per GOV-H, postcondition refuses an actor FK). mappingProfileStore is the SINGLE writer (coordinator ruling 2026-11-11). Platform-scope rows: Super Admin approval path not yet built (step E); until then no writer sets platform rows."
+    },
+    {
+      "table": "source_mapping_profile_entries",
+      "column": "approved_by",
+      "immutable_actor": true,
+      "fk_into_users": "absent",
+      "nullable": true,
+      "check_constraint": "smpe_tenant_decision_has_provenance",
+      "writer_validation": "backend/services/leadMapping/mappingProfileStore.ts:saveProfileVersion (caller verifies an ACTIVE tenant membership first)",
+      "evidence": "CODE_VERIFIED",
+      "status": "enforced",
+      "note": "20270211000000; same writer and rule as source_mapping_profiles.created_by."
+    },
+    {
+      "table": "source_assertions",
+      "column": "approved_by",
+      "immutable_actor": true,
+      "fk_into_users": "absent",
+      "nullable": true,
+      "check_constraint": "source_assertions_approval_coherent",
+      "writer_validation": "NOT YET WIRED (PI-LDB provenance writer)",
+      "evidence": "CODE_VERIFIED",
+      "status": "remediating",
+      "note": "Column added without an FK in 20270211000001 (renumbered, never applied). No writer sets it yet. SEQUENCING COMMITMENT: the provenance writer copies approved_by only from a server-RE-VERIFIED profile entry (tenant ownership, active version, pair equality), never from the request."
     }
   ],
   "pending_owner_decision": [
