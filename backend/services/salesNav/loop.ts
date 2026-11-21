@@ -146,14 +146,19 @@ export async function submitPage(
     const after = await loadRun(ctx.organizationId, run.id, store);
     return after && after !== 'unreadable' ? toRunStatusView(after, now) : null;
   };
+  // 89 (R4): a refusal that ENDS the run says so EXPLICITLY - extra.closed is whether the close actually APPLIED (a
+  // failed close write leaves the run running, and an inferred "it has a code, so it closed" would then be wrong).
   const closeWith = async (status: 'refused' | 'unknown', code: string, http: number, error: string): Promise<SubmitResult> => {
+    let closed: boolean;
     if (status === 'unknown') {
-      await recordSalesNavPage(ctx, { runId: run.id, pageIndex: run.next_page_index, outcome: 'unknown', hasNextPage: null,
+      const r = await recordSalesNavPage(ctx, { runId: run.id, pageIndex: run.next_page_index, outcome: 'unknown', hasNextPage: null,
         listTotal: null, leadKeys: [], unknownCode: code }, store);
+      // `in`, not a boolean test: tsconfig.json:11 is "strict": false (repo-wide), so a boolean-literal discriminant does NOT narrow a union here - do not 'simplify' back
+      closed = !('reason' in r);
     } else {
-      await closeSalesNavRun(ctx, { runId: run.id, status, code }, store);
+      closed = (await closeSalesNavRun(ctx, { runId: run.id, status, code }, store)) === 'ok';
     }
-    return { kind: 'refusal', http, error, extra: { code, run: await view() } };
+    return { kind: 'refusal', http, error, extra: { closed, code, run: await view() } };
   };
 
   if (canonicalMemberId(input.attestedMemberId) !== run.member_id) return closeWith('refused', 'member_mismatch', 409, 'MEMBER_MISMATCH');

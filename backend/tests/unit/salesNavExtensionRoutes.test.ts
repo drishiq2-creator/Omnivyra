@@ -346,3 +346,34 @@ describe('the SHARED loop (loop.ts), in-process as the RPA route calls it (89 R4
       .toEqual({ kind: 'already_closed' });
   });
 });
+
+describe('submitPage marks a run-ending refusal EXPLICITLY (89 R4): extra.closed = did the close apply', () => {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const loop = require('../../services/salesNav/loop') as typeof import('../../services/salesNav/loop');
+  const ctx = { organizationId: ORG, initiatedBy: USER };
+  const submit = (e: any, over: Record<string, unknown> = {}, store = e.deps.store) => loop.submitPage(ctx, e.runId, {
+    route: 'extension', pageIndex: 0, finalUrl: LIST, outcome: 'unknown', unknownCode: 'structure_unrecognised',
+    hasNextPage: null, listTotal: null, leads: [], readerVersion: 'snr-1', attestedMemberId: URN, ...over,
+  }, { store });
+  it('a close that APPLIED -> closed: true, with the code and the closed run view', async () => {
+    const e = await withRun();
+    expect(await submit(e)).toMatchObject({ kind: 'refusal', extra: { closed: true, code: 'structure_unrecognised', run: { status: 'unknown' } } });
+  });
+  it('a close whose write FAILED -> closed: false (the run is still running) - never inferred from the code', async () => {
+    const e = await withRun();
+    const broken = { ...e.deps.store, table: (n: string) => {
+      const b = e.db.table(n);
+      if (n === 'salesnav_extraction_runs') { const upd = b.update; b.update = (p: any, o?: any) => (p && p.status === 'unknown' ? { ...b, eq: () => ({ eq: () => ({ eq: () => ({ eq: async () => ({ error: { message: 'down' }, count: null }) }) }) }) } : upd(p, o)); }
+      return b;
+    } };
+    const r: any = await submit(e, {}, broken);
+    expect(r.extra.closed).toBe(false);
+    expect(run0(e.db).status).toBe('running');
+  });
+  it('control: a refusal that does NOT end the run carries no closed marker (NO_RESERVATION)', async () => {
+    const e = await withRun();
+    const r: any = await submit(e, { outcome: 'ok', unknownCode: undefined, leads: [lead('keyZ00001')] });
+    expect(r).toMatchObject({ kind: 'refusal', error: 'NO_RESERVATION' });
+    expect(r.extra?.closed).toBeUndefined();
+  });
+});
