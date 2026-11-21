@@ -52,6 +52,48 @@ async function main() {
   // Import + use the admin client EARLY so it initializes (prod env) before ingest.
   const { supabase } = await import('../../../backend/db/supabaseClient');
 
+  // ── --canonical: project canonical_leads prospects (PI-LDB C, 2026-11-11) ──
+  // The SECOND entity this CLI handles. Legacy `leads` (below) and canonical
+  // prospects (`canonical_leads`) are DIFFERENT entities, so this is a separate
+  // mode, not a merge: it calls the ONE reconciliation service
+  // (`reconcileLeadProjections`), which reads prospects newest first, checks
+  // presence in URL-budgeted batches, and projects only what is missing, through
+  // the same durable sink. Tenant-scoped: --company is required.
+  // --dry projects NOTHING: the sink refuses, and those rows report as wouldProject.
+  if (args.includes('--canonical')) {
+    if (!companyArg) {
+      console.error(JSON.stringify({ phase: 'REFUSED', reason: '--canonical requires --company <id>: reconciliation is never tenant-less' }));
+      process.exitCode = 2;
+      return;
+    }
+    const { reconcileLeadProjections, MAX_RECONCILE_BATCH } = await import('../../../backend/services/leadIntelligence/leadProjectionReconciliation');
+    // --dry: a REFUSING sink (fail-closed by construction: there is nothing to
+    // write with). The report counts the prospects the sink ACTUALLY RECEIVED,
+    // by id, never by matching an error message - so a different, real failure
+    // can never be absorbed into "would project" (PI review).
+    const refusedProspectIds = new Set<string>();
+    const res = await reconcileLeadProjections({
+      organizationId: companyArg,
+      limit: Math.min(limitArg, MAX_RECONCILE_BATCH),
+      ...(DRY ? { ports: { sink: { emit: async (lead) => {
+        if (lead?.sourceRef?.id) refusedProspectIds.add(String(lead.sourceRef.id));
+        throw new Error('dry run: nothing is written');
+      } } } } : {}),
+    });
+    const tally: Record<string, number> = {};
+    let wouldProject = 0;
+    for (const o of res.outcomes) {
+      if (DRY && o.status === 'still_missing' && o.prospectId && refusedProspectIds.has(o.prospectId)) { wouldProject++; continue; }
+      tally[o.status] = (tally[o.status] ?? 0) + 1;
+    }
+    console.info(JSON.stringify({
+      phase: DRY ? 'CANONICAL_DRY_DONE' : 'CANONICAL_DONE', company: companyArg,
+      prospects: res.outcomes.length, truncated: res.truncated, ...(DRY ? { wouldProject } : {}), byStatus: tally,
+      presenceFallbacks: res.presenceFallbacks,
+    }));
+    return;
+  }
+
   // Existing canonical mirrors (resumable set = leads NOT already present).
   let ciq = supabase.from('lead_intelligence').select('source_id').eq('source_table', 'leads');
   if (companyArg) ciq = ciq.eq('company_id', companyArg);

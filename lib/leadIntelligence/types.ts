@@ -10,6 +10,8 @@
 
 import type { ContributionRole, ProvenanceContribution, ScoreScale, SourceCategory } from '../prospectProvenance/contract';
 
+import type { LeadProjectionResult } from './projectionResult';
+
 /** The canonical lead-source taxonomy — every incoming lead resolves to exactly one. */
 export type CanonicalLeadSource =
   | 'website'
@@ -88,6 +90,21 @@ export interface CanonicalLeadScores {
   scale?: 'unit';
   /** The source columns these values were derived from, with their declared scales. */
   sourceScores?: SourceScore[];
+  /**
+   * Which MATERIALIZATION MODEL produced these values (Prompt 2B).
+   *
+   * Set only by `materializeScoresFromView`; a source-provided score (System-B
+   * `qualifyLead`) leaves it absent, which is itself information - it says
+   * these numbers did not come from our scorer and must not be replaced by it.
+   *
+   * It exists because the scorer's own EVIDENCE RULE can change, and when it
+   * does the same lead legitimately scores differently. Without a stamp, a
+   * routine re-sync silently rewrote a customer-visible number with no event,
+   * no history row and no notice. With one, a stored score whose model is not
+   * the current model is recognisable as belonging to an earlier model and is
+   * preserved until a transition is authorized.
+   */
+  modelVersion?: string | null;
 }
 
 /**
@@ -205,6 +222,27 @@ export interface LeadOrigin {
   category: SourceCategory | null;
   platform: string | null;
   observedAt: string | null;
+  /**
+   * WHERE THIS CLASSIFICATION CAME FROM, and therefore whether it may be
+   * PERSISTED (D2, owner ruling 2026-11-07).
+   *
+   * 'asserted' means an ingestion path set it explicitly, from the provenance
+   * profile table. ABSENT means it is a read-time HINT derived from a display
+   * source or a provider name: `crmAdapter` reads `pi_discovery` off
+   * provider-name membership, and `websiteAdapter` reads `inbound_form` off
+   * the free-text `leads.source` string matching 'form' after whitespace and
+   * hyphen normalisation. That last one is worth +15 and the words
+   * "Submitted a lead form".
+   *
+   * A hint is fine for display. Storing one durably would manufacture a claim
+   * about something a human did, so only 'asserted' reaches
+   * `lead_intelligence.origin_category`.
+   *
+   * Optional, so every existing construction still compiles and no read path
+   * changes behaviour: absence is the safe value, and the write boundary -
+   * not the type - is what refuses a hint.
+   */
+  provenance?: 'asserted';
 }
 
 export interface CanonicalLeadInput {
@@ -275,6 +313,20 @@ export interface CanonicalLeadView {
   /** Account of an account-only canonical prospect (read side; see LeadAccount). */
   account?: LeadAccount | null;
   accountStatus?: LeadAccountStatus;
+  /**
+   * How a human recognises this lead: a name, a job title, a snippet.
+   *
+   * Added because the view carried NO human-readable label at all — only
+   * identity (email, phone) and attribution. `CanonicalLeadInput.display` has
+   * always existed and `assemble()` has always populated it from the source
+   * row, but `viewFromInput` dropped it, so every consumer rendered a lead as
+   * an email address with no name beside it.
+   *
+   * OPTIONAL on purpose. A view projected from a source table with no name
+   * column genuinely has no name, and a required field would force every such
+   * reader to invent one. Absent means unknown, not empty.
+   */
+  display?: CanonicalLeadInput['display'];
 }
 
 /* ── Hexagonal ports (reuse existing infrastructure; never duplicated here) ── */
@@ -288,8 +340,13 @@ export interface IdentityResolverPort {
   }): Promise<{ unifiedPersonId: string | null; matchedBy?: string }>;
 }
 
+/**
+ * PI-LDB P0: `emit` returns its verdict. It used to be `Promise<void>`, which
+ * left the only function that knew whether the row landed with nowhere to say
+ * so, and made `emitted: true` a constant rather than a claim about a row.
+ */
 export interface LeadIntelligenceSink {
-  emit(lead: CanonicalLead): Promise<void>;
+  emit(lead: CanonicalLead): Promise<LeadProjectionResult>;
 }
 
 export interface IngestionPorts {

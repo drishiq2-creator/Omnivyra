@@ -391,6 +391,8 @@ describe('actor-FK compatibility detector — catalog level', () => {
     const r = actorFk.detect(cat, registry, actorFk.loadKnown());
     expect(r.counts.error).toBe(0);
     expect(r.stale_known).toEqual([]);
+    // The seventh entry postdates the baseline: visible as unjudged, not lost.
+    expect(r.unjudged_known.map((u: { key: string }) => u.key)).toEqual(['source_assertions.platform_mapping_profile_id']);
     expect(r.known_open.map((f: { table: string; column: string }) => `${f.table}.${f.column}`).sort()).toEqual([
       'canonical_revenue_events.company_id',
       'canonical_users.company_id',
@@ -408,12 +410,58 @@ describe('actor-FK compatibility detector — catalog level', () => {
     expect(r.counts.error).toBe(1);
   });
 
+  it('a frozen entry whose COLUMN postdates a bounded dump is NOT called stale; on a live catalog it IS', () => {
+    // source_assertions predates the 20260916000000 baseline; its
+    // platform_mapping_profile_id column (PI-LDB step E) does not. Absence of a
+    // column proves nothing on a bounded dump - same rule as registry_column_missing.
+    const ddl = `CREATE TABLE public.t (
+    a uuid
+);`;
+    const entry = [{ key: 't.later', owner: 'x', classification: 'y' }];
+    const bounded = actorFk.detect(actorFk.parseBaselineCatalog(ddl, { source: 'baseline', boundary: '20260916000000' }), { columns: [] }, entry);
+    expect(bounded.stale_known).toEqual([]);
+    expect(bounded.counts.error).toBe(0);
+    // Exempt is not silent: the entry is returned as unjudged and printed.
+    expect(bounded.unjudged_known).toEqual([{ key: 't.later', missing: 'column' }]);
+    const lines: string[] = [];
+    actorFk.reportCoverageLimits(bounded, { write: (x: string) => { lines.push(x); return true; } });
+    const text = lines.join('');
+    expect(text).toMatch(/columns later migrations added to older tables, are NOT covered/);
+    // 7c (2026-11-21): the bounded run EXITS 0 here, so the text must say what is true - this run cannot decide,
+    // the --db path must - and must NOT say "NOT a pass" (exit code and message would disagree).
+    expect(text).toMatch(/CANNOT DECIDE them \(it exits 0 for them\); the --db path against a replayed schema/);
+    expect(text).not.toMatch(/acknowledgement\(s\) could not be judged[^\n]*NOT a pass/);
+    expect(text).toContain('NOT JUDGED (acknowledgement)  public.t.later  catalog_known  column not in this catalog');
+    const live = actorFk.detect(actorFk.parseBaselineCatalog(ddl, { source: 'pg_catalog' }), { columns: [] }, entry);
+    expect(live.stale_known).toEqual(['t.later']);
+    expect(live.counts.error).toBe(1);
+    expect(live.unjudged_known).toEqual([]);
+  });
+
+  it('a frozen entry whose column IS in a bounded dump but no longer reproduces still FAILS as stale', () => {
+    const cat = actorFk.parseBaselineCatalog(`CREATE TABLE public.t (
+    a uuid
+);`, { source: 'baseline', boundary: '20260916000000' });
+    expect(actorFk.detect(cat, { columns: [] }, [{ key: 't.a', owner: 'x', classification: 'y' }]).stale_known).toEqual(['t.a']);
+  });
+
   it('a frozen entry for a table absent from a point-in-time dump is NOT called stale', () => {
     // Absence in a boundary-limited dump proves nothing.
     const cat = actorFk.parseBaselineCatalog('CREATE TABLE public.other (\n    a uuid\n);', { source: 'baseline', boundary: '20260916000000' });
     const r = actorFk.detect(cat, { columns: [] }, [{ key: 'missing_table.a', owner: 'x', classification: 'y' }]);
     expect(r.stale_known).toEqual([]);
     expect(r.counts.error).toBe(0);
+    expect(r.unjudged_known).toEqual([{ key: 'missing_table.a', missing: 'table' }]);
+  });
+
+  it('on a LIVE catalog an entry for an absent table IS stale (nothing further could judge it)', () => {
+    // 05 (2026-11-11): the table branch was not boundary-aware, so on the --db
+    // run a dropped table read "NOT JUDGED ... run the --db path" and stayed green.
+    const cat = actorFk.parseBaselineCatalog('CREATE TABLE public.other (\n    a uuid\n);', { source: 'pg_catalog' });
+    const r = actorFk.detect(cat, { columns: [] }, [{ key: 'missing_table.a', owner: 'x', classification: 'y' }]);
+    expect(r.stale_known).toEqual(['missing_table.a']);
+    expect(r.counts.error).toBe(1);
+    expect(r.unjudged_known).toEqual([]);
   });
 
   it('parses the real baseline into a catalog of the expected size', () => {

@@ -48,6 +48,24 @@ describe('2 — Prospects sits beneath Prospect and points at /prospects', () =>
   });
 });
 
+describe('2b — PI-LDB: Import is NOT placed in the header by this branch', () => {
+  // c6 2026-11-20, CHANGED CONTRACT (b3 ruling 4): 04 is restructuring the header (owner-approved) and places the
+  // Import entry in the new Prospect menu behind the default-OFF flag (lib/prospects/import/prospectImportUi.ts).
+  // This branch must not add one: a menu item to a default-off page is a link to a 404. The former "is a Prospect
+  // action" case is removed rather than kept - with no Import child it would pass vacuously.
+  it('the Prospect menu has no Import child', () => {
+    expect(childLabels('prospect')).not.toContain('Import');
+  });
+
+  it('control: the Prospect menu itself is present with its children', () => {
+    expect(childLabels('prospect').length).toBeGreaterThan(0);
+  });
+
+  it('a /prospects/import URL still activates exactly the Prospect group', () => {
+    expect(activeGroups('/prospects/import')).toEqual(['Prospect']);
+  });
+});
+
 describe('3/4 — Lead Intelligence nests under Prospect and keeps its two items', () => {
   it('Overview and All Leads are grouped under Lead Intelligence', () => {
     const grouped = prospect().children.filter((c) => c.group === 'Lead Intelligence').map((c) => c.label);

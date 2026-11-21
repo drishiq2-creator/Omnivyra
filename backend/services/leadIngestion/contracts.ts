@@ -33,6 +33,7 @@
  */
 
 import type { EmployeeBand, Seniority } from '../prospectIdentity/attributes';
+import type { LeadProjectionResult } from '../../../lib/leadIntelligence';
 
 export const INGESTION_CONTRACT_VERSION = 'li4d.1';
 
@@ -225,7 +226,23 @@ export type IngestionRejection =
   /** Operator-asserted evidence contradicted the person it would have been
    *  attached to (see `NormalizedIngestionRecord.operatorAsserted`). Nothing
    *  was written; `identityConflict` says which person and why. */
-  | 'identity_conflict';
+  | 'identity_conflict'
+  /**
+   * A record's ingestion THREW instead of returning an outcome (Prompt 2B).
+   *
+   * Every known failure above is returned, not raised - the comment on
+   * `ingestion_disabled` states the principle - but `ingestNormalizedRecord`
+   * had no catch-all, and its caller had no guard around the call, so one
+   * unexpected throw discarded the outcomes of every record already processed
+   * and aborted the whole batch. On the discovery path it did worse: the
+   * provider had already been PAID for that page.
+   *
+   * This reason exists so the same principle covers the unexpected case too:
+   * the record that threw is reported as failed, by name, and the batch
+   * continues. It is deliberately distinct from the classified reasons - an
+   * operator seeing this is looking at a bug, not at bad input.
+   */
+  | 'unexpected_failure';
 
 /** The outcome of ONE record. A batch is a list of these — never a single verdict. */
 export interface IngestionRecordOutcome {
@@ -256,6 +273,25 @@ export interface IngestionRecordOutcome {
     needsResolution?: number;
     error?: string;
   };
+  /**
+   * PI-LDB-4 — whether this prospect reached the DURABLE lead store, which is
+   * the store the Lead Database surface reads first and wins dedupe on.
+   *
+   * Reported rather than assumed, and reported on failure too. The projection
+   * is fail-open by design: the prospect, person, employer and evidence are all
+   * already durable by the time it runs, so a projection failure must not
+   * discard good intake. But an unreported fail-open is exactly how a channel
+   * comes to look operational while nothing appears on screen, so the outcome
+   * states plainly whether the lead will be visible.
+   *
+   * PI-LDB P0: this was `{ emitted: boolean }`, and `emitted: true` meant only
+   * that the sink had not thrown — which it never did, because every failure
+   * beneath it was caught and flattened. A record that wrote no row at all
+   * reported the same thing as one that wrote a row. The shared result type
+   * replaces the boolean with the four states the write can actually be in, so
+   * `persisted` is a claim about a row and nothing else can be mistaken for it.
+   */
+  leadProjection?: LeadProjectionResult;
   /** LI-2's verdict: whether the evidence was new, unchanged, or changed. */
   provenanceOutcome?: 'created' | 'unchanged' | 'changed';
   /** Canonical attributes LI-2 applied and withheld — a withheld one is a finding. */
@@ -296,8 +332,63 @@ export interface IngestionBatchResult {
   organizationId: string;
   source: string;
   total: number;
+  /** Records that INGESTED. Says nothing about the Lead Database projection. */
   succeeded: number;
   failed: number;
+  /**
+   * Of the ingested records, how many reached the store the Lead Database reads.
+   *
+   * `succeeded` deliberately stays projection-blind — a record whose projection
+   * failed really did ingest, and its prospect, person, employer and evidence
+   * are all durable. But a batch summary that reported only `succeeded` let a
+   * run in which NOT ONE row reached `lead_intelligence` answer
+   * `succeeded === total`, which is the batch-level form of the same false
+   * success. These two counts are what make the difference reportable.
+   */
+  projected: number;
+  /**
+   * Ingested records whose projection failed or is unconfirmed. Excludes
+   * legitimate skips.
+   *
+   * THE RECONCILIATION IDENTITY, because callers reason with these numbers:
+   *
+   *   total     === succeeded + failed === outcomes.length
+   *   succeeded === projected + notProjected + (skipped projections)
+   *
+   * `skipped` is in NEITHER counter, deliberately. `needsAttention`
+   * (projectionResult.ts) excludes it because a record with no prospect has
+   * nothing to list, and warning about it would train operators to ignore the
+   * warning that matters.
+   *
+   * The second line holds only because of two rules nothing else states: an
+   * outcome with `ok: false` carries NO `leadProjection`, and an outcome with
+   * `ok: true` carries EXACTLY ONE. If a future change attaches a verdict to a
+   * rejected record, the identity breaks and `succeeded === total` becomes the
+   * only available reading again. `piLdbBatchCounters.test.ts` holds both rules
+   * on every batch it produces.
+   */
+  notProjected: number;
+  /**
+   * POSITIONAL, ONE PER RECORD — part of the contract, not an accident.
+   *
+   * `outcomes[i]` is the outcome of `records[i]`, and `outcomes.length`
+   * always equals `records.length`. Every path through `ingestLeadBatch`
+   * upholds this: the two whole-batch refusals build outcomes with
+   * `records.map`, and inside the loop every `continue` is preceded by exactly
+   * one push.
+   *
+   * It is written down because a CALLER now depends on it. A record carries no
+   * identifier a client can compute — `csvExternalId` is a server-side digest
+   * and `externalId` is `null` for a record with no reference — so position is
+   * the only way a client can say "retry the rows that did not land". Had this
+   * stayed an implementation detail, a later refactor that filtered or
+   * reordered outcomes would have silently re-imported the wrong rows, and no
+   * test would have objected.
+   *
+   * So: if a future change needs to drop or reorder an outcome, it must change
+   * this contract and give callers another key — it may not quietly break the
+   * correspondence.
+   */
   outcomes: IngestionRecordOutcome[];
 }
 

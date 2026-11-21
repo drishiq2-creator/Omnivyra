@@ -38,7 +38,7 @@ const isIdentityConflict = (e: unknown): e is IdentityConflictError =>
 import { resolveOrCreateAccount, attachPersonToAccount } from '../prospectIdentity/accountResolution';
 import { resolveOrCreateProspect } from '../prospectIdentity/prospectResolution';
 import { piProspectCandidateKeys, recordPiIngestionContribution } from '../prospectProvenance/ingestion/piIngestionContribution';
-import type { ProviderSourceRecord } from '../prospectIdentity/ingestionBoundary';
+import type { AssertionMappingProvenance, ProviderSourceRecord } from '../prospectIdentity/ingestionBoundary';
 
 type ProviderSourceCategory = ProviderSourceRecord['sourceCategory'];
 import { planProspectEnrichment, type EnrichmentPorts } from '../enrichment/service';
@@ -54,10 +54,53 @@ import {
   type NormalizedIngestionRecord,
 } from './contracts';
 import { getLeadSourceAdapter, UnsupportedSourceError } from './registry';
+// PI-LDB-4. The durable lead store and the canonical ingestion pipeline that
+// writes it already existed and had NO caller from this path: `assemble()`,
+// `ingestCanonicalLead` and `durableLeadIntelligenceSink` were all wired to
+// each other and to the read service, and nothing invoked them. A prospect
+// therefore reached `canonical_leads` and never reached the store the Lead
+// Database reads, so it surfaced only through the legacy bridge — which reads
+// name and email columns that `canonical_leads` deliberately does not have.
+import {
+  ingestCanonicalLead,
+  buildAttributionContract,
+  canonicalProspectSource,
+  resolveCanonicalSource,
+  failed,
+  needsAttention,
+  pendingReconciliation,
+  projectionFailureFrom,
+  skipped,
+  type LeadIntelligenceSink,
+  type LeadProjectionResult,
+} from '../../../lib/leadIntelligence';
+import type { CanonicalLeadInput, IdentityResolverPort } from '../../../lib/leadIntelligence';
+import { isSourceCategory } from '../../../lib/prospectProvenance/contract';
+import { durableLeadIntelligenceSink } from '../leadIntelligence/durableLeadIntelligenceSink';
 import { evaluateFeatureFlag } from '../featureFlagService';
 
-/** A batch bounded so a single call cannot be used to exhaust the platform. */
-export const MAX_BATCH_SIZE = 1_000;
+/**
+ * Records per SYNCHRONOUS ingestion request. NOT a maximum CSV size —
+ * a larger file is submitted in chunks of this size by `submitChunks`.
+ *
+ * D4 (owner ruling, 2026-11-07): 100, down from 1,000.
+ *
+ * WHY, measured rather than guessed. This path is fully synchronous
+ * (`ingestLeadBatch` awaits `ingestNormalizedRecord` per record in a
+ * sequential loop) and the 2F audit counted the PostgREST round trips a single
+ * record costs: ~18-20 for a lean row, ~52-55 for a first-import row carrying
+ * employer attributes, because source assertions are written one INSERT per
+ * attribute. `vercel.json` declares no `functions.maxDuration` and this
+ * repository holds NO evidence of a plan entitlement, so the effective limit is
+ * a platform default that cannot be verified from here. 1,000 records could not
+ * fit any defensible budget; the only safe move is to reduce the work per
+ * request rather than to assume more time, which is why this is a smaller
+ * number and not a larger `maxDuration`.
+ *
+ * `lib/prospects/import/submitChunks.ts` restates this value so the client
+ * never provokes the 413. The two MUST stay equal; a test pins that.
+ */
+export const MAX_BATCH_SIZE = 100;
 
 /**
  * The ingestion capability switch. Default OFF — absent, empty or unrecognised
@@ -157,6 +200,18 @@ export interface IngestBatchInput {
   ingestionRunId?: string | null;
   /** Injected instant, so a run is reproducible. */
   now?: string;
+  /**
+   * PI-LDB D: field-level mapping provenance for the WHOLE batch (one import =
+   * one mapping), already VERIFIED server-side (importMappingProvenance.ts).
+   * Keyed per entity by attribute column. Never built from a request as-is.
+   */
+  mappingProvenance?: BatchMappingProvenance;
+}
+
+/** Per-entity, per-attribute-column provenance (see ingestionBoundary). */
+export interface BatchMappingProvenance {
+  person: Readonly<Record<string, AssertionMappingProvenance>>;
+  account: Readonly<Record<string, AssertionMappingProvenance>>;
 }
 
 const fail = (
@@ -248,6 +303,8 @@ export async function ingestNormalizedRecord(
   options: {
     ingestionRunId?: string | null;
     now?: string;
+    /** PI-LDB D: verified batch mapping provenance (see IngestBatchInput). */
+    mappingProvenance?: BatchMappingProvenance;
     /**
      * WS-2 seam ports. OPTIONAL by design: without them no enrichment planning
      * happens and ingestion behaves exactly as before, so wiring the planner
@@ -461,6 +518,9 @@ export async function ingestNormalizedRecord(
       confidence: record.confidence ?? null,
       sourceCategory: (keys.provenance?.sourceCategory ?? null) as ProviderSourceCategory,
       platform: keys.provenance?.platform ?? null,
+      ...(options.mappingProvenance
+        ? { mappingProvenance: record.entityType === 'person' ? options.mappingProvenance.person : options.mappingProvenance.account }
+        : {}),
     }, at);
   } catch (e) {
     return fail(externalId, 'provenance_failed', e);
@@ -499,6 +559,7 @@ export async function ingestNormalizedRecord(
         ingestionRunId: options.ingestionRunId ?? null,
         accountAttributes: toAccountAttributeInput(record.account),
         confidence: record.confidence ?? null,
+        ...(options.mappingProvenance ? { mappingProvenance: options.mappingProvenance.account } : {}),
       }, at);
     } catch (e) {
       // Consistent with the employer resolution above, which already fails a
@@ -576,6 +637,158 @@ export async function ingestNormalizedRecord(
     }
   }
 
+  // ── DURABLE LEAD PROJECTION (PI-LDB-4) ──────────────────────────────────
+  // Makes the prospect VISIBLE. Everything above made it true and auditable;
+  // without this step it appears on no surface with a name.
+  //
+  // Placed last on purpose: this is a read-model projection of a prospect that
+  // is already durable, so it must run after identity, employer, the canonical
+  // Prospect and provenance have all committed. Running it earlier would risk
+  // publishing a lead whose evidence then failed to record.
+  //
+  // FAIL-OPEN, and reported. A projection failure leaves the prospect, person,
+  // employer and evidence exactly as they are — all durable — so failing the
+  // record here would discard good intake over a display concern. But the
+  // outcome carries the failure, because a fail-open nobody is told about is
+  // how a channel comes to look operational while the screen stays empty.
+  let leadProjection: IngestionRecordOutcome['leadProjection'];
+  if (!prospectId) {
+    // No canonical Prospect means there is nothing to project. WS-1 returns a
+    // null prospectId for a record with no `externalId` rather than minting one,
+    // so this is the same legitimate partial-record case, not a fault.
+    leadProjection = skipped('no_prospect');
+  } else {
+    try {
+      // Identity is ALREADY resolved above. This port hands back that answer
+      // instead of resolving again: a second resolution could return a
+      // different person for the same record and split one prospect across two
+      // identities, and identity resolution is not this step's job.
+      const resolvedIdentity: IdentityResolverPort = {
+        resolve: async () => ({ unifiedPersonId: personId, matchedBy: 'ingestion_orchestrator' }),
+      };
+
+      const identityHints = {
+        email: record.person?.email ?? null,
+        phone: record.person?.phone ?? null,
+        unifiedPersonId: personId,
+        externalKeys: record.person?.externalKeys ?? undefined,
+      };
+
+      const input: CanonicalLeadInput = {
+        organizationId: record.organizationId,
+        // The free-text provider key mapped onto the ONE canonical taxonomy by
+        // its own resolver, rather than cast here. `csv` resolves to `import`,
+        // which is why an imported prospect is labelled Import and answers the
+        // `?source=import` filter.
+        // `canonicalProspectSource`, NOT `resolveCanonicalSource`: this row's
+        // `sourceRef` is the canonical prospect, so its source must match what
+        // the reader's `canonical_leads` bridge computes for that same row, or
+        // the two views get different dedupe keys and one prospect is listed
+        // twice. See the helper's comment for the measured failure.
+        source: canonicalProspectSource({ rawSource: record.source }),
+        identity: identityHints,
+        // The provider's record verbatim. `buildAttributionContract` keeps every
+        // key it does not map in `sourceMetadata`, which is what preserves the
+        // original data alongside the canonical interpretation.
+        attribution: buildAttributionContract(result.raw ?? {}, identityHints),
+        status: null,
+        occurredAt: record.observedAt ?? at,
+        // The human-readable label. This is the whole reason PI-LDB-4 exists:
+        // the person's name and job title have nowhere else to go on the read
+        // path, because `canonical_leads` stores no person attributes.
+        display: {
+          name: record.person?.fullName ?? null,
+          title: record.person?.jobTitle ?? null,
+          contentText: null,
+        },
+        sourceRef: { table: 'canonical_leads', id: prospectId },
+        // PROVENANCE ON THE WRITE PATH (Prompt 2B).
+        //
+        // `lead_captured` (+15, "Submitted a lead form") is now decided by
+        // `origin.category` rather than by display-source membership, so the
+        // category has to reach the lead being written or the rule is
+        // fail-closed for everything and right only by accident.
+        //
+        // Nothing new is computed here. This is the SAME
+        // `keys.provenance.sourceCategory` already handed to
+        // `ingestSourceRecord` above, from the explicit `PI_ADAPTER_PROFILES`
+        // table, so the durable row and the contribution cannot disagree
+        // about what originated this prospect. `isSourceCategory` guards the
+        // boundary because that field is typed as the provider vocabulary,
+        // and an unmapped adapter must land on `null` - "nobody recorded
+        // evidence" - never on a guessed category.
+        //
+        // No adapter on this path maps to `inbound_form`, and that is the
+        // correct outcome rather than an omission: `apollo` is `pi_discovery`,
+        // `csv` is `csv`, `crm` is `crm`, `manual` is `manual`. None of them
+        // is a person submitting a form, so none of them earns the claim.
+        // D2/D3 (owner ruling, 2026-11-07). Two things changed here.
+        //
+        // `provenance: 'asserted'` is what lets this category be PERSISTED.
+        // It is the one place in the tree entitled to say so: the value comes
+        // from the explicit `PI_ADAPTER_PROFILES` table, not from a label. The
+        // adapters in adapters.ts build an `origin` too, by inference, and
+        // they deliberately do not set this - so their hint still displays and
+        // never reaches the column.
+        //
+        // `observedAt` is now the INGESTION CLOCK, not `record.observedAt`.
+        // D3 defines the persisted observation as "when Omnivyra first
+        // accepted the evidence establishing the current classification", and
+        // names the source event's own time as one of the four things it must
+        // NOT be. `record.observedAt` is exactly that - the provider's or the
+        // source row's event time - and it is still carried on `occurredAt`
+        // just above, which is the field that means it. On a re-ingestion the
+        // database trigger keeps the FIRST acceptance time, so this value is
+        // used only when the classification is new or superseded.
+        ...(keys.provenance
+          ? {
+            origin: {
+              category: isSourceCategory(keys.provenance.sourceCategory)
+                ? keys.provenance.sourceCategory
+                : null,
+              platform: keys.provenance.platform ?? null,
+              observedAt: at,
+              provenance: 'asserted' as const,
+            },
+          }
+          : {}),
+      };
+
+      // PI-LDB P0. The sink's verdict is the ONLY evidence that a row landed,
+      // so it is captured rather than discarded.
+      //
+      // It has to be captured through a wrapper because `ingestCanonicalLead`
+      // returns the lead it CONSTRUCTED, not the row that was written — a
+      // distinction that is the whole defect in miniature. Wrapping the sink
+      // here, rather than widening the pipeline's return type, leaves the pure
+      // `ingestCanonicalLead`/`ingestFromSource` signatures and every other
+      // caller of them exactly as they are.
+      const observed: { verdict: LeadProjectionResult | null } = { verdict: null };
+      const observedSink: LeadIntelligenceSink = {
+        async emit(l) {
+          const result = await durableLeadIntelligenceSink.emit(l);
+          observed.verdict = result;
+          return result;
+        },
+      };
+
+      await ingestCanonicalLead(input, { identity: resolvedIdentity, sink: observedSink, now: () => at });
+
+      // No verdict means the sink was never reached. Pessimistic deliberately:
+      // a later change that stops calling the sink degrades to "unconfirmed",
+      // never to "success". Defaulting the other way is precisely the bug.
+      leadProjection = observed.verdict
+        ?? pendingReconciliation('no_row_returned', 'the durable sink was not reached');
+    } catch (e) {
+      // A typed failure carries the classified verdict; unwrap it rather than
+      // flattening everything to `write_failed`, or an operator reading
+      // "the write failed" would go looking at the data when the real answer is
+      // an unapplied migration.
+      leadProjection = projectionFailureFrom(e)
+        ?? failed('write_failed', e instanceof Error ? e.message : String(e));
+    }
+  }
+
   return {
     externalId,
     ok: true,
@@ -583,6 +796,7 @@ export async function ingestNormalizedRecord(
     personId,
     accountId,
     prospectId,
+    leadProjection,
     enrichmentPlan,
     provenanceOutcome: ingestion.outcome,
     canonicalApplied: ingestion.canonicalApplied,
@@ -630,6 +844,8 @@ export async function ingestLeadBatch(input: IngestBatchInput): Promise<Ingestio
       total: records.length,
       succeeded: 0,
       failed: records.length,
+      projected: 0,
+      notProjected: 0,
       outcomes: records.map(() => fail(
         null,
         'ingestion_disabled',
@@ -651,6 +867,8 @@ export async function ingestLeadBatch(input: IngestBatchInput): Promise<Ingestio
         total: records.length,
         succeeded: 0,
         failed: records.length,
+        projected: 0,
+        notProjected: 0,
         outcomes: records.map(() => fail(null, 'unsupported_source', e)),
       };
     }
@@ -696,22 +914,59 @@ export async function ingestLeadBatch(input: IngestBatchInput): Promise<Ingestio
       continue;
     }
 
-    outcomes.push(withIgnored(await ingestNormalizedRecord(translated, {
-      ingestionRunId: input.ingestionRunId ?? null,
-      now: at,
-      // One decision for the batch. The kill switch is still re-read per
-      // record inside, so a mid-batch flip still stops the next one.
-      gateDecision,
-    }), raw));
+    // ── ONE RECORD MUST NOT BE ABLE TO DISCARD THE BATCH (Prompt 2B) ────
+    // Every classified failure inside is RETURNED, never thrown - which is
+    // why this call had no guard. But `ingestNormalizedRecord` has no
+    // top-level catch-all, so anything unforeseen (a port that rejects
+    // outside the paths it is expected on, a programming error, a throw from
+    // a lazily loaded module) propagated out of here and took the whole
+    // batch with it: `outcomes` was a local, so every record already
+    // processed lost its outcome, and the caller got an exception instead of
+    // a result it could account for.
+    //
+    // On the discovery path that was the expensive shape of the bug. The
+    // provider had already been called and billed for the page; the records
+    // ahead of the throw may have been fully written; and the executor's
+    // ledger row was left open holding its lease, because nothing closed it.
+    //
+    // So the unexpected case now behaves like every classified one: the
+    // record is reported failed BY NAME and the batch continues. The outcome
+    // is pushed before the loop moves on, so the counters below - `succeeded`,
+    // `projected`, `notProjected` - stay arithmetically complete over all
+    // `records.length` records, which is what makes the batch result
+    // trustworthy at all.
+    try {
+      outcomes.push(withIgnored(await ingestNormalizedRecord(translated, {
+        ingestionRunId: input.ingestionRunId ?? null,
+        now: at,
+        // One decision for the batch. The kill switch is still re-read per
+        // record inside, so a mid-batch flip still stops the next one.
+        gateDecision,
+        ...(input.mappingProvenance ? { mappingProvenance: input.mappingProvenance } : {}),
+      }), raw));
+    } catch (e) {
+      outcomes.push(withIgnored(fail(translated.normalized.externalId ?? null, 'unexpected_failure', e), raw));
+    }
   }
 
   const succeeded = outcomes.filter((o) => o.ok).length;
+  // Reported ALONGSIDE `succeeded`, not folded into it. An ingested record
+  // whose projection did not confirm really did ingest — but a batch in which
+  // not one row reached `lead_intelligence` must not be able to answer
+  // `succeeded === total` and nothing else, which is how this defect looked
+  // from the outside.
+  const projected = outcomes.filter((o) => o.leadProjection?.status === 'persisted').length;
+  const notProjected = outcomes.filter(
+    (o) => o.leadProjection !== undefined && needsAttention(o.leadProjection),
+  ).length;
   return {
     organizationId,
     source,
     total: records.length,
     succeeded,
     failed: outcomes.length - succeeded,
+    projected,
+    notProjected,
     outcomes,
   };
 }
