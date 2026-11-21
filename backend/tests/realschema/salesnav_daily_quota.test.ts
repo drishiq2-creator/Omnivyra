@@ -69,10 +69,16 @@ describe('ownership (b3 ruling A): only the owning company consumes; the count f
     expect(await rowCount(M1)).toBe(0);
   });
 
-  it('a non-owner cannot add to an existing count either', async () => {
+  it('a non-owner cannot add to an existing count either - and LEARNS NOTHING about it (7c slice 1)', async () => {
     await consume(db, ORG_A, M1, 10, 150);
-    expect((await consume(db, ORG_B, M1, 5, 150)).rows[0]).toMatchObject({ granted: 0, consumed: 10 });
+    // the member really has consumed 10 today; the non-owner is told 0, never the true figure
+    expect((await consume(db, ORG_B, M1, 5, 150)).rows[0]).toEqual({ granted: 0, consumed: 0, remaining: 0 });
     expect((await db.query('SELECT consumed FROM public.salesnav_daily_quota WHERE member_id = $1', [M1])).rows[0].consumed).toBe(10);
+  });
+
+  it('control: the OWNER is told the true consumed figure', async () => {
+    await consume(db, ORG_A, M1, 10, 150);
+    expect((await consume(db, ORG_A, M1, 10, 150)).rows[0]).toMatchObject({ granted: 10, consumed: 20 });
   });
 
   it('a member with NO owner row cannot consume at all', async () => {
@@ -177,4 +183,32 @@ describe('no client role can consume or read', () => {
       await db.query('ROLLBACK');
     }
   });
+});
+
+describe('074 preflight refuses a PRE-re-key table (7c slice 1, finding 1)', () => {
+  // The file's own preflight block, executed as written - not a re-statement of its rule.
+  const fileSql = require('fs').readFileSync(
+    require('path').join(process.cwd(), 'supabase/migrations/20270217000074_salesnav_daily_quota.sql'), 'utf8') as string;
+  const preflight = (/DO \$preflight\$[\s\S]*?\$preflight\$;/.exec(fileSql) as RegExpExecArray)[0];
+
+  async function inTx<T>(body: () => Promise<T>): Promise<T> {
+    await db.query('BEGIN');
+    try { return await body(); } finally { await db.query('ROLLBACK'); }
+  }
+  async function codeOfSql(sql: string): Promise<string> {
+    await db.query('SAVEPOINT p');
+    try { await db.query(sql); await db.query('RELEASE SAVEPOINT p'); return 'ok'; }
+    catch (e) { await db.query('ROLLBACK TO SAVEPOINT p'); return (e as { message: string }).message; }
+  }
+
+  it('a salesnav_daily_quota carrying organization_id (the first form) makes the preflight RAISE', () => inTx(async () => {
+    await db.query('DROP TABLE public.salesnav_daily_quota CASCADE');
+    await db.query(`CREATE TABLE public.salesnav_daily_quota (organization_id uuid NOT NULL, member_id text NOT NULL,
+      usage_day date NOT NULL, consumed integer NOT NULL DEFAULT 0, PRIMARY KEY (organization_id, member_id, usage_day))`);
+    expect(await codeOfSql(preflight)).toContain('PRE-re-key shape');
+  }));
+
+  it('control: the re-keyed shape (the one this replay built) passes the same preflight', () => inTx(async () => {
+    expect(await codeOfSql(preflight)).toBe('ok');
+  }));
 });
