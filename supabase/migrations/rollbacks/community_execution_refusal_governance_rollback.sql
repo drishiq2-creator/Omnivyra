@@ -34,5 +34,8 @@ DROP INDEX IF EXISTS public.uq_community_ai_action_logs_refusal_key;
 ALTER TABLE public.community_ai_action_logs DROP CONSTRAINT IF EXISTS community_ai_action_logs_event_type_check;
 ALTER TABLE public.community_ai_action_logs
   ADD CONSTRAINT community_ai_action_logs_event_type_check
+  -- STAGE-0 FIX (a9, 2026-11-21): restore the PRODUCTION pre-image, which is 20270217000071's 8 values
+  -- (applied 2026-11-20), never the older 6-value list: a rollback must not narrow below what is applied.
   CHECK (event_type = ANY (ARRAY['approved'::text, 'executed'::text, 'failed'::text, 'skipped'::text,
-                                 'scheduled'::text, 'auto_executed'::text]));
+                                 'scheduled'::text, 'auto_executed'::text, 'skipped_due_to_platform_policy'::text,
+                                 'sent_unverified'::text]));

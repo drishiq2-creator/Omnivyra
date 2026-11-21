@@ -8,6 +8,10 @@
 --    'skipped_due_to_platform_policy'. The executor already writes that event
 --    type for policy refusals and the old CHECK rejected it (the insert failed
 --    and the refusal was lost: a confirmed defect). Nothing else changes.
+--    STAGE-0 FIX (a9, 2026-11-21): 20270217000071 (APPLIED TO PRODUCTION 2026-11-20, owner-approved)
+--    already set this CHECK to 8 values incl. 'sent_unverified'. This file must NEVER narrow it, so
+--    the list below is 071's 8 values (a superset of what this file originally added) and a
+--    postcondition refuses any result without 'sent_unverified'.
 -- 2. Partial unique index on event_payload->>'refusal_key' (rows that carry
 --    one): a refusal is recorded once, however often it is retried.
 -- 3. record_community_execution_refusal(action, org, tenant, claim_point, code,
@@ -47,7 +51,8 @@ ALTER TABLE public.community_ai_action_logs DROP CONSTRAINT IF EXISTS community_
 ALTER TABLE public.community_ai_action_logs
   ADD CONSTRAINT community_ai_action_logs_event_type_check
   CHECK (event_type = ANY (ARRAY['approved'::text, 'executed'::text, 'failed'::text, 'skipped'::text,
-                                 'scheduled'::text, 'auto_executed'::text, 'skipped_due_to_platform_policy'::text]));
+                                 'scheduled'::text, 'auto_executed'::text, 'skipped_due_to_platform_policy'::text,
+                                 'sent_unverified'::text]));
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_community_ai_action_logs_refusal_key
   ON public.community_ai_action_logs ((event_payload ->> 'refusal_key'))
@@ -145,6 +150,12 @@ BEGIN
                             WHERE conrelid = 'public.community_ai_action_logs'::regclass
                               AND conname = 'community_ai_action_logs_event_type_check')) NOT LIKE '%skipped_due_to_platform_policy%' THEN
     RAISE EXCEPTION 'community execution refusal governance postcondition: event_type CHECK not widened';
+  END IF;
+  -- Never narrower than 20270217000071 (applied in production): 'sent_unverified' must stay admitted.
+  IF pg_get_constraintdef((SELECT oid FROM pg_constraint
+                            WHERE conrelid = 'public.community_ai_action_logs'::regclass
+                              AND conname = 'community_ai_action_logs_event_type_check')) NOT LIKE '%sent_unverified%' THEN
+    RAISE EXCEPTION 'community execution refusal governance postcondition: event_type CHECK would drop sent_unverified (20270217000071)';
   END IF;
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') AND has_function_privilege('anon', f, 'EXECUTE') THEN
     RAISE EXCEPTION 'community execution refusal governance postcondition: anon can execute the record function';

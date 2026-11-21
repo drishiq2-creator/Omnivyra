@@ -528,6 +528,9 @@ describe('§13 refusal records', () => {
       const { id } = await approvedAction(db, { org: ORG_A });
       expect(await effect(`INSERT INTO public.community_ai_action_logs (action_id, tenant_id, organization_id, event_type, event_payload)
         VALUES ($1, $2, $2, 'skipped_due_to_platform_policy', '{}')`, [id, ORG_A])).toBe('ok');
+      // 20270217000071 (applied in production 2026-11-20) admits 'sent_unverified'; this file must never narrow it.
+      expect(await effect(`INSERT INTO public.community_ai_action_logs (action_id, tenant_id, organization_id, event_type, event_payload)
+        VALUES ($1, $2, $2, 'sent_unverified', '{}')`, [id, ORG_A])).toBe('ok');
       expect(await effect(`INSERT INTO public.community_ai_action_logs (action_id, tenant_id, organization_id, event_type, event_payload)
         VALUES ($1, $2, $2, 'nope', '{}')`, [id, ORG_A])).toBe('23514');
     });
