@@ -1,0 +1,3 @@
+# Quarantined integration suites (t2-integration-parity.js). One per line:
+# backend/tests/integration/<file> # expires=YYYY-MM-DD owner=<who> <reason>
+# A regression is REPORTED (not failed) until expiry; no expires/owner, or past expiry, FAILS the gate.
