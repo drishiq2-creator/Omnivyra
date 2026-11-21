@@ -219,6 +219,12 @@ export interface CompleteAttemptInput {
   readonly sourceRecordId?: string | null;
   readonly attributesReturned?: readonly string[];
   readonly detail?: string | null;
+  /** Vendor usage: who paid the vendor (own key only). Written only when supplied. */
+  readonly funding?: 'tenant' | null;
+  /** Vendor usage: what the VENDOR billed, in its own unit. Written only when supplied. */
+  readonly providerCostUnits?: number | null;
+  /** Omnivyra credits charged: always 0 (own key only; PL-171). Written only when supplied. */
+  readonly creditsCharged?: number | null;
   readonly executorVersion?: string | null;
   readonly completedAt: string;
 }
@@ -634,6 +640,31 @@ export async function completeAttempt(input: CompleteAttemptInput): Promise<void
     .eq('id', input.attemptId)
     .eq('organization_id', input.organizationId);
   if (error) throw new Error(`prospect_enrichment_attempts update failed: ${error.message}`);
+
+  // Vendor usage columns, in a SEPARATE best-effort write. They are reporting,
+  // not control state, and they only exist once the usage-ledger migration is
+  // applied: folding them into the close above would let a schema that lacks
+  // them fail the close and leave a truthful attempt open. Only stated values
+  // are written; an unknown stays NULL rather than being guessed.
+  const usage: Record<string, unknown> = {
+    ...(input.funding !== undefined ? { funding: input.funding } : {}),
+    ...(input.providerCostUnits !== undefined ? { provider_cost_units: input.providerCostUnits } : {}),
+    ...(input.creditsCharged !== undefined ? { credits_charged: input.creditsCharged } : {}),
+  };
+  if (Object.keys(usage).length === 0) return;
+  try {
+    const res = await ownedDbTable('prospect_enrichment_attempts')
+      .update(usage)
+      .eq('id', input.attemptId)
+      .eq('organization_id', input.organizationId);
+    // REPORTING columns written after the attempt's close, never control state or money (own key:
+    // Omnivyra charges 0 credits); folding them into the close would let a failure here reopen a truthful attempt. A lost
+    // write leaves provider_cost_units NULL, which the usage report counts as vendorUnitsUnknownRuns - never as zero.
+    // dropped-error-exempt: best-effort REPORTING write after the close - what a loss leaves behind is stated above
+    if (res.error) console.warn('[enrichment] attempt usage write failed', { code: res.error.code ?? null });
+  } catch {
+    console.warn('[enrichment] attempt usage write threw');
+  }
 }
 
 /**

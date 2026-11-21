@@ -45,6 +45,17 @@ export const ENRICHMENT_EXECUTOR_VERSION = 'a3.1';
 /** How long an equivalent observation stays fresh enough to reuse. */
 export const DEFAULT_FRESHNESS_DAYS = 30;
 
+/**
+ * Who pays the vendor for a call. OWN KEY ONLY (owner, 2026-11-20): the tenant's own vendor key; the vendor bills the
+ * tenant; no Omnivyra credits. Recorded on the attempt for the usage report. Narrowed from a5f2e9647's
+ * 'tenant' | 'platform' (mode B, central access): the 'platform' branches are REMOVED, not left unreachable - PL-171
+ * records what to re-add, against that sha, once it is priced as fixed credits at 10-15x.
+ */
+export type CredentialFunding = 'tenant';
+
+/** Outcomes where the vendor ANSWERED, and so billed the call (misses included: the owner's rule). Drives the vendor-unit COUNT. */
+export const BILLABLE_OUTCOMES: readonly EnrichmentOutcome[] = ['enriched', 'no_match', 'field_not_found'];
+
 /** Outcome of a cost decision. `denied` must stop the call. */
 export type CostDecision =
   | { readonly authorized: true; readonly holdId: string | null; readonly cost: SourceCost }
@@ -169,6 +180,8 @@ export interface ExecuteEnrichmentResult {
   readonly providerError?: unknown;
   /** The vendor's request-rate quota from its own headers. Null when it stated none. */
   readonly providerUsage?: unknown;
+  /** Who paid the vendor for this call (own key only). Absent when no credential was resolved. */
+  readonly funding?: CredentialFunding;
 }
 
 const outcomeResult = (
@@ -235,7 +248,7 @@ export async function executeEnrichment(
   const credential = await ports.resolveCredential({
     organizationId, providerId: adapter.id,
   });
-  if (!credential) {
+  if (typeof credential !== 'string' || !credential.trim()) {
     return outcomeResult('credential_missing', request, adapter.id,
       `no credential is configured for '${adapter.id}' by this tenant`);
   }
@@ -260,6 +273,8 @@ export async function executeEnrichment(
   }
 
   // ── cost, BEFORE the call ────────────────────────────────────────────────
+  // Own key only: the tenant's credential means the tenant pays the vendor.
+  const funding: CredentialFunding = 'tenant';
   const decision = await ports.authorizeCost({
     organizationId, providerId: adapter.id, attributes: supported, correlationId: request.correlationId,
   });
@@ -280,8 +295,8 @@ export async function executeEnrichment(
     // `provider_unavailable`, never `no_match`.
     const outcome = classifyEnrichmentError(err);
     await ports.releaseCost(decision.holdId, `provider error: ${outcome}`);
-    return outcomeResult(outcome, request, adapter.id,
-      err instanceof Error ? err.message : String(err), true);
+    return { ...outcomeResult(outcome, request, adapter.id,
+      err instanceof Error ? err.message : String(err), true), funding };
   }
 
   const usable = response.fields.filter((f) => f.value !== null && f.value !== undefined && f.value !== '');
@@ -290,6 +305,7 @@ export async function executeEnrichment(
     // there is no observation to persist and nothing billable to confirm.
     await ports.releaseCost(decision.holdId, `no usable field: ${response.outcome}`);
     return {
+      funding,
       ...outcomeResult(response.outcome === 'enriched' ? 'field_not_found' : response.outcome,
         request, adapter.id, response.detail ?? 'the provider returned no usable field', true),
       attributesNotReturned: response.notReturned.length ? response.notReturned : supported,
@@ -303,7 +319,17 @@ export async function executeEnrichment(
   }
 
   // ── persist as an observation ────────────────────────────────────────────
-  const persisted = await ports.persistObservation({
+  // The recorder closes the attempt from a thrown persistence error; it is told who paid the vendor, so a
+  // paid-not-stored row still reports its funding. The error itself propagates unchanged.
+  const tagFunding = async <T>(fn: () => Promise<T>): Promise<T> => {
+    try {
+      return await fn();
+    } catch (err) {
+      if (err && typeof err === 'object') (err as { funding?: CredentialFunding }).funding = funding;
+      throw err;
+    }
+  };
+  const persisted = await tagFunding(() => ports.persistObservation({
     organizationId,
     providerId: adapter.id,
     subject: request.subject,
@@ -316,7 +342,7 @@ export async function executeEnrichment(
     observedAt: usable.find((f) => f.observedAt)?.observedAt ?? null,
     correlationId: request.correlationId,
     prospectId: request.prospectId ?? null,
-  });
+  }));
 
   const normalized = normalizeEnrichmentResult({
     organizationId,
@@ -333,6 +359,7 @@ export async function executeEnrichment(
 
   return {
     outcome: 'enriched',
+    funding,
     retryAfterAt: null,          // A6A: a successful call imposes no wait
     providerError: null,
     providerUsage: response.providerUsage ?? null,
