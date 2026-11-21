@@ -208,9 +208,17 @@ $snr_rls$;
 REVOKE ALL ON TABLE public.salesnav_member_owner    FROM PUBLIC, anon, authenticated, authenticator, service_role;
 REVOKE ALL ON TABLE public.salesnav_member_bindings FROM PUBLIC, anon, authenticated, authenticator, service_role;
 REVOKE ALL ON TABLE public.salesnav_extraction_runs FROM PUBLIC, anon, authenticated, authenticator, service_role;
--- owner + bindings: DELETE is the disconnect. Runs: no DELETE (history).
+-- b3 (C163 lesson): REVOKE ALL above (the hosted default ACL grants ALL), then ONLY what a code path needs:
+--   salesnav_member_owner    SELECT; INSERT  store.ts bindSalesNavMember (the claim);
+--                            DELETE  store.ts bindSalesNavMember (a losing concurrent bind gives its claim back);
+--                            UPDATE  074 salesnav_consume_daily_quota takes FOR SHARE on the owner row, and
+--                                    PostgreSQL requires UPDATE privilege for a FOR SHARE lock. No code UPDATEs a row.
+--   salesnav_member_bindings SELECT; INSERT  store.ts bindSalesNavMember. Nothing updates or deletes a binding.
+--   salesnav_extraction_runs SELECT; INSERT  store.ts startSalesNavRun; UPDATE  store.ts guarded updates (record /
+--                            pause / resume / close / stale close / markPendingReservation). No DELETE: history.
+-- No TRUNCATE anywhere.
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.salesnav_member_owner    TO service_role;
-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.salesnav_member_bindings TO service_role;
+GRANT SELECT, INSERT                 ON TABLE public.salesnav_member_bindings TO service_role;
 GRANT SELECT, INSERT, UPDATE         ON TABLE public.salesnav_extraction_runs TO service_role;
 
 -- POSTCONDITIONS (each RAISEs; the trip input is named). -----------------------------------------------------------
@@ -233,8 +241,9 @@ BEGIN
       RAISE EXCEPTION 'SNR postcondition: % policy must apply to exactly {service_role}, found %', t, v_pol_roles;
     END IF;
 
-    v_expect := CASE WHEN t = 'salesnav_extraction_runs' THEN ARRAY['INSERT', 'SELECT', 'UPDATE']
-                     ELSE ARRAY['DELETE', 'INSERT', 'SELECT', 'UPDATE'] END;
+    v_expect := CASE t WHEN 'salesnav_extraction_runs' THEN ARRAY['INSERT', 'SELECT', 'UPDATE']
+                       WHEN 'salesnav_member_bindings' THEN ARRAY['INSERT', 'SELECT']
+                       ELSE ARRAY['DELETE', 'INSERT', 'SELECT', 'UPDATE'] END;
     SELECT array_agg(DISTINCT a.privilege_type ORDER BY a.privilege_type) INTO v_priv
       FROM pg_class c CROSS JOIN LATERAL aclexplode(c.relacl) a JOIN pg_roles r2 ON r2.oid = a.grantee
      WHERE c.oid = ('public.' || t)::regclass AND r2.rolname = 'service_role';

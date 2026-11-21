@@ -214,3 +214,24 @@ describe('no client role can read or write the three tables', () => {
     expect(await own(M1, ORG_A)).toBe('42501');
   }));
 });
+
+describe('service_role holds ONLY what a code path needs (b3, C163)', () => {
+  it('service_role may INSERT a binding, but NOT UPDATE or DELETE one, and NOT DELETE a run', () => inRollback(async () => {
+    await seedTenants();
+    await own(M1, ORG_A);
+    expect(await bind(ORG_A, 'unipile', M1)).toBe('ok');
+    await db.query('SET LOCAL ROLE service_role');
+    expect(await attempt(`UPDATE public.salesnav_member_bindings SET bound_at = now() WHERE member_id = $1`, [M1])).toBe('42501');
+    expect(await attempt(`DELETE FROM public.salesnav_member_bindings WHERE member_id = $1`, [M1])).toBe('42501');
+    expect(await attempt(`DELETE FROM public.salesnav_extraction_runs`)).toBe('42501');
+    expect(await attempt(`TRUNCATE public.salesnav_member_owner`)).toBe('42501');
+  }));
+  it('control: service_role may insert a binding and update a run (the code paths it does have)', () => inRollback(async () => {
+    await seedTenants();
+    await own(M2, ORG_A);
+    await db.query('SET LOCAL ROLE service_role');
+    expect(await attempt(`INSERT INTO public.salesnav_member_bindings (organization_id, user_id, transport, member_id) VALUES ($1, $2, 'unipile', $3)`,
+      [ORG_A, '00000000-0000-4000-8000-0000000000a1', M2])).toBe('ok');
+    expect(await attempt(`UPDATE public.salesnav_extraction_runs SET updated_at = now() WHERE false`)).toBe('ok');
+  }));
+});
