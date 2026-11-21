@@ -86,8 +86,13 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       // Who would pay, decided by the SAME credential resolution the run uses.
       // The key VALUE is discarded here; only the funding kind is reported.
       // OWN KEY ONLY (owner 2026-11-20; central access = PL-171): the tenant's own Apollo key, or no access.
-      const ownKey = await tenantCredentialPort.resolveCredential({ organizationId: companyId, providerId: 'apollo' });
-      const hasOwnKey = typeof ownKey === 'string' && ownKey.trim().length > 0;
+      // PL-180: an unreadable credential store is NOT "no Apollo access" (that would tell the tenant to add a key they
+      // may already have). It is a 503 the client already renders as "could not be prepared. Nothing was spent."
+      const keyState = await tenantCredentialPort.resolveCredentialState({ organizationId: companyId, providerId: 'apollo' });
+      if (keyState.kind === 'unreadable') {
+        return res.status(503).json({ error: 'CREDENTIAL_STORE_UNREADABLE', code: 'CREDENTIAL_STORE_UNREADABLE' });
+      }
+      const hasOwnKey = keyState.kind === 'present';
       const vendorUnits = estimate.calls.reduce((n, c) => n + (unitsForCall('apollo', c.subject as 'person' | 'account')?.units ?? 0), 0);
       return res.status(200).json({
         dataAck: { vendor_data: ack.categories.vendor_data.state, contact_data: ack.categories.contact_data.state },
