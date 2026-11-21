@@ -151,6 +151,14 @@ function orderingViolations(files, frozen) {
 // were remediated in bulk by 20261026000000_close_anon_rls_exposure.sql.
 const SECURITY_RULES_FROM = '20261026000000';
 
+// Rule 9 (cb 2026-11-21, b3 ruling after C163): the public schema's DEFAULT ACL grants service_role ALL (arwdDxtm) on
+// every new table, so a migration that GRANTs service_role a narrower set (e.g. SELECT, INSERT, UPDATE for an
+// append-only table) still leaves DELETE and TRUNCATE in place. C163 found 22 of 31 recently created prod tables in that
+// state. From this version on, every CREATE TABLE in public must REVOKE from service_role explicitly (before any GRANT to
+// it) in the same migration, or carry `-- service-role-acl-ok: <reason>` (a reviewed decision that the default ALL is
+// intended). Applied/unapplied files below this version are not retro-flagged.
+const SERVICE_ROLE_ACL_FROM = '20270217000073';
+
 // Length-preserving strippers: offsets (and so line numbers and annotations)
 // in the stripped text map 1:1 onto the original migration.
 const blank = (s) => s.replace(/[^\n]/g, ' ');
@@ -165,7 +173,9 @@ const CLIENT_ROLES = ['anon', 'authenticated', 'public'];
 /** An annotation `-- <token>: <reason>` on the statement's line or the two lines above. */
 function annotated(lines, ln, token) {
   const around = lines.slice(Math.max(0, ln - 3), ln).join('\n');
-  return new RegExp(`--\\s*${token}:\\s*\\S`).test(around);
+  // The reason must be on the SAME line: `\s*` would cross the newline and accept the next line's first character as a
+  // "reason", so a bare `-- token:` passed (found by rule 9's negative control, cb 2026-11-21).
+  return new RegExp(`--[ \\t]*${token}:[ \\t]*\\S`).test(around);
 }
 
 /** Role names in a grantee/revokee list (`anon, "authenticated", PUBLIC WITH GRANT OPTION`). */
@@ -331,6 +341,57 @@ function securityViolations(sql) {
     const ln = lineOf(sql, m.index);
     if (!annotated(lines, ln, 'rls-public-ok')) {
       push(m.index, 'policy grants anon/public/authenticated unconditional access (USING/WITH CHECK true) — add `-- rls-public-ok: <reason>` above it or scope it to a role/condition', stmt);
+    }
+  }
+  return v;
+}
+
+/**
+ * Rule 9 — service_role must not inherit the default ALL on a new table by omission (see SERVICE_ROLE_ACL_FROM).
+ * Every CREATE TABLE public.X needs, in the same migration, a REVOKE on X whose role list includes service_role, placed
+ * BEFORE the first GRANT on X to service_role (a REVOKE ALL after the grant would undo it); or `-- service-role-acl-ok:
+ * <reason>` on the CREATE TABLE line or the two lines above. A dynamically named table must carry the annotation or
+ * REVOKE … FROM service_role inside the same dollar block. Temporary tables and other schemas are exempt.
+ */
+function serviceRoleAclViolations(sql) {
+  const v = [];
+  const lines = sql.split('\n');
+  const nc = stripSqlComments(sql);
+  const push = (idx, rule, text) => v.push({ line: lineOf(sql, idx), rule, text: String(text).split('\n')[0].trim().slice(0, 160) });
+  const createRe = /\bCREATE\s+(?:(?:GLOBAL|LOCAL)\s+)?(TEMP\s+|TEMPORARY\s+)?(?:UNLOGGED\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([^\s(;]+)/gi;
+  for (const m of nc.matchAll(createRe)) {
+    if (m[1]) continue;
+    const ln = lineOf(sql, m.index);
+    if (annotated(lines, ln, 'service-role-acl-ok')) continue;
+    const token = m[2];
+    const dynamic = /[%'|$]/.test(token.replace(/^"?public"?\./i, '').replace(/^'/, '')) || /^'?\s*$/.test(token);
+    if (dynamic) {
+      const schema = token.replace(/^'/, '').match(/^"?([A-Za-z_][A-Za-z0-9_]*)"?\./);
+      if (schema && schema[1].toLowerCase() !== 'public') continue;
+      const block = enclosingDollarBlock(nc, m.index);
+      const scope = block ? nc.slice(block[0], block[1]) : nc;
+      if (!/\bREVOKE\b[^;]*\bFROM\b[^;]*\bservice_role\b/i.test(scope)) {
+        push(m.index, 'dynamically-named public table must REVOKE … FROM service_role in the same block (the default ACL grants it ALL), or `-- service-role-acl-ok: <reason>`', m[0]);
+      }
+      continue;
+    }
+    const full = tableName(token.replace(/^'/, ''));
+    if (full.includes('.') && !full.startsWith('public.')) continue;
+    const name = full.replace(/^public\./, '');
+    if (!/^[a-z_][a-z0-9_]*$/.test(name)) continue;
+    const obj = `\\bON\\s+(?:TABLE\\s+)?(?:"?public"?\\.)?"?${esc(name)}"?(?![\\w])`;
+    let revokeAt = -1;
+    for (const r of nc.matchAll(new RegExp(`\\bREVOKE\\s+[^;]*?${obj}[^;]*?\\bFROM\\s+([^;]*)`, 'gi'))) {
+      if (roleList(r[1]).includes('service_role')) { revokeAt = r.index; break; }
+    }
+    let grantAt = -1;
+    for (const g of nc.matchAll(new RegExp(`\\bGRANT\\s+[^;]*?${obj}[^;]*?\\bTO\\s+([^;]*)`, 'gi'))) {
+      if (roleList(g[1]).includes('service_role')) { grantAt = g.index; break; }
+    }
+    if (revokeAt < 0) {
+      push(m.index, `table public.${name}: REVOKE ALL ON public.${name} FROM service_role in the same migration (the default ACL grants it ALL incl. DELETE/TRUNCATE), then GRANT only what it needs; or \`-- service-role-acl-ok: <reason>\``, m[0]);
+    } else if (grantAt >= 0 && revokeAt > grantAt) {
+      push(revokeAt, `table public.${name}: the REVOKE … FROM service_role comes AFTER its GRANT … TO service_role, so it undoes the grant — revoke first, then grant`, m[0]);
     }
   }
   return v;
@@ -866,6 +927,12 @@ function main() {
         errors.push(`${f}:${viol.line}\n    ✗ ${viol.rule}\n      ${viol.text}`);
       }
     }
+    // 9. service_role default ACL (version-keyed only: files below SERVICE_ROLE_ACL_FROM are not retro-flagged).
+    if (ver && ver.length === 14 && ver >= SERVICE_ROLE_ACL_FROM) {
+      for (const viol of serviceRoleAclViolations(sql)) {
+        errors.push(`${f}:${viol.line}\n    ✗ ${viol.rule}\n      ${viol.text}`);
+      }
+    }
     // 8. FK / NOT NULL / CHECK contradiction (GOV-H).
     //    Pre-existing instances are FROZEN in set-null-known-defects.json, for a
     //    reason that is not cosmetic: every one of those files sits at or below
@@ -959,6 +1026,8 @@ if (require.main === module) main();
 
 module.exports = {
   securityViolations,
+  serviceRoleAclViolations,
+  SERVICE_ROLE_ACL_FROM,
   idempotencyViolations,
   orderingViolations,
   SECURITY_RULES_FROM,
