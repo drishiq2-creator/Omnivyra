@@ -77,13 +77,22 @@ if [ -n "$SUPABASE_TARGET" ]; then
   esac
 fi
 
-if [ "$TARGET_ENV" = "production" ] && [ "$HAS_PRODUCTION_CONFIRM" != "yes" ]; then
-  echo "[operator-safety] Refusing to continue before any mutation-capable logic runs."
-  echo "[operator-safety] Reason: target-env=production requires --confirm-production-impact."
-  echo "[operator-safety] Safe usage example:"
-  echo "  npm run db:push -- --target-env=production --apply --confirm-production-impact"
-  exit 0
+# PRODUCTION IS NEVER A db push TARGET (b3/owner, 2026-11-21). There is no override flag: production holds 38+ versions
+# applied by owner-approved runners WITHOUT ledger rows (release-gates/APPLIED-WITHOUT-LEDGER.md), so `supabase db push`
+# would re-run applied files or skip unapplied ones. Production migrations go only through owner-approved apply runners.
+if [ "$TARGET_ENV" = "production" ]; then
+  echo "[operator-safety] REFUSED: target-env=production is never a db push target (no override exists)."
+  echo "[operator-safety] Production migrations go only through owner-approved apply runners (release-gates)."
+  exit 1
 fi
+# --target-env=local MEANS the local stack: pass --local to the CLI. Without it the CLI pushes to the LINKED project,
+# which on operator machines is production, so "target-env=local" used to be a label, not a target.
+if [ "$TARGET_ENV" = "local" ]; then
+  has_local="no"; for a in "${FILTERED_ARGS[@]}"; do [ "$a" = "--local" ] && has_local="yes"; done
+  [ "$has_local" = "yes" ] || FILTERED_ARGS+=("--local")
+fi
+# The prod-ref guard runs BEFORE any mutation-capable step, for every target (it also resolves the LINKED project).
+bash ./scripts/guard-no-prod-push.sh "${FILTERED_ARGS[@]}"
 
 if [ "$HAS_INTENT" != "yes" ]; then
   echo "[operator-safety] Intended action preview: push local Supabase migrations/schema changes to the selected database."
