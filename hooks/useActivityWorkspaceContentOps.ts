@@ -2,6 +2,7 @@ import { executeMasterContentPipeline } from '@/lib/planning/executeMasterConten
 import { apiFetch } from '@/lib/apiFetch';
 import type { ScheduleItem } from '../types/activityWorkspace';
 import { asObject, type WorkspacePayload } from '@/lib/activity-workspace/shared';
+import { throwIfBillingRefusal, userErrorMessage } from '@/lib/billing/billingRefusalCopy';
 
 type NotifyFn = (type: 'success' | 'error' | 'info', message: string) => void;
 
@@ -75,6 +76,7 @@ export function useActivityWorkspaceContentOps({
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
+        throwIfBillingRefusal(response.status, data);
         throw new Error(String(data?.message || data?.error || 'Failed to generate master content'));
       }
       const masterFromResponse =
@@ -99,7 +101,7 @@ export function useActivityWorkspaceContentOps({
       notify('success', 'Master content generated.');
     } catch (error) {
       console.error('Master generation failed:', error);
-      notify('error', `Failed to generate master content: ${String((error as any)?.message || error)}`);
+      notify('error', userErrorMessage(error, 'Failed to generate master content'));
     } finally {
       setIsGeneratingMaster(false);
     }
@@ -171,7 +173,7 @@ export function useActivityWorkspaceContentOps({
       notify('success', 'Platform variants generated.');
     } catch (error) {
       console.error('Generate variants failed:', error);
-      notify('error', `Failed to generate variants: ${String((error as any)?.message || error)}`);
+      notify('error', userErrorMessage(error, 'Failed to generate variants'));
     } finally {
       setIsGeneratingVariants(false);
     }
@@ -200,6 +202,9 @@ export function useActivityWorkspaceContentOps({
             }),
           });
           const masterData = await masterRes.json().catch(() => ({}));
+          // A billing refusal of the inner master generation used to be DROPPED (the next call then failed with an
+          // unrelated message); report it as what it is.
+          if (!masterRes.ok) throwIfBillingRefusal(masterRes.status, masterData);
           if (masterRes.ok) {
             const newMaster = asObject(masterData?.master_content) || asObject(masterData?.masterContent) || null;
             if (newMaster) {
@@ -235,6 +240,7 @@ export function useActivityWorkspaceContentOps({
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
+        throwIfBillingRefusal(response.status, data);
         throw new Error(String(data?.message || data?.error || 'Failed to repurpose content'));
       }
 
@@ -274,7 +280,7 @@ export function useActivityWorkspaceContentOps({
       notify('success', `Repurposed content generated for ${schedule.platform}.`);
     } catch (error) {
       console.error('Repurpose generation failed:', error);
-      notify('error', `Failed to repurpose content: ${String((error as any)?.message || error)}`);
+      notify('error', userErrorMessage(error, 'Failed to repurpose content'));
     } finally {
       setRepurposingByScheduleId((prev) => ({ ...prev, [schedule.id]: false }));
     }
@@ -342,6 +348,7 @@ export function useActivityWorkspaceContentOps({
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
+        throwIfBillingRefusal(response.status, data);
         throw new Error(String(data?.message || data?.error || 'Failed to generate promotion content'));
       }
       const incoming = Array.isArray(data.platform_variants) ? data.platform_variants : [];
@@ -370,7 +377,7 @@ export function useActivityWorkspaceContentOps({
       notify('success', 'Promotion content generated.');
     } catch (error) {
       console.error('Generate creator promotion failed:', error);
-      notify('error', `Failed to generate: ${String((error as any)?.message || error)}`);
+      notify('error', userErrorMessage(error, 'Failed to generate'));
     } finally {
       setIsGeneratingVariants(false);
     }

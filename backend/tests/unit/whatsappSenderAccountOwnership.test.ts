@@ -160,6 +160,16 @@ beforeEach(() => {
 
 const broadcastInserts = () => db.inserts.filter((i) => i.table === 'whatsapp_broadcasts');
 
+// Launch gate (b3, 11-18): WhatsApp is default-OFF on main (WHATSAPP_CONNECT_ENABLED === 'true' only).
+// This suite exercises the ENABLED behaviour, so it turns the gate on for this file and restores it after;
+// the OFF behaviour is pinned in whatsappConnectGate.test.ts.
+const PRIOR_WA_GATE = process.env.WHATSAPP_CONNECT_ENABLED;
+beforeAll(() => { process.env.WHATSAPP_CONNECT_ENABLED = 'true'; });
+afterAll(() => {
+  if (PRIOR_WA_GATE === undefined) delete process.env.WHATSAPP_CONNECT_ENABLED;
+  else process.env.WHATSAPP_CONNECT_ENABLED = PRIOR_WA_GATE;
+});
+
 describe('POST /api/whatsapp/broadcasts — sender account must belong to company_id', () => {
   it('own account: broadcast is created', async () => {
     const res = await call(createRoute, { method: 'POST', body: createBody(ACCOUNT_A) });

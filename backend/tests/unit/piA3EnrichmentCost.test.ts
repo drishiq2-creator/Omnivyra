@@ -66,13 +66,10 @@ describe('A3B — the prospect enrichment action is not registered', () => {
     expect(CREDIT_ACTIONS as readonly string[]).not.toContain(PROSPECT_ENRICHMENT_ACTION);
   });
 
-  it('the registry does NOT answer null for an unregistered action — it falls back', () => {
-    // A live-registry finding, asserted so the gate can never rely on null.
-    // The last fallback resolves with no report inputs, so an unknown action
-    // silently becomes a different, credit-holding, customer-facing action.
-    const resolved = resolveMonetizationFeature({ action_key: PROSPECT_ENRICHMENT_ACTION });
-    expect(resolved).not.toBeNull();
-    expect(resolved?.action_key).not.toBe(PROSPECT_ENRICHMENT_ACTION);
+  it('the registry answers NULL for an unregistered action (the no-report-fields fallback is closed, 89/b3 2026-11-20)', () => {
+    // Was a live-registry finding: the last fallback resolved with no report inputs, so an unknown action became a
+    // different, credit-holding, customer-facing action. featureRegistry.ts now runs it only with report fields.
+    expect(resolveMonetizationFeature({ action_key: PROSPECT_ENRICHMENT_ACTION })).toBeNull();
   });
 
   it('the default port therefore refuses, naming the action', async () => {
@@ -80,7 +77,7 @@ describe('A3B — the prospect enrichment action is not registered', () => {
     expect(d.authorized).toBe(false);
     if ('reason' in d) {
       expect(d.reason).toContain(PROSPECT_ENRICHMENT_ACTION);
-      expect(d.reason).toContain('not registered');
+      expect(d.reason).toMatch(/no credit action '.+' is registered/); // the null-resolution refusal path
       expect(d.reason).toContain('before any external call');
     }
   });

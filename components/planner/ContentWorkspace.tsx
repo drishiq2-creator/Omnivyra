@@ -56,6 +56,7 @@ import {
 import { SlotReviewPanel } from './SlotReviewPanel';
 import { fetchLibraryMaterializableAssets } from '../../lib/content/creatorAssetServerBackend';
 import { fetchRequireAssignmentApproval } from './useApprovalSettings';
+import { billingFallbackNote, describeBillingRefusal } from '@/lib/billing/billingRefusalCopy';
 
 const ASSIST_VERBS: Array<{ action: string; label: string }> = [
   { action: 'improve', label: 'Improve' },
@@ -498,9 +499,10 @@ function ActivityContentRow({
       });
       const data = await res.json().catch(() => ({}));
       if (res.ok && Array.isArray(data?.proposals) && data.proposals.length > 0) {
-        setProposals({ operation: `assist:${action}`, label, bodies: data.proposals, note: data.used_fallback ? 'AI unavailable — deterministic fallback shown' : undefined });
+        // b3 (A): a billing refusal's deterministic fallback is labelled "AI wasn't used: …", never shown as AI output.
+        setProposals({ operation: `assist:${action}`, label, bodies: data.proposals, note: billingFallbackNote(data) ?? (data.used_fallback ? 'AI unavailable — deterministic fallback shown' : undefined) });
       } else {
-        setProposals({ operation: `assist:${action}`, label, bodies: [], note: data?.error ?? (data?.used_fallback ? 'AI unavailable for this action right now' : 'No proposals returned') });
+        setProposals({ operation: `assist:${action}`, label, bodies: [], note: describeBillingRefusal(res.status, data)?.message ?? billingFallbackNote(data) ?? data?.error ?? (data?.used_fallback ? 'AI unavailable for this action right now' : 'No proposals returned') });
       }
     } catch {
       setProposals({ operation: `assist:${action}`, label, bodies: [], note: 'Request failed' });

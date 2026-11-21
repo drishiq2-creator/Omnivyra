@@ -131,6 +131,11 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
 
   if (!result.success) {
     const failResult = result as Extract<typeof result, { success: false }>;
+    // A test-mode purchase in production is a DEFINITIVE refusal (completePurchase granted nothing and closed the row):
+    // 409 + the same code verify sends, never the 500 that reads as "something broke, retry" (04, 2026-11-20; 7c).
+    if (failResult.reason === 'test_mode_no_grant') {
+      return res.status(409).json({ error: failResult.reason, code: 'TEST_MODE_PAYMENT_NO_CREDITS', detail: failResult.detail });
+    }
     const statusCode = failResult.reason === 'not_found' ? 404
                      : failResult.reason === 'already_failed' ? 409
                      : 500;

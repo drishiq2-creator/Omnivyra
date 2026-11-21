@@ -19,6 +19,7 @@ import {
   type CreateBroadcastInput,
   type ContactInput,
 } from '../../../../backend/services/whatsappBroadcastService';
+import { refuseIfWhatsAppDisabled } from '../../../../backend/services/whatsappAvailability';
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
   // ── GET: list broadcasts ───────────────────────────────────────────────────
@@ -47,6 +48,9 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
 
   // ── POST: create broadcast ─────────────────────────────────────────────────
   if (req.method === 'POST') {
+    // Launch gate (b3, 11-18): no broadcast is created while WhatsApp is disabled. First, before any read or write.
+    if (refuseIfWhatsAppDisabled(res)) return;
+
     const {
       company_id,
       social_account_id,
