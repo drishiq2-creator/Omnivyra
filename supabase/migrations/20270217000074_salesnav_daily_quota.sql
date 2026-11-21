@@ -42,6 +42,14 @@ BEGIN
   IF to_regclass('public.salesnav_member_owner') IS NULL THEN
     RAISE EXCEPTION 'SNQ preflight: public.salesnav_member_owner (073) is missing - member ownership cannot be checked';
   END IF;
+  -- 7c (slice 1): CREATE TABLE IF NOT EXISTS would silently ACCEPT a table already present in the PRE-re-key shape
+  -- (keyed by organization_id), and the re-keyed function would then run against a per-company key - the cap NOT
+  -- shared, a member stacking past it by being connected twice: the exact defect the re-key removes, failing open.
+  IF to_regclass('public.salesnav_daily_quota') IS NOT NULL AND EXISTS (
+       SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'salesnav_daily_quota' AND column_name = 'organization_id') THEN
+    RAISE EXCEPTION 'SNQ preflight: salesnav_daily_quota exists in the PRE-re-key shape (organization_id); 074 was applied in its first form - the re-key needs its own migration, not IF NOT EXISTS';
+  END IF;
 END
 $preflight$;
 
@@ -105,14 +113,13 @@ BEGIN
   -- OWNERSHIP, under lock: only the company that owns the member may consume its cap. FOR SHARE holds the owner row
   -- until this transaction ends, so a transfer (DELETE of that row) cannot interleave with the increment below. No
   -- owner row for this (member, company) -> grant 0 and write NOTHING.
+  -- 7c (slice 1): and DISCLOSE nothing - a caller with no claim to the member has no claim to its usage, so the
+  -- non-owner answer is (0, 0, 0) and the quota row is not even read (it used to return the member's real consumed).
   PERFORM 1 FROM public.salesnav_member_owner o
    WHERE o.member_id = p_member_id AND o.organization_id = p_organization_id
      FOR SHARE;
   IF NOT FOUND THEN
-    SELECT d.consumed INTO v_consumed
-      FROM public.salesnav_daily_quota d
-     WHERE d.member_id = p_member_id AND d.usage_day = p_usage_day;
-    RETURN QUERY SELECT 0, coalesce(v_consumed, 0), 0;
+    RETURN QUERY SELECT 0, 0, 0;
     RETURN;
   END IF;
 
