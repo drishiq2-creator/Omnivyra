@@ -91,6 +91,11 @@ describe('check-no-raw-db-push.js: no direct CLI invocation outside the wrapper'
     ['a JS exec string', { 'scripts/x.js': "require('child_process').execSync('supabase db push --linked');\n" }],
     ['a JS spawn argv', { 'scripts/x.js': "spawnSync('supabase', ['db', 'push']);\n" }],
     ['an npm script', { 'package.json': JSON.stringify({ scripts: { 'yolo': 'supabase db push' } }) }],
+    // 7c reach finding: operational scripts also live outside scripts/**.
+    ['backend/scripts (JS exec)', { 'backend/scripts/push-schema.ts': "execSync('npx supabase db push');\n" }],
+    ['tools/ (shell)', { 'tools/x.sh': 'supabase migration up\n' }],
+    ['a root Dockerfile RUN', { 'Dockerfile.cron': 'FROM node:20\nRUN npx supabase db push --linked\n' }],
+    ['a root *.sh', { 'deploy.sh': 'set -e\nsupabase db push\n' }],
   ])('FAILS on %s', (_n, files) => {
     const r = repo({ ...base, ...files });
     expect(r.status).toBe(1);

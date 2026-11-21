@@ -9,8 +9,13 @@
  * runs scripts/guard-no-prod-push.sh (which resolves the LINKED project too). This gate fails if any script, workflow,
  * or package.json script invokes the CLI directly, so nobody adds a path that skips the guard.
  *
- * Scope (its REACH): package.json "scripts", scripts/** (sh, js, mjs, cjs, ts), .github/workflows/** (yml/yaml).
- * Comment lines (#, //, *) are ignored, so documentation of the hazard is allowed. Docs/markdown are out of scope.
+ * REACH (what is scanned): package.json "scripts"; scripts/**, backend/scripts/** and tools/** (sh, js, mjs, cjs, ts);
+ * .github/workflows/** (yml/yaml); repo-root *.sh and Dockerfile* (RUN lines). 7c 2026-11-21: backend/scripts/ (19
+ * operational scripts) and tools/ were outside the first version, which is exactly where someone would add one.
+ * NOT SCANNED (named so the gap is visible): any other directory (app code under backend/services, pages, lib, worker,
+ * src: runtime code has no business invoking the Supabase CLI), docs/markdown, and node_modules. If a new location for
+ * operational scripts appears, add it to WALK below.
+ * Comment lines (#, //, *) are ignored, so documentation of the hazard is allowed.
  * Limit: a command assembled at runtime from fragments is invisible to a text scan.
  * Exit: 0 clean; 1 violation(s); 2 nothing scanned (refuses a vacuous pass).
  */
@@ -22,7 +27,7 @@ const SANCTIONED = new Set(['scripts/operator/db/db-push.sh', 'scripts/ci/check-
 // The CLI verb, optionally via npx / pnpm dlx / yarn.
 const CLI = String.raw`(?:(?:npx|pnpm\s+dlx|yarn)\s+)?supabase\s+(?:db\s+push|migration\s+up)\b`;
 // An INVOCATION, not a mention: per file type (messages and warnings that name the command are not invocations).
-const SHELL_CMD = new RegExp(String.raw`(?:^|&&|\|\||;|\$\(|\brun:\s*|\bexec\s+)\s*` + CLI); // sh / yml / npm scripts
+const SHELL_CMD = new RegExp(String.raw`(?:^|&&|\|\||;|\$\(|\brun:\s*|\bexec\s+|^RUN\s+)\s*` + CLI); // sh / yml / npm / Dockerfile
 const JS_EXEC = new RegExp(String.raw`\b(?:exec|execSync|execFile|execFileSync|spawn|spawnSync|execa)\s*\(\s*[\x60'"]\s*` + CLI);
 const JS_ARGV = /\b(?:spawn|spawnSync|execFile|execFileSync|execa)\s*\(\s*['"](?:npx|supabase)['"]\s*,\s*\[[^\]]*['"](?:db|migration)['"]\s*,\s*['"](?:push|up)['"]/;
 const COMMENT = /^\s*(#|\/\/|\*|\/\*)/;
@@ -55,8 +60,13 @@ if (fs.existsSync(pkgPath)) {
   scanned++;
   for (const [name, cmd] of Object.entries(scripts)) if (SHELL_CMD.test(cmd.trim())) hits.push(`package.json scripts.${name}: ${cmd}`);
 }
-walk('scripts', /\.(sh|js|mjs|cjs|ts)$/);
-walk('.github/workflows', /\.ya?ml$/);
+const WALK = [['scripts', /\.(sh|js|mjs|cjs|ts)$/], ['backend/scripts', /\.(sh|js|mjs|cjs|ts)$/], ['tools', /\.(sh|js|mjs|cjs|ts)$/],
+  ['.github/workflows', /\.ya?ml$/]];
+for (const [d, re] of WALK) walk(d, re);
+// Repo-root shell scripts and Dockerfiles (not recursive).
+for (const e of fs.existsSync(root) ? fs.readdirSync(root, { withFileTypes: true }) : []) {
+  if (e.isFile() && (/\.sh$/.test(e.name) || /^Dockerfile/.test(e.name))) scanText(e.name, fs.readFileSync(path.join(root, e.name), 'utf8'));
+}
 
 if (scanned === 0) { console.log('no-raw-db-push: NOTHING SCANNED - refusing a vacuous pass'); process.exit(2); }
 if (hits.length) {

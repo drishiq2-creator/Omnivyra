@@ -12,6 +12,11 @@
 # env vars, or the linked-project file. It passes ONLY a target PROVEN non-production: --local, a localhost --db-url,
 # an explicit non-production --project-ref, or a readable link to a non-production project. An unreadable link file or
 # no determinable target is refused (a failed read is never "safe").
+# ASSUMPTION (7c 2026-11-21): there is EXACTLY ONE production project, and PROD_REF is a hardcoded literal (never
+# resolved from .env or the link file, so the comparison cannot silently degrade to "compare against nothing").
+# "Any other --project-ref is provably not prod" is a denylist of ONE; it is equivalent to an allowlist only while the
+# dangerous set has exactly one member. If a second production-grade project is ever created (another product's
+# database, a staging that matters), this check MUST become an allowlist of known-safe refs.
 PROD_REF="klkiseupptzbecbxwrky"
 ROOT="${GUARD_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 refuse() { echo "🚫 BLOCKED: db push/migration up refused - $1"; echo "   Production schema changes go ONLY through owner-approved apply runners (release-gates)."; exit 1; }
