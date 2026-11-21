@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import Head from 'next/head';
 import { useCompanyContext } from '../components/CompanyContext';
+import CompanyAdminOnly from '../components/shared/CompanyAdminOnly';
 import { WebsiteExecutiveSummary, WebsiteModuleCard, WebsiteRoadmap, BusinessImpactGraph, buildWebsitePresentationModel } from '../components/websiteIntelligence';
 
 /**
@@ -51,7 +52,7 @@ function Row({ label, status, detail, source, updated }: { label: string; status
   );
 }
 
-export default function WebsiteHealthPage() {
+function WebsiteHealthPageContent() {
   const { selectedCompanyId } = useCompanyContext();
   const companyId = selectedCompanyId || '';
 
@@ -237,5 +238,14 @@ export default function WebsiteHealthPage() {
         </div>
       </main>
     </>
+  );
+}
+
+// Admin-only page (owner ruling 2026-11-20): the server decides (components/shared/CompanyAdminOnly.tsx).
+export default function WebsiteHealthPage() {
+  return (
+    <CompanyAdminOnly>
+      <WebsiteHealthPageContent />
+    </CompanyAdminOnly>
   );
 }
