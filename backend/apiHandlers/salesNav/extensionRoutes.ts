@@ -67,7 +67,10 @@ const defaultSecret = (s: ExtSession): string | null =>
 
 async function authed(req: NextApiRequest, res: NextApiResponse, deps: SalesNavExtensionDeps) {
   if (!post(req, res)) return null;
-  const a = await (deps.auth ?? (requireExtensionAuth as unknown as NonNullable<SalesNavExtensionDeps['auth']>))(req, res);
+  // ROUTE-AUTH-001: the primitive is INVOKED directly (provenance-checked by check-route-auth); deps only for tests
+  const a = deps.auth
+    ? await deps.auth(req, res)
+    : ((await requireExtensionAuth(req, res)) as unknown as { session: ExtSession } | null);
   if (!a) return null;                                   // the middleware already answered
   const s = a.session;
   const store = storeDepsFor(deps.binding ?? activeExtensionBinding, { ...(deps.store ?? {}), ...(deps.now ? { now: deps.now } : {}) });

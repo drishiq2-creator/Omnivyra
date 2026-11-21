@@ -97,7 +97,7 @@ describe('the job model', () => {
     const nonTerminal = ['queued', 'running', ...SALESNAV_RESUMABLE_STATUSES] as string[];
     expect([...SALESNAV_TERMINAL_STATUSES].sort()).toEqual(
       SALESNAV_RUN_STATUSES.filter((s) => !nonTerminal.includes(s)).slice().sort());
-    for (const s of SALESNAV_TERMINAL_STATUSES) expect((SALESNAV_STATUS_CODES as Record<string, string[]>)[s].length).toBeGreaterThan(0);
+    for (const s of SALESNAV_TERMINAL_STATUSES) expect((SALESNAV_STATUS_CODES as Record<string, readonly string[]>)[s].length).toBeGreaterThan(0);
   });
   it('isAllowedClose accepts only listed (status, code) pairs', () => {
     expect(isAllowedClose('auth_expired', 'checkpoint')).toBe(false);   // v2: a RESUMABLE state, not a close
