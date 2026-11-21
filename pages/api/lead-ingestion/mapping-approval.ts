@@ -18,16 +18,19 @@ import {
  * GOV-H writer validation for `approved_by`: the approver must hold an ACTIVE
  * membership in THIS tenant. A platform-level bypass that passes the
  * capability check is not a member and cannot approve a tenant's mapping.
- * An unreadable membership refuses (a null error is not an answer).
+ * An unreadable membership refuses (a null error is not an answer). It is the
+ * typed MEMBERSHIP_UNREADABLE state - never null or false, which would read as
+ * "not a member" (dropped-error gate, shape B; same rule as tenantDataAck).
  */
-async function isActiveMember(userId: string, companyId: string): Promise<boolean | null> {
+const MEMBERSHIP_UNREADABLE = 'unreadable' as const;
+async function isActiveMember(userId: string, companyId: string): Promise<boolean | typeof MEMBERSHIP_UNREADABLE> {
   try {
     const res = await ownedDbTable('user_company_roles').select('company_id')
       .eq('user_id', userId).eq('company_id', companyId).eq('status', 'active').limit(1);
-    if (res.error || (res.status !== 200 && res.status !== 206) || !Array.isArray(res.data)) return null;
+    if (res.error || (res.status !== 200 && res.status !== 206) || !Array.isArray(res.data)) return MEMBERSHIP_UNREADABLE;
     return res.data.length > 0;
   } catch {
-    return null;
+    return MEMBERSHIP_UNREADABLE;
   }
 }
 
@@ -170,7 +173,8 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   // active member of this tenant.
   const approvedBy = guard.principal.userId;
   const member = await isActiveMember(approvedBy, companyId);
-  if (member === null) {
+  // Only a real boolean is an answer: the unreadable state (or anything else) is 503, never "not a member".
+  if (member !== true && member !== false) {
     return res.status(503).json({ error: 'Membership could not be verified; nothing was saved.', code: 'MEMBERSHIP_UNKNOWN' });
   }
   if (!member) {
