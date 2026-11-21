@@ -20,7 +20,14 @@
 PROD_REF="klkiseupptzbecbxwrky"
 ROOT="${GUARD_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 refuse() { echo "🚫 BLOCKED: db push/migration up refused - $1"; echo "   Production schema changes go ONLY through owner-approved apply runners (release-gates)."; exit 1; }
-is_local_url() { case "$1" in *localhost*|*127.0.0.1*|*host.docker.internal*) return 0 ;; esac; return 1; }
+# Local = the HOST is exactly a local name (7c 2026-11-21). A substring match on the whole URL let a password containing
+# "127.0.0.1" or a hostname like "db-localhost-1.prod.example.com" pass as local. Strip the scheme, then everything up
+# to the LAST "@" (greedy, so a password containing "@" cannot leak into the host), then path and port; match EXACTLY.
+is_local_url() {
+  local hp="${1#*://}"; hp="${hp##*@}"; hp="${hp%%/*}"; local h="${hp%%:*}"
+  case "$h" in localhost|127.0.0.1|host.docker.internal) return 0 ;; esac
+  return 1
+}
 
 # 1. The prod ref anywhere in the arguments (covers --project-ref X, --db-url postgres://...prod...).
 [[ "$*" == *"$PROD_REF"* ]] && refuse "the arguments name the production project"

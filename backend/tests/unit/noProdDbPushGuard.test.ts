@@ -52,7 +52,15 @@ describe('guard-no-prod-push.sh: refuses anything that could be production', () 
     // No credentials in the fixture (the repo secrets gate flags a credential URL): the host alone decides.
     expect(guard(['--db-url', 'postgres://some-remote-host:5432/postgres']).status).toBe(1);
   });
+  it('7c: a local MARKER elsewhere in the URL is not a local HOST (password or hostname containing it) -> refused', () => {
+    // Built at runtime: a literal credential URL would trip the repo secrets gate.
+    const pwUrl = ['postgres', '://', 'user', ':', '127.0.0.1', '@', 'realhost:5432/db'].join('');
+    expect(guard(['--db-url', pwUrl]).status).toBe(1);
+    expect(guard(['--db-url', 'postgres://db-localhost-1.prod.example.com:5432/db']).status).toBe(1);
+    expect(guard(['--db-url=postgres://localhost.attacker.example.com:5432/db']).status).toBe(1);
+  });
   it('CONTROLS: proven non-production targets pass', () => {
+    expect(guard(['--db-url', 'postgresql://host.docker.internal:54322/postgres']).status).toBe(0);
     expect(guard(['--local']).status).toBe(0);
     expect(guard(['--db-url', 'postgresql://postgres:postgres@127.0.0.1:54322/postgres']).status).toBe(0);
     expect(guard([`--db-url=postgresql://postgres@localhost:54322/postgres`]).status).toBe(0);
