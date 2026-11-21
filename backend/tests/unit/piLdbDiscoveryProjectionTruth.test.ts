@@ -42,6 +42,7 @@ import {
   type DiscoveryPorts,
 } from '../../services/prospectDiscovery/discoveryExecutor';
 import type { DiscoveryProviderAdapter } from '../../services/prospectDiscovery/contract';
+import { passThroughScreen } from '../../services/prospectImportReview/screen';
 import {
   registerDiscoveryProvider,
   __resetDiscoveryProviderRegistry,
@@ -323,6 +324,10 @@ const vendor = (records: VendorRecord[]): DiscoveryProviderAdapter => ({
 const externalPorts = (over: Partial<DiscoveryPorts> = {}): DiscoveryPorts => ({
   credential: { resolveCredential: async () => 'tenant-key' },
   authorizeCost: async () => ({ authorized: true, holdId: null, cost: { kind: 'unknown' } }),
+  // Explicit, greppable bypass (main's R3 rule, #91): this suite tests PROJECTION truth, not R3 screening. Since the
+  // rebase onto main the executor runs the production screen unless a caller passes this, and the screen's reads
+  // against this suite's in-memory store would hold every record.
+  screen: passThroughScreen,
   now: () => NOW,
   ...over,
 });
