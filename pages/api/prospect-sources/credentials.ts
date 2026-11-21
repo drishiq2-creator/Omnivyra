@@ -1,5 +1,5 @@
 import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeFactory';
-import { assertTenantDataAck, TenantDataAckRequired } from '../../../backend/services/compliance/tenantDataAck';
+import { assertTenantDataAck, TenantDataAckRequired, TenantDataAckUnreadable } from '../../../backend/services/compliance/tenantDataAck';
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { requireExternalApiAccess } from '../../../backend/apiHandlers/externalApis/indexShared';
 import { requireTenantAccess } from '../../../backend/security/TenantGuard';
@@ -112,6 +112,9 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       try {
         await assertTenantDataAck(tenantId, 'vendor_data');
       } catch (e) {
+        if (e instanceof TenantDataAckUnreadable) {
+          return res.status(503).json({ error: 'DATA_CONTROLLER_ACK_UNREADABLE', category: e.category });
+        }
         if (e instanceof TenantDataAckRequired) {
           return res.status(403).json({ error: 'DATA_CONTROLLER_ACK_REQUIRED', category: e.category, state: e.state });
         }

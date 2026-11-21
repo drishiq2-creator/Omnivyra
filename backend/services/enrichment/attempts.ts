@@ -657,6 +657,10 @@ export async function completeAttempt(input: CompleteAttemptInput): Promise<void
       .update(usage)
       .eq('id', input.attemptId)
       .eq('organization_id', input.organizationId);
+    // REPORTING columns written after the attempt's close, never control state or money (own key:
+    // Omnivyra charges 0 credits); folding them into the close would let a failure here reopen a truthful attempt. A lost
+    // write leaves provider_cost_units NULL, which the usage report counts as vendorUnitsUnknownRuns - never as zero.
+    // dropped-error-exempt: best-effort REPORTING write after the close - what a loss leaves behind is stated above
     if (res.error) console.warn('[enrichment] attempt usage write failed', { code: res.error.code ?? null });
   } catch {
     console.warn('[enrichment] attempt usage write threw');

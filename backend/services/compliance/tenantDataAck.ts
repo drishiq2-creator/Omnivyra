@@ -76,6 +76,14 @@ export function loadTenantDataNotice(raw: RawNotice = notice as RawNotice): Tena
   };
 }
 
+/**
+ * A ledger or role read that did not ANSWER (error, non-2xx such as a blank 204, non-array, throw). A typed state, never
+ * null / [] / false: an unreadable ack must never read as "not acknowledged" OR "acknowledged" (b3 class ruling; cb on
+ * the dropped-error gate, 2026-11-21). Enforcement answers it 503 DATA_CONTROLLER_ACK_UNREADABLE.
+ */
+export const ACK_UNREADABLE = 'unreadable' as const;
+export type AckUnreadable = typeof ACK_UNREADABLE;
+
 export interface AckRow {
   consent_version: string;
   granted_by: string | null;
@@ -94,9 +102,9 @@ export interface CategoryStatus {
 }
 
 /** Pure: the state of one category given the notice and the tenant's acceptance rows (newest first). */
-export function categoryStatus(n: TenantDataNotice, rows: readonly AckRow[] | null, c: DataCategory, now: Date): CategoryStatus {
+export function categoryStatus(n: TenantDataNotice, rows: readonly AckRow[] | AckUnreadable, c: DataCategory, now: Date): CategoryStatus {
   const none = (state: CategoryState): CategoryStatus => ({ state, allowed: false, acceptedVersion: null, acceptedAt: null, acceptedBy: null, graceEndsAt: null });
-  if (rows === null) return none('unknown');
+  if (rows === ACK_UNREADABLE || !Array.isArray(rows)) return none('unknown');
   const row = rows.find((r) => Array.isArray(r.scope_snapshot) && (r.scope_snapshot as unknown[]).includes(c));
   if (!row) return none('required');
   const meta = (row.metadata && typeof row.metadata === 'object' ? row.metadata : {}) as Record<string, unknown>;
@@ -112,8 +120,8 @@ export function categoryStatus(n: TenantDataNotice, rows: readonly AckRow[] | nu
     : { state: 'expired', allowed: false, ...base, graceEndsAt: graceEnds.toISOString() };
 }
 
-/** The tenant's acceptance rows, newest first; null when the ledger could not be read (a null error is not an answer). */
-export async function readAckRows(organizationId: string): Promise<AckRow[] | null> {
+/** The tenant's acceptance rows, newest first; ACK_UNREADABLE when the ledger did not answer (a null error is not an answer). */
+export async function readAckRows(organizationId: string): Promise<AckRow[] | AckUnreadable> {
   try {
     const res = await ownedDbTable('consent_records')
       .select('consent_version, granted_by, granted_at, scope_snapshot, metadata')
@@ -123,10 +131,10 @@ export async function readAckRows(organizationId: string): Promise<AckRow[] | nu
       .order('granted_at', { ascending: false })
       .limit(50);
     const { data, error, status } = res as { data: unknown; error: unknown; status?: number };
-    if (error || (status !== 200 && status !== 206) || !Array.isArray(data)) return null;
+    if (error || (status !== 200 && status !== 206) || !Array.isArray(data)) return ACK_UNREADABLE;
     return data as AckRow[];
   } catch {
-    return null;
+    return ACK_UNREADABLE;
   }
 }
 
@@ -143,7 +151,7 @@ export async function getTenantDataAckStatus(
   const rows = await (deps.read ?? readAckRows)(organizationId);
   return {
     notice: n,
-    readable: rows !== null,
+    readable: rows !== ACK_UNREADABLE,
     categories: Object.fromEntries(DATA_CATEGORIES.map((c) => [c, categoryStatus(n, rows, c, now)])) as Record<DataCategory, CategoryStatus>,
   };
 }
@@ -156,14 +164,30 @@ export class TenantDataAckRequired extends Error {
   }
 }
 
+/** Thrown when the ledger did not answer: routes map it to 503 DATA_CONTROLLER_ACK_UNREADABLE, never to 403 "required". */
+export class TenantDataAckUnreadable extends Error {
+  constructor(readonly category: DataCategory) {
+    super(`data-controller acknowledgement for '${category}' could not be read`);
+    this.name = 'TenantDataAckUnreadable';
+  }
+}
+
+/**
+ * The ONE decision from a category status: allowed -> the status; unreadable ('unknown') -> TenantDataAckUnreadable
+ * (503); otherwise -> TenantDataAckRequired (403). Every enforcement point goes through here.
+ */
+export function requireCategoryAck(s: CategoryStatus, category: DataCategory): CategoryStatus {
+  if (s.allowed) return s;
+  if (s.state === 'unknown') throw new TenantDataAckUnreadable(category);
+  throw new TenantDataAckRequired(category, s.state);
+}
+
 /** Enforcement: allowed only when the category is current or in grace. */
 export async function assertTenantDataAck(
   organizationId: string, category: DataCategory, now: Date = new Date(), deps: { read?: typeof readAckRows; notice?: TenantDataNotice } = {},
 ): Promise<CategoryStatus> {
   const n = deps.notice ?? loadTenantDataNotice();
-  const s = categoryStatus(n, await (deps.read ?? readAckRows)(organizationId), category, now);
-  if (!s.allowed) throw new TenantDataAckRequired(category, s.state);
-  return s;
+  return requireCategoryAck(categoryStatus(n, await (deps.read ?? readAckRows)(organizationId), category, now), category);
 }
 
 export class TenantDataAckRefused extends Error {
@@ -173,16 +197,16 @@ export class TenantDataAckRefused extends Error {
   }
 }
 
-/** The acceptor's role in THIS tenant: COMPANY_ADMIN only (Super Admin excluded, as in CPG-058). null = unreadable. */
-export async function isTenantCompanyAdmin(userId: string, organizationId: string): Promise<boolean | null> {
+/** The acceptor's role in THIS tenant: COMPANY_ADMIN only (Super Admin excluded, as in CPG-058). ACK_UNREADABLE = no answer. */
+export async function isTenantCompanyAdmin(userId: string, organizationId: string): Promise<boolean | AckUnreadable> {
   try {
     const res = await ownedDbTable('user_company_roles').select('role')
       .eq('user_id', userId).eq('company_id', organizationId).eq('status', 'active').limit(5);
     const { data, error, status } = res as { data: unknown; error: unknown; status?: number };
-    if (error || (status !== 200 && status !== 206) || !Array.isArray(data)) return null;
+    if (error || (status !== 200 && status !== 206) || !Array.isArray(data)) return ACK_UNREADABLE;
     return (data as Array<{ role: string }>).some((r) => normalizeRole(r.role) === Role.COMPANY_ADMIN);
   } catch {
-    return null;
+    return ACK_UNREADABLE;
   }
 }
 
@@ -205,12 +229,13 @@ export async function recordTenantDataAck(input: {
   }
   if (input.shownVersion !== n.version || input.shownTextSha256 !== n.textSha256) throw new TenantDataAckRefused('stale_notice');
   const admin = await (deps.isAdmin ?? isTenantCompanyAdmin)(input.userId, input.organizationId);
-  if (admin === null) throw new TenantDataAckRefused('membership_unknown');
+  // Only a real boolean is an answer: ACK_UNREADABLE, or anything else, is membership_unknown - never "not admin".
+  if (admin !== true && admin !== false) throw new TenantDataAckRefused('membership_unknown');
   if (!admin) throw new TenantDataAckRefused('not_company_admin');
 
   // The grace window this acceptance closes, when it is a RE-acceptance.
   const rows = await (deps.read ?? readAckRows)(input.organizationId);
-  const prev = rows?.find((r) => Array.isArray(r.scope_snapshot) && (r.scope_snapshot as unknown[]).some((c) => cats.includes(c as DataCategory)));
+  const prev = (Array.isArray(rows) ? rows : []).find((r) => Array.isArray(r.scope_snapshot) && (r.scope_snapshot as unknown[]).some((c) => cats.includes(c as DataCategory)));
   const graceEnds = new Date(Date.parse(n.publishedAt) + n.graceDays * 86_400_000).toISOString();
   try {
     await (deps.record ?? recordConsent)({

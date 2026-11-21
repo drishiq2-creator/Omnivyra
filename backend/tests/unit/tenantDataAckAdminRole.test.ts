@@ -54,9 +54,9 @@ it('COMPANY_ADMIN of ANOTHER company -> false: no row matches this company (the 
   expect(filters).toContainEqual(['company_id', ORG]);
 });
 
-it('an unreadable role is NULL, never false and never true (204 and errors are not answers)', async () => {
+it('an unreadable role is the typed UNREADABLE state, never false and never true (204 and errors are not answers)', async () => {
   for (const r of [{ data: null, error: null, status: 204 }, { data: null, error: { code: 'x' }, status: 500 }, { data: {}, error: null, status: 200 }]) {
     response = r;
-    expect(await isTenantCompanyAdmin(USER, ORG)).toBeNull();
+    expect(await isTenantCompanyAdmin(USER, ORG)).toBe('unreadable');
   }
 });

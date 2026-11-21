@@ -545,6 +545,10 @@ export async function recordDiscoveryUsage(input: {
       .eq('organization_id', input.organizationId)
       .eq('id', input.id)
       .maybeSingle();
+    // REPORTING write after the close, never control state or money (own key: Omnivyra charges 0
+    // credits). An unreadable row writes NOTHING rather than overwrite a cumulative count with one run's figure; the
+    // run's funding then stays NULL, which the usage report shows as unknown - not as a recorded value.
+    // dropped-error-exempt: best-effort REPORTING write after the close - what a loss leaves behind is stated above
     if (read.error || !read.data) {
       console.warn('[discovery] usage read failed; usage not written', { code: read.error?.code ?? 'no_row' });
       return;
@@ -561,6 +565,9 @@ export async function recordDiscoveryUsage(input: {
       })
       .eq('organization_id', input.organizationId)
       .eq('id', input.id);
+    // REPORTING write after the close (see above); it must never fail or reopen the execution. A lost
+    // write leaves funding NULL (reported as unknown) and the screening counts at their previous value.
+    // dropped-error-exempt: best-effort REPORTING write after the close - what a loss leaves behind is stated above
     if (res.error) console.warn('[discovery] usage write failed', { code: res.error.code ?? null });
   } catch {
     console.warn('[discovery] usage write threw');

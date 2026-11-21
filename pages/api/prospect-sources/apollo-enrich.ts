@@ -1,5 +1,5 @@
 import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeFactory';
-import { getTenantDataAckStatus, TenantDataAckRequired } from '../../../backend/services/compliance/tenantDataAck';
+import { getTenantDataAckStatus, requireCategoryAck, TenantDataAckRequired, TenantDataAckUnreadable } from '../../../backend/services/compliance/tenantDataAck';
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { requireTenantAccess } from '../../../backend/security/TenantGuard';
 import { requireCapability } from '../../../backend/security/requireCapability';
@@ -71,9 +71,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     // current (or in-grace) 'vendor_data' acknowledgement; a preview fetches
     // nothing and is allowed, returning the state so the notice is shown.
     const ack = await getTenantDataAckStatus(companyId);
-    if (mode === 'run' && !ack.categories.vendor_data.allowed) {
-      throw new TenantDataAckRequired('vendor_data', ack.categories.vendor_data.state);
-    }
+    if (mode === 'run') requireCategoryAck(ack.categories.vendor_data, 'vendor_data');
     const groups = await readTenantFieldGroups(companyId, { contactAllowed: ack.categories.contact_data.allowed });
     const allowedAttributes = allowedAttributesFor(groups);
     const now = new Date().toISOString();
@@ -109,6 +107,9 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     const result = await executeProspectEnrichmentBatch(common);
     return res.status(200).json({ fieldGroups: groups, estimate, result });
   } catch (e) {
+    if (e instanceof TenantDataAckUnreadable) {
+      return res.status(503).json({ error: 'DATA_CONTROLLER_ACK_UNREADABLE', category: e.category });
+    }
     if (e instanceof TenantDataAckRequired) {
       return res.status(403).json({ error: 'DATA_CONTROLLER_ACK_REQUIRED', category: e.category, state: e.state });
     }

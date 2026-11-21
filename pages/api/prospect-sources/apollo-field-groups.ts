@@ -1,5 +1,5 @@
 import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeFactory';
-import { getTenantDataAckStatus, TenantDataAckRequired } from '../../../backend/services/compliance/tenantDataAck';
+import { getTenantDataAckStatus, requireCategoryAck, TenantDataAckRequired, TenantDataAckUnreadable } from '../../../backend/services/compliance/tenantDataAck';
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { requireTenantAccess } from '../../../backend/security/TenantGuard';
 import { requireExternalApiAccess } from '../../../backend/apiHandlers/externalApis/indexShared';
@@ -42,7 +42,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     const ack = await getTenantDataAckStatus(org);
     const contactAllowed = ack.categories.contact_data.allowed;
     if (method === 'PUT') {
-      if (!ack.categories.vendor_data.allowed) throw new TenantDataAckRequired('vendor_data', ack.categories.vendor_data.state);
+      requireCategoryAck(ack.categories.vendor_data, 'vendor_data');
       const body = (req.body ?? {}) as { groups?: unknown };
       const saved = await writeTenantFieldGroups(org, body.groups, tenant.userId, { contactAllowed });
       return res.status(200).json({ selected: saved });
@@ -60,6 +60,9 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       selected,
     });
   } catch (e) {
+    if (e instanceof TenantDataAckUnreadable) {
+      return res.status(503).json({ error: 'DATA_CONTROLLER_ACK_UNREADABLE', category: e.category });
+    }
     if (e instanceof TenantDataAckRequired) {
       return res.status(403).json({ error: 'DATA_CONTROLLER_ACK_REQUIRED', category: e.category, state: e.state });
     }

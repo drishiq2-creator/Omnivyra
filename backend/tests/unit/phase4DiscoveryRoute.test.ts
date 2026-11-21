@@ -268,6 +268,15 @@ describe('the data-controller acknowledgement gate (vendor_data) stops discovery
     expect(createDiscoveryExecution).not.toHaveBeenCalled();
   });
 
+  it('a TYPED unreadable acknowledgement -> 503 DATA_CONTROLLER_ACK_UNREADABLE with the category, never 403', async () => {
+    const { TenantDataAckUnreadable } = jest.requireActual('../../services/compliance/tenantDataAck');
+    mockAssertTenantDataAck.mockImplementation(async () => { throw new TenantDataAckUnreadable('vendor_data'); });
+    const res = await call() as unknown as { _status: number; _json?: unknown; body?: unknown };
+    expect(res._status).toBe(503);
+    expect(JSON.stringify(res._json ?? res.body ?? null)).toContain('DATA_CONTROLLER_ACK_UNREADABLE');
+    expect(createDiscoveryExecution).not.toHaveBeenCalled();
+  });
+
   it('an UNREADABLE acknowledgement -> 503, never treated as acknowledged, no execution created', async () => {
     mockAssertTenantDataAck.mockImplementation(async () => { throw new Error('consent ledger down'); });
     const res = await call();

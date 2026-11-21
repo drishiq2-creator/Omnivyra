@@ -10,6 +10,9 @@ import {
   TenantDataAckRequired,
   type AckRow,
   type TenantDataNotice,
+  ACK_UNREADABLE,
+  requireCategoryAck,
+  TenantDataAckUnreadable,
 } from '../../services/compliance/tenantDataAck';
 
 const RAW = {
@@ -72,8 +75,24 @@ describe('enforcement', () => {
       .rejects.toMatchObject({ name: 'TenantDataAckRequired', category: 'vendor_data', state: 'required' });
     await expect(assertTenantDataAck(ORG, 'vendor_data', D('2026-11-11'), { notice: N, read: async () => [row({ consent_version: 'v1' })] }))
       .resolves.toMatchObject({ state: 'grace' });
-    await expect(assertTenantDataAck(ORG, 'vendor_data', D('2026-11-11'), { notice: N, read: async () => null }))
-      .rejects.toBeInstanceOf(TenantDataAckRequired);
+  });
+
+  // cb on the dropped-error gate (2026-11-21): an UNREADABLE ledger is its own answer - 503, never 403 "required"
+  // (which would tell the user to acknowledge when the truth is "we could not check") and never allowed.
+  it('an UNREADABLE ledger throws TenantDataAckUnreadable - never TenantDataAckRequired, never allowed', async () => {
+    const r = assertTenantDataAck(ORG, 'vendor_data', D('2026-11-11'), { notice: N, read: async () => ACK_UNREADABLE });
+    await expect(r).rejects.toBeInstanceOf(TenantDataAckUnreadable);
+    await expect(assertTenantDataAck(ORG, 'vendor_data', D('2026-11-11'), { notice: N, read: async () => ACK_UNREADABLE }))
+      .rejects.not.toBeInstanceOf(TenantDataAckRequired);
+  });
+
+  it('requireCategoryAck: allowed -> returned; unknown -> Unreadable; any other refusal -> Required with its state', () => {
+    const s = (state: string, allowed: boolean) => ({ state, allowed, acceptedVersion: null, acceptedAt: null, acceptedBy: null, graceEndsAt: null }) as never;
+    expect(requireCategoryAck(s('current', true), 'vendor_data')).toMatchObject({ state: 'current' });
+    expect(() => requireCategoryAck(s('unknown', false), 'vendor_data')).toThrow(TenantDataAckUnreadable);
+    for (const st of ['required', 'expired', 'text_changed']) {
+      expect(() => requireCategoryAck(s(st, false), 'vendor_data')).toThrow(TenantDataAckRequired);
+    }
   });
 });
 
@@ -113,7 +132,11 @@ describe('recording an acceptance', () => {
     let r = deps({ isAdmin: async () => false });
     await expect(recordTenantDataAck(base, r.d)).rejects.toMatchObject({ code: 'not_company_admin' });
     expect(r.written).toEqual([]);
-    r = deps({ isAdmin: async () => null });
+    r = deps({ isAdmin: async () => ACK_UNREADABLE });
+    await expect(recordTenantDataAck(base, r.d)).rejects.toMatchObject({ code: 'membership_unknown' });
+    expect(r.written).toEqual([]);
+    // anything that is not a real boolean (a legacy/fake null) is also unknown - never "not admin", never "admin"
+    r = deps({ isAdmin: async () => null as never });
     await expect(recordTenantDataAck(base, r.d)).rejects.toMatchObject({ code: 'membership_unknown' });
     expect(r.written).toEqual([]);
   });
