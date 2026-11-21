@@ -1,6 +1,7 @@
 import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeFactory';
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { enforceCompanyAccess } from '../../../backend/services/userContextService';
+import { requireCompanyAdmin } from '../../../backend/services/companyAdminGate';
 import { buildFormAbandonmentReport } from '../../../backend/services/formAbandonmentService';
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
@@ -9,6 +10,8 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (!companyId) return res.status(400).json({ error: 'company_id is required' });
   const access = await enforceCompanyAccess({ req, res, companyId });
   if (!access) return;
+  // Admin-only page API (owner ruling 2026-11-20): a non-admin member gets 403 COMPANY_ADMIN_REQUIRED.
+  if (!(await requireCompanyAdmin({ req, res, companyId }))) return;
   const websiteId = typeof req.query.website_id === 'string' ? req.query.website_id : null;
   try {
     return res.status(200).json(await buildFormAbandonmentReport(companyId, websiteId));
