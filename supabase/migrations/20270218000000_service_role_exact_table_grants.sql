@@ -23,6 +23,11 @@
 -- Unaffected: SECURITY DEFINER writers and FK actions (CASCADE / SET NULL) run with the table
 -- OWNER's rights, not service_role's; RLS policies are untouched; client roles are untouched.
 --
+-- PUBLIC. has_table_privilege counts privileges granted to PUBLIC, and 20270120000000:99 never
+-- revoked from PUBLIC; each table also gets REVOKE ALL FROM PUBLIC (a no-op where PUBLIC holds
+-- nothing, which Supabase's default ACL does not grant), so a stray PUBLIC grant cannot abort this
+-- file or survive it (89 review note 2, 2026-11-21).
+--
 -- FAIL CLOSED. A missing table refuses the whole file (nothing changed). The postcondition checks
 -- every table privilege BOTH ways: present exactly for the intended set, absent otherwise
 -- (including MAINTAIN on PostgreSQL 17+).
@@ -46,18 +51,23 @@ BEGIN
 END
 $preflight$;
 
+REVOKE ALL ON TABLE public.extension_account_bindings FROM PUBLIC;
 REVOKE ALL ON TABLE public.extension_account_bindings FROM service_role;
 GRANT SELECT, INSERT ON TABLE public.extension_account_bindings TO service_role;
 
+REVOKE ALL ON TABLE public.contact_opt_out_reviews FROM PUBLIC;
 REVOKE ALL ON TABLE public.contact_opt_out_reviews FROM service_role;
 GRANT SELECT, INSERT, UPDATE ON TABLE public.contact_opt_out_reviews TO service_role;
 
+REVOKE ALL ON TABLE public.contact_opt_out_review_activity_days FROM PUBLIC;
 REVOKE ALL ON TABLE public.contact_opt_out_review_activity_days FROM service_role;
 GRANT SELECT, INSERT, UPDATE ON TABLE public.contact_opt_out_review_activity_days TO service_role;
 
+REVOKE ALL ON TABLE public.contact_opt_out_review_reanchors FROM PUBLIC;
 REVOKE ALL ON TABLE public.contact_opt_out_review_reanchors FROM service_role;
 GRANT SELECT ON TABLE public.contact_opt_out_review_reanchors TO service_role;
 
+REVOKE ALL ON TABLE public.execution_journey_decisions FROM PUBLIC;
 REVOKE ALL ON TABLE public.execution_journey_decisions FROM service_role;
 GRANT SELECT, INSERT ON TABLE public.execution_journey_decisions TO service_role;
 
