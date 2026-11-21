@@ -171,14 +171,24 @@ describe('F17 / connection writes / F18', () => {
     rerender(<WebsiteSetupPage />);
     // B has no integration; its provider must be chosen again, so the Connect step can't silently PUT A's id.
     await waitFor(() => expect(calls('GET', '/api/integrations?').length).toBe(2));
-    await act(async () => {});
+    // Wait for B's load to FINISH, not just start: the admin gate re-checks access on a company switch and remounts
+    // the page, and the page's resume (setStepIndex) lands just before 'Loading your setup…' clears. Clicking before
+    // that let the resume overwrite the click: green locally, red in CI (CI-835). The wizard must be idle first.
+    await waitFor(() => expect(screen.queryByText('Loading your setup…')).toBeNull());
     expect(calls('PUT', '/api/integrations/int-a')).toHaveLength(0);
     expect(screen.queryByLabelText(/WordPress username/)).toBeNull();
     // Drive B through Platform -> Verify -> Connect: the connection must be CREATED for B, never PUT to A's id.
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Confirm platform/ })); });
-    fireEvent.click(screen.getByRole('button', { name: /^WordPress/ }));
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Continue' })); });
-    const onVerify = screen.getAllByRole('button').filter((b) => /continue|skip/i.test(b.textContent ?? ''));
+    const confirmPlatform = await screen.findByRole('button', { name: /Confirm platform/ });
+    await act(async () => { fireEvent.click(confirmPlatform); });
+    fireEvent.click(await screen.findByRole('button', { name: /^WordPress/ }));
+    const toVerify = await screen.findByRole('button', { name: 'Continue' });
+    await act(async () => { fireEvent.click(toVerify); });
+    // Each step's buttons are WAITED for, never grabbed synchronously: the steps settle asynchronously (CI-835).
+    let onVerify: HTMLElement[] = [];
+    await waitFor(() => {
+      onVerify = screen.getAllByRole('button').filter((b) => /continue|skip/i.test(b.textContent ?? ''));
+      expect(onVerify.length).toBeGreaterThan(0);
+    });
     await act(async () => { fireEvent.click(onVerify[onVerify.length - 1]); });
     await waitFor(() => screen.getByLabelText(/WordPress username/));
     await fillWordpressAndContinue();
