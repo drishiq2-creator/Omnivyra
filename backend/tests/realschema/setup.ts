@@ -8,6 +8,13 @@
  */
 import { Client } from 'pg';
 
+// WhatsApp launch gate (b3, 11-18; #83): default OFF on main. The real-schema suites exercise SENDING on the applied
+// schema, so the gate is ON (exact 'true') for EVERY realschema suite - set here once, not per suite (with maxWorkers 1
+// a per-suite afterAll delete leaks across files; c6's PI_LDB_SCHEMA_READY precedent, 0e4a82690). The OFF behaviour is
+// pinned by the unit suite whatsappConnectGate.test.ts and by the realschema control in whatsapp_send_once_real
+// ('gate OFF: a queued batch sends nothing and writes nothing').
+process.env.WHATSAPP_CONNECT_ENABLED = 'true';
+
 const url = process.env.W6_DB_URL;
 if (!url) {
   throw new Error(

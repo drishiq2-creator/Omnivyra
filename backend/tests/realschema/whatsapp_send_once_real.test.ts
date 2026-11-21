@@ -126,6 +126,20 @@ describe('WhatsApp send-once on the real schema (L-4)', () => {
     expect(metaCalls).toHaveLength(1);
   }), 120_000);
 
+  it('gate OFF (WHATSAPP_CONNECT_ENABLED unset): a batch queued while it was ON sends nothing and the recipient stays pending', () => inRollback(async () => {
+    const { b, r } = await broadcastWithRecipient();
+    await svc.enqueueBroadcast(b, 'free');   // queued while the gate is ON (setup.ts)
+    const prior = process.env.WHATSAPP_CONNECT_ENABLED;
+    delete process.env.WHATSAPP_CONNECT_ENABLED;
+    try {
+      await expect(runQueued()).rejects.toThrow('WhatsApp is not available yet');
+      expect(metaCalls).toEqual([]);
+      expect(await state(r)).toMatchObject({ status: 'pending', wa_message_id: null });
+    } finally {
+      process.env.WHATSAPP_CONNECT_ENABLED = prior;
+    }
+  }), 120_000);
+
   it('a marker for another number changes nothing', () => inRollback(async () => {
     const { b, r } = await broadcastWithRecipient();
     meta = async () => { throw new Error('socket hang up'); };

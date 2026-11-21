@@ -197,6 +197,9 @@ const SAFETY_SUITE_REGISTRY = [
   // L-4 Follow-up A: the unconfirmed-send sweep never resends and never writes failed without
   // a provider event; the webhook names a recipient in the ledger only once verified.
   'backend/tests/unit/whatsappUnconfirmedSendSweep.test.ts',
+  // Stage-0 merge (a9, 2026-11-21): the idempotency adoption gate names the stack's PI execution-instance invoke
+  // (pages/api/prospect-campaigns, sanctioned PI-034), so it references stack surface and must be gated.
+  'backend/tests/unit/groupAIdempotencyAdoption.test.ts',
 ];
 
 /** Narrow naming convention; see header. Applied to basenames in UNIT_DIR only. */

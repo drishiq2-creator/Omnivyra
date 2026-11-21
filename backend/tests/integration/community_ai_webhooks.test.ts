@@ -5,6 +5,11 @@ import { executeAction as executeCommunityAction } from '../../services/communit
 import {
   actionStore,
   buildQuery,
+  communityRpc,
+  executionPolicyStore,
+  refusalStore,
+  seedExecutionPolicy,
+  withApprovalEvidence,
   createMockRes,
   resetCommunityAiStores,
   seedConnectedAccount,
@@ -26,6 +31,15 @@ jest.mock('../../services/userContextService', () => ({
     companyIds: ['tenant-1'],
     defaultCompanyId: 'tenant-1',
   }),
+}));
+
+// Stage-0 merge (a9, 2026-11-21): the stranded line's executor (Prompt 3 / D-01) executes only an action carrying a
+// complete human approval of record whose tenant has an open execution policy, and rechecks the recipient (L-3).
+// Same setup as the line's community_ai_action_connectors.test.ts; nothing here waives a gate. The webhook
+// assertions are main's, unchanged.
+jest.mock('../../services/communityRecipientRecheck', () => ({
+  ...jest.requireActual('../../services/communityRecipientRecheck'),
+  recheckCommunityRecipient: async () => ({ ok: true, basis: 'recipient_allowed', recipient: null }),
 }));
 
 jest.mock('../../db/supabaseClient', () => ({
@@ -50,8 +64,11 @@ jest.mock('../../auth/tokenRefresh', () => ({ refreshPlatformToken: jest.fn(asyn
 
 // A TERMINAL failure is what emits the 'failed' webhook. A failed API send is NOT terminal: the executor falls back
 // once to the browser (status 'dispatched', in flight), so these tests fail through RPA, which has no fallback.
+// A DEFINITE terminal failure on the line's executor: the RPA worker states it did not act (may_have_acted:false).
+// Anything else is 'uncertain' there (rpaResultMayHaveActed, the real reading, is kept), which is not a failure.
 jest.mock('../../services/rpaWorker/rpaWorkerService', () => ({
-  executeRpaTask: jest.fn(async () => ({ success: false, error: 'boom' })),
+  ...jest.requireActual('../../services/rpaWorker/rpaWorkerService'),
+  executeRpaTask: jest.fn(async () => ({ success: false, error: 'boom', may_have_acted: false })),
 }));
 
 // Webhook delivery goes through the SSRF-safe fetcher (HARDEN-005, 41f134d3b), which uses undici - NOT global fetch.
@@ -76,6 +93,10 @@ describe('Community-AI Webhooks', () => {
     (supabase.from as jest.Mock).mockImplementation((table: string) => buildQuery(table));
     resetCommunityAiStores();
     delivered.length = 0;
+    (supabase.rpc as jest.Mock).mockImplementation(communityRpc);
+    executionPolicyStore.clear();
+    refusalStore.length = 0;
+    seedExecutionPolicy({ tenantId: 'tenant-1' });
   });
 
   it('creates webhook per tenant', async () => {
@@ -142,7 +163,7 @@ describe('Community-AI Webhooks', () => {
       webhook_url: 'https://example.com/webhook',
       is_active: true,
     });
-    actionStore.set('webhook-1', {
+    actionStore.set('webhook-1', withApprovalEvidence({
       id: 'webhook-1',
       tenant_id: 'tenant-1',
       organization_id: 'tenant-1',
@@ -154,8 +175,8 @@ describe('Community-AI Webhooks', () => {
       execution_mode: 'rpa',
       status: 'approved',
       requires_human_approval: false,
-    });
-    const result = await executeCommunityAction(actionStore.get('webhook-1'), true);
+    } as Record<string, any>));
+    const result = await executeCommunityAction(actionStore.get('webhook-1'), true, { persist: true });
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(result).toMatchObject({ ok: false, status: 'failed' }); // the scenario IS a terminal failure
     expect(delivered.length).toBeGreaterThanOrEqual(1);
@@ -175,7 +196,7 @@ describe('Community-AI Webhooks', () => {
       webhook_url: `https://${hookTenant}.${hookOrg}.example.com/webhook`,
       is_active: true,
     });
-    actionStore.set('webhook-2', {
+    actionStore.set('webhook-2', withApprovalEvidence({
       id: 'webhook-2',
       tenant_id: 'tenant-1',
       organization_id: 'tenant-1',
@@ -187,7 +208,7 @@ describe('Community-AI Webhooks', () => {
       execution_mode: 'rpa',
       status: 'approved',
       requires_human_approval: false,
-    });
+    } as Record<string, any>));
     const req = {
       method: 'POST',
       headers: {},
