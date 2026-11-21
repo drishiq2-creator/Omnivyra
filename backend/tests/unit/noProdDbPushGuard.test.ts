@@ -49,7 +49,8 @@ describe('guard-no-prod-push.sh: refuses anything that could be production', () 
     expect(guard([], { link: '' }).status).toBe(1);
   });
   it('refuses a non-local --db-url (not provably non-production)', () => {
-    expect(guard(['--db-url', 'postgres://u:p@some-remote-host:5432/postgres']).status).toBe(1);
+    // No credentials in the fixture (the repo secrets gate flags a credential URL): the host alone decides.
+    expect(guard(['--db-url', 'postgres://some-remote-host:5432/postgres']).status).toBe(1);
   });
   it('CONTROLS: proven non-production targets pass', () => {
     expect(guard(['--local']).status).toBe(0);
