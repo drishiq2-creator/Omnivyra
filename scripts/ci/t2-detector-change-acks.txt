@@ -1,0 +1,14 @@
+# Acknowledged changes to scripts/ci/check-actor-fk-compatibility.js (#28 actor-FK parity).
+#
+# The actor-FK parity gate fails when the checker differs between HEAD and BASE, because a
+# weakened rule would otherwise read as "resolved". An intended, reviewed change is listed
+# here as the sha256 of the HEAD checker file, then " # <reason>". Example:
+#   <64 hex> # rule set_null_vs_check tightened (reviewed by virality-05, 2026-11-xx)
+#
+# Prune an entry once its change is on main: when HEAD and BASE run the same detector and
+# this file still lists that sha, the gate fails with STALE DETECTOR ACK.
+#
+# MIGRATION-CLASS (#27 clarification 3): every edit needs full virality-05 review.
+80d3bafb57ebaccd61da07e05adf4179e9e4b4c3d70fb1386fb02599051fa89c # PI-LDB (virality-e1, 158328569; supersedes 5b9d17e7 at fa067bf87/c1af54b4b, which had a live table-absence gap 05 found, now fixed: an acknowledgement for an absent table is STALE on a live catalog): a catalog_known entry is judged STALE only when its column is visible in the catalogue or the catalogue is unbounded (live/replayed), mirroring registry_column_missing; an unjudged entry prints NOT JUDGED under COVERAGE LIMIT 1/2. Reviewed and PASSED by virality-05 2026-11-11: byte-equality pin via cat-file; whole-corpus differential on the committed baseline (823 tables, 791 FKs): no finding newly flagged or unflagged; only source_assertions.platform_mapping_profile_id moves from error to NOT JUDGED. Prune when it reaches main.
+884e8825e62c7ebe33ac974683b6eb61fc1662ae6d2ad274f9506a2d69593be6 # PL-84 (virality-a9, fix/actor-fk-known-rule-keyed-20261120 838eca78d; b3 condition 3 of the G-11 ack, 2026-11-20): catalog_known entries match on table.column + RULE; a rule-less, unknown-rule or duplicate entry makes detect() throw (exit 2); stale_known ids carry the rule. TIGHTENS, never loosens. 7c individual review pending; prune once on main.
+3ae7681ad7cab4d91c87cbdf5979def0cc10b8e51a7b45d0ca975d1ab01382a0 # PI-LDB import wizard (virality-c6, feat/pi-import-wizard-rebase-20261121 ab9c88eaf; detector commits 9e7076f8a, 06ea0a90f, 4395a81f1, ab9c88eaf): the 80d3bafb rule (bounded dump -> NOT JUDGED under COVERAGE LIMIT; stale on a live/replayed catalog) rebased onto main + ab9c88eaf's wording (bounded path says "cannot decide; the --db path must" instead of "NOT a pass" while exiting 0). Loosens nothing on the --db path. Covered by virality-7c's YES at ab9c88eaf (2026-11-21). Prune when it reaches main.
