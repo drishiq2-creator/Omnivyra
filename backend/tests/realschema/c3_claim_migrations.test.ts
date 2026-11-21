@@ -110,8 +110,18 @@ describe('C3 migrations: each rollback', () => {
       await db.query(`DELETE FROM public.community_ai_action_logs WHERE action_id = $1`, [id]);
       await db.query(RB.refusal);
       expect(await fn('public.record_community_execution_refusal(uuid,uuid,uuid,text,text,uuid,jsonb)')).toBe(false);
+      // The rollback restores the PRODUCTION pre-image - 20270217000071's 8 values (applied 2026-11-20) - never the
+      // older 6-value list, so a rollback can never narrow what production admits ('sent_unverified' included).
+      expect(await db.query(`SELECT pg_get_constraintdef(oid) AS d FROM pg_constraint
+        WHERE conrelid = 'public.community_ai_action_logs'::regclass AND conname = 'community_ai_action_logs_event_type_check'`)
+        .then((r: any) => r.rows[0]?.d)).toBe("CHECK ((event_type = ANY (ARRAY['approved'::text, 'executed'::text, 'failed'::text, 'skipped'::text, 'scheduled'::text, 'auto_executed'::text, 'skipped_due_to_platform_policy'::text, 'sent_unverified'::text])))");
+      for (const kept of ['skipped_due_to_platform_policy', 'sent_unverified']) {
+        expect(await effect(`INSERT INTO public.community_ai_action_logs (action_id, tenant_id, organization_id, event_type, event_payload)
+          VALUES ($1, $2, $2, $3, '{}')`, [id, ORG_A, kept])).toBe('ok');
+      }
       expect(await effect(`INSERT INTO public.community_ai_action_logs (action_id, tenant_id, organization_id, event_type, event_payload)
-        VALUES ($1, $2, $2, 'skipped_due_to_platform_policy', '{}')`, [id, ORG_A])).toBe('23514');
+        VALUES ($1, $2, $2, 'nope', '{}')`, [id, ORG_A])).toBe('23514'); // control: the CHECK still rejects
+      await db.query(`DELETE FROM public.community_ai_action_logs WHERE action_id = $1`, [id]);
       await db.query(FWD.refusal);
       await db.query(FWD.claim);
       expect(await forwardState()).toEqual(ALL_ON);
