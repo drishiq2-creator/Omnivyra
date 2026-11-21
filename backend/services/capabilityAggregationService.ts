@@ -31,6 +31,7 @@ import type {
   IntegrationCapability,
   IntegrationCapabilityRecord,
 } from '../types/integrationCapabilities';
+import { isIntegrationCapability } from '../types/integrationCapabilities';
 import type { ConsentRecord } from '../types/consent';
 import type {
   ListeningSource,
@@ -298,12 +299,15 @@ export async function buildCapabilityAggregate(
       };
     });
 
-    const activeConsents = platformConsents.map((cr) => ({
+    // consent_records also holds ACKNOWLEDGEMENTS (tenant_data_controller_ack, salesnav_linkedin_restriction_ack;
+    // types/consent.ts CONSENT_CAPABILITIES). They are not integration consents: only integration capabilities are
+    // aggregated here (the guard both narrows the type and keeps an ack row out of integration readiness).
+    const activeConsents = platformConsents.flatMap((cr) => (isIntegrationCapability(cr.capability) ? [{
       consent_record_id: cr.id,
       capability: cr.capability,
       granted_at: cr.granted_at,
       age_days: daysBetween(cr.granted_at, generatedAt),
-    }));
+    }] : []));
 
     const listenRowAge = caps.find((c) => c.capability === 'listen')?.consent_record_age_days ?? null;
 
