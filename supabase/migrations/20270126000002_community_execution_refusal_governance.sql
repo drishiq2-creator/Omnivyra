@@ -47,6 +47,28 @@ BEGIN
 END
 $$;
 
+-- Never narrower than what is live (class guard, 7c 2026-11-21): every value the live CHECK admits today must be
+-- in the new list, or nothing changes. Values are parsed from pg_get_constraintdef, not matched one by one.
+DO $never_narrow$
+DECLARE
+  v_def  text;
+  v_lost text[];
+BEGIN
+  SELECT pg_get_constraintdef(oid) INTO v_def FROM pg_constraint
+   WHERE conrelid = 'public.community_ai_action_logs'::regclass
+     AND conname = 'community_ai_action_logs_event_type_check' AND contype = 'c';
+  IF v_def IS NOT NULL THEN
+    SELECT array_agg(m[1] ORDER BY m[1]) INTO v_lost
+      FROM regexp_matches(v_def, '''([^'']+)''', 'g') AS m
+     WHERE m[1] <> ALL (ARRAY['approved','executed','failed','skipped','scheduled','auto_executed',
+                              'skipped_due_to_platform_policy','sent_unverified']);
+    IF v_lost IS NOT NULL THEN
+      RAISE EXCEPTION 'community execution refusal governance preflight: the live event_type CHECK admits % which this file would drop - nothing changed', v_lost;
+    END IF;
+  END IF;
+END
+$never_narrow$;
+
 ALTER TABLE public.community_ai_action_logs DROP CONSTRAINT IF EXISTS community_ai_action_logs_event_type_check;
 ALTER TABLE public.community_ai_action_logs
   ADD CONSTRAINT community_ai_action_logs_event_type_check
@@ -151,11 +173,13 @@ BEGIN
                               AND conname = 'community_ai_action_logs_event_type_check')) NOT LIKE '%skipped_due_to_platform_policy%' THEN
     RAISE EXCEPTION 'community execution refusal governance postcondition: event_type CHECK not widened';
   END IF;
-  -- Never narrower than 20270217000071 (applied in production): 'sent_unverified' must stay admitted.
-  IF pg_get_constraintdef((SELECT oid FROM pg_constraint
-                            WHERE conrelid = 'public.community_ai_action_logs'::regclass
-                              AND conname = 'community_ai_action_logs_event_type_check')) NOT LIKE '%sent_unverified%' THEN
-    RAISE EXCEPTION 'community execution refusal governance postcondition: event_type CHECK would drop sent_unverified (20270217000071)';
+  -- The full set, not one member: the result must be exactly 20270217000071's validated 8-value definition
+  -- (byte-equal to 071's own postcondition string), so dropping ANY value fails here.
+  IF (SELECT pg_get_constraintdef(oid) FROM pg_constraint
+       WHERE conrelid = 'public.community_ai_action_logs'::regclass
+         AND conname = 'community_ai_action_logs_event_type_check' AND contype = 'c' AND convalidated)
+     IS DISTINCT FROM 'CHECK ((event_type = ANY (ARRAY[''approved''::text, ''executed''::text, ''failed''::text, ''skipped''::text, ''scheduled''::text, ''auto_executed''::text, ''skipped_due_to_platform_policy''::text, ''sent_unverified''::text])))' THEN
+    RAISE EXCEPTION 'community execution refusal governance postcondition: event_type CHECK is not the validated 8-value list of 20270217000071';
   END IF;
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') AND has_function_privilege('anon', f, 'EXECUTE') THEN
     RAISE EXCEPTION 'community execution refusal governance postcondition: anon can execute the record function';
