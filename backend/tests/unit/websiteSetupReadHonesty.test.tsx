@@ -42,6 +42,9 @@ const fetchMock = jest.fn((input: RequestInfo, init?: RequestInit) => {
     const [m, frag] = k.split(' ');
     return m === method && url.includes(frag);
   });
+  // /website-setup is admin-only on main (owner ruling 2026-11-20, CompanyAdminOnly). These tests exercise the page
+  // AS AN ADMIN, so the access probe answers admin unless a test routes it itself.
+  if (!key && url.includes('/api/company-admin/access')) return toRes({ status: 200, body: { admin: true } });
   if (!key) return toRes({ status: 200, body: {} });
   const q = routes[key];
   return toRes(q.length > 1 ? q.shift()! : q[0]);
