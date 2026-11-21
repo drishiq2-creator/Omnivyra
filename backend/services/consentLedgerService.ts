@@ -1,5 +1,5 @@
 import { ownedDbTable } from '../db/writeOwner';
-import type { ConsentRecord, ConsentVersion } from '../types/consent';
+import type { ConsentCapability, ConsentRecord, ConsentVersion } from '../types/consent';
 import { CONSENT_VERSION_V1 } from '../types/consent';
 import type {
   CapabilitySource,
@@ -11,7 +11,8 @@ import { invalidateCapabilityAggregate } from './capabilityCacheService';
 export type RecordConsentInput = {
   organizationId: string;
   platform: string;
-  capability: IntegrationCapability;
+  /** Any consent-ledger value (the DB's CHECK), not only an integration capability - see types/consent.ts. */
+  capability: ConsentCapability;
   grantedBy: string | null;
   grantedAt?: string;
   scopeSnapshot: string[];
