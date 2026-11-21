@@ -2,6 +2,7 @@ import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeF
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { enforceCompanyAccess } from '../../../backend/services/userContextService';
 import { enforceRole, getUserCompanyRole, Role } from '../../../backend/services/rbacService';
+import { INTEGRATIONS_UNAVAILABLE } from '../../../shared/integrations/integrationsReadCodes';
 import { canViewIntegrationSecrets, redactIntegrationSecrets } from '../../../backend/services/integrationSecretRedaction';
 import {
   createIntegration,
@@ -36,7 +37,14 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   // GET — any company member can list integrations
   if (req.method === 'GET') {
     const type = typeof req.query.type === 'string' ? req.query.type as IntegrationType : undefined;
-    const integrations = await getIntegrations(companyId, type).catch(() => []);
+    // A failed read is NOT "no integrations" (Rule 1): it used to be `.catch(() => [])`, a 200 with an empty list.
+    let integrations: Awaited<ReturnType<typeof getIntegrations>>;
+    try {
+      integrations = await getIntegrations(companyId, type);
+    } catch (err) {
+      console.error('[api/integrations] read failed', { company_id: companyId, message: err instanceof Error ? err.message : String(err) });
+      return res.status(503).json({ error: "Couldn't load integrations.", code: INTEGRATIONS_UNAVAILABLE });
+    }
     // Hydrated integrations carry DECRYPTED credentials. Only company admins see them; every other member gets them
     // redacted (backend/services/integrationSecretRedaction.ts). A failed role read answers null, i.e. redacted.
     const { role } = await getUserCompanyRole(req, companyId);
