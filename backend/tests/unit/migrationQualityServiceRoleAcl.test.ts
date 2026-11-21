@@ -9,6 +9,9 @@
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { serviceRoleAclViolations, SERVICE_ROLE_ACL_FROM } = require('../../../scripts/check-migration-quality.js');
 
+// A module, not a global script: a top-level const would collide with migrationQualitySecurityRules.test.ts (TS2451, CI-843).
+export {};
+
 const rules = (sql: string): string[] => serviceRoleAclViolations(sql).map((v: { rule: string }) => v.rule);
 
 // The real defect shape: client roles revoked, service_role granted a narrower set, its default ALL never revoked.
