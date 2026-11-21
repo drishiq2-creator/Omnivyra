@@ -180,6 +180,9 @@ export function makeSupabaseModule(pg: () => Queryable, savepointPrefix: string)
       gte: (c: string, v: unknown) => { st.filters.push({ kind: 'cmp', col: c, op: '>=', val: v }); return b; },
       lt: (c: string, v: unknown) => { st.filters.push({ kind: 'cmp', col: c, op: '<', val: v }); return b; },
       lte: (c: string, v: unknown) => { st.filters.push({ kind: 'cmp', col: c, op: '<=', val: v }); return b; },
+      // c6 2026-11-21 (additive): PostgREST's ilike, used by the R3 probe's name lookup (prospectImportReview
+      // repository byNameToken). It threw "not supported" before, which the screen turned into probe_unknown.
+      ilike: (c: string, v: unknown) => { st.filters.push({ kind: 'cmp', col: c, op: 'ILIKE', val: v }); return b; },
       is: (c: string, v: unknown) => {
         if (v === null) st.filters.push({ kind: 'isnull', col: c, not: false });
         else if (typeof v === 'boolean') st.filters.push({ kind: 'isbool', col: c, val: v });
