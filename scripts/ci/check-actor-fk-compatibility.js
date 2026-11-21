@@ -683,7 +683,11 @@ function reportCoverageLimits(result, out = process.stdout) {
   if (unjudged.length) {
     out.write(
       `           ${unjudged.length} catalog_known acknowledgement(s) could not be judged against this catalog ` +
-      '(neither reproduced nor stale). NOT a pass: run the --db path to decide.\n',
+      // 7c (2026-11-21): this path EXITS 0 for these, so the text must not say "NOT a pass" - a reader of the exit
+      // code and a reader of the message must get the same answer. What is true: this run cannot decide them; the
+      // --db path (real-schema CI, after replay; real-schema-ci.yml) must, and on that path this list is empty.
+      '(neither reproduced nor stale). This run CANNOT DECIDE them (it exits 0 for them); the --db path against ' +
+      'a replayed schema (real-schema CI) must decide them, and there this list is always empty.\n',
     );
     for (const u of unjudged) {
       out.write(`           NOT JUDGED (acknowledgement)  public.${u.key}  catalog_known  ${u.missing} not in this catalog\n`);

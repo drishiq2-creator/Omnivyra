@@ -427,7 +427,10 @@ describe('actor-FK compatibility detector — catalog level', () => {
     actorFk.reportCoverageLimits(bounded, { write: (x: string) => { lines.push(x); return true; } });
     const text = lines.join('');
     expect(text).toMatch(/columns later migrations added to older tables, are NOT covered/);
-    expect(text).toMatch(/NOT a pass: run the --db path to decide/);
+    // 7c (2026-11-21): the bounded run EXITS 0 here, so the text must say what is true - this run cannot decide,
+    // the --db path must - and must NOT say "NOT a pass" (exit code and message would disagree).
+    expect(text).toMatch(/CANNOT DECIDE them \(it exits 0 for them\); the --db path against a replayed schema/);
+    expect(text).not.toMatch(/acknowledgement\(s\) could not be judged[^\n]*NOT a pass/);
     expect(text).toContain('NOT JUDGED (acknowledgement)  public.t.later  catalog_known  column not in this catalog');
     const live = actorFk.detect(actorFk.parseBaselineCatalog(ddl, { source: 'pg_catalog' }), { columns: [] }, entry);
     expect(live.stale_known).toEqual(['t.later']);
