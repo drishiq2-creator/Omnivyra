@@ -212,3 +212,22 @@ describe('074 preflight refuses a PRE-re-key table (7c slice 1, finding 1)', () 
     expect(await codeOfSql(preflight)).toBe('ok');
   }));
 });
+
+describe('as service_role - the PRODUCTION caller - with the narrowed grants (b3, C163)', () => {
+  // FOR SHARE needs UPDATE privilege on the owner row; the upsert needs INSERT + UPDATE on the quota table.
+  // Proven as the role production runs as, not as the admin connection the other tests use.
+  it('service_role can claim a member and consume its cap (FOR SHARE + the atomic upsert work)', async () => {
+    const roleExists = (await db.query(`SELECT 1 FROM pg_roles WHERE rolname = 'service_role'`)).rowCount === 1;
+    expect(roleExists).toBe(true);
+    await db.query('BEGIN');
+    try {
+      await db.query('SET LOCAL ROLE service_role');
+      await db.query(`DELETE FROM public.salesnav_member_owner WHERE member_id = $1`, [M2]);   // owner DELETE (give-back path)
+      await db.query(`INSERT INTO public.salesnav_member_owner (member_id, organization_id) VALUES ($1, $2)`, [M2, ORG_B]);
+      const r = await consume(db, ORG_B, M2, 5, 150);
+      expect(r.rows[0]).toEqual({ granted: 5, consumed: 5, remaining: 145 });
+    } finally {
+      await db.query('ROLLBACK');
+    }
+  });
+});
