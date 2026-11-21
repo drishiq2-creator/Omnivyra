@@ -3,6 +3,9 @@
  * atomic all-or-nothing consume; a genuine two-session race at cap-1 yields EXACTLY ONE success (control: at cap-2
  * both succeed); the cap is bounded 1..200 and the member id must be canonical, in the database; no client role can
  * execute the function.
+ * RE-KEYED 2026-11-21 (b3 ruling A): the count is per MEMBER (not per tenant); only the owning company (073
+ * salesnav_member_owner) may consume - a non-owner gets 0 and writes nothing; a same-day ownership move carries the
+ * count; the ownership check holds a lock on the owner row, so a transfer cannot interleave with a consume.
  */
 import { Client } from 'pg';
 import { db, seedTenants, ORG_A, ORG_B } from './setup';
@@ -19,9 +22,24 @@ async function codeOf(p: Promise<unknown>): Promise<string> {
   try { await p; return 'ok'; } catch (e) { return (e as { code?: string }).code ?? 'error'; }
 }
 
+const own = (member: string, org: string) =>
+  db.query('INSERT INTO public.salesnav_member_owner (member_id, organization_id) VALUES ($1, $2)', [member, org]);
+const transfer = async (member: string, org: string) => {
+  await db.query('DELETE FROM public.salesnav_member_owner WHERE member_id = $1', [member]);
+  await own(member, org);
+};
+const rowCount = async (member: string): Promise<number> =>
+  (await db.query('SELECT count(*)::int n FROM public.salesnav_daily_quota WHERE member_id = $1', [member])).rows[0].n;
+
 beforeAll(async () => { await seedTenants(); });
+beforeEach(async () => {
+  // M1 and M2 are both owned by ORG_A unless a test moves one.
+  await own(M1, ORG_A);
+  await own(M2, ORG_A);
+});
 afterEach(async () => {
   await db.query(`DELETE FROM public.salesnav_daily_quota WHERE member_id LIKE 'ACoAAAsnqTest%'`);
+  await db.query(`DELETE FROM public.salesnav_member_owner WHERE member_id LIKE 'ACoAAAsnqTest%'`);
 });
 
 describe('consume: atomic, all-or-nothing, bounded by the cap', () => {
@@ -33,16 +51,67 @@ describe('consume: atomic, all-or-nothing, bounded by the cap', () => {
     expect((await consume(db, ORG_A, M1, 1, 150)).rows[0]).toEqual({ granted: 0, consumed: 150, remaining: 0 });
   });
 
-  it('the key is (tenant, member, day): another member or another tenant has its own count', async () => {
+  it('the key is (member, day): another member has its own count', async () => {
     await consume(db, ORG_A, M1, 150, 150);
     expect((await consume(db, ORG_A, M2, 5, 150)).rows[0]).toMatchObject({ granted: 5 });
-    expect((await consume(db, ORG_B, M1, 5, 150)).rows[0]).toMatchObject({ granted: 5 });
   });
 
   it('a first call above the cap inserts nothing', async () => {
     expect((await consume(db, ORG_A, M1, 151, 150)).rows[0]).toEqual({ granted: 0, consumed: 0, remaining: 150 });
     const { rows } = await db.query(`SELECT count(*)::int n FROM public.salesnav_daily_quota WHERE member_id = $1`, [M1]);
     expect(rows[0].n).toBe(0);
+  });
+});
+
+describe('ownership (b3 ruling A): only the owning company consumes; the count follows the member', () => {
+  it('a NON-OWNER company gets 0 and writes NOTHING (no row created)', async () => {
+    expect((await consume(db, ORG_B, M1, 5, 150)).rows[0]).toEqual({ granted: 0, consumed: 0, remaining: 0 });
+    expect(await rowCount(M1)).toBe(0);
+  });
+
+  it('a non-owner cannot add to an existing count either', async () => {
+    await consume(db, ORG_A, M1, 10, 150);
+    expect((await consume(db, ORG_B, M1, 5, 150)).rows[0]).toMatchObject({ granted: 0, consumed: 10 });
+    expect((await db.query('SELECT consumed FROM public.salesnav_daily_quota WHERE member_id = $1', [M1])).rows[0].consumed).toBe(10);
+  });
+
+  it('a member with NO owner row cannot consume at all', async () => {
+    await db.query('DELETE FROM public.salesnav_member_owner WHERE member_id = $1', [M1]);
+    expect((await consume(db, ORG_A, M1, 1, 150)).rows[0]).toMatchObject({ granted: 0 });
+    expect(await rowCount(M1)).toBe(0);
+  });
+
+  it('a SAME-DAY move carries the count: the new owner sees only what remains of that day', async () => {
+    await consume(db, ORG_A, M1, 100, 150);
+    await transfer(M1, ORG_B);
+    expect((await consume(db, ORG_A, M1, 1, 150)).rows[0]).toMatchObject({ granted: 0 });    // the old owner is out
+    expect((await consume(db, ORG_B, M1, 60, 150)).rows[0]).toEqual({ granted: 0, consumed: 100, remaining: 50 });
+    expect((await consume(db, ORG_B, M1, 50, 150)).rows[0]).toEqual({ granted: 50, consumed: 150, remaining: 0 });
+  });
+
+  it('control: the same consume by the owner, without a move, is granted', async () => {
+    await consume(db, ORG_A, M1, 100, 150);
+    expect((await consume(db, ORG_A, M1, 50, 150)).rows[0]).toEqual({ granted: 50, consumed: 150, remaining: 0 });
+  });
+
+  it('a transfer WAITS for an in-flight consume (the owner row is locked), and the old owner is out after it', async () => {
+    const c1 = new Client({ connectionString: url });
+    const c2 = new Client({ connectionString: url });
+    await Promise.all([c1.connect(), c2.connect()]);
+    try {
+      await c1.query('BEGIN');
+      expect((await consume(c1, ORG_A, M1, 1, 150)).rows[0]).toMatchObject({ granted: 1 });   // holds FOR SHARE
+      let deleted = false;
+      const pending = c2.query('DELETE FROM public.salesnav_member_owner WHERE member_id = $1', [M1])
+        .then((r) => { deleted = true; return r; });
+      await new Promise((r) => setTimeout(r, 300));
+      expect(deleted).toBe(false);          // blocked behind the consume's lock
+      await c1.query('COMMIT');
+      expect((await pending).rowCount).toBe(1);
+    } finally {
+      await Promise.all([c1.end(), c2.end()]);
+    }
+    expect((await consume(db, ORG_A, M1, 1, 150)).rows[0]).toMatchObject({ granted: 0 });
   });
 });
 
