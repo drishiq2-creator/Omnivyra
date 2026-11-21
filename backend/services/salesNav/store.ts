@@ -33,6 +33,13 @@ type DbResult = { data?: unknown; error?: unknown; status?: number; count?: numb
 
 export interface SalesNavStoreDeps {
   readonly table?: (name: string) => any;
+  /**
+   * Which member a user has bound for a transport. Default: this store's bindings. The routes pass the EXTENSION
+   * binding port (memberBinding.ts) so the path-1 / path-2 switch is one line, never a per-route choice.
+   */
+  readonly memberFor?: (org: string, userId: string, transport: SalesNavTransport) => Promise<string | null | 'unreadable'>;
+  /** Is the member bound for the transport by ANY user of the company (resume, quota). Same port as memberFor. */
+  readonly boundInCompany?: (org: string, transport: SalesNavTransport, member: string) => Promise<boolean | 'unreadable'>;
   readonly rpc?: (fn: string, args: Record<string, unknown>) => PromiseLike<DbResult>;
   readonly now?: () => Date;
 }
@@ -148,7 +155,9 @@ export async function startSalesNavRun(
   const parsed = parseSalesNavUrl(input.url);
   if (!parsed.ok) return { refused: parsed.refused };
   if (!ctx.initiatedBy) return { refused: 'member_unresolved' };
-  const member = await boundMember(ctx.organizationId, ctx.initiatedBy, input.transport, deps);
+  const member = deps.memberFor
+    ? await deps.memberFor(ctx.organizationId, ctx.initiatedBy, input.transport)
+    : await boundMember(ctx.organizationId, ctx.initiatedBy, input.transport, deps);
   if (member === 'unreadable') return { refused: 'store_unreadable' };
   if (!member) return { refused: 'member_unresolved' };
 
@@ -355,7 +364,9 @@ export async function resumeSalesNavRun(
   if (run === 'unreadable') return { resumed: false, reason: 'store_unreadable' };
   if (!run) return { resumed: false, reason: 'run_not_found' };
   if (run.status !== 'paused_daily_cap' && run.status !== 'auth_expired') return { resumed: false, reason: 'run_not_paused' };
-  const bound = await memberBoundInCompany(ctx.organizationId, run.transport, run.member_id, deps);
+  const bound = deps.boundInCompany
+    ? await deps.boundInCompany(ctx.organizationId, run.transport, run.member_id)
+    : await memberBoundInCompany(ctx.organizationId, run.transport, run.member_id, deps);
   if (bound === 'unreadable') return { resumed: false, reason: 'store_unreadable' };
   if (!bound) return { resumed: false, reason: 'member_not_bound' };
   const now = (deps.now ?? (() => new Date()))().toISOString();
@@ -398,7 +409,9 @@ export async function reserveSalesNavQuota(
   const member = canonicalMemberId(input.linkedinMemberId);
   const n = Math.floor(Number(input.requested));
   if (!member || !Number.isFinite(n) || n < 1) return none;
-  const bound = await memberBoundInCompany(ctx.organizationId, input.transport, member, deps);
+  const bound = deps.boundInCompany
+    ? await deps.boundInCompany(ctx.organizationId, input.transport, member)
+    : await memberBoundInCompany(ctx.organizationId, input.transport, member, deps);
   if (bound !== true) return none;
   const cap = resolveDailyCap(undefined);
   const day = utcDay((deps.now ?? (() => new Date()))());
