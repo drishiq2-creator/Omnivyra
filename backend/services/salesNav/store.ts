@@ -153,7 +153,8 @@ export async function startSalesNavRun(
   const table = deps.table ?? ownedDbTable;
   const now = (deps.now ?? (() => new Date()))();
   const parsed = parseSalesNavUrl(input.url);
-  // `'refused' in`, not `!parsed.ok`: the root tsconfig is non-strict, so a boolean discriminant does not narrow
+  // `'refused' in`, not `!parsed.ok`: tsconfig.json:11 is "strict": false (repo-wide), so a boolean-literal
+  // discriminant does NOT narrow a union here - do not 'simplify' back to `!parsed.ok`.
   if ('refused' in parsed) return { refused: parsed.refused };
   if (!ctx.initiatedBy) return { refused: 'member_unresolved' };
   const member = deps.memberFor
@@ -166,6 +167,7 @@ export async function startSalesNavRun(
   const staleBefore = new Date(now.getTime() - SALESNAV_RUN_STALE_SECONDS * 1000).toISOString();
   const stale = await table(RUNS).update({
     status: 'unknown', status_code: 'run_stale', closed_at: now.toISOString(), updated_at: now.toISOString(),
+    pending_page_index: null, pending_granted: null, 
   }).eq('member_id', member).eq('status', 'running').lt('last_activity_at', staleBefore);
   if (stale.error) return { refused: 'store_unreadable' };
 
@@ -187,7 +189,7 @@ export async function startSalesNavRun(
 const RUN_COLUMNS = 'id, organization_id, transport, member_id, url_kind, canonical_url, status, status_code, '
   + 'next_page_index, list_total, total_unreliable, last_has_next_page, pages_read, leads_read, accepted, rejected, '
   + 'created_count, updated_count, held_for_review, skipped_duplicates, dropped, quota_refused, seen_lead_keys, '
-  + 'retry_after_at, created_at, last_activity_at, closed_at';
+  + 'retry_after_at, created_at, last_activity_at, closed_at, active_route, pending_page_index, pending_granted';
 
 export interface SalesNavRunRow {
   readonly id: string;
@@ -217,6 +219,11 @@ export interface SalesNavRunRow {
   readonly created_at: string;
   readonly last_activity_at: string;
   readonly closed_at: string | null;
+  /** The browser route currently holding the run (extension | rpa); null for API transports. */
+  readonly active_route: 'extension' | 'rpa' | null;
+  /** The /next reservation outstanding for the page about to be read (both or neither). */
+  readonly pending_page_index: number | null;
+  readonly pending_granted: number | null;
 }
 
 /** One run of THIS company: the row, null when there is none (for this company), or 'unreadable'. */
@@ -289,6 +296,9 @@ export async function recordSalesNavPage(
   input: {
     runId: string; pageIndex: number; outcome: 'ok' | 'unknown'; hasNextPage: boolean | null; listTotal: unknown;
     leadKeys: readonly string[]; unknownCode?: string; vendorCursor?: string | null;
+    /** The page's ingestion counts, ADDED to the run's totals in the same update. */
+    counts?: Partial<Record<'leads_read' | 'accepted' | 'rejected' | 'created_count' | 'updated_count'
+      | 'held_for_review' | 'skipped_duplicates' | 'dropped' | 'quota_refused', number>>;
   },
   deps: SalesNavStoreDeps = {},
 ): Promise<RecordPageOutcome> {
@@ -301,7 +311,7 @@ export async function recordSalesNavPage(
 
   const close = async (status: SalesNavTerminalStatus, code: string): Promise<RecordPageOutcome> => {
     const r = await guardedUpdate(ctx.organizationId, run.id, { status: 'running', nextPageIndex: run.next_page_index }, {
-      status, status_code: code, closed_at: now, updated_at: now, last_activity_at: now,
+      status, status_code: code, closed_at: now, updated_at: now, last_activity_at: now, pending_page_index: null, pending_granted: null, 
     }, table);
     return r === 'ok' ? { recorded: true, closed: { status, code } } : { recorded: false, reason: r === 'unreadable' ? 'store_unreadable' : r };
   };
@@ -325,7 +335,15 @@ export async function recordSalesNavPage(
     list_total: total ?? run.list_total,
     updated_at: now,
     last_activity_at: now,
+    // the reservation for THIS page is spent: cleared in the update that advances the position (073's CHECK
+    // pending_page_index = next_page_index would refuse any other order)
+    pending_page_index: null,
+    pending_granted: null,
   };
+  for (const [k, v] of Object.entries(input.counts ?? {})) {
+    const n = Math.max(0, Math.floor(Number(v) || 0));
+    patch[k] = Number((run as unknown as Record<string, number>)[k] ?? 0) + n;
+  }
   if (run.transport === 'unipile' || run.transport === 'vayne') patch.vendor_cursor = input.vendorCursor ?? null;
   if (input.hasNextPage === false) {
     patch.status = 'completed';
@@ -349,7 +367,7 @@ export async function pauseSalesNavRun(
   const now = (deps.now ?? (() => new Date()))().toISOString();
   return guardedUpdate(ctx.organizationId, input.runId, { status: 'running' }, {
     status: input.status, status_code: input.code, retry_after_at: input.retryAfterAt ?? null,
-    updated_at: now, last_activity_at: now,
+    updated_at: now, last_activity_at: now, pending_page_index: null, pending_granted: null, 
   }, deps.table ?? ownedDbTable);
 }
 
@@ -387,7 +405,7 @@ export async function closeSalesNavRun(
   const now = (deps.now ?? (() => new Date()))().toISOString();
   return guardedUpdate(ctx.organizationId, input.runId, { status: ['running', 'queued', 'paused_daily_cap', 'auth_expired'] }, {
     status: input.status, status_code: input.code, retry_after_at: input.retryAfterAt ?? null,
-    closed_at: now, updated_at: now, last_activity_at: now,
+    closed_at: now, updated_at: now, last_activity_at: now, pending_page_index: null, pending_granted: null, 
   }, deps.table ?? ownedDbTable);
 }
 
@@ -430,4 +448,45 @@ export async function reserveSalesNavQuota(
   if (!first) return none;
   if (first.granted > 0 || first.remaining <= 0) return first;
   return (await call(first.remaining)) ?? none;
+}
+
+// -- route group B helpers ----------------------------------------------------------------------------------------
+
+/** The member's OPEN run in this company (queued / running / a resumable pause), null when none, or 'unreadable'. */
+export async function findOpenRun(org: string, member: string, deps: SalesNavStoreDeps = {}): Promise<SalesNavRunRow | null | 'unreadable'> {
+  const table = deps.table ?? ownedDbTable;
+  const rows = rowsOf(await table(RUNS).select(RUN_COLUMNS).eq('organization_id', org).eq('member_id', member)
+    .in('status', ['queued', 'running', 'paused_daily_cap', 'auth_expired']).limit(1));
+  if (!rows) return 'unreadable';
+  return (rows[0] as unknown as SalesNavRunRow | undefined) ?? null;
+}
+
+/** Today's (UTC) consumed count for a member the CALLER has bound: a number (0 when no row), or 'unreadable'. */
+export async function consumedToday(member: string, deps: SalesNavStoreDeps = {}): Promise<number | 'unreadable'> {
+  const table = deps.table ?? ownedDbTable;
+  const day = utcDay((deps.now ?? (() => new Date()))());
+  const rows = rowsOf(await table('salesnav_daily_quota').select('consumed').eq('member_id', member).eq('usage_day', day).limit(1));
+  if (!rows) return 'unreadable';
+  const c = rows[0]?.consumed;
+  return typeof c === 'number' ? c : 0;
+}
+
+/**
+ * Record the /next reservation on the run: only while it is running AT that page with NO reservation outstanding.
+ * The cap was ALREADY consumed (074) before this write; if this write fails, the cap stays spent (consume-on-reserve,
+ * never refunded) and a retried /next consumes again - the owner-ruled direction (less reading, never more).
+ */
+export async function markPendingReservation(
+  ctx: SalesNavCallerContext, input: { runId: string; pageIndex: number; granted: number; totalUnreliable: boolean },
+  deps: SalesNavStoreDeps = {},
+): Promise<'ok' | 'not_in_expected_state' | 'unreadable'> {
+  const table = deps.table ?? ownedDbTable;
+  const now = (deps.now ?? (() => new Date()))().toISOString();
+  const r: DbResult = await table(RUNS).update({
+    pending_page_index: input.pageIndex, pending_granted: input.granted, total_unreliable: input.totalUnreliable,
+    updated_at: now, last_activity_at: now,
+  }, { count: 'exact' }).eq('id', input.runId).eq('organization_id', ctx.organizationId).eq('status', 'running')
+    .eq('next_page_index', input.pageIndex).is('pending_page_index', null);
+  if (r.error || typeof r.count !== 'number') return 'unreadable';
+  return r.count === 1 ? 'ok' : 'not_in_expected_state';
 }

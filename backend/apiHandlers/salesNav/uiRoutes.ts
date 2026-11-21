@@ -158,6 +158,7 @@ export async function resumeRunHandler(req: NextApiRequest, res: NextApiResponse
   const runId = q(req, 'id');
   if (!runId) return res.status(400).json({ error: 'RUN_ID_REQUIRED' });
   const out = await resumeSalesNavRun({ organizationId: String(companyId), initiatedBy: tenant.userId }, { runId }, routedStore(deps));
+  // `in`, not a boolean test: tsconfig.json:11 is "strict": false (repo-wide), so a boolean-literal discriminant does NOT narrow a union here - do not 'simplify' back
   if (!('reason' in out)) return res.status(200).json(out);
   if (out.reason === 'store_unreadable' || out.reason === 'unreadable') return res.status(503).json({ error: 'STORE_UNREADABLE' });
   if (out.reason === 'run_not_found') return res.status(404).json({ error: 'RUN_NOT_FOUND' });

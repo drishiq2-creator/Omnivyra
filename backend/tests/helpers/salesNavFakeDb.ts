@@ -6,7 +6,7 @@ export const OPEN = ['queued', 'running', 'paused_daily_cap', 'auth_expired'];
  */
 export type Row = Record<string, any>;
 export function fakeDb(opts: { failTable?: string; failOp?: string } = {}) {
-  const t: Record<string, Row[]> = { salesnav_member_owner: [], salesnav_member_bindings: [], salesnav_extraction_runs: [] };
+  const t: Record<string, Row[]> = { salesnav_member_owner: [], salesnav_member_bindings: [], salesnav_extraction_runs: [], salesnav_daily_quota: [] };
   let seq = 0;
   const violation = (name: string, row: Row): string | null => {
     if (name === 'salesnav_member_owner' && t[name].some((r) => r.member_id === row.member_id)) return '23505';
