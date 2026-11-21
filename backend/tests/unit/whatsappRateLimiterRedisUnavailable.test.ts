@@ -15,6 +15,10 @@
  * when the new total stays within the limit, and returns { allowed, used }.
  */
 
+// A module, not a global script: piLdbBatchCounters.test.ts also declares a top-level `load`, and two scripts share
+// one scope under tsc (TS2451 + the wrong `load` type, CI-842).
+export {};
+
 const db = { tier: 1 as number, usageDay: 0 as number, rpcCalls: [] as unknown[] };
 
 jest.mock('../../db/writeOwner', () => ({

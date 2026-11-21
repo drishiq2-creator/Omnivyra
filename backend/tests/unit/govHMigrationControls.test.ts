@@ -391,8 +391,12 @@ describe('actor-FK compatibility detector — catalog level', () => {
     const r = actorFk.detect(cat, registry, actorFk.loadKnown());
     expect(r.counts.error).toBe(0);
     expect(r.stale_known).toEqual([]);
-    // The seventh entry postdates the baseline: visible as unjudged, not lost.
-    expect(r.unjudged_known.map((u: { key: string }) => u.key)).toEqual(['source_assertions.platform_mapping_profile_id']);
+    // Entries that postdate the baseline are visible as unjudged, not lost: the stage-0 line's opt-out review FK
+    // (20270127000001) and PI-LDB's source_assertions FK (step E). Both are judged by the --db path on the live catalog.
+    expect(r.unjudged_known.map((u: { key: string }) => u.key).sort()).toEqual([
+      'contact_opt_out_reviews.person_id',
+      'source_assertions.platform_mapping_profile_id',
+    ]);
     expect(r.known_open.map((f: { table: string; column: string }) => `${f.table}.${f.column}`).sort()).toEqual([
       'canonical_revenue_events.company_id',
       'canonical_users.company_id',
