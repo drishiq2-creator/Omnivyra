@@ -315,3 +315,34 @@ describe('POST /pause, /close, /cancel', () => {
     expect(run0(e.db).status).toBe('running');
   });
 });
+
+describe('the SHARED loop (loop.ts), in-process as the RPA route calls it (89 R4)', () => {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const loop = require('../../services/salesNav/loop') as typeof import('../../services/salesNav/loop');
+  const ctx = { organizationId: ORG, initiatedBy: USER };
+  it('a CANCEL stops the next page for a self-driving route: decideNextPage -> stop cancelled/user_cancelled', async () => {
+    const e = await withRun();
+    Object.assign(run0(e.db), { status: 'cancelled', status_code: 'user_cancelled', closed_at: 'x' });
+    const d = await loop.decideNextPage(ctx, e.runId, { route: 'extension', attestedMemberId: URN }, { store: e.deps.store, gate: e.deps.gate, now: () => NOW });
+    expect(d).toEqual({ kind: 'stop', status: 'cancelled', code: 'user_cancelled' });
+    expect(e.rpc).not.toHaveBeenCalled();
+  });
+  it('a route cannot drive a run another route HOLDS (handoff holder), and nothing is consumed', async () => {
+    const e = await withRun();
+    const d = await loop.decideNextPage(ctx, e.runId, { route: 'rpa', attestedMemberId: URN }, { store: e.deps.store, gate: e.deps.gate, now: () => NOW });
+    expect(d).toMatchObject({ kind: 'refusal', http: 409, error: 'RUN_NOT_HELD_BY_ROUTE', extra: { heldBy: 'extension' } });
+    expect(e.rpc).not.toHaveBeenCalled();
+    const s = await loop.submitPage(ctx, e.runId, { route: 'rpa', pageIndex: 0, finalUrl: LIST, outcome: 'ok', hasNextPage: true,
+      listTotal: 1, leads: [lead('keyR00001')], readerVersion: 'snr-1', attestedMemberId: URN }, { store: e.deps.store });
+    expect(s).toMatchObject({ kind: 'refusal', error: 'RUN_NOT_HELD_BY_ROUTE' });
+  });
+  it('reportClose accepts a transport failure before any read; an unlisted pair is refused; a second close is already_closed', async () => {
+    const e = await withRun();
+    expect(await loop.reportClose(ctx, e.runId, { route: 'extension', status: 'completed', code: 'no_next_page' }, { store: e.deps.store }))
+      .toMatchObject({ kind: 'refusal', http: 422 });
+    expect(await loop.reportClose(ctx, e.runId, { route: 'extension', status: 'failed', code: 'transport_error' }, { store: e.deps.store }))
+      .toEqual({ kind: 'ok' });
+    expect(await loop.reportClose(ctx, e.runId, { route: 'extension', status: 'failed', code: 'transport_error' }, { store: e.deps.store }))
+      .toEqual({ kind: 'already_closed' });
+  });
+});
