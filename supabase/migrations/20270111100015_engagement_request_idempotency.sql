@@ -117,6 +117,8 @@ ALTER TABLE public.engagement_request_idempotency ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON TABLE public.engagement_request_idempotency FROM PUBLIC;
 REVOKE ALL ON TABLE public.engagement_request_idempotency FROM anon;
 REVOKE ALL ON TABLE public.engagement_request_idempotency FROM authenticated;
+-- Default ACL already gives service_role ALL on a new table: revoke first, or the GRANT below narrows nothing.
+REVOKE ALL ON TABLE public.engagement_request_idempotency FROM service_role;
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.engagement_request_idempotency TO service_role;
 
 COMMENT ON TABLE public.engagement_request_idempotency IS
@@ -142,6 +144,14 @@ BEGIN
   END IF;
   IF to_regclass('public.uq_engagement_request_idempotency_key') IS NULL THEN
     RAISE EXCEPTION 'engagement request idempotency postcondition: natural-key unique index is missing';
+  END IF;
+  -- service_role holds EXACTLY SELECT, INSERT, UPDATE, DELETE (default-ACL class, CI-842): every other table privilege is absent.
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role') AND EXISTS (
+    SELECT 1 FROM unnest(ARRAY['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER']) AS p(priv)
+     WHERE has_table_privilege('service_role', 'public.engagement_request_idempotency', p.priv)
+           IS DISTINCT FROM (p.priv = ANY (ARRAY['SELECT', 'INSERT', 'UPDATE', 'DELETE']))
+  ) THEN
+    RAISE EXCEPTION 'engagement request idempotency postcondition: service_role privileges on engagement_request_idempotency are not exactly SELECT, INSERT, UPDATE, DELETE';
   END IF;
 END
 $$;

@@ -41,7 +41,10 @@ describe('preconditions and idempotency', () => {
 
   it('is re-runnable: replace/if-not-exists only, no destructive DDL', () => {
     expect(sql).not.toMatch(/\bDROP\s+(TABLE|FUNCTION|COLUMN|CONSTRAINT)\b/i);
-    expect(sql).not.toMatch(/\bTRUNCATE\b|\bDELETE\s+FROM\b/i);
+    // A bare quoted privilege NAME ('TRUNCATE' in a has_table_privilege postcondition) is not a statement; any
+    // TRUNCATE statement, including a dynamic EXECUTE 'TRUNCATE public.x', is still refused.
+    const statements = sql.replace(/'(SELECT|INSERT|UPDATE|DELETE|TRUNCATE|REFERENCES|TRIGGER)'/g, "'<privilege>'");
+    expect(statements).not.toMatch(/\bTRUNCATE\b|\bDELETE\s+FROM\b/i);
     expect(sql).toContain('CREATE TABLE IF NOT EXISTS public.rpa_auth_token_redemptions');
     expect(sql).toContain('CREATE INDEX IF NOT EXISTS');
   });

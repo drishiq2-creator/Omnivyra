@@ -365,6 +365,8 @@ BEGIN
     EXECUTE 'REVOKE ALL ON TABLE public.rpa_auth_token_redemptions FROM authenticated';
   END IF;
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role') THEN
+    -- Default ACL already gives service_role ALL on a new table: revoke first, or the GRANT below narrows nothing.
+    EXECUTE 'REVOKE ALL ON TABLE public.rpa_auth_token_redemptions FROM service_role';
     EXECUTE 'GRANT SELECT, INSERT, DELETE ON TABLE public.rpa_auth_token_redemptions TO service_role';
   END IF;
 END
@@ -451,6 +453,14 @@ BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon')
      AND has_table_privilege('anon', 'public.rpa_auth_token_redemptions', 'SELECT') THEN
     RAISE EXCEPTION 'extension dispatch safety postcondition: anon can read rpa_auth_token_redemptions';
+  END IF;
+  -- service_role holds EXACTLY SELECT, INSERT, DELETE (default-ACL class, CI-842): every other table privilege is absent.
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role') AND EXISTS (
+    SELECT 1 FROM unnest(ARRAY['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER']) AS p(priv)
+     WHERE has_table_privilege('service_role', 'public.rpa_auth_token_redemptions', p.priv)
+           IS DISTINCT FROM (p.priv = ANY (ARRAY['SELECT', 'INSERT', 'DELETE']))
+  ) THEN
+    RAISE EXCEPTION 'extension dispatch safety postcondition: service_role privileges on rpa_auth_token_redemptions are not exactly SELECT, INSERT, DELETE';
   END IF;
 END
 $$;
