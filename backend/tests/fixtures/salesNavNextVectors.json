@@ -1,0 +1,41 @@
+{
+  "$comment": "Shared test vectors for the signed Sales Navigator /next answer (route contract v0.3). The secret is a TEST value, not a real one. Copy byte-for-byte into the extension parity test. canonical_throws: inputs BOTH sides must refuse (constructed in code; JSON cannot carry them).",
+  "domain": "omnivyra.salesnav.next.v1",
+  "secret": "TEST-ONLY-salesnav-next-secret-not-real",
+  "envelope": {
+    "run_id": "11111111-2222-4333-8444-555555555555",
+    "page_index": 1,
+    "page_url": "https://www.linkedin.com/sales/lists/people/123?page=2",
+    "position": {
+      "param": "page",
+      "value": "2"
+    },
+    "max_leads": 25,
+    "member": "urn:li:fsd_profile:ACoAAAvectorTest0001",
+    "expires_at": "2026-11-21T12:01:00.000Z"
+  },
+  "canonical": "{\"expires_at\":\"2026-11-21T12:01:00.000Z\",\"max_leads\":25,\"member\":\"urn:li:fsd_profile:ACoAAAvectorTest0001\",\"page_index\":1,\"page_url\":\"https://www.linkedin.com/sales/lists/people/123?page=2\",\"position\":{\"param\":\"page\",\"value\":\"2\"},\"run_id\":\"11111111-2222-4333-8444-555555555555\"}",
+  "signature": "87bd697e47c885dc80771cff1da6100d41d72c6b31fe84274c3cbeb9cddb7f7e",
+  "canonical_basic": {
+    "input": {
+      "b": [
+        true,
+        null,
+        "x"
+      ],
+      "a": 1
+    },
+    "expected": "{\"a\":1,\"b\":[true,null,\"x\"]}"
+  },
+  "canonical_throws": [
+    "undefined_array_element",
+    "sparse_array_hole",
+    "nested_undefined_array_element",
+    "function_value",
+    "symbol_value",
+    "bigint_value",
+    "date_object",
+    "map_object",
+    "top_level_undefined"
+  ]
+}
