@@ -11,6 +11,14 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { classifyApolloHttpError } from '../../services/providerErrors/apolloErrors';
 
+// The discovery route requires the tenant's data-controller acknowledgement for 'vendor_data' (54928556e /
+// owner 2026-11-11). This suite tests what happens AFTER that gate, so the gate is mocked OPEN here; the gate's own
+// 403/503 behaviour is pinned in phase4DiscoveryRoute (c6 2026-11-20: these suites were red since 54928556e).
+const mockAssertTenantDataAck = jest.fn(async () => undefined);
+jest.mock('../../services/compliance/tenantDataAck', () => ({
+  ...jest.requireActual('../../services/compliance/tenantDataAck'),
+  assertTenantDataAck: (...a: unknown[]) => (mockAssertTenantDataAck as (...x: unknown[]) => Promise<void>)(...a),
+}));
 jest.mock('@/config', () => ({ config: {}, getValidatedConfig: () => ({}) }));
 jest.mock('../../../lib/platform/routeFactory', () => ({ createApiRoute: (h: unknown) => h }));
 jest.mock('../../middleware/withIdempotency', () => ({ withIdempotency: (h: unknown) => h }));
