@@ -23,6 +23,14 @@
  *   all      URL paging (pageUrlFor) is UNVERIFIED against live LinkedIn - see pageUrlFor.
  */
 
+/**
+ * v2.3 (a9, 2026-11-21): the page-reader versions the server accepts on /pages. SERVER POLICY lives here, not in the
+ * reader (the reader file only states its own READER_VERSION). Default: exactly the canonical reader's version
+ * (lib/salesnav/salesNavPageReader.js, pinned by a test). During an extension store rollout the previous version is
+ * added, then removed once no old installs remain.
+ */
+export const ACCEPTED_READER_VERSIONS: readonly string[] = ['snr-1'];
+
 /** One SOURCE for every route: the same lead seen by two transports is ONE source record (by lead_key). */
 export const SALESNAV_SOURCE = 'linkedin_sales_navigator' as const;
 
@@ -199,7 +207,10 @@ export type SalesNavRunStatus = (typeof SALESNAV_RUN_STATUSES)[number];
 export const SALESNAV_STATUS_CODES = {
   completed: ['no_next_page', 'empty_first_page'],
   rate_limited: ['site_rate_limit', 'vendor_rate_limit'],
-  refused: ['gate_closed', 'url_not_allowed', 'member_unresolved', 'member_mismatch', 'quota_unreadable'],
+  // v2.3 (a9, 2026-11-21): reader_version_unsupported - the route's page reader is not one the server accepts. The run
+  // CLOSES at once with this code (never left to go stale), so the user is told to update, not that it stalled.
+  refused: ['gate_closed', 'url_not_allowed', 'member_unresolved', 'member_mismatch', 'quota_unreadable',
+    'reader_version_unsupported'],
   failed: ['dom_changed', 'vendor_error', 'transport_error', 'internal_error'],
   /** The user's Cancel (v1.2): the server stops issuing pages. */
   cancelled: ['user_cancelled'],
