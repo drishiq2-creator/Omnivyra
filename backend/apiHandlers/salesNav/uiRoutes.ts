@@ -59,7 +59,8 @@ const routedStore = (deps: SalesNavUiDeps): SalesNavStoreDeps =>
 export async function setupHandler(req: NextApiRequest, res: NextApiResponse, deps: SalesNavUiDeps = {}) {
   if (!method(req, res, 'GET')) return;
   const companyId = companyIdOf(req);
-  const tenant = await (deps.requireTenant ?? requireTenantAccess)(req, res, companyId);
+  // ROUTE-AUTH-001: the primitive is INVOKED directly (provenance-checked by check-route-auth); deps only for tests
+  const tenant = deps.requireTenant ? await deps.requireTenant(req, res, companyId) : await requireTenantAccess(req, res, companyId);
   if (!tenant) return;
   const transport = q(req, 'transport') ?? 'extension';
   if (!isTransport(transport)) return res.status(400).json({ error: 'TRANSPORT_INVALID' });
@@ -87,7 +88,8 @@ export async function setupHandler(req: NextApiRequest, res: NextApiResponse, de
 export async function ackHandler(req: NextApiRequest, res: NextApiResponse, deps: SalesNavUiDeps = {}) {
   if (!method(req, res, 'POST')) return;
   const companyId = companyIdOf(req);
-  const tenant = await (deps.requireTenant ?? requireTenantAccess)(req, res, companyId);
+  // ROUTE-AUTH-001: the primitive is INVOKED directly (provenance-checked by check-route-auth); deps only for tests
+  const tenant = deps.requireTenant ? await deps.requireTenant(req, res, companyId) : await requireTenantAccess(req, res, companyId);
   if (!tenant) return;
   const b = body(req);
   if (!isTransport(b.transport)) return res.status(400).json({ error: 'TRANSPORT_INVALID' });
@@ -114,7 +116,8 @@ export async function ackHandler(req: NextApiRequest, res: NextApiResponse, deps
 export async function startRunHandler(req: NextApiRequest, res: NextApiResponse, deps: SalesNavUiDeps = {}) {
   if (!method(req, res, 'POST')) return;
   const companyId = companyIdOf(req);
-  const tenant = await (deps.requireTenant ?? requireTenantAccess)(req, res, companyId);
+  // ROUTE-AUTH-001: the primitive is INVOKED directly (provenance-checked by check-route-auth); deps only for tests
+  const tenant = deps.requireTenant ? await deps.requireTenant(req, res, companyId) : await requireTenantAccess(req, res, companyId);
   if (!tenant) return;
   const b = body(req);
   if (!isTransport(b.transport)) return res.status(400).json({ error: 'TRANSPORT_INVALID' });
@@ -139,7 +142,8 @@ export async function startRunHandler(req: NextApiRequest, res: NextApiResponse,
 export async function runStatusHandler(req: NextApiRequest, res: NextApiResponse, deps: SalesNavUiDeps = {}) {
   if (!method(req, res, 'GET')) return;
   const companyId = companyIdOf(req);
-  const tenant = await (deps.requireTenant ?? requireTenantAccess)(req, res, companyId);
+  // ROUTE-AUTH-001: the primitive is INVOKED directly (provenance-checked by check-route-auth); deps only for tests
+  const tenant = deps.requireTenant ? await deps.requireTenant(req, res, companyId) : await requireTenantAccess(req, res, companyId);
   if (!tenant) return;
   const runId = q(req, 'id');
   if (!runId) return res.status(400).json({ error: 'RUN_ID_REQUIRED' });
@@ -153,7 +157,8 @@ export async function runStatusHandler(req: NextApiRequest, res: NextApiResponse
 export async function resumeRunHandler(req: NextApiRequest, res: NextApiResponse, deps: SalesNavUiDeps = {}) {
   if (!method(req, res, 'POST')) return;
   const companyId = companyIdOf(req);
-  const tenant = await (deps.requireTenant ?? requireTenantAccess)(req, res, companyId);
+  // ROUTE-AUTH-001: the primitive is INVOKED directly (provenance-checked by check-route-auth); deps only for tests
+  const tenant = deps.requireTenant ? await deps.requireTenant(req, res, companyId) : await requireTenantAccess(req, res, companyId);
   if (!tenant) return;
   const runId = q(req, 'id');
   if (!runId) return res.status(400).json({ error: 'RUN_ID_REQUIRED' });
@@ -182,7 +187,8 @@ export async function cancelRunCore(
 export async function cancelRunSessionHandler(req: NextApiRequest, res: NextApiResponse, deps: SalesNavUiDeps = {}) {
   if (!method(req, res, 'POST')) return;
   const companyId = companyIdOf(req);
-  const tenant = await (deps.requireTenant ?? requireTenantAccess)(req, res, companyId);
+  // ROUTE-AUTH-001: the primitive is INVOKED directly (provenance-checked by check-route-auth); deps only for tests
+  const tenant = deps.requireTenant ? await deps.requireTenant(req, res, companyId) : await requireTenantAccess(req, res, companyId);
   if (!tenant) return;
   return cancelRunCore(String(companyId), tenant.userId, q(req, 'id'), res, routedStore(deps));
 }
