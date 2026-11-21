@@ -36,6 +36,7 @@ import { supabase } from '@/backend/db/supabaseClient';
 import { verifyPayment } from '@/backend/services/payments/orchestrator';
 import type { PaymentProviderId } from '@/backend/services/payments/orchestrator';
 import { generateTopupInvoice } from '@/backend/services/billing/topupInvoiceService';
+import { NON_LIVE_NO_GRANT, TEST_MODE_PAYMENT_NO_CREDITS, nonLivePurchaseRefusal } from '../../../../shared/billing/purchaseModeRefusal';
 import {
   closePurchaseFromClient,
   fulfillProviderConfirmedPurchase,
@@ -104,11 +105,14 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   // Reopen-safe: if an expiry sweep closed this row moments earlier, a genuine
   // provider-verified success still fulfills.
   const fulfillment = await fulfillProviderConfirmedPurchase(purchaseId, paymentId || undefined);
-  if (!fulfillment.ok && fulfillment.detail === 'test_mode_no_grant') {
-    // A TEST-mode payment in production grants nothing (purchaseService.completePurchase). State only: no real money
-    // moved and no credits were added - never "paid, credits pending".
+  if (!fulfillment.ok && fulfillment.detail === NON_LIVE_NO_GRANT) {
+    // A non-live payment in production grants nothing (purchaseService.completePurchase). State only: no credits were
+    // added - never "paid, credits pending". The code names the STORED mode (PL-162); a provider row is 'test' here.
+    const refusal = nonLivePurchaseRefusal(fulfillment.providerMode);
     return res.status(409).json({
-      ok: false, purchase_id: purchaseId, status: 'test_payment', code: 'TEST_MODE_PAYMENT_NO_CREDITS', provider,
+      ok: false, purchase_id: purchaseId,
+      status: refusal.code === TEST_MODE_PAYMENT_NO_CREDITS ? 'test_payment' : 'not_live_payment',
+      code: refusal.code, provider,
     });
   }
   if (!fulfillment.ok) {

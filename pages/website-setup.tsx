@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useCompanyContext } from '../components/CompanyContext';
 import CompanyAdminOnly from '../components/shared/CompanyAdminOnly';
 import { startGoogleAnalyticsConnect } from '../lib/analytics/startGoogleAnalyticsConnect';
+import { readIntegrationsList } from '../shared/integrations/integrationsReadCodes';
 
 /**
  * Guided website onboarding wizard.
@@ -160,8 +161,12 @@ function WebsiteSetupPageContent() {
       }
       // Recover an existing CMS integration for resumability.
       const intRes = await fetch(`/api/integrations?company_id=${encodeURIComponent(companyId)}`, { credentials: 'include' });
-      const intData = await intRes.json().catch(() => ({}));
-      const cms = (intData.integrations || []).find((i: any) =>
+      const intList = readIntegrationsList(intRes.ok, await intRes.json().catch(() => null));
+      if (intList === null) {
+        // Not "none": an unread list would let the wizard offer to connect a CMS that is already connected.
+        setError("Couldn't check for an existing website connection. Refresh before connecting one, so it isn't added twice.");
+      }
+      const cms = ((intList || []) as any[]).find((i: any) =>
         ['wordpress', 'shopify', 'webflow', 'ghost', 'drupal', 'joomla', 'custom_blog_api'].includes(i.type),
       );
       if (cms) {
@@ -272,10 +277,13 @@ function WebsiteSetupPageContent() {
     try {
       const [r, i] = await Promise.all([
         fetch(`/api/activation/readiness?company_id=${encodeURIComponent(companyId)}`, { credentials: 'include' }).then((x) => (x.ok ? x.json() : null)).catch(() => null),
-        fetch(`/api/integrations?company_id=${encodeURIComponent(companyId)}`, { credentials: 'include' }).then((x) => (x.ok ? x.json() : null)).catch(() => null),
+        fetch(`/api/integrations?company_id=${encodeURIComponent(companyId)}`, { credentials: 'include' })
+          .then(async (x) => readIntegrationsList(x.ok, await x.json().catch(() => null))).catch(() => null),
       ]);
-      setReadiness({ checks: r?.checks ?? [], activated: !!r?.activated, hasWebhook: ((i?.integrations) || []).some((x: any) => x.type === 'lead_webhook') });
-    } catch { /* review still renders */ }
+      // Either read failing means the checklist is UNKNOWN, not "Pending" (Rule 1).
+      if (!r || !Array.isArray(r.checks) || i === null) { setReadiness({ unavailable: true }); return; }
+      setReadiness({ checks: r.checks, activated: !!r.activated, hasWebhook: i.some((x: any) => x?.type === 'lead_webhook') });
+    } catch { setReadiness({ unavailable: true }); }
   }, [companyId]);
 
   const step = WIZARD[stepIndex];
@@ -778,7 +786,12 @@ function WebsiteSetupPageContent() {
 
             {step.key === 'review' && (
               <div className="space-y-3">
-                {(() => {
+                {readiness?.unavailable ? (
+                  <div role="alert" data-testid="activation-checklist-unavailable" className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-800">
+                    <p className="font-semibold">Couldn't load the activation checklist.</p>
+                    <button type="button" onClick={() => void loadReadiness()} className="mt-2 rounded-lg bg-white px-3 py-1 text-sm font-semibold text-red-700 ring-1 ring-red-200 hover:bg-red-100">Retry</button>
+                  </div>
+                ) : (() => {
                   const checkBy = (id: string) => !!readiness?.checks?.find((c: any) => c.id === id)?.done;
                   const st = domainStatus?.verification_status as string | undefined;
                   const leadsReady = checkBy('leads');
