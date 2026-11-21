@@ -1,7 +1,7 @@
 import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeFactory';
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { enforceCompanyAccess } from '../../../backend/services/userContextService';
-import { enforceRole, Role } from '../../../backend/services/rbacService';
+import { requireCompanyAdmin } from '../../../backend/services/companyAdminGate';
 import { createWebsiteFromSetup, getOrCreateWebsiteSetup, markWebsiteSetupStep, type WebsiteSetupStep } from '../../../backend/services/websiteSetupService';
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
@@ -11,6 +11,10 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (!companyId) return res.status(400).json({ error: 'company_id is required' });
   const access = await enforceCompanyAccess({ req, res, companyId });
   if (!access) return;
+  // Admin-only page API (owner ruling 2026-11-20), now for GET too: a member's GET used to run
+  // getOrCreateWebsiteSetup, i.e. a member page load could CREATE setup state. Member → 403 COMPANY_ADMIN_REQUIRED.
+  const roleGate = await requireCompanyAdmin({ req, res, companyId });
+  if (!roleGate) return;
 
   if (req.method === 'GET') {
     const result = await getOrCreateWebsiteSetup({
@@ -19,9 +23,6 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     });
     return res.status(200).json(result);
   }
-
-  const roleGate = await enforceRole({ req, res, companyId, allowedRoles: [Role.COMPANY_ADMIN, Role.SUPER_ADMIN] });
-  if (!roleGate) return;
 
   if (req.method === 'POST') {
     if (req.body?.action === 'create_website') {

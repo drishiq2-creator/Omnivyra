@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useCompanyContext } from '../components/CompanyContext';
+import CompanyAdminOnly from '../components/shared/CompanyAdminOnly';
 import ConversionFunnelStrip from '@/components/engagement/ConversionFunnelStrip';
 
 /**
@@ -61,7 +62,7 @@ const CAPTURE_OPTIONS = [
   { key: 'sdk', title: 'Universal SDK', why: 'Cover all of the above in one drop-in.', how: 'Add omnivera-attribution.js to your site head.' },
 ];
 
-export default function LeadCapturePage() {
+function LeadCapturePageContent() {
   const { selectedCompanyId } = useCompanyContext();
   const companyId = selectedCompanyId || '';
   const [tab, setTab] = useState<Tab>('guide');
@@ -803,5 +804,14 @@ export default function LeadCapturePage() {
         )}
       </div>
     </main>
+  );
+}
+
+// Admin-only page (owner ruling 2026-11-20): the server decides (components/shared/CompanyAdminOnly.tsx).
+export default function LeadCapturePage() {
+  return (
+    <CompanyAdminOnly>
+      <LeadCapturePageContent />
+    </CompanyAdminOnly>
   );
 }

@@ -5,6 +5,7 @@ import { htmlToPlainText } from '@/components/RichTextEditor';
 import { apiFetch } from '@/lib/apiFetch';
 import type { ScheduleItem } from '../types/activityWorkspace';
 import type { RefineChatMessage, WorkspacePayload } from '@/lib/activity-workspace/shared';
+import { throwIfBillingRefusal, userErrorMessage } from '@/lib/billing/billingRefusalCopy';
 
 type NotifyFn = (type: 'success' | 'error' | 'info', message: string) => void;
 
@@ -133,6 +134,7 @@ export function useActivityWorkspaceRefinementOps({
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
+        throwIfBillingRefusal(response.status, data);
         throw new Error(String(data?.message || data?.error || 'Failed to refine content'));
       }
       const refinedContent = String(data?.refined_content || '').trim();
@@ -158,7 +160,7 @@ export function useActivityWorkspaceRefinementOps({
       updateSchedule(schedule.id, { status: 'in-progress' });
     } catch (error) {
       console.error('Refine with AI failed:', error);
-      notify('error', `Failed to refine content: ${String((error as any)?.message || error)}`);
+      notify('error', userErrorMessage(error, 'Failed to refine content'));
     } finally {
       setIsRefiningByScheduleId((prev) => ({ ...prev, [schedule.id]: false }));
     }

@@ -1,5 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useCompanyContext } from '../components/CompanyContext';
+import CompanyAdminOnly from '../components/shared/CompanyAdminOnly';
+import { startGoogleAnalyticsConnect } from '../lib/analytics/startGoogleAnalyticsConnect';
 
 /**
  * Guided website onboarding wizard.
@@ -94,9 +96,22 @@ function guessProvider(url: string): ProviderId | null {
   return null;
 }
 
-export default function WebsiteSetupPage() {
+function WebsiteSetupPageContent() {
   const { selectedCompanyId } = useCompanyContext();
   const companyId = selectedCompanyId || '';
+  const [gaConnecting, setGaConnecting] = useState(false);
+  const [gaConnectError, setGaConnectError] = useState<string | null>(null);
+
+  // The connect API is POST-only (lib/analytics/startGoogleAnalyticsConnect). The former plain <a href> was a GET →
+  // 405, so this button never worked (04, 2026-11-20).
+  async function connectGoogleAnalytics() {
+    setGaConnecting(true);
+    setGaConnectError(null);
+    const started = await startGoogleAnalyticsConnect(companyId, '/website-setup');
+    if ('authorizationUrl' in started) { window.location.assign(started.authorizationUrl); return; }
+    setGaConnectError(started.message);
+    setGaConnecting(false);
+  }
 
   const [website, setWebsite] = useState<any>(null);
   const [progress, setProgress] = useState<any>(null);
@@ -652,12 +667,14 @@ export default function WebsiteSetupPage() {
                   Connect Google Analytics 4 to see <strong>views per blog</strong> and traffic sources. This is optional — you can skip it and connect later from Integrations.
                 </p>
                 <div className="flex flex-wrap gap-2">
-                  <a
-                    href={`/api/analytics/connect/google?company_id=${encodeURIComponent(companyId)}`}
-                    className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white"
+                  <button
+                    type="button"
+                    onClick={() => void connectGoogleAnalytics()}
+                    disabled={gaConnecting || !companyId}
+                    className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
                   >
-                    Connect Google Analytics
-                  </a>
+                    {gaConnecting ? 'Connecting…' : 'Connect Google Analytics'}
+                  </button>
                   <button
                     type="button"
                     onClick={() => setStepIndex((i) => Math.min(i + 1, WIZARD.length - 1))}
@@ -666,6 +683,7 @@ export default function WebsiteSetupPage() {
                     Skip for now
                   </button>
                 </div>
+                {gaConnectError && <p role="alert" className="text-sm text-red-600">{gaConnectError}</p>}
                 <p className="text-[11px] text-gray-500">
                   After connecting, you'll be redirected here. We auto-detect your GA4 properties on the Analytics page.
                 </p>
@@ -905,5 +923,14 @@ function ReadinessSummary({ beta, validation, provider }: { beta: any; validatio
         <p className="mt-1 text-xs">Readiness report unavailable — you can still activate.</p>
       )}
     </div>
+  );
+}
+
+// Admin-only page (owner ruling 2026-11-20): the server decides (components/shared/CompanyAdminOnly.tsx).
+export default function WebsiteSetupPage() {
+  return (
+    <CompanyAdminOnly>
+      <WebsiteSetupPageContent />
+    </CompanyAdminOnly>
   );
 }

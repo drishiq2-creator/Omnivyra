@@ -6,6 +6,8 @@ import {
   Download, Palette, Link2,
 } from 'lucide-react';
 import { useCompanyContext } from '../components/CompanyContext';
+import { useCompanyAdminAccess } from '../components/shared/CompanyAdminOnly';
+import { COMPANY_ADMIN_REQUIRED_MESSAGE, isCompanyAdminRequired } from '../shared/auth/companyAdminRequired';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 type FieldType = 'text' | 'email' | 'phone';
@@ -292,6 +294,8 @@ export function useLeadsPage() {
   const [leads, setLeads] = useState<Lead[]>([]);
   const [forms, setForms] = useState<CaptureForm[]>([]);
   const [webhookIntegrations, setWebhookIntegrations] = useState<WebhookIntegration[]>([]);
+  // The server says whether this viewer may see webhook secrets (company admins only). Absent = not visible.
+  const [webhookSecretsVisible, setWebhookSecretsVisible] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [activeTab, setActiveTab] = useState<Tab>('leads');
@@ -322,8 +326,13 @@ export function useLeadsPage() {
   const [lmSaving, setLmSaving] = useState(false);
   const [lmError, setLmError] = useState('');
 
-  const [deleteConfirm, setDeleteConfirm] = useState<{ kind: 'form' | 'lead'; id: string; name: string } | null>(null);
+  // Only forms can be deleted here: nothing in the UI ever opened a 'lead' delete (it pointed at a route that does not
+  // exist), so that dead variant is gone rather than kept as a 404 waiting to be wired (04, 2026-11-20).
+  const [deleteConfirm, setDeleteConfirm] = useState<{ id: string; name: string } | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  // Forms management is admin-only (owner ruling 2026-11-20); the server answers, never the client's role guess.
+  const { access: formsAccess, retry: retryFormsAccess } = useCompanyAdminAccess(selectedCompanyId || '');
   const [testResults, setTestResults] = useState<Record<string, { loading: boolean; ok?: boolean; msg?: string }>>({});
 
   useEffect(() => {
@@ -346,6 +355,7 @@ export function useLeadsPage() {
       setLeads(leadsRes.leads || []);
       setForms(formsRes.forms || []);
       setWebhookIntegrations(intRes.integrations || []);
+      setWebhookSecretsVisible(intRes.secrets_visible === true);
     } catch { setError('Failed to load data. Please refresh.'); }
     finally { setLoading(false); }
   }, [selectedCompanyId]);
@@ -427,14 +437,28 @@ export function useLeadsPage() {
   }
 
   // ── Delete ─────────────────────────────────────────────────────────────────
+  // A failed delete used to be swallowed and the dialog closed as if it had worked (Rule 1). The dialog now stays open
+  // with what actually happened; only a confirmed delete closes it.
   async function confirmDelete() {
     if (!deleteConfirm) return;
     setDeleting(true);
-    const url = deleteConfirm.kind === 'form'
-      ? `/api/forms/${deleteConfirm.id}?company_id=${selectedCompanyId}`
-      : `/api/leads/${deleteConfirm.id}?company_id=${selectedCompanyId}`;
-    await fetch(url, { method: 'DELETE' }).catch(() => {});
-    setDeleteConfirm(null); setDeleting(false); fetchAll();
+    setDeleteError(null);
+    try {
+      const r = await fetch(`/api/forms/${deleteConfirm.id}?company_id=${selectedCompanyId}`, { method: 'DELETE' });
+      const body = await r.json().catch(() => null);
+      if (r.ok) {
+        setDeleteConfirm(null);
+        fetchAll();
+      } else if (isCompanyAdminRequired(r.status, body)) {
+        setDeleteError(COMPANY_ADMIN_REQUIRED_MESSAGE);
+      } else {
+        setDeleteError("The form wasn't deleted. Please try again.");
+      }
+    } catch {
+      setDeleteError("We couldn't reach the server, so the form may not have been deleted. Refresh to check.");
+    } finally {
+      setDeleting(false);
+    }
   }
 
   // ── Test webhook ───────────────────────────────────────────────────────────
@@ -460,7 +484,7 @@ export function useLeadsPage() {
 
   function samplePayload(i: WebhookIntegration) {
     return JSON.stringify({
-      integration_id: i.id, webhook_secret: i.config.secret || 'YOUR_SECRET',
+      integration_id: i.id, webhook_secret: (webhookSecretsVisible && i.config.secret) || 'YOUR_SECRET',
       name: 'Jane Doe', email: 'jane@example.com', phone: '+1 555-0101', source: 'contact-form',
     }, null, 2);
   }
@@ -497,6 +521,11 @@ export function useLeadsPage() {
     fromForms,
     fromWebhooks,
     isAdmin,
+    webhookSecretsVisible,
+    formsAccess,
+    retryFormsAccess,
+    deleteError,
+    setDeleteError,
     leadModal,
     leads,
     lmEmail,

@@ -160,7 +160,8 @@ export function useIntegrationsPageController() {
   }, [load, loadGoogleAnalyticsStatus]);
 
   useEffect(() => {
-    if (!companyId) return;
+    // Provider diagnostics render only in the (admin-only) website view; the data view never asks for them.
+    if (!companyId || focusParam !== 'website') return;
     let cancelled = false;
     setProviderCardsLoading(true);
     (async () => {
@@ -172,7 +173,7 @@ export function useIntegrationsPageController() {
       finally { if (!cancelled) setProviderCardsLoading(false); }
     })();
     return () => { cancelled = true; };
-  }, [companyId]);
+  }, [companyId, focusParam]);
 
   useEffect(() => {
     if (!router.isReady) return;

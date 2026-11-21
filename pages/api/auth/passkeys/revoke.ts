@@ -1,4 +1,5 @@
 import { createApiRoute as __createApiRoute } from '../../../../lib/platform/routeFactory';
+import { ALREADY_REVOKED, REVOKE_UNCONFIRMED } from '../../../../shared/security/revokeCodes';
 /**
  * POST /api/auth/passkeys/revoke
  *
@@ -50,13 +51,13 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     return res.status(403).json({ error: 'Not your credential' });
   }
   if (existing.revokedAt) {
-    return res.status(409).json({ error: 'Already revoked' });
+    return res.status(409).json({ error: 'Already revoked', code: ALREADY_REVOKED });
   }
 
   const ok = await revokeCredential(id, p.userId, reason);
   if (!ok) {
     // Race or concurrent revoke — re-fetch to confirm state.
-    return res.status(409).json({ error: 'Credential could not be revoked' });
+    return res.status(409).json({ error: 'Credential could not be revoked', code: REVOKE_UNCONFIRMED });
   }
 
   await logSecurityEvent({

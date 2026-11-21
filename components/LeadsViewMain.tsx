@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import { useCompanyContext } from './CompanyContext';
 import EmptyState from './shared/EmptyState';
+import { CompanyAdminAccessNotice } from './shared/CompanyAdminOnly';
 import ExamplePreview from './shared/ExamplePreview';
 import { sampleForm, sampleLead } from '../lib/activation/sampleData';
 import { trackActivationEvent } from '../lib/analytics/activationEvents';
@@ -45,6 +46,11 @@ export default function LeadsView({ d }: { d: S }) {
     fromForms,
     fromWebhooks,
     isAdmin,
+    webhookSecretsVisible,
+    formsAccess,
+    retryFormsAccess,
+    deleteError,
+    setDeleteError,
     leadModal,
     leads,
     lmEmail,
@@ -293,7 +299,10 @@ export default function LeadsView({ d }: { d: S }) {
             )}
 
             {/* ── FORMS TAB ──────────────────────────────────────────────── */}
-            {activeTab === 'forms' && (
+            {activeTab === 'forms' && formsAccess !== 'admin' && formsAccess !== 'no_company' && (
+              <CompanyAdminAccessNotice access={formsAccess} onRetry={retryFormsAccess} />
+            )}
+            {activeTab === 'forms' && (formsAccess === 'admin' || formsAccess === 'no_company') && (
               <div>
                 {forms.length === 0 ? (
                   <EmptyState
@@ -347,7 +356,7 @@ export default function LeadsView({ d }: { d: S }) {
                                 <button onClick={() => openEditForm(form)} className="p-1.5 rounded-lg text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 transition-colors" title="Edit form">
                                   <Edit2 className="h-3.5 w-3.5" />
                                 </button>
-                                <button onClick={() => setDeleteConfirm({ kind: 'form', id: form.id, name: form.name })} className="p-1.5 rounded-lg text-gray-400 hover:text-red-600 hover:bg-red-50 transition-colors" title="Delete form">
+                                <button onClick={() => setDeleteConfirm({ id: form.id, name: form.name })} className="p-1.5 rounded-lg text-gray-400 hover:text-red-600 hover:bg-red-50 transition-colors" title="Delete form">
                                   <Trash2 className="h-3.5 w-3.5" />
                                 </button>
                               </div>
@@ -411,7 +420,8 @@ export default function LeadsView({ d }: { d: S }) {
                   <div className="space-y-4">
                     {webhookIntegrations.map(integration => {
                       const test = testResults[integration.id];
-                      const secret = integration.config.secret;
+                      // A redacted secret ('********') is not a secret: never copy it, never send it.
+                      const secret = webhookSecretsVisible ? integration.config.secret : undefined;
                       const webhookLeads = leads.filter(l => l.integration_id === integration.id && !l.is_test).length;
                       return (
                         <div key={integration.id} className="bg-white rounded-xl border border-gray-200/60 shadow-sm p-5">
@@ -436,9 +446,11 @@ export default function LeadsView({ d }: { d: S }) {
                             <div className="bg-gray-50 rounded-lg p-3 sm:col-span-2">
                               <div className="flex justify-between mb-1">
                                 <span className="text-xs text-gray-500 font-medium">Webhook Secret</span>
-                                {secret ? <CopyButton text={secret} /> : <span className="text-xs text-amber-600">Not set — edit in Integrations</span>}
+                                {!webhookSecretsVisible
+                                  ? <span className="text-xs text-gray-500">Only company admins can view this secret</span>
+                                  : secret ? <CopyButton text={secret} /> : <span className="text-xs text-amber-600">Not set — edit in Integrations</span>}
                               </div>
-                              <code className="text-xs text-gray-700">{secret ? '••••••••••••••••' : 'Not configured'}</code>
+                              <code className="text-xs text-gray-700">{!webhookSecretsVisible ? 'Hidden' : secret ? '••••••••••••••••' : 'Not configured'}</code>
                             </div>
                           </div>
                           <div className="bg-gray-900 rounded-lg p-3 mb-4 overflow-x-auto">
@@ -720,13 +732,13 @@ export default function LeadsView({ d }: { d: S }) {
       {deleteConfirm && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl shadow-xl w-full max-w-sm p-6">
-            <h2 className="text-lg font-bold text-gray-900 mb-2">Delete {deleteConfirm.kind === 'form' ? 'Form' : 'Lead'}?</h2>
+            <h2 className="text-lg font-bold text-gray-900 mb-2">Delete Form?</h2>
             <p className="text-sm text-gray-600 mb-5">
-              <strong>{deleteConfirm.name}</strong> will be permanently deleted.
-              {deleteConfirm.kind === 'form' && ' Leads captured by this form will not be deleted.'}
+              <strong>{deleteConfirm.name}</strong> will be permanently deleted. Leads captured by this form will not be deleted.
             </p>
+            {deleteError && <p role="alert" className="mb-4 text-sm text-red-600" data-testid="delete-error">{deleteError}</p>}
             <div className="flex flex-col-reverse sm:flex-row justify-end gap-2">
-              <button onClick={() => setDeleteConfirm(null)} className="px-4 py-2 text-sm font-semibold text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors">Cancel</button>
+              <button onClick={() => { setDeleteConfirm(null); setDeleteError(null); }} className="px-4 py-2 text-sm font-semibold text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors">Cancel</button>
               <button onClick={confirmDelete} disabled={deleting} className="px-4 py-2 text-sm font-semibold text-white bg-red-600 rounded-lg hover:bg-red-700 disabled:opacity-50 transition-colors">
                 {deleting ? 'Deleting…' : 'Delete'}
               </button>

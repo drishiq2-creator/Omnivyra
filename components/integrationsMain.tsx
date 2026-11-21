@@ -32,8 +32,26 @@ import { useIntegrationsPageController } from './integrationsController';
 // PHASE-1A: the shared hub nav. This page keeps its own content unchanged — the
 // nav is added above it so every integration area is reachable from one spine.
 import IntegrationHubNav from './integrations/IntegrationHubNav';
+import CompanyAdminOnly from './shared/CompanyAdminOnly';
 
+/**
+ * Only the WEBSITE view (focus=website: registry, publishing, provider diagnostics, webhooks) is admin-only (owner
+ * ruling 2026-11-20). focus=data (CRM, Google Analytics, Search Console, files) stays open to members.
+ */
 export default function IntegrationsPage() {
+  const router = useRouter();
+  const focus = typeof router.query.focus === 'string' ? router.query.focus : '';
+  if (focus === 'website') {
+    return (
+      <CompanyAdminOnly fallback={{ label: 'Open Data & CRM sources', href: '/integrations?focus=data' }}>
+        <IntegrationsPageContent />
+      </CompanyAdminOnly>
+    );
+  }
+  return <IntegrationsPageContent />;
+}
+
+function IntegrationsPageContent() {
   const f = useIntegrationsPageController();
   const {
     analyticsStatus, blogIntegrations, categoryCards, categoryDescription, categoryTitle, companyId,
