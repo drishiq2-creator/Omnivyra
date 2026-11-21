@@ -38,7 +38,9 @@ describe('the credential port: three states, and resolveCredential unchanged', (
     expect(await p.resolveCredentialState({ organizationId: '  ', providerId: 'apollo' })).toEqual({ kind: 'absent' });
     expect(read).not.toHaveBeenCalled();
   });
-  it('resolveCredential works as an UNBOUND reference (productionPorts passes it that way)', async () => {
+  // A contract with TWO consumers that pass the method unbound: productionPorts.ts:107 and the automated retry job
+  // backend/jobs/prospectRetryJob.ts:161 (7c census). Keep resolveCredential free of `this`.
+  it('resolveCredential works as an UNBOUND reference (productionPorts + prospectRetryJob pass it that way)', async () => {
     const { resolveCredential } = port(async () => ({ api_key: 'k-2' }));
     expect(await resolveCredential({ organizationId: 'o', providerId: 'apollo' })).toBe('k-2');
   });
