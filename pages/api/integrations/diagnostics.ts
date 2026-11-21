@@ -1,6 +1,7 @@
 import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeFactory';
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { enforceCompanyAccess } from '../../../backend/services/userContextService';
+import { requireCompanyAdmin } from '../../../backend/services/companyAdminGate';
 import { buildAllProviderDiagnostics, buildProviderDiagnosticsCard } from '../../../backend/services/providerDiagnosticsService';
 import { isCmsProvider } from '../../../backend/services/cms/registry';
 import type { CmsProvider } from '../../../backend/services/cms/types';
@@ -11,6 +12,8 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (!companyId) return res.status(400).json({ error: 'company_id is required' });
   const access = await enforceCompanyAccess({ req, res, companyId });
   if (!access) return;
+  // Admin-only page API (owner ruling 2026-11-20): a non-admin member gets 403 COMPANY_ADMIN_REQUIRED.
+  if (!(await requireCompanyAdmin({ req, res, companyId }))) return;
   const provider = typeof req.query.provider === 'string' ? req.query.provider : null;
   try {
     if (provider) {

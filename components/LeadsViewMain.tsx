@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import { useCompanyContext } from './CompanyContext';
 import EmptyState from './shared/EmptyState';
+import { CompanyAdminAccessNotice } from './shared/CompanyAdminOnly';
 import ExamplePreview from './shared/ExamplePreview';
 import { sampleForm, sampleLead } from '../lib/activation/sampleData';
 import { trackActivationEvent } from '../lib/analytics/activationEvents';
@@ -46,6 +47,11 @@ export default function LeadsView({ d }: { d: S }) {
     fromWebhooks,
     isAdmin,
     webhookSecretsVisible,
+    formsAccess,
+    retryFormsAccess,
+    deleteError,
+    setDeleteError,
+    webhookIntegrationsUnavailable,
     leadModal,
     leads,
     lmEmail,
@@ -294,7 +300,10 @@ export default function LeadsView({ d }: { d: S }) {
             )}
 
             {/* ── FORMS TAB ──────────────────────────────────────────────── */}
-            {activeTab === 'forms' && (
+            {activeTab === 'forms' && formsAccess !== 'admin' && formsAccess !== 'no_company' && (
+              <CompanyAdminAccessNotice access={formsAccess} onRetry={retryFormsAccess} />
+            )}
+            {activeTab === 'forms' && (formsAccess === 'admin' || formsAccess === 'no_company') && (
               <div>
                 {forms.length === 0 ? (
                   <EmptyState
@@ -348,7 +357,7 @@ export default function LeadsView({ d }: { d: S }) {
                                 <button onClick={() => openEditForm(form)} className="p-1.5 rounded-lg text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 transition-colors" title="Edit form">
                                   <Edit2 className="h-3.5 w-3.5" />
                                 </button>
-                                <button onClick={() => setDeleteConfirm({ kind: 'form', id: form.id, name: form.name })} className="p-1.5 rounded-lg text-gray-400 hover:text-red-600 hover:bg-red-50 transition-colors" title="Delete form">
+                                <button onClick={() => setDeleteConfirm({ id: form.id, name: form.name })} className="p-1.5 rounded-lg text-gray-400 hover:text-red-600 hover:bg-red-50 transition-colors" title="Delete form">
                                   <Trash2 className="h-3.5 w-3.5" />
                                 </button>
                               </div>
@@ -399,7 +408,12 @@ export default function LeadsView({ d }: { d: S }) {
                   <p>Already have a form on your website? Point it to <code className="bg-blue-100 px-1 rounded">POST /api/leads</code> with your credentials. Works with any platform — WordPress, Webflow, Squarespace, custom code.</p>
                 </div>
 
-                {webhookIntegrations.length === 0 ? (
+                {webhookIntegrationsUnavailable ? (
+                  <div role="alert" data-testid="webhooks-unavailable" className="rounded-xl border border-red-200 bg-red-50 p-5 text-sm text-red-800">
+                    <p className="font-semibold">Couldn't load your webhook connections.</p>
+                    <button onClick={() => fetchAll()} className="mt-3 rounded-lg bg-white px-3 py-1.5 text-sm font-semibold text-red-700 ring-1 ring-red-200 hover:bg-red-100">Retry</button>
+                  </div>
+                ) : webhookIntegrations.length === 0 ? (
                   <div className="text-center py-16">
                     <Webhook className="h-10 w-10 mx-auto mb-3 text-gray-300" />
                     <p className="font-medium text-gray-600">No webhook connections configured</p>
@@ -724,13 +738,13 @@ export default function LeadsView({ d }: { d: S }) {
       {deleteConfirm && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl shadow-xl w-full max-w-sm p-6">
-            <h2 className="text-lg font-bold text-gray-900 mb-2">Delete {deleteConfirm.kind === 'form' ? 'Form' : 'Lead'}?</h2>
+            <h2 className="text-lg font-bold text-gray-900 mb-2">Delete Form?</h2>
             <p className="text-sm text-gray-600 mb-5">
-              <strong>{deleteConfirm.name}</strong> will be permanently deleted.
-              {deleteConfirm.kind === 'form' && ' Leads captured by this form will not be deleted.'}
+              <strong>{deleteConfirm.name}</strong> will be permanently deleted. Leads captured by this form will not be deleted.
             </p>
+            {deleteError && <p role="alert" className="mb-4 text-sm text-red-600" data-testid="delete-error">{deleteError}</p>}
             <div className="flex flex-col-reverse sm:flex-row justify-end gap-2">
-              <button onClick={() => setDeleteConfirm(null)} className="px-4 py-2 text-sm font-semibold text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors">Cancel</button>
+              <button onClick={() => { setDeleteConfirm(null); setDeleteError(null); }} className="px-4 py-2 text-sm font-semibold text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors">Cancel</button>
               <button onClick={confirmDelete} disabled={deleting} className="px-4 py-2 text-sm font-semibold text-white bg-red-600 rounded-lg hover:bg-red-700 disabled:opacity-50 transition-colors">
                 {deleting ? 'Deleting…' : 'Delete'}
               </button>

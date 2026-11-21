@@ -66,6 +66,12 @@ jobs:
       - name: Dropped-error read gate
         run: node scripts/check-dropped-supabase-error.js
 
+      # No raw db push (b3/owner 2026-11-21): production holds 38+ versions applied WITHOUT ledger rows
+      # (release-gates/APPLIED-WITHOUT-LEDGER.md), so `supabase db push` / `migration up` must only ever run through
+      # scripts/operator/db/db-push.sh, which refuses production outright and resolves the LINKED project.
+      - name: No raw db push gate
+        run: node scripts/ci/check-no-raw-db-push.js
+
       # GOV-H: FK / NOT NULL / CHECK compatibility against the committed
       # schema-only dump (supabase/_schema/baseline.sql). Deterministic,
       # read-only, NO database, NO network, NO secrets — so it belongs in this
