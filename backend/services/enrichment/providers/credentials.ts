@@ -61,6 +61,21 @@ export interface TenantCredentialPort {
 }
 
 /**
+ * The same lookup, with the store failure kept DISTINCT from "no key" (PL-180, c6's find; 04, 2026-11-21).
+ * resolveCredential folds both into null, which is right for the executor (no credential → no call → fail closed).
+ * But a caller that REPORTS the answer must not tell a tenant "you have no Apollo key" when the store could not be
+ * read: that sends them to add a key they may already have. Such callers use resolveCredentialState.
+ */
+export type CredentialState =
+  | { readonly kind: 'present'; readonly value: string }
+  | { readonly kind: 'absent' }
+  | { readonly kind: 'unreadable' };
+
+export interface TenantCredentialStatePort extends TenantCredentialPort {
+  resolveCredentialState(input: { organizationId: string; providerId: string }): Promise<CredentialState>;
+}
+
+/**
  * Build the port the executor requires.
  *
  * Every failure mode returns null rather than throwing, because a credential
@@ -70,29 +85,38 @@ export interface TenantCredentialPort {
  */
 export function makeTenantCredentialPort(
   options: TenantCredentialPortOptions = {},
-): TenantCredentialPort {
+): TenantCredentialStatePort {
   const read = options.read ?? getProviderCredentials;
   const credentialKey = options.credentialKey ?? PROVIDER_API_KEY;
 
+  // ONE lookup, closed over (no `this`): productionPorts passes resolveCredential as an unbound reference.
+  const resolveCredentialState = async (
+    { organizationId, providerId }: { organizationId: string; providerId: string },
+  ): Promise<CredentialState> => {
+    const tenant = String(organizationId ?? '').trim();
+    const provider = String(providerId ?? '').trim();
+    // A tenant-less or provider-less lookup is refused before it reaches the
+    // store, so an empty string can never widen a WHERE clause into a scan.
+    if (!tenant || !provider) return { kind: 'absent' };
+
+    let credentials: CredentialMap;
+    try {
+      credentials = await read(tenant, provider);
+    } catch {
+      // A store failure is NOT a reason to look elsewhere, and NOT "no key": it is unknown.
+      return { kind: 'unreadable' };
+    }
+
+    const value = credentials?.[credentialKey];
+    return typeof value === 'string' && value.trim() ? { kind: 'present', value } : { kind: 'absent' };
+  };
+
   return {
-    async resolveCredential({ organizationId, providerId }) {
-      const tenant = String(organizationId ?? '').trim();
-      const provider = String(providerId ?? '').trim();
-      // A tenant-less or provider-less lookup is refused before it reaches the
-      // store, so an empty string can never widen a WHERE clause into a scan.
-      if (!tenant || !provider) return null;
-
-      let credentials: CredentialMap;
-      try {
-        credentials = await read(tenant, provider);
-      } catch {
-        // A store failure is NOT a reason to look elsewhere. The tenant either
-        // has a credential we could read or it does not get a call.
-        return null;
-      }
-
-      const value = credentials?.[credentialKey];
-      return typeof value === 'string' && value.trim() ? value : null;
+    resolveCredentialState,
+    // The executor's view: no readable credential → no call (fail closed). Unchanged behaviour.
+    async resolveCredential(input) {
+      const state = await resolveCredentialState(input);
+      return state.kind === 'present' ? state.value : null;
     },
   };
 }
@@ -102,4 +126,4 @@ export function makeTenantCredentialPort(
  * rather than a default, and so a caller cannot accidentally construct an
  * executor with no credential source at all.
  */
-export const tenantCredentialPort: TenantCredentialPort = makeTenantCredentialPort();
+export const tenantCredentialPort: TenantCredentialStatePort = makeTenantCredentialPort();

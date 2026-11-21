@@ -190,6 +190,7 @@ describe('A6 — production executor boundary', () => {
         recorder: {
           record: async () => ({ attemptId: 'a-1' }),
           nextNumber: async () => 1,
+          latest: async () => null,   // explicit: no prior attempt (the user-path stop-gap rule in recordedExecution)
           markPending: async () => { order.push('mark_pending'); },
           complete: async () => { order.push('complete'); },
         } as never,
@@ -216,6 +217,7 @@ describe('A6 — production executor boundary', () => {
         recorder: {
           record: async () => ({ attemptId: 'a-1' }),
           nextNumber: async () => 1,
+          latest: async () => null,   // explicit: no prior attempt (the user-path stop-gap rule in recordedExecution)
           markPending: async () => { throw new Error('mark failed'); },
           complete: async () => { /* terminal write */ },
         } as never,

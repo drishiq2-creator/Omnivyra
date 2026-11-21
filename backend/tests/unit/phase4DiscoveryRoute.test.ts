@@ -19,6 +19,14 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 
 // The wrappers pass through, so the default export IS the handler — the pattern
 // `phase1aDataSources.test.ts` already uses for this repository's routes.
+// The discovery route requires the tenant's data-controller acknowledgement for 'vendor_data' (54928556e /
+// owner 2026-11-11). This suite tests what happens AFTER that gate, so the gate is mocked OPEN here; the gate's own
+// 403/503 behaviour is pinned in phase4DiscoveryRoute (c6 2026-11-20: these suites were red since 54928556e).
+const mockAssertTenantDataAck = jest.fn(async () => undefined);
+jest.mock('../../services/compliance/tenantDataAck', () => ({
+  ...jest.requireActual('../../services/compliance/tenantDataAck'),
+  assertTenantDataAck: (...a: unknown[]) => (mockAssertTenantDataAck as (...x: unknown[]) => Promise<void>)(...a),
+}));
 jest.mock('../../../lib/platform/routeFactory', () => ({ createApiRoute: (h: unknown) => h }));
 jest.mock('../../middleware/withIdempotency', () => ({ withIdempotency: (h: unknown) => h }));
 
@@ -246,6 +254,39 @@ describe('Phase 4 — the tenant is the VERIFIED one, never the body\'s', () => 
     const res = await call({ body: { filters: { titles: ['x'] } } });
     expect(res._status).toBe(400);
     expect(createDiscoveryExecution).not.toHaveBeenCalled();
+  });
+});
+
+describe('the data-controller acknowledgement gate (vendor_data) stops discovery BEFORE any execution', () => {
+  afterEach(() => { mockAssertTenantDataAck.mockImplementation(async () => undefined); });
+
+  it('no acknowledgement -> 403 DATA_CONTROLLER_ACK_REQUIRED, no execution created', async () => {
+    const { TenantDataAckRequired } = jest.requireActual('../../services/compliance/tenantDataAck');
+    mockAssertTenantDataAck.mockImplementation(async () => { throw new TenantDataAckRequired('vendor_data', 'required'); });
+    const res = await call();
+    expect((res as unknown as { _status: number })._status).toBe(403);
+    expect(createDiscoveryExecution).not.toHaveBeenCalled();
+  });
+
+  it('a TYPED unreadable acknowledgement -> 503 DATA_CONTROLLER_ACK_UNREADABLE with the category, never 403', async () => {
+    const { TenantDataAckUnreadable } = jest.requireActual('../../services/compliance/tenantDataAck');
+    mockAssertTenantDataAck.mockImplementation(async () => { throw new TenantDataAckUnreadable('vendor_data'); });
+    const res = await call() as unknown as { _status: number; _json?: unknown; body?: unknown };
+    expect(res._status).toBe(503);
+    expect(JSON.stringify(res._json ?? res.body ?? null)).toContain('DATA_CONTROLLER_ACK_UNREADABLE');
+    expect(createDiscoveryExecution).not.toHaveBeenCalled();
+  });
+
+  it('an UNREADABLE acknowledgement -> 503, never treated as acknowledged, no execution created', async () => {
+    mockAssertTenantDataAck.mockImplementation(async () => { throw new Error('consent ledger down'); });
+    const res = await call();
+    expect((res as unknown as { _status: number })._status).toBe(503);
+    expect(createDiscoveryExecution).not.toHaveBeenCalled();
+  });
+
+  it('control: acknowledged -> the execution is created', async () => {
+    await call();
+    expect(createDiscoveryExecution).toHaveBeenCalled();
   });
 });
 

@@ -8,6 +8,7 @@ import {
 import { useCompanyContext } from '../components/CompanyContext';
 import { useCompanyAdminAccess } from '../components/shared/CompanyAdminOnly';
 import { COMPANY_ADMIN_REQUIRED_MESSAGE, isCompanyAdminRequired } from '../shared/auth/companyAdminRequired';
+import { readIntegrationsList } from '../shared/integrations/integrationsReadCodes';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 type FieldType = 'text' | 'email' | 'phone';
@@ -294,6 +295,8 @@ export function useLeadsPage() {
   const [leads, setLeads] = useState<Lead[]>([]);
   const [forms, setForms] = useState<CaptureForm[]>([]);
   const [webhookIntegrations, setWebhookIntegrations] = useState<WebhookIntegration[]>([]);
+  // The webhook list could not be READ: the Connections tab says so instead of "no webhooks" (Rule 1).
+  const [webhookIntegrationsUnavailable, setWebhookIntegrationsUnavailable] = useState(false);
   // The server says whether this viewer may see webhook secrets (company admins only). Absent = not visible.
   const [webhookSecretsVisible, setWebhookSecretsVisible] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -350,12 +353,16 @@ export function useLeadsPage() {
       const [leadsRes, formsRes, intRes] = await Promise.all([
         fetch(`/api/leads?${qs}&is_test=false`).then(r => r.json()),
         fetch(`/api/forms?${qs}`).then(r => r.json()),
-        fetch(`/api/integrations?${qs}&type=lead_webhook`).then(r => r.json()),
+        fetch(`/api/integrations?${qs}&type=lead_webhook`)
+          .then(async (r) => ({ ok: r.ok, body: await r.json().catch(() => null) }))
+          .catch(() => ({ ok: false, body: null })),
       ]);
       setLeads(leadsRes.leads || []);
       setForms(formsRes.forms || []);
-      setWebhookIntegrations(intRes.integrations || []);
-      setWebhookSecretsVisible(intRes.secrets_visible === true);
+      const intList = readIntegrationsList(intRes.ok, intRes.body);
+      setWebhookIntegrationsUnavailable(intList === null);
+      setWebhookIntegrations((intList ?? []) as WebhookIntegration[]);
+      setWebhookSecretsVisible((intRes.body as { secrets_visible?: unknown } | null)?.secrets_visible === true);
     } catch { setError('Failed to load data. Please refresh.'); }
     finally { setLoading(false); }
   }, [selectedCompanyId]);
@@ -526,6 +533,7 @@ export function useLeadsPage() {
     retryFormsAccess,
     deleteError,
     setDeleteError,
+    webhookIntegrationsUnavailable,
     leadModal,
     leads,
     lmEmail,

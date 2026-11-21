@@ -23,6 +23,9 @@ import { useCompanyIdentity } from '../../hooks/useCompanyIdentity';
 import type { CreatorFlowContext } from '../../lib/content/creatorFlowContext';
 
 import { DEFAULT_TEMPLATE, CMS_INTEGRATION_TYPES, CMS_LABELS, type PrefillPayload, type CmsIntegrationOption, type ConnectedSocialAccount, safeFileStem, escapeHtml, blockHtml, buildTextDownload } from './blogsNewModel';
+import { readIntegrationsList } from '../../shared/integrations/integrationsReadCodes';
+
+export const CMS_CONNECTIONS_UNAVAILABLE_MESSAGE = "Couldn't load your website connections. Refresh to try again.";
 
 function buildHtmlDownload(state: BlogFormState | null): string {
   if (!state) return '';
@@ -82,6 +85,8 @@ export default function BlogNewPage() {
   const [cmsIntegrations, setCmsIntegrations] = useState<CmsIntegrationOption[]>([]);
   const [socialAccounts, setSocialAccounts] = useState<ConnectedSocialAccount[]>([]);
   const [hasLeadCapture, setHasLeadCapture] = useState<boolean>(false);
+  // The integrations list could not be READ: not "no CMS connected" (Rule 1, 04 2026-11-20).
+  const [cmsIntegrationsUnavailable, setCmsIntegrationsUnavailable] = useState<boolean>(false);
   const [isPostingBlog, setIsPostingBlog] = useState<boolean>(false);
   const [postBlogStatus, setPostBlogStatus] = useState<PostBlogStatus | null>(null);
   const [targetWordCount, setTargetWordCount] = useState<number>(800);
@@ -193,14 +198,15 @@ export default function BlogNewPage() {
     let active = true;
     Promise.all([
       fetch(`/api/integrations?company_id=${encodeURIComponent(selectedCompanyId)}`, { credentials: 'include' })
-        .then((r) => (r.ok ? r.json() : null))
+        .then(async (r) => readIntegrationsList(r.ok, await r.json().catch(() => null)))
         .catch(() => null),
       fetch(`/api/social-accounts/status?companyId=${encodeURIComponent(selectedCompanyId)}`, { credentials: 'include' })
         .then((r) => (r.ok ? r.json() : null))
         .catch(() => null),
     ]).then(([integrationData, socialData]) => {
       if (!active) return;
-      const integrations = Array.isArray(integrationData?.integrations) ? integrationData.integrations : [];
+      setCmsIntegrationsUnavailable(integrationData === null);
+      const integrations = (integrationData ?? []) as any[];
       setCmsIntegrations(
         integrations
           .filter((item: { type: string; status: string }) => CMS_INTEGRATION_TYPES.has(item.type) && item.status === 'connected')
@@ -218,6 +224,7 @@ export default function BlogNewPage() {
       setCmsIntegrations([]);
       setSocialAccounts([]);
       setHasLeadCapture(false);
+      setCmsIntegrationsUnavailable(true);
     });
     return () => {
       active = false;
@@ -419,7 +426,9 @@ export default function BlogNewPage() {
     }
     const integration = targetIntegration ?? cmsIntegrations[0] ?? null;
     if (!integration) {
-      setError('Connect a website CMS integration before posting.');
+      setError(cmsIntegrationsUnavailable
+        ? CMS_CONNECTIONS_UNAVAILABLE_MESSAGE
+        : 'Connect a website CMS integration before posting.');
       return;
     }
     if (!liveState) {
@@ -854,7 +863,9 @@ export default function BlogNewPage() {
                 const websiteIntegrationAvailable = cmsIntegrations.length > 0;
                 let websiteIntegrationReason: string | undefined;
                 const primaryCmsIntegration = cmsIntegrations[0] ?? null;
-                if (!primaryCmsIntegration) {
+                if (!primaryCmsIntegration && cmsIntegrationsUnavailable) {
+                  websiteIntegrationReason = CMS_CONNECTIONS_UNAVAILABLE_MESSAGE;
+                } else if (!primaryCmsIntegration) {
                   websiteIntegrationReason = 'Connect a website CMS (WordPress, HubSpot, etc.) in Integrations to enable posting.';
                 } else if (!hasLeadCapture) {
                   websiteIntegrationReason = `Connected to ${primaryCmsIntegration.name}. Posting is available; add lead capture for full attribution.`;
