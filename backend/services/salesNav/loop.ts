@@ -222,6 +222,9 @@ export async function submitPage(
     counts: {
       leads_read: raw.length, accepted: withinCap.length, rejected: rejected + failed, created_count: created,
       updated_count: updated, held_for_review: screened.heldForReview, skipped_duplicates: skippedDuplicates,
+      // the R3 screen could not check these against the company's leads (a probe read did not answer): NOT imported
+      // (fail closed) and COUNTED - never silently lost from the page's totals (found by the end-to-end test)
+      dropped: screened.probeUnknown,
       quota_refused: quotaRefused,
     },
   }, store);
@@ -233,7 +236,7 @@ export async function submitPage(
     kind: 'ok', http: 200,
     body: {
       accepted: withinCap.length, rejected: rejected + failed, created, updated, heldForReview: screened.heldForReview,
-      skippedDuplicates, dropped: 0, quotaRefused, run: await view(),
+      skippedDuplicates, probeUnknown: screened.probeUnknown, dropped: screened.probeUnknown, quotaRefused, run: await view(),
     },
   };
 }
