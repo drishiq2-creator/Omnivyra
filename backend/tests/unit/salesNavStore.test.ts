@@ -133,7 +133,7 @@ describe('runs', () => {
 
   it('a STALE running run is closed unknown/run_stale and frees the slot; a fresh one does not', async () => {
     const { db, runId } = await started();
-    db.t.salesnav_extraction_runs[0].last_activity_at = new Date(NOW.getTime() - 121_000).toISOString();
+    db.t.salesnav_extraction_runs[0].last_activity_at = new Date(NOW.getTime() - 181_000).toISOString();
     const second = await startSalesNavRun(A, { transport: 'unipile', url: LIST }, deps(db));
     expect(second).toMatchObject({ kind: 'lead_list' });
     expect(db.t.salesnav_extraction_runs.find((r) => r.id === runId)).toMatchObject({ status: 'unknown', status_code: 'run_stale' });

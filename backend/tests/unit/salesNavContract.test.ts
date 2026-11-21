@@ -209,9 +209,12 @@ describe('effectiveRunStatus (v2.2: a stale running run is never shown as runnin
   it('control: recent activity -> running', () => {
     expect(effectiveRunStatus({ status: 'running', code: null, lastActivityAt: at(30) }, now)).toEqual({ status: 'running', code: null, stale: false });
   });
-  it('120 s with no page result -> unknown / run_stale (boundary inclusive)', () => {
-    expect(effectiveRunStatus({ status: 'running', code: null, lastActivityAt: at(120) }, now)).toEqual({ status: 'unknown', code: 'run_stale', stale: true });
-    expect(effectiveRunStatus({ status: 'running', code: null, lastActivityAt: at(119) }, now).stale).toBe(false);
+  it('180 s with no page result -> unknown / run_stale (boundary inclusive; v2.4, was 120)', () => {
+    expect(effectiveRunStatus({ status: 'running', code: null, lastActivityAt: at(180) }, now)).toEqual({ status: 'unknown', code: 'run_stale', stale: true });
+    expect(effectiveRunStatus({ status: 'running', code: null, lastActivityAt: at(179) }, now).stale).toBe(false);
+  });
+  it('a run one late 1-minute tick behind (120 s idle) is STILL running - the v2.4 headroom', () => {
+    expect(effectiveRunStatus({ status: 'running', code: null, lastActivityAt: at(120) }, now).status).toBe('running');
   });
   it('a running run with no recorded activity is stale, never running', () => {
     expect(effectiveRunStatus({ status: 'running', code: null, lastActivityAt: null }, now).status).toBe('unknown');

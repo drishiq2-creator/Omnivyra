@@ -42,7 +42,7 @@ export function runMessage(run: Pick<SalesNavRunView, 'status' | 'code'>): strin
       if (run.code === 'url_not_allowed') return 'Stopped: LinkedIn redirected away from the list.';
       return 'Stopped: extraction is not enabled for your company right now.';
     case 'unknown': return run.code === 'run_stale'
-      ? 'Stalled: no page arrived for two minutes. Is Chrome open with the extension signed in?'
+      ? 'Stalled: no page arrived for three minutes. Is Chrome open with the extension signed in?'
       : 'Stopped: we could not confirm a page was read correctly, so nothing further was imported.';
     default: return 'Stopped: something went wrong while reading.';
   }

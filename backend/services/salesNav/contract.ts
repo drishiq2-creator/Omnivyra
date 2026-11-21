@@ -200,7 +200,10 @@ export const SALESNAV_RESUMABLE_STATUSES = ['paused_daily_cap', 'auth_expired'] 
  * (run_stale) the next time anyone starts a run for the same member (lazy, no cron), which also frees the member's
  * one-run lock. Default pending b3's ruling.
  */
-export const SALESNAV_RUN_STALE_SECONDS = 120;
+// v2.4 (a9, 2026-11-22): 120 -> 180. The extension's real pace is ~1 page/MINUTE (its MV3 poll alarm is 1 min; 20 s is
+// only the floor), so 120 s left ~1 min of headroom: a late alarm showed a LIVE run as stalled, and a restart then
+// lazily closed it. 180 s keeps a run alive across one missed tick and still catches a closed Chrome within 3 minutes.
+export const SALESNAV_RUN_STALE_SECONDS = 180;
 export type SalesNavRunStatus = (typeof SALESNAV_RUN_STATUSES)[number];
 
 /** Codes allowed per terminal status (closed sets: a route cannot invent one). */
