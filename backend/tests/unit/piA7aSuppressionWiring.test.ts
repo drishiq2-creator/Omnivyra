@@ -80,6 +80,7 @@ function store() {
   const row = { outcome: null as string | null, executionStatus: 'in_flight' as string };
   return {
     nextNumber: async () => 1,
+    latest: async () => null,   // explicit: no prior attempt (the user-path stop-gap rule in recordedExecution)
     record: async () => ({ attemptId: 'attempt-1' }),
     claim: async () => ({ claimed: true as const, attemptId: 'attempt-1', attemptNumber: 1, reclaimed: false }),
     markPending: async () => { /* proven in A4Q */ },

@@ -135,6 +135,42 @@
       "evidence": "CODE_VERIFIED",
       "status": "declared",
       "note": "ORDINARY OWNERSHIP - c6 ruling 2026-11-20. As added_by_user_id: display-only history; a removed row must carry its timestamp only, so nulling the actor can never violate the members CHECK."
+    },
+    {
+      "table": "prospect_import_review_items",
+      "column": "decided_by",
+      "immutable_actor": true,
+      "fk_into_users": "absent",
+      "nullable": true,
+      "check_constraint": "piri_decision_coherent",
+      "writer_validation": "backend/services/prospectImportReview/repository.ts:decideReviewItems",
+      "evidence": "CODE_VERIFIED",
+      "status": "enforced",
+      "note": "Created without an FK in 20270206000000 (PI R3 staging table). Writer validation: decideReviewItems calls assertActiveMember (active user_company_roles row in THIS tenant, read checked by status; an unreadable membership refuses) before writing decided_by. SEQUENCING COMMITMENT (PI review, 2026-11-10): decideReviewItems is the ONLY writer of decided_by; no other write path may set it. piri_decision_coherent forbids decided_by on a pending row."
+    },
+    {
+      "table": "prospect_enrichment_attempts",
+      "column": "initiated_by",
+      "immutable_actor": true,
+      "fk_into_users": "absent",
+      "nullable": true,
+      "check_constraint": null,
+      "writer_validation": "NOT YET WIRED (PI mode B)",
+      "evidence": "CODE_VERIFIED",
+      "status": "remediating",
+      "note": "Column added without an FK in 20270209000000. No writer sets it yet: every attempt row leaves it NULL. SEQUENCING COMMITMENT: the writer will pass only a user id the API handler resolved from the verified session with an active membership in this tenant; a system/queue attempt stays NULL. Status moves to enforced when that writer lands."
+    },
+    {
+      "table": "prospect_discovery_attempts",
+      "column": "initiated_by",
+      "immutable_actor": true,
+      "fk_into_users": "absent",
+      "nullable": true,
+      "check_constraint": null,
+      "writer_validation": "NOT YET WIRED (PI mode B)",
+      "evidence": "CODE_VERIFIED",
+      "status": "remediating",
+      "note": "Column added without an FK in 20270209000000. No writer sets it yet. Same sequencing commitment as prospect_enrichment_attempts.initiated_by."
     }
   ],
   "pending_owner_decision": [
