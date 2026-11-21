@@ -153,7 +153,8 @@ export async function startSalesNavRun(
   const table = deps.table ?? ownedDbTable;
   const now = (deps.now ?? (() => new Date()))();
   const parsed = parseSalesNavUrl(input.url);
-  if (!parsed.ok) return { refused: parsed.refused };
+  // `'refused' in`, not `!parsed.ok`: the root tsconfig is non-strict, so a boolean discriminant does not narrow
+  if ('refused' in parsed) return { refused: parsed.refused };
   if (!ctx.initiatedBy) return { refused: 'member_unresolved' };
   const member = deps.memberFor
     ? await deps.memberFor(ctx.organizationId, ctx.initiatedBy, input.transport)

@@ -89,6 +89,8 @@ export async function recordSalesNavAck(
       capability: SALESNAV_ACK_CAPABILITY as never,
       grantedBy: ctx.initiatedBy,
       grantedAt: (deps.now ?? (() => new Date()))().toISOString(),
+      // RecordConsentInput requires a scope (CI-839 TS2345): what was acknowledged - the transport's restriction
+      scopeSnapshot: [input.transport],
       source: 'ui',
       consentVersion: SALESNAV_RESTRICTION_ACK.version as never,
       metadata: { text_sha256: SALESNAV_RESTRICTION_ACK.textSha256, wording_status: SALESNAV_RESTRICTION_ACK.status },
