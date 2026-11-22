@@ -277,7 +277,9 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   const ranBlocked = result.status === 'blocked' || (result.response as any)?.original_status === 'blocked';
   const ownWriteMissing = Boolean(result.response?.persist_error)
     || (Boolean((result as any).deduplicated) && (result as any).prior_action_id !== actionId);
-  if (ranBlocked && ownWriteMissing) {
+  // Also when the result is anything but 'blocked' (re-review: a write error on a run carrying its own key - a caller
+  // key or newdm:<id> - "deduplicates" to THIS row, still 'executing').
+  if (ranBlocked && (result.status !== 'blocked' || ownWriteMissing)) {
     // The executor's own reason (e.g. PLAN_LIMIT_EXCEEDED), not the write error that replaced it.
     const originalError = (result.response as any)?.original_error ?? result.error;
     const blockedResult = { ...result, ok: false, status: 'blocked', error: originalError, deduplicated: undefined, prior_action_id: undefined };

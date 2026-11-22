@@ -89,6 +89,21 @@ describe('B1: a blocked run never stays executing and is never reported as anoth
     expect(res.statusCode).not.toBe(200);
   });
 
+  it('re-review: the blocked write errored on a run with its OWN key -> "deduplicated" to THIS row (still executing) -> written blocked', async () => {
+    executorResult = { ok: false, status: 'executing', deduplicated: true, prior_action_id: 'act-1', response: { original_status: 'blocked', original_error: PLAN } };
+    const res = await call(executeRoute, { body: { idempotency_key: 'k1' } });
+    expect(actionRow.status).toBe('blocked');
+    expect(actionRow.execution_result.error).toEqual(PLAN);
+    expect(res.body).toMatchObject({ status: 'blocked', error: 'ACTION_BLOCKED' });
+  });
+
+  it('a blocked LinkedIn new DM (newdm:<id> key) whose write errored the same way is written blocked - its slot is released', async () => {
+    actionRow = ordinary({ action_type: 'dm', dm_lead_id: 'lead-1', dm_sender_member_id: 'ACoAAMEMEMEMEMEMEMEMEMEMEME01', acting_user_id: 'u1', target_id: 'https://www.linkedin.com/in/a/' });
+    executorResult = { ok: false, status: 'executing', deduplicated: true, prior_action_id: 'act-1', response: { original_status: 'blocked', original_error: PLAN } };
+    await call(executeRoute);
+    expect(actionRow.status).toBe('blocked');
+  });
+
   it('CONTROL: a non-blocked write failure is still TERMINAL_WRITE_FAILED (no compensation)', async () => {
     executorResult = { ok: false, status: 'failed', error: 'x', response: { persist_error: 'x', original_status: 'executed', original_error: null } };
     const res = await call(executeRoute);
