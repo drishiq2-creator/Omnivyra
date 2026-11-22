@@ -2,6 +2,7 @@ import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeF
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { enforceCompanyAccess } from '../../../backend/services/userContextService';
 import { supabase } from '../../../backend/db/supabaseClient';
+import { blockedReasonText } from '../../../lib/communityAi/blockedReason';
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'GET') {
@@ -48,8 +49,9 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
         : typeof response.platform_id === 'string'
           ? response.platform_id
           : null;
-    const errorMessage =
-      typeof executionResult.error === 'string'
+    const errorMessage = data.status === 'blocked'
+      ? blockedReasonText(executionResult)   // plan-limit restriction: the reason, not a bare "blocked" (review #5)
+      : typeof executionResult.error === 'string'
         ? executionResult.error
         : typeof response.error_message === 'string'
           ? response.error_message

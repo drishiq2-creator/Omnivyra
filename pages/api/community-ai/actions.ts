@@ -365,6 +365,11 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       });
     }
 
+    // A 'blocked' action (plan-limit restriction) is a record of what happened; skipping would overwrite it (review #4).
+    if (body.status === 'skipped' && action.status === 'blocked') {
+      return res.status(409).json({ error: 'ACTION_BLOCKED' });
+    }
+
     if (body.status === 'skipped') {
       await supabase
         .from('community_ai_actions')

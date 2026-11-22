@@ -576,10 +576,13 @@ export const evaluateAutoRules = async (input: AutoRuleInput) => {
         };
       }
 
+      // A plan-limit restriction is not an auto-execution (review #3): not counted, no 'auto_executed' event (which the
+      // UI shows as "Auto-Executed"); the row itself records status 'blocked' and the reason.
+      if (execution.status === 'blocked') {
+        return { ...action, blocked_reason: 'Plan limit reached - not executed' };
+      }
       const nextStatus =
-        execution.status === 'skipped' ? 'skipped'
-          : execution.status === 'blocked' ? 'blocked'   // a restriction, not a failure (owner 2026-11-22)
-            : execution.ok ? 'executed' : 'failed';
+        execution.status === 'skipped' ? 'skipped' : execution.ok ? 'executed' : 'failed';
 
       await logCommunityAiActionEvent({
         action_id: record.id,

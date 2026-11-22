@@ -7,8 +7,25 @@ import { fetchWithAuth } from '../components/community-ai/fetchWithAuth';
 import type { PendingAction } from '../components/community-ai/types';
 import { blockedReasonText } from '../lib/communityAi/blockedReason';
 
+export const normalizeActionStatus = (action: PendingAction, fallback: string) => {
+  const status = (action.status || '').toString().trim();
+  return status.length > 0 ? status : fallback.toLowerCase();
+};
+
+/** The actions list response as one list for the tabs - including 'blocked' (owner 2026-11-22). */
+export const combineActionLists = (data: any): PendingAction[] => {
+  const lists: Array<[string, string]> = [
+    ['pending_actions', 'pending'], ['scheduled_actions', 'scheduled'], ['completed_actions', 'completed'],
+    ['skipped_actions', 'skipped'], ['blocked_actions', 'blocked'],
+  ];
+  return lists.flatMap(([key, fallback]) => ((data && data[key]) || []).map((action: PendingAction) => ({
+    ...action,
+    status: normalizeActionStatus(action, fallback),
+  })));
+};
+
 // An execute response for a plan-limit restriction says so - never "Execution failed" (owner 2026-11-22).
-const executeErrorText = (data: any) =>
+export const executeErrorText = (data: any) =>
   data?.status === 'blocked' ? `Blocked: ${blockedReasonText(data?.execution)}` : (data?.error || 'Execution failed');
 import {
   validateActionAgainstPlaybook,
@@ -74,10 +91,7 @@ export function useCommunityActions() {
     >
   >({});
 
-  const normalizeStatus = (action: PendingAction, fallback: string) => {
-    const status = (action.status || '').toString().trim();
-    return status.length > 0 ? status : fallback.toLowerCase();
-  };
+  const normalizeStatus = normalizeActionStatus;
 
   const loadActions = async () => {
     if (!tenantId) {
@@ -97,29 +111,7 @@ export function useCommunityActions() {
         throw new Error(data?.error || 'Failed to load actions');
       }
       const data = await response.json();
-      const combined: PendingAction[] = [
-        ...(data.pending_actions || []).map((action: PendingAction) => ({
-          ...action,
-          status: normalizeStatus(action, 'pending'),
-        })),
-        ...(data.scheduled_actions || []).map((action: PendingAction) => ({
-          ...action,
-          status: normalizeStatus(action, 'scheduled'),
-        })),
-        ...(data.completed_actions || []).map((action: PendingAction) => ({
-          ...action,
-          status: normalizeStatus(action, 'completed'),
-        })),
-        ...(data.skipped_actions || []).map((action: PendingAction) => ({
-          ...action,
-          status: normalizeStatus(action, 'skipped'),
-        })),
-        ...(data.blocked_actions || []).map((action: PendingAction) => ({
-          ...action,
-          status: normalizeStatus(action, 'blocked'),
-        })),
-      ];
-      setActions(combined);
+      setActions(combineActionLists(data));
       setPermissions({
         canApprove: !!data?.permissions?.canApprove,
         canExecute: !!data?.permissions?.canExecute,
@@ -250,6 +242,8 @@ export function useCommunityActions() {
       });
       const data = await response.json().catch(() => null);
       if (!response.ok) {
+        // A blocked action moved to 'blocked' on the server: reload so it leaves Pending (review #1).
+        if (data?.status === 'blocked') await loadActions();
         throw new Error(executeErrorText(data));
       }
       setActions((prev) =>
@@ -370,6 +364,8 @@ export function useCommunityActions() {
       });
       const data = await response.json().catch(() => null);
       if (!response.ok) {
+        // A blocked action moved to 'blocked' on the server: reload so it leaves Pending (review #1).
+        if (data?.status === 'blocked') await loadActions();
         throw new Error(executeErrorText(data));
       }
       setActions((prev) =>
@@ -436,6 +432,8 @@ export function useCommunityActions() {
       });
       const data = await response.json().catch(() => null);
       if (!response.ok) {
+        // A blocked action moved to 'blocked' on the server: reload so it leaves Pending (review #1).
+        if (data?.status === 'blocked') await loadActions();
         throw new Error(executeErrorText(data));
       }
       setActions((prev) =>

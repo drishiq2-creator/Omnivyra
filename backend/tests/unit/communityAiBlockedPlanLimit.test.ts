@@ -9,6 +9,7 @@
 type Row = Record<string, any>;
 let row: Row;
 const metricEvents: Row[] = [];
+let failNextActionWrite: string | null = null;   // review B1: make the terminal write fail once
 
 function table(name: string) {
   const filters: Array<[string, unknown]> = [];
@@ -16,6 +17,10 @@ function table(name: string) {
   let inserted: Row | null = null;
   const result = () => {
     if (name === 'community_ai_execution_metric_events' && inserted) { metricEvents.push(inserted); return { data: null, error: null }; }
+    if (name === 'community_ai_actions' && patch && failNextActionWrite) {
+      const message = failNextActionWrite; failNextActionWrite = null;
+      return { data: null, error: { message } };
+    }
     if (name === 'community_ai_actions' && patch) {
       const hit = filters.every(([k, v]) => row[k] === v);
       if (hit) row = { ...row, ...patch };
@@ -63,7 +68,7 @@ const action = () => ({
 
 beforeEach(() => {
   row = { id: 'act-1', organization_id: 'org-1', status: 'executing', dispatch_lease_id: 'lease-x', dispatch_lease_holder_id: 'h', dispatch_lease_expires_at: 'later' };
-  metricEvents.length = 0;
+  metricEvents.length = 0; failNextActionWrite = null;
   [usageCheck, logUsage, meter, send].forEach((m) => m.mockClear());
   jest.spyOn(console, 'warn').mockImplementation(() => undefined);
 });
@@ -81,6 +86,18 @@ describe("plan-limit restriction -> 'blocked' (owner 2026-11-22)", () => {
     expect(metricEvents.map((m) => m.event_type)).not.toContain('execution_failed');
     expect(logUsage).not.toHaveBeenCalled();
     expect(meter).not.toHaveBeenCalled();
+    // review B1: no automatic (target + 5-minute) idempotency key on a blocked write
+    expect(row.idempotency_key).toBeUndefined();
+  });
+
+  it('review B1: if the blocked write itself fails, the result still says it was BLOCKED and why (for the route to write it)', async () => {
+    usageCheck.mockResolvedValueOnce({ allowed: false } as any);
+    failNextActionWrite = 'some write error';
+    const result = await executeAction(action(), true, { source: 'manual', persist: true, notify: false, webhook: false });
+    expect((result.response as any).persist_error).toBe('some write error');
+    expect((result.response as any).original_status).toBe('blocked');
+    expect((result.response as any).original_error.code).toBe('PLAN_LIMIT_EXCEEDED');
+    expect(send).not.toHaveBeenCalled();
   });
 
   it('CONTROL: the limit allows -> sent and executed (the test reaches the send and the terminal write)', async () => {
@@ -88,5 +105,6 @@ describe("plan-limit restriction -> 'blocked' (owner 2026-11-22)", () => {
     expect(result.status).toBe('executed');
     expect(send).toHaveBeenCalledTimes(1);
     expect(row.status).toBe('executed');
+    expect(typeof row.idempotency_key).toBe('string');   // CONTROL: an executed write does carry the automatic key
   });
 });

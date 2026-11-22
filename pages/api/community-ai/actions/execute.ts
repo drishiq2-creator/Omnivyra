@@ -268,7 +268,34 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     }
   );
 
-  const nextStatus = result.status === 'dispatched' ? 'pending' : result.status;
+  let nextStatus = result.status === 'dispatched' ? 'pending' : result.status;
+
+  // Review B1 (2026-11-22): a run that came back 'blocked' (plan limit - nothing was sent) must end 'blocked', never stay
+  // 'executing' and never be reported as another row's outcome. If the executor's own write did not land on THIS row
+  // (write error, or an idempotency collision answered with a different row), write 'blocked' here - only from
+  // 'executing', only on this row.
+  const ranBlocked = result.status === 'blocked' || (result.response as any)?.original_status === 'blocked';
+  const ownWriteMissing = Boolean(result.response?.persist_error)
+    || (Boolean((result as any).deduplicated) && (result as any).prior_action_id !== actionId);
+  if (ranBlocked && ownWriteMissing) {
+    // The executor's own reason (e.g. PLAN_LIMIT_EXCEEDED), not the write error that replaced it.
+    const originalError = (result.response as any)?.original_error ?? result.error;
+    const blockedResult = { ...result, ok: false, status: 'blocked', error: originalError, deduplicated: undefined, prior_action_id: undefined };
+    const { data: compensated } = await supabase
+      .from('community_ai_actions')
+      .update({ status: 'blocked', execution_result: blockedResult, updated_at: new Date().toISOString() })
+      .eq('id', actionId)
+      .eq('status', 'executing')
+      .select('id')
+      .maybeSingle();
+    if (!compensated) {
+      return res.status(500).json({ error: 'TERMINAL_WRITE_FAILED', execution: result });
+    }
+    return res.status(400).json({
+      tenant_id: scope.tenantId, organization_id: scope.organizationId, action_id: actionId,
+      status: 'blocked', execution: blockedResult, error: 'ACTION_BLOCKED', blocked_reason: blockedReasonCode(blockedResult),
+    });
+  }
 
   if (result.response?.persist_error) {
     return res.status(500).json({ error: 'TERMINAL_WRITE_FAILED', execution: result });

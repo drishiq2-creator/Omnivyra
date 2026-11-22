@@ -66,3 +66,23 @@ describe('blockedReasonText', () => {
     [null, 'Blocked - this action was not executed.'],
   ])('%p -> %p', (input, text) => { expect(blockedReasonText(input)).toBe(text); });
 });
+
+describe('review #6: the hook keeps blocked actions and reports a blocked Execute as blocked', () => {
+  const { combineActionLists, executeErrorText } = jest.requireActual('../../../hooks/useCommunityActions');
+
+  it('combineActionLists keeps the blocked list (CONTROL: and every other list)', () => {
+    const merged = combineActionLists({
+      pending_actions: [{ action_id: 'p', status: 'pending' }], scheduled_actions: [{ action_id: 's', status: 'approved' }],
+      completed_actions: [{ action_id: 'c', status: 'executed' }], skipped_actions: [{ action_id: 'k', status: 'skipped' }],
+      blocked_actions: [{ action_id: 'b', status: 'blocked' }],
+    });
+    expect(merged.map((a: any) => `${a.action_id}:${a.status}`)).toEqual(['p:pending', 's:approved', 'c:executed', 'k:skipped', 'b:blocked']);
+  });
+
+  it('executeErrorText: blocked -> "Blocked: <reason>"; CONTROL: other errors unchanged', () => {
+    expect(executeErrorText({ status: 'blocked', execution: { error: { code: 'PLAN_LIMIT_EXCEEDED' } } }))
+      .toBe('Blocked: Plan limit reached - this action was not executed.');
+    expect(executeErrorText({ status: 'failed', error: 'CONNECTOR_ERROR' })).toBe('CONNECTOR_ERROR');
+    expect(executeErrorText(null)).toBe('Execution failed');
+  });
+});

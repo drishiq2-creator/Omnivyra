@@ -200,7 +200,9 @@ export async function persistExecutionResult(input: {
   // Stamp idempotency key: prefer caller, then row-hint hash.
   if (input.idempotencyKey && input.idempotencyKey.trim().length > 0) {
     update.idempotency_key = input.idempotencyKey.trim();
-  } else if (input.rowHint) {
+  } else if (input.rowHint && finalStatus !== 'blocked') {
+    // Never on a 'blocked' outcome (review B1, 2026-11-22): nothing was sent, so there is nothing to deduplicate - and
+    // the target+5-minute key could collide with a sibling action's key and turn this write into "already executed".
     update.idempotency_key = deriveAutoIdempotencyKey({
       organization_id: input.organizationId,
       platform: input.rowHint.platform ?? null,
@@ -413,7 +415,7 @@ export const executeAction = async (
         ok: false,
         status: 'failed',
         error: persistOutcome.error || 'PERSIST_FAILED',
-        response: { ...(runResult.response || {}), persist_error: persistOutcome.error || 'PERSIST_FAILED', current_status: persistOutcome.current_status },
+        response: { ...(runResult.response || {}), persist_error: persistOutcome.error || 'PERSIST_FAILED', current_status: persistOutcome.current_status, original_status: runResult.status, original_error: runResult.error ?? null },
       };
     }
     // Dedup: persist hit the (org, idempotency_key) unique index, meaning a
@@ -438,6 +440,8 @@ export const executeAction = async (
             prior_status: priorStatus,
             prior_action_id: persistOutcome.prior_action_id ?? null,
           },
+          original_status: runResult.status,
+          original_error: runResult.error ?? null,
         },
       } as ExecutionResult;
     }

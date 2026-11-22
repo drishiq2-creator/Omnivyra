@@ -144,3 +144,23 @@ describe("owner 2026-11-22: auto rules never put a 'blocked' action back into ex
     expect((executeAction as jest.Mock).mock.calls.map((c) => c[0].id)).not.toContain('existing-1');
   });
 });
+
+describe('review #3: a blocked result is not an auto-execution', () => {
+  const { logCommunityAiActionEvent } = jest.requireMock('../../services/communityAiActionLogService');
+  beforeEach(() => { (executeAction as jest.Mock).mockClear(); (logCommunityAiActionEvent as jest.Mock).mockClear(); failActionReads = false; });
+
+  it('blocked -> not counted, no "auto_executed" event', async () => {
+    seed({ dm_lead_id: null });
+    (executeAction as jest.Mock).mockResolvedValueOnce({ ok: false, status: 'blocked', error: { code: 'PLAN_LIMIT_EXCEEDED' } });
+    const r = await run();
+    expect(r.autoExecuted).toBe(0);
+    expect((logCommunityAiActionEvent as jest.Mock).mock.calls.filter((c) => c[0].event_type === 'auto_executed')).toHaveLength(0);
+  });
+
+  it('CONTROL: executed -> counted, with its "auto_executed" event', async () => {
+    seed({ dm_lead_id: null });
+    const r = await run();
+    expect(r.autoExecuted).toBe(1);
+    expect((logCommunityAiActionEvent as jest.Mock).mock.calls.filter((c) => c[0].event_type === 'auto_executed')).toHaveLength(1);
+  });
+});
