@@ -247,3 +247,29 @@ describe('review 3 T / N4: a new-DM row without its job never blocks the one-row
     expect((await poll()).ids).toEqual([newer.id]);
   });
 });
+
+describe("owner 2026-11-22: a 'blocked' action (plan-limit restriction) is never offered to an extension", () => {
+  it('Sales Navigator: a blocked new DM (approved, with its job) is not offered or claimed', async () => {
+    const dm = newDm({ status: 'blocked' });
+    db.actions = [dm];
+    expect((await poll()).ids).toEqual([]);
+    expect(claimed(dm.id)).toBe(false);
+  });
+
+  it('CONTROL: the same new DM while pending is offered', async () => {
+    const dm = newDm();
+    db.actions = [dm];
+    expect((await poll()).ids).toEqual([dm.id]);
+  });
+
+  it('engagement: a blocked reply is not offered, strict or legacy; CONTROL: the same reply pending is', async () => {
+    session = { userId: ALICE, product: 'linkedin_engagement' };
+    const blocked = reply({ status: 'blocked' });
+    db.actions = [blocked];
+    expect((await poll()).ids).toEqual([]);
+    expect((await poll({ strict: false })).ids).toEqual([]);
+    const pending = reply();
+    db.actions = [pending];
+    expect((await poll()).ids).toEqual([pending.id]);
+  });
+});

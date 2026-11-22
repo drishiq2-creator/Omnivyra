@@ -212,7 +212,9 @@ export async function persistExecutionResult(input: {
         platform_id: result.platform_id ?? null,
       },
     });
-  } else if (finalStatus === 'failed' || finalStatus === 'blocked' || finalStatus === 'skipped') {
+  // 'blocked' (a plan-limit restriction) is NOT an execution failure (owner 2026-11-22): no 'execution_failed' metric;
+  // the action row itself records status 'blocked' and the reason.
+  } else if (finalStatus === 'failed' || finalStatus === 'skipped') {
     await recordExecutionMetric({
       organization_id: input.organizationId,
       action_id: input.actionId,

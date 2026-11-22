@@ -2,10 +2,10 @@
 --
 -- Restores the exact old five-status rule:
 --   CHECK ((status = ANY (ARRAY['pending'::text, 'approved'::text, 'executed'::text, 'failed'::text, 'skipped'::text])))
--- REFUSES while any row holds 'executing' or 'sent_unverified': those records are real outcomes (a send whose delivery
--- is unknown, or an execution in progress) and are never rewritten or discarded by a rollback. An operator resolves
--- them first.
--- Only the exact seven-status rule written by the forward migration is replaced - validated, or still NOT VALID when its
+-- REFUSES while any row holds 'executing', 'sent_unverified' or 'blocked': those records are real outcomes (an execution
+-- in progress, a send whose delivery is unknown, a plan-limit restriction) and are never rewritten, discarded or
+-- invalidated by a rollback. An operator resolves them first.
+-- Only the exact eight-status rule written by the forward migration is replaced - validated, or still NOT VALID when its
 -- second transaction never ran (review F3); when the old rule is already in place this is a no-op; any other shape is
 -- refused (nothing changed). Re-running is safe.
 -- Note: the code on main also writes these statuses, so after a rollback executions fail again exactly as before.
@@ -19,7 +19,7 @@ LOCK TABLE public.community_ai_actions IN ACCESS EXCLUSIVE MODE;
 DO $rollback$
 DECLARE
   v_old CONSTANT text := 'CHECK ((status = ANY (ARRAY[''pending''::text, ''approved''::text, ''executed''::text, ''failed''::text, ''skipped''::text])))';
-  v_new CONSTANT text := 'CHECK ((status = ANY (ARRAY[''pending''::text, ''approved''::text, ''executing''::text, ''executed''::text, ''sent_unverified''::text, ''failed''::text, ''skipped''::text])))';
+  v_new CONSTANT text := 'CHECK ((status = ANY (ARRAY[''pending''::text, ''approved''::text, ''executing''::text, ''executed''::text, ''sent_unverified''::text, ''failed''::text, ''skipped''::text, ''blocked''::text])))';
   v_def text;
   v_open bigint;
 BEGIN
@@ -34,9 +34,9 @@ BEGIN
     RAISE EXCEPTION 'CAS rollback refused: community_ai_actions_status_check is not the rule this migration wrote (found: %) - nothing changed', coalesce(v_def, '<absent>');
   END IF;
 
-  SELECT count(*) INTO v_open FROM public.community_ai_actions WHERE status IN ('executing', 'sent_unverified');
+  SELECT count(*) INTO v_open FROM public.community_ai_actions WHERE status IN ('executing', 'sent_unverified', 'blocked');
   IF v_open <> 0 THEN
-    RAISE EXCEPTION 'CAS rollback refused: % row(s) hold executing/sent_unverified - resolve them first; nothing changed', v_open;
+    RAISE EXCEPTION 'CAS rollback refused: % row(s) hold executing/sent_unverified/blocked - resolve them first; nothing changed', v_open;
   END IF;
 
   ALTER TABLE public.community_ai_actions DROP CONSTRAINT community_ai_actions_status_check;

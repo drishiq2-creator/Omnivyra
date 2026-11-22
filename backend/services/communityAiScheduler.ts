@@ -16,6 +16,8 @@ type SchedulerResult = {
   processed: number;
   executed: number;
   failed: number;
+  /** Plan-limit restrictions (owner 2026-11-22): counted on their own, never as failed. */
+  blocked: number;
 };
 
 const loadHistoryMetrics = async (
@@ -93,7 +95,7 @@ export const runCommunityAiScheduler = async (now = new Date()): Promise<Schedul
       },
       created_at: new Date().toISOString(),
     });
-    return { processed: 0, executed: 0, failed: 0 };
+    return { processed: 0, executed: 0, failed: 0, blocked: 0 };
   }
 
   const cutoff = now.toISOString();
@@ -105,11 +107,12 @@ export const runCommunityAiScheduler = async (now = new Date()): Promise<Schedul
 
   if (error || !actions) {
     console.warn('COMMUNITY_AI_SCHEDULER_LOAD_FAILED', error?.message);
-    return { processed: 0, executed: 0, failed: 0 };
+    return { processed: 0, executed: 0, failed: 0, blocked: 0 };
   }
 
   let executed = 0;
   let failed = 0;
+  let blocked = 0;
 
   for (const action of actions) {
     if (!action.tenant_id || !action.organization_id) {
@@ -402,6 +405,12 @@ export const runCommunityAiScheduler = async (now = new Date()): Promise<Schedul
       continue;
     }
 
+    // 'blocked' (plan-limit restriction) is its own outcome, not a failure (owner 2026-11-22): counted separately and
+    // not logged as 'failed'; the row records status 'blocked' and the reason.
+    if (result.status === 'blocked') {
+      blocked += 1;
+      continue;
+    }
     const nextStatus =
       result.status === 'skipped' ? 'skipped' : result.ok ? 'executed' : 'failed';
     if (result.ok) executed += 1;
@@ -416,5 +425,5 @@ export const runCommunityAiScheduler = async (now = new Date()): Promise<Schedul
     });
   }
 
-  return { processed: actions.length, executed, failed };
+  return { processed: actions.length, executed, failed, blocked };
 };

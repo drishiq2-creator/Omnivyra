@@ -30,6 +30,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       else if (status === 'executed') acc.executed += 1;
       else if (status === 'failed') acc.failed += 1;
       else if (status === 'skipped') acc.skipped += 1;
+      else if (status === 'blocked') acc.blocked += 1;   // plan-limit restriction: neither pending nor failed
       else acc.pending += 1;
       return acc;
     },
@@ -40,6 +41,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       executed: 0,
       failed: 0,
       skipped: 0,
+      blocked: 0,
     }
   );
 

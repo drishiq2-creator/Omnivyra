@@ -5,6 +5,11 @@ import CommunityAiLayout from '../components/community-ai/CommunityAiLayout';
 import SectionCard from '../components/community-ai/SectionCard';
 import { fetchWithAuth } from '../components/community-ai/fetchWithAuth';
 import type { PendingAction } from '../components/community-ai/types';
+import { blockedReasonText } from '../lib/communityAi/blockedReason';
+
+// An execute response for a plan-limit restriction says so - never "Execution failed" (owner 2026-11-22).
+const executeErrorText = (data: any) =>
+  data?.status === 'blocked' ? `Blocked: ${blockedReasonText(data?.execution)}` : (data?.error || 'Execution failed');
 import {
   validateActionAgainstPlaybook,
   type PlaybookValidationInput,
@@ -108,6 +113,10 @@ export function useCommunityActions() {
         ...(data.skipped_actions || []).map((action: PendingAction) => ({
           ...action,
           status: normalizeStatus(action, 'skipped'),
+        })),
+        ...(data.blocked_actions || []).map((action: PendingAction) => ({
+          ...action,
+          status: normalizeStatus(action, 'blocked'),
         })),
       ];
       setActions(combined);
@@ -241,7 +250,7 @@ export function useCommunityActions() {
       });
       const data = await response.json().catch(() => null);
       if (!response.ok) {
-        throw new Error(data?.error || 'Execution failed');
+        throw new Error(executeErrorText(data));
       }
       setActions((prev) =>
         prev.map((entry) =>
@@ -296,7 +305,9 @@ export function useCommunityActions() {
         const queuedData = await queued.json().catch(() => null);
         if (!queued.ok) {
           await loadActions();
-          throw new Error(`Approved, but not yet queued for sending (${queuedData?.error || queued.status}). Use "Send" to queue it.`);
+          throw new Error(queuedData?.status === 'blocked'
+            ? `Approved, but blocked: ${blockedReasonText(queuedData?.execution)}`
+            : `Approved, but not yet queued for sending (${queuedData?.error || queued.status}). Use "Send" to queue it.`);
         }
       }
       setActions((prev) =>
@@ -359,7 +370,7 @@ export function useCommunityActions() {
       });
       const data = await response.json().catch(() => null);
       if (!response.ok) {
-        throw new Error(data?.error || 'Execution failed');
+        throw new Error(executeErrorText(data));
       }
       setActions((prev) =>
         prev.map((entry) =>
@@ -425,7 +436,7 @@ export function useCommunityActions() {
       });
       const data = await response.json().catch(() => null);
       if (!response.ok) {
-        throw new Error(data?.error || 'Execution failed');
+        throw new Error(executeErrorText(data));
       }
       setActions((prev) =>
         prev.map((entry) =>

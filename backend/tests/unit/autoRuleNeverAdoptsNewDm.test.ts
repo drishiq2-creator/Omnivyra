@@ -134,3 +134,13 @@ describe('auto rules never adopt a LinkedIn new DM (third review N-d)', () => {
     expect(executedIds).not.toContain('existing-1');
   });
 });
+
+describe("owner 2026-11-22: auto rules never put a 'blocked' action back into execution", () => {
+  beforeEach(() => { (executeAction as jest.Mock).mockClear(); failActionReads = false; });
+
+  it('an existing BLOCKED action with the same key is not executed (the CONTROL above shows the same row approved is)', async () => {
+    seed({ status: 'blocked', dm_lead_id: null });
+    await run();
+    expect((executeAction as jest.Mock).mock.calls.map((c) => c[0].id)).not.toContain('existing-1');
+  });
+});

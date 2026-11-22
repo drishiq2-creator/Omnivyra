@@ -253,6 +253,8 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       ['executed', 'failed'].includes(action.status)
     );
     const skipped_actions = serialized.filter((action) => action.status === 'skipped');
+    // Plan-limit restrictions (owner 2026-11-22): their own list, shown with the reason.
+    const blocked_actions = serialized.filter((action) => action.status === 'blocked');
 
     return res.status(200).json({
       tenant_id: scope.tenantId,
@@ -272,6 +274,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       scheduled_actions,
       completed_actions,
       skipped_actions,
+      blocked_actions,
     });
   }
 

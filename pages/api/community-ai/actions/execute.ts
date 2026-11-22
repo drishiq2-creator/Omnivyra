@@ -1,3 +1,4 @@
+import { blockedReasonCode } from '../../../../lib/communityAi/blockedReason';
 import { createApiRoute as __createApiRoute } from '../../../../lib/platform/routeFactory';
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { supabase } from '../../../../backend/db/supabaseClient';
@@ -275,7 +276,9 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
 
   // Skip the outcome event for in-flight browser dispatches — the extension's
   // /action-result writes the real terminal event once the command lands.
-  if (result.status !== 'dispatched') {
+  // A 'blocked' result (plan-limit restriction) is not logged as 'failed' (owner 2026-11-22): the action row records
+  // status 'blocked' with its reason.
+  if (result.status !== 'dispatched' && result.status !== 'blocked') {
     await logCommunityAiActionEvent({
       action_id: actionId,
       tenant_id: scope.tenantId,
@@ -296,7 +299,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     });
   }
 
-  if (!result.ok) {
+  if (!result.ok && result.status !== 'blocked') {
     const { data: failureLogs } = await supabase
       .from('community_ai_action_logs')
       .select('id')
@@ -326,6 +329,8 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     action_id: actionId,
     status: nextStatus,
     execution: result,
+    // A plan-limit restriction is reported as such, never as "execution failed".
+    ...(nextStatus === 'blocked' ? { error: 'ACTION_BLOCKED', blocked_reason: blockedReasonCode(result) } : {}),
   });
 }
 

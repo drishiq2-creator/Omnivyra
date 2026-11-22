@@ -11,7 +11,7 @@
 jest.mock('../../db/supabaseClient', () => ({ supabase: {} }));
 jest.mock('../../db/writeOwner', () => ({ ownedDbTable: () => { throw new Error('no database in this test'); } }));
 
-import { requestLinkedInNewDm, canonicalProfileUrl } from '../../services/linkedinNewDm/requestService';
+import { requestLinkedInNewDm, canonicalProfileUrl, OPEN_STATUSES } from '../../services/linkedinNewDm/requestService';
 import { buildDmCommandChain, resolveExecutionMode } from '../../services/communityAiActionExecutorContracts';
 import { claimCodeTableFake } from '../helpers/claimCodeTableFake';
 import { autoSignInAllowed, readSalesNavExtensionState } from '../../../lib/prospects/salesnav/salesNavExtensionLink';
@@ -218,5 +218,11 @@ describe('Message on LinkedIn: the open-request rule (review N1)', () => {
   it.each(['dispatched', 'acknowledged', 'executing'])('a request still %s counts as open', async (status) => {
     const db = fakeDb({ actions: [{ id: 'old', organization_id: ORG, dm_lead_id: LEAD, acting_user_id: USER, status }] });
     expect(await req(db)).toEqual({ ok: false, status: 409, error: 'MESSAGE_ALREADY_PENDING' });
+  });
+
+  it("owner 2026-11-22: a 'blocked' request (plan-limit restriction) holds no slot - a new request is accepted", async () => {
+    const db = fakeDb({ actions: [{ id: 'old', organization_id: ORG, dm_lead_id: LEAD, acting_user_id: USER, status: 'blocked' }] });
+    expect((await req(db)).ok).toBe(true);
+    expect(OPEN_STATUSES).not.toContain('blocked');
   });
 });

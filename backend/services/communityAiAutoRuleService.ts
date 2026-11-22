@@ -454,6 +454,10 @@ export const evaluateAutoRules = async (input: AutoRuleInput) => {
       if ((record as { dm_lead_id?: string | null }).dm_lead_id) {
         return { ...action, blocked_reason: 'LinkedIn new DMs are sent only after human approval' };
       }
+      // A 'blocked' action (plan-limit restriction) never goes back into execution by an auto rule (owner 2026-11-22).
+      if ((record as { status?: string | null }).status === 'blocked') {
+        return { ...action, blocked_reason: 'Action is blocked (plan limit) and is not executed' };
+      }
 
       let playbook = null;
       try {
@@ -573,7 +577,9 @@ export const evaluateAutoRules = async (input: AutoRuleInput) => {
       }
 
       const nextStatus =
-        execution.status === 'skipped' ? 'skipped' : execution.ok ? 'executed' : 'failed';
+        execution.status === 'skipped' ? 'skipped'
+          : execution.status === 'blocked' ? 'blocked'   // a restriction, not a failure (owner 2026-11-22)
+            : execution.ok ? 'executed' : 'failed';
 
       await logCommunityAiActionEvent({
         action_id: record.id,

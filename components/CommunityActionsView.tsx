@@ -5,12 +5,13 @@ import CommunityAiLayout from './community-ai/CommunityAiLayout';
 import SectionCard from './community-ai/SectionCard';
 import { fetchWithAuth } from './community-ai/fetchWithAuth';
 import type { PendingAction } from './community-ai/types';
+import { blockedReasonText } from '../lib/communityAi/blockedReason';
 import {
   validateActionAgainstPlaybook,
   type PlaybookValidationInput,
 } from '../backend/services/playbooks/playbookValidator';
 
-const tabs = ['Pending', 'Scheduled', 'Completed', 'Skipped'];
+const tabs = ['Pending', 'Scheduled', 'Completed', 'Skipped', 'Blocked'];
 
 import type { useCommunityActions } from '../hooks/useCommunityActions';
 type S = ReturnType<typeof useCommunityActions>;
@@ -168,7 +169,8 @@ export default function CommunityActionsView({ d }: { d: S }) {
                 const requiresApproval =
                   action.requires_human_approval ?? action.requires_approval ?? true;
                 const status = action.status.toLowerCase();
-                const isTerminal = ['executed', 'failed', 'skipped'].includes(status);
+                // 'blocked' (plan-limit restriction) is final too: no execute, schedule or skip buttons.
+                const isTerminal = ['executed', 'failed', 'skipped', 'blocked'].includes(status);
                 const isExecuting = executingActionId === action.action_id;
                 const showHighRisk = action.risk_level?.toLowerCase() === 'high';
                 const executionModeLabel = (action.execution_mode || 'manual').toLowerCase();
@@ -252,6 +254,11 @@ export default function CommunityActionsView({ d }: { d: S }) {
                     <td className="px-3 py-2">{action.target_url || action.target_id}</td>
                     <td className="px-3 py-2">
                       {action.action_type}
+                      {status === 'blocked' && (
+                        <div className="mt-1 text-xs font-medium text-amber-700" data-testid="action-blocked-reason">
+                          Blocked: {blockedReasonText(action.execution_result)}
+                        </div>
+                      )}
                       {action.dm_lead_id && (
                         <div className="mt-1 text-xs text-gray-600" data-testid="linkedin-new-dm-sender">
                           New LinkedIn message to a lead. Sent only after approval, only by the requester&apos;s own Sales
