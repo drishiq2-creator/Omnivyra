@@ -17,6 +17,8 @@ import { boundMember } from '../salesNav/store';
 import { SALESNAV_SOURCE } from '../salesNav/contract';
 
 export const LINKEDIN_DM_MAX_TEXT = 8000;
+/** Every non-terminal status of community_ai_actions (status CHECK): a request in any of them is still open. */
+export const OPEN_STATUSES = ['pending', 'approved', 'dispatched', 'acknowledged', 'executing'];
 const PROFILE_URL = /^https?:\/\/(?:www\.)?linkedin\.com\/in\/([A-Za-z0-9_%-]{1,100})\/?(?:[?#].*)?$/i;
 
 export type NewDmRequestResult =
@@ -51,7 +53,7 @@ export async function resolveLeadProfileUrl(
   const personId = typeof lead[0].unified_person_id === 'string' ? lead[0].unified_person_id : null;
   if (!personId) return { error: 'NO_LINKEDIN_PROFILE' };
   const recs = rowsOf(await table('source_records').select('raw_payload')
-    .eq('organization_id', org).eq('person_id', personId).eq('provider', SALESNAV_SOURCE).limit(50));
+    .eq('organization_id', org).eq('person_id', personId).eq('provider', SALESNAV_SOURCE).limit(1000));
   if (!recs) return { error: 'unavailable' };
   const urls = new Set<string>();
   for (const r of recs) {
@@ -87,7 +89,7 @@ export async function requestLinkedInNewDm(
   // One open request per (lead, sender): a double click must not queue two messages.
   const open = rowsOf(await table('community_ai_actions').select('id')
     .eq('organization_id', input.organizationId).eq('dm_lead_id', input.prospectId).eq('acting_user_id', input.userId)
-    .in('status', ['pending', 'approved']).limit(1));
+    .in('status', OPEN_STATUSES).limit(1));
   if (!open) return { ok: false, status: 503, error: 'ACTIONS_UNREADABLE' };
   if (open[0]) return { ok: false, status: 409, error: 'MESSAGE_ALREADY_PENDING' };
 
@@ -114,6 +116,9 @@ export async function requestLinkedInNewDm(
     created_at: now,
     updated_at: now,
   });
+  // The partial unique index (migration 20270222000001) closes the select-then-insert race: a concurrent second
+  // request for the same lead and sender is refused by the database, reported exactly like the first check.
+  if (ins && ins.error && String((ins.error as { code?: unknown }).code) === '23505') return { ok: false, status: 409, error: 'MESSAGE_ALREADY_PENDING' };
   if (!ins || ins.error) return { ok: false, status: 503, error: 'ACTION_NOT_RECORDED' };
   return { ok: true, actionId: id, recipientProfileUrl: recipient.url, senderMemberId: member };
 }

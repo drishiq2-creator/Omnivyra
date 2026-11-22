@@ -103,10 +103,18 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     return res.status(403).json({ error: 'APPROVAL_REQUIRED', reason: 'NOT_APPROVED' });
   }
 
+  // "Message on LinkedIn" (owner 2026-11-22): a new DM to a lead is sent ONLY by the requesting user's Sales Navigator
+  // extension (browser), whatever the caller asks for, and exactly with the words the requester wrote and the
+  // approver approved - the executor may not change the text sent from someone else's LinkedIn account.
+  const isLinkedInNewDm = Boolean((action as any).dm_lead_id);
+  if (isLinkedInNewDm && body.final_text != null && String(body.final_text) !== String(action.suggested_text ?? '')) {
+    return res.status(409).json({ error: 'NEW_DM_TEXT_CHANGE_NOT_ALLOWED' });
+  }
+
   const requestedMode = (body.execution_mode || action.execution_mode || '').toString();
   // Manual is the human-driven simulation path; everything else is delegated
   // to the central router inside the executor (which itself handles fallback).
-  const executionMode = requestedMode || 'manual';
+  const executionMode = isLinkedInNewDm ? 'browser' : (requestedMode || 'manual');
 
   const finalText = (body.final_text ?? action.suggested_text ?? '').toString();
   if (action.action_type === 'reply' && finalText.trim().length === 0) {
@@ -153,7 +161,9 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     final_text: finalText,
     updated_at: transitionAt,
   };
-  if (idempotencyKey) transitionPayload.idempotency_key = idempotencyKey;
+  // A new DM always carries its own key (newdm:<id>), stamped here and passed to the executor alike.
+  if (isLinkedInNewDm) transitionPayload.idempotency_key = `newdm:${action.id}`;
+  else if (idempotencyKey) transitionPayload.idempotency_key = idempotencyKey;
 
   const { data: claimed, error: claimError } = await supabase
     .from('community_ai_actions')
@@ -234,12 +244,18 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       execution_mode: executionMode as any,
       tone_used: action.tone_used,
       approved_at: approvedAtIso,
+      // Carried through so the executor builds the new-DM step for the right sender (review B1, 2026-11-22).
+      acting_user_id: (action as any).acting_user_id ?? null,
+      dm_lead_id: (action as any).dm_lead_id ?? null,
+      dm_sender_member_id: (action as any).dm_sender_member_id ?? null,
     },
     body.approved === true,
     {
       source: 'manual',
       persist: true,
-      idempotency_key: idempotencyKey ?? undefined,
+      // A new DM gets its own key: the automatic key buckets by target + 5 minutes, so two colleagues' messages to
+      // the same lead would otherwise collide and the second would be reported with the first one's outcome.
+      idempotency_key: isLinkedInNewDm ? `newdm:${action.id}` : (idempotencyKey ?? undefined),
       final_text: finalText,
     }
   );

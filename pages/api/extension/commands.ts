@@ -195,6 +195,8 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
         .eq('platform', 'linkedin')
         .not('dm_lead_id', 'is', null)
         .not('approved_at', 'is', null)
+        // Only rows the executor turned into a job (review N4): a row without its step can never block the 1-row page.
+        .not('command_chain', 'is', null)
         .eq('acting_user_id', session.userId)
         .eq('dm_sender_member_id', member);
       pageSize = 1;   // one DM per poll: its claim cannot lapse while an earlier DM in the same poll runs

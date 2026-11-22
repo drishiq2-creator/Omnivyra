@@ -201,3 +201,22 @@ describe('Sales Navigator page: which extension answered, and no silent company 
     expect(autoSignInAllowed({ kind: 'not_detected' })).toBe(false);
   });
 });
+
+describe('Message on LinkedIn: the open-request rule (review N1)', () => {
+  it('a concurrent duplicate refused by the database unique index (23505) is MESSAGE_ALREADY_PENDING, not 503', async () => {
+    const db = fakeDb();
+    const table = (name: string) => {
+      const q = db.table(name);
+      if (name === 'community_ai_actions') q.insert = async () => ({ error: { code: '23505', message: 'duplicate key' } });
+      return q;
+    };
+    const r = await requestLinkedInNewDm({ organizationId: ORG, userId: USER, prospectId: LEAD, text: 'Hi' },
+      { table, memberFor: async () => MEMBER, newId: () => 'a2' });
+    expect(r).toEqual({ ok: false, status: 409, error: 'MESSAGE_ALREADY_PENDING' });
+  });
+
+  it.each(['dispatched', 'acknowledged', 'executing'])('a request still %s counts as open', async (status) => {
+    const db = fakeDb({ actions: [{ id: 'old', organization_id: ORG, dm_lead_id: LEAD, acting_user_id: USER, status }] });
+    expect(await req(db)).toEqual({ ok: false, status: 409, error: 'MESSAGE_ALREADY_PENDING' });
+  });
+});

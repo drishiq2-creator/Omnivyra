@@ -599,6 +599,12 @@ const runExecution = async (
       // thread url / id, or a user handle. Non-DM browser dispatches
       // stay as single-step.
       const chain = buildDmCommandChain(action) ?? undefined;
+      // "Message on LinkedIn" (owner 2026-11-22): a new DM to a lead is dispatched ONLY as its own start_new_dm step.
+      // If that step cannot be built, nothing is queued (never a bare dispatch the extension would treat otherwise).
+      if (action.dm_lead_id && !(chain && chain.length === 1 && chain[0].action_type === 'start_new_dm')) {
+        result = { ok: false, status: 'failed', error: 'NEW_DM_COMMAND_INVALID', execution_mode: 'browser', response: { source: 'executor', reason: 'new_dm_step_not_buildable' } };
+        break;
+      }
       result = prepareBrowserDispatch(chain);
       break;
     }

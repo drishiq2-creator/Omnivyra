@@ -100,6 +100,10 @@ export async function recoverAbandonedBrowserDispatches(options?: {
     .eq('execution_mode', 'browser')
     .is('dispatch_lease_id', null)
     .is('dispatch_acknowledged_at', null)
+    // "Message on LinkedIn" new DMs are excluded (review N5, 2026-11-22): their created_at is the REQUEST time, so an
+    // approval more than an hour later would be released as "abandoned" before the sender's extension ever polled.
+    // They are offered only to that one sender and stay visible as pending until it does.
+    .is('dm_lead_id', null)
     .lt('created_at', cutoff)
     .order('created_at', { ascending: true })
     .limit(batchSize);
