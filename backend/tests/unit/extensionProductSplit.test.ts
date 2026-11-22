@@ -143,13 +143,14 @@ describe('every extension-authenticated route declares its product', () => {
   // The routes that serve BOTH extensions (pairing health, capability map, validation, and the R-3 410 ingestion
   // routes). Adding a route to this list is a decision, not a default.
   const BOTH = new Set([
+    // Command hand-out, its results and lease renewal serve both: GET /commands offers each product only its own
+    // work (salesnav: approved new LinkedIn DMs only - extensionNewDmRouting.test.ts); results and renewals are bound
+    // to the session that holds the command's lease.
+    'pages/api/extension/commands.ts', 'pages/api/extension/action-result.ts', 'pages/api/extension/dispatch/renew.ts',
     'pages/api/extension/validate.ts', 'pages/api/extension/health.ts', 'pages/api/extension/capabilities.ts',
     'pages/api/extension/events.ts', 'pages/api/extension/events/comments.ts', 'pages/api/extension/events/dms.ts',
   ]);
   const EXPECT: Record<string, string> = {
-    'pages/api/extension/commands.ts': 'linkedin_engagement',
-    'pages/api/extension/action-result.ts': 'linkedin_engagement',
-    'pages/api/extension/dispatch/renew.ts': 'linkedin_engagement',
     'backend/apiHandlers/salesNav/extensionRoutes.ts': 'salesnav',
   };
   function walk(dir: string, out: string[] = []): string[] {

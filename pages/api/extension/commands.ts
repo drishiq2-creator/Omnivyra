@@ -85,7 +85,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     return res.status(405).json({ success: false, error: 'Method not allowed' });
   }
 
-  const auth = await requireExtensionAuth(req, res, { product: 'linkedin_engagement' });
+  const auth = await requireExtensionAuth(req, res);
   if (!auth) return;
   const { session } = auth;
 
@@ -284,6 +284,21 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       const extensionAction = mapCapabilityActionToExtensionAction(capabilityAction);
       if (!extensionAction) continue;
 
+      // Owner 2026-11-22 (two LinkedIn extensions): a NEW LinkedIn DM to a lead (start_new_dm) is sent ONLY by the
+      // Omnivyra Sales Navigator extension, and that extension is offered NOTHING else from this route:
+      //   - salesnav session: only LinkedIn start_new_dm, only when a person approved it (approved_at set, whatever
+      //     the platform policy says), only in strict-claim mode (a claimed command is never offered again - at most
+      //     once);
+      //   - every other session (engagement, or an extension built before the split): never a LinkedIn
+      //     start_new_dm (it would refuse it and fail the approved DM before the Sales Navigator extension could send
+      //     it); everything else exactly as before.
+      const isLinkedInNewDm = row.platform === 'linkedin' && extensionAction === 'start_new_dm';
+      if (session.product === 'salesnav') {
+        if (!isLinkedInNewDm || !(row as any).approved_at || !supportsRenewal) continue;
+      } else if (isLinkedInNewDm) {
+        continue;
+      }
+
       const platformSlug = row.platform === 'x' ? 'twitter' : row.platform;
       // Chain-step payload takes precedence when present. The default
       // payload (used by single-step pairs: reply / like / post_create /
@@ -394,7 +409,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
  * Safe to call repeatedly: an already-acknowledged row returns idempotently.
  */
 async function handleAck(req: NextApiRequest, res: NextApiResponse) {
-  const auth = await requireExtensionAuth(req, res, { product: 'linkedin_engagement' });
+  const auth = await requireExtensionAuth(req, res);
   if (!auth) return;
   const { session } = auth;
 
