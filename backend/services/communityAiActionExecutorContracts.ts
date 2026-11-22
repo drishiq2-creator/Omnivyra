@@ -31,6 +31,10 @@ export type CommunityAiAction = {
   /** Operator who initiated this action (server-derived). Persisted on the
    *  community_ai_actions row for multi-user attribution. */
   acting_user_id?: string | null;
+  /** "Message on LinkedIn" (owner 2026-11-22): the Prospect a NEW LinkedIn DM is for; null for every other action. */
+  dm_lead_id?: string | null;
+  /** The sender's linked LinkedIn account (canonical member id) for that new DM. */
+  dm_sender_member_id?: string | null;
   requires_approval?: boolean | null;
   execution_mode?: ExecutionMode | null;
   tone_used?: string | null;
@@ -393,6 +397,9 @@ export const loadHistoryMetrics = async (
 export const resolveExecutionMode = async (
   action: CommunityAiAction
 ): Promise<ExecutionMode> => {
+  // A new LinkedIn DM to a lead is sent ONLY by the sender's Sales Navigator extension (owner 2026-11-22), never by
+  // an API token or RPA that happens to exist for the organisation.
+  if (action.dm_lead_id) return 'browser';
   const declared = (action.execution_mode || '').toString().toLowerCase();
   if (declared === 'api' || declared === 'rpa' || declared === 'browser' || declared === 'manual') {
     return declared;
@@ -653,6 +660,17 @@ export function buildDmCommandChain(action: CommunityAiAction): CommandChainStep
   if (!text.trim()) return null;
 
   const platform = (action.platform || '').toString().toLowerCase();
+  // "Message on LinkedIn" (owner 2026-11-22): a GENUINE new DM to one lead - never a continuation of a conversation.
+  // One atomic step, so a successful report is final (no chain to re-pend). Anything not exactly right -> no chain.
+  if (action.dm_lead_id) {
+    const url = String(action.target_id || '');
+    const member = String(action.dm_sender_member_id || '');
+    if (platform !== 'linkedin' || !/^https:\/\/www\.linkedin\.com\/in\/[A-Za-z0-9_%-]{1,100}\/$/.test(url)
+      || !/^ACoAA[A-Za-z0-9_-]{10,80}$/.test(member) || !action.acting_user_id) {
+      return null;
+    }
+    return [{ action_type: 'start_new_dm', payload: { recipientProfileUrl: url, text, autoSubmit: true, senderMemberId: member } }];
+  }
   const metadata = action.metadata;
   if (metadata && metadata.dm_thread_ready === true) {
     const metadataThreadUrl =

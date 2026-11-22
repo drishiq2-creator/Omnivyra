@@ -31,6 +31,7 @@ import { recordExecutionMetric } from '@/backend/services/communityAiExecutionRe
 import { resolveAccountTier } from '@/backend/services/rpaWorker/rpaAccountTier';
 import { getCommunityAiPlatformPolicy } from '@/backend/services/communityAiPlatformPolicyService';
 import { EXTENSION_BROWSER_INGESTION_SUSPENDED, SUSPENDED_COLLECTION_COMMANDS } from '@/backend/services/extensionIngestionSuspension';
+import { boundMember } from '@/backend/services/salesNav/store';
 
 const LEASE_TTL_SECONDS = 90; // longer than the extension's 30s handler timeout + retries
 
@@ -173,10 +174,33 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
 
     let query = supabase
       .from('community_ai_actions')
-      .select('id, platform, action_type, target_id, suggested_text, execution_mode, created_at, dispatch_lease_expires_at, execution_correlation_id, command_chain, command_chain_index, approved_at')
+      .select('id, platform, action_type, target_id, suggested_text, execution_mode, created_at, dispatch_lease_expires_at, execution_correlation_id, command_chain, command_chain_index, approved_at, acting_user_id, dm_lead_id, dm_sender_member_id')
       .eq('organization_id', session.orgId)
       .eq('status', 'pending')
       .eq('execution_mode', 'browser');
+
+    // Owner 2026-11-22: a NEW LinkedIn DM to a lead ("Message on LinkedIn", dm_lead_id set) is sent ONLY by the
+    // requesting user's own Sales Navigator extension, signed in to the LinkedIn account recorded on the approval.
+    // These filters run IN THE QUERY, so neither product can fill the other's page of work (review finding 2).
+    let pageSize = 10;
+    let salesNavMember: string | null = null;
+    if (session.product === 'salesnav') {
+      // Strict claims only (never-claimed rows), so a claimed DM is never offered again: at most once.
+      if (!supportsRenewal) return res.status(200).json({ success: true, commands: [] });
+      const member = await boundMember(session.orgId, session.userId, 'extension');
+      if (member === 'unreadable') return res.status(503).json({ success: false, error: 'SENDER_ACCOUNT_UNREADABLE' });
+      if (!member) return res.status(200).json({ success: true, commands: [] });
+      salesNavMember = member;
+      query = query
+        .eq('platform', 'linkedin')
+        .not('dm_lead_id', 'is', null)
+        .not('approved_at', 'is', null)
+        .eq('acting_user_id', session.userId)
+        .eq('dm_sender_member_id', member);
+      pageSize = 1;   // one DM per poll: its claim cannot lapse while an earlier DM in the same poll runs
+    } else {
+      query = query.is('dm_lead_id', null);
+    }
 
     if (supportsRenewal) {
       // Strict: only work that has NEVER been claimed is offered.
@@ -188,7 +212,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
 
     const { data, error } = await query
       .order('created_at', { ascending: false })
-      .limit(10);
+      .limit(pageSize);
 
     if (error) {
       console.error('[extension/commands] supabase error:', error.message);
@@ -293,9 +317,11 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       //     start_new_dm (it would refuse it and fail the approved DM before the Sales Navigator extension could send
       //     it); everything else exactly as before.
       const isLinkedInNewDm = row.platform === 'linkedin' && extensionAction === 'start_new_dm';
+      const r = row as any;
       if (session.product === 'salesnav') {
-        if (!isLinkedInNewDm || !(row as any).approved_at || !supportsRenewal) continue;
-      } else if (isLinkedInNewDm) {
+        if (!isLinkedInNewDm || !r.dm_lead_id || !r.approved_at || !supportsRenewal
+          || r.acting_user_id !== session.userId || !salesNavMember || r.dm_sender_member_id !== salesNavMember) continue;
+      } else if (isLinkedInNewDm || r.dm_lead_id) {
         continue;
       }
 
@@ -354,7 +380,9 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
           updated_at: new Date().toISOString(),
         })
         .eq('id', row.id)
-        .eq('status', 'pending');
+        .eq('status', 'pending')
+        .eq('command_chain_index', chainIndex);
+      if (supportsRenewal) update = update.is('dispatch_lease_id', null);
       update = priorExpiry == null
         ? update.is('dispatch_lease_expires_at', null)
         : update.eq('dispatch_lease_expires_at', priorExpiry);

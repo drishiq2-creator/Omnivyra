@@ -222,7 +222,9 @@ const VALIDATORS: Record<string, (p: any) => Validation> = {
     return { ok: true, payload: p };
   },
   'linkedin.start_new_dm': (p) => {
-    const unknown = allowOnly(p, ['recipientHandle', 'recipientProfileUrl', 'text', 'autoSubmit']);
+    // senderMemberId: the sender's linked LinkedIn account for a "Message on LinkedIn" new DM (the extension refuses
+    // to send from any other signed-in account).
+    const unknown = allowOnly(p, ['recipientHandle', 'recipientProfileUrl', 'text', 'autoSubmit', 'senderMemberId']);
     if (unknown) return { ok: false, code: 'UNKNOWN_FIELD', message: unknown };
     if (!p.recipientHandle && !p.recipientProfileUrl) {
       return { ok: false, code: 'INVALID_PAYLOAD', message: 'recipientHandle or recipientProfileUrl required' };

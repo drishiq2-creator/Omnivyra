@@ -6,7 +6,7 @@
  */
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  connectSalesNavExtension, readSalesNavExtensionState, type SalesNavExtensionState,
+  autoSignInAllowed, connectSalesNavExtension, readSalesNavExtensionState, type SalesNavExtensionState,
 } from '@/lib/prospects/salesnav/salesNavExtensionLink';
 
 export default function SalesNavExtensionPanel({ companyId }: { companyId: string }) {
@@ -37,7 +37,9 @@ export default function SalesNavExtensionPanel({ companyId }: { companyId: strin
   useEffect(() => {
     void (async () => {
       const s = await refresh();
-      if (!autoTried.current && (s.kind === 'signed_out' || s.kind === 'other_company')) {
+      // Only a signed-out extension is signed in automatically. One signed in to ANOTHER company is never moved
+      // silently (review finding 6): the user presses "Switch the extension to this company".
+      if (!autoTried.current && autoSignInAllowed(s)) {
         autoTried.current = true;
         await connect();
       }
@@ -47,7 +49,7 @@ export default function SalesNavExtensionPanel({ companyId }: { companyId: strin
   const line = state === null ? 'Checking the Omnivyra Sales Navigator extension…'
     : state.kind === 'not_detected' ? 'The Omnivyra Sales Navigator extension was not detected in this browser. Install it (or reload this page if you just loaded it).'
       : state.kind === 'signed_out' ? 'The Omnivyra Sales Navigator extension is installed but not signed in.'
-        : state.kind === 'other_company' ? 'The Omnivyra Sales Navigator extension is signed in to a different company.'
+        : state.kind === 'other_company' ? 'The Omnivyra Sales Navigator extension is signed in to a different company. It stays there unless you switch it.'
           : 'The Omnivyra Sales Navigator extension is signed in.';
 
   return (
@@ -56,7 +58,7 @@ export default function SalesNavExtensionPanel({ companyId }: { companyId: strin
       {state !== null && state.kind !== 'signed_in' && state.kind !== 'not_detected' && (
         <button type="button" disabled={busy} onClick={() => { void connect(); }}
           className="mt-2 rounded-lg border border-purple-600 px-3 py-1.5 text-sm text-purple-700">
-          {busy ? 'Signing in…' : 'Sign in the extension'}
+          {busy ? 'Signing in…' : state.kind === 'other_company' ? 'Switch the extension to this company' : 'Sign in the extension'}
         </button>
       )}
       {error && <p className="mt-2 text-red-700" role="alert">{error}</p>}

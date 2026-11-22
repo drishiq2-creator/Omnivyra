@@ -90,7 +90,7 @@ describe('the claim predicate, pinned against source', () => {
   it('the re-offer query does NOT exclude acknowledged commands', () => {
     const claimQuery = commandsSrc.slice(
       commandsSrc.indexOf("from('community_ai_actions')"),
-      commandsSrc.indexOf('.limit(10)'),
+      commandsSrc.indexOf('.limit(pageSize)'), // the page size became a variable (Sales Navigator: 1 DM per poll)
     );
     expect(claimQuery).toContain("eq('status', 'pending')");
     expect(claimQuery).toContain("eq('execution_mode', 'browser')");

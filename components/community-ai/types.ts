@@ -68,6 +68,10 @@ export type PendingAction = TenantScoped & {
   platform: string;
   target_url?: string;
   target_id?: string;
+  /** "Message on LinkedIn" (owner 2026-11-22): the requesting/sending user, the lead, the sender's LinkedIn account. */
+  acting_user_id?: string | null;
+  dm_lead_id?: string | null;
+  dm_sender_member_id?: string | null;
   suggested_text?: string | null;
   final_text?: string | null;
   risk_level: string;

@@ -19,11 +19,17 @@ export type SalesNavExtensionState =
 
 type Win = Pick<Window, 'postMessage' | 'addEventListener' | 'removeEventListener' | 'setTimeout' | 'clearTimeout' | 'location'>;
 
+/**
+ * Wait for THE SALES NAVIGATOR EXTENSION's reply: same window, the expected type, AND product 'salesnav' on the reply
+ * (review finding 5). A reply from any other extension - the engagement one, or a build from before the split that
+ * echoes no product - is ignored, so the page never reports another extension as "the Sales Navigator extension".
+ */
 function waitFor<T>(win: Win, type: string, timeoutMs: number): Promise<T | null> {
   return new Promise((resolve) => {
     const onMessage = (event: MessageEvent) => {
       if (event.source !== (win as unknown as Window)) return;
       if (!event.data || event.data.type !== type) return;
+      if (event.data.product !== SALESNAV_EXTENSION_PRODUCT) return;
       win.clearTimeout(timer);
       win.removeEventListener('message', onMessage as EventListener);
       resolve((event.data.data ?? event.data) as T);
@@ -72,4 +78,13 @@ export async function connectSalesNavExtension(
   const result = await reply;
   if (!result) throw new Error('The Sales Navigator extension did not answer. Make sure it is installed, then reload this page.');
   if (result.success !== true) throw new Error(`The extension could not sign in (${result.message || 'unknown reason'}). Reload this page and try again.`);
+}
+
+/**
+ * May the page sign the Sales Navigator extension in WITHOUT a click? Only when it is installed and signed out.
+ * Signed in to another company -> never (review finding 6: the user must press "Switch the extension to this
+ * company"); not detected / already signed in -> nothing to do.
+ */
+export function autoSignInAllowed(state: SalesNavExtensionState): boolean {
+  return state.kind === 'signed_out';
 }

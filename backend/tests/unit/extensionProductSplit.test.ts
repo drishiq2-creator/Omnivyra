@@ -60,7 +60,7 @@ describe('claim codes: the shared store', () => {
     ['salesnav', 'salesnav', true],
     [null, 'salesnav', true],                // a pre-split page's code: any extension
     [null, 'linkedin_engagement', true],
-    ['salesnav', undefined, true],           // a pre-split extension declares nothing: legacy session
+    ['salesnav', undefined, false],          // review finding 4: a pre-split extension (no product) cannot take a product's code
   ] as const)('a code issued for %p redeemed by %p -> %p', async (issued, redeemer, ok) => {
     const db = claimCodeTableFake();
     const c = await svc().createClaimCode('user-1', 'org-1', issued, { table: db.table, ...at(T0) });

@@ -241,7 +241,16 @@ export default function CommunityActionsView({ d }: { d: S }) {
                   <tr key={action.action_id} className="border-b">
                     <td className="px-3 py-2">{action.platform}</td>
                     <td className="px-3 py-2">{action.target_url || action.target_id}</td>
-                    <td className="px-3 py-2">{action.action_type}</td>
+                    <td className="px-3 py-2">
+                      {action.action_type}
+                      {action.dm_lead_id && (
+                        <div className="mt-1 text-xs text-gray-600" data-testid="linkedin-new-dm-sender">
+                          New LinkedIn message to a lead. Sent only after approval, only by the requester&apos;s own Sales
+                          Navigator extension, from LinkedIn account …{String(action.dm_sender_member_id || '').slice(-6)}
+                          {' '}(requested by user …{String(action.acting_user_id || '').slice(-6)}). First-degree connections only.
+                        </div>
+                      )}
+                    </td>
                     <td className="px-3 py-2">
                       <div className="flex items-center gap-2">
                         <span>{action.risk_level}</span>

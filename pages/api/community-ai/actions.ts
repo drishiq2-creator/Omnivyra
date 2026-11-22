@@ -158,6 +158,10 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       action_type: action.action_type,
       target_id: action.target_id,
       target_url: action.target_url,
+      // "Message on LinkedIn" (owner 2026-11-22): the approval shows WHO sends and from WHICH linked LinkedIn account.
+      acting_user_id: action.acting_user_id ?? null,
+      dm_lead_id: action.dm_lead_id ?? null,
+      dm_sender_member_id: action.dm_sender_member_id ?? null,
       suggested_text: action.suggested_text,
       final_text: action.final_text,
       tone: action.tone,

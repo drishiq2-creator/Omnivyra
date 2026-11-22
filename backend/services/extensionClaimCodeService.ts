@@ -131,7 +131,10 @@ export async function redeemClaimCode(
     .is('redeemed_at', null)
     .gt('expires_at', nowIso);
   // An extension that declares its product may only take a code issued for it (or a pre-split page's code).
-  if (opts.product) q = q.or(`product.is.null,product.eq.${opts.product}`);
+  // An extension that declares NO product (built before the split) may only take a pre-split page's code: a code the
+  // page issued FOR a product (e.g. Sales Navigator) is never redeemable by it (review finding 4). Legacy engagement
+  // installs keep working - the engagement page issues codes without a product.
+  q = opts.product ? q.or(`product.is.null,product.eq.${opts.product}`) : q.is('product', null);
 
   let result: { data?: unknown; error?: unknown };
   try {

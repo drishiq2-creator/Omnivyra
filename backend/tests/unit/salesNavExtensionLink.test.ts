@@ -27,7 +27,7 @@ const ORG = '11111111-1111-4111-8111-111111111111';
 
 describe('Sales Navigator page: extension sign-in state', () => {
   it('asks ONLY the Sales Navigator extension (product on the message)', async () => {
-    const { win, posted } = fakeWindow(() => ({ type: 'OMNIVYRA_EXTENSION_AUTH_STATE', data: { isAuthenticated: true, orgId: ORG } }));
+    const { win, posted } = fakeWindow(() => ({ type: 'OMNIVYRA_EXTENSION_AUTH_STATE', product: 'salesnav', data: { isAuthenticated: true, orgId: ORG } }));
     expect(await readSalesNavExtensionState(ORG, win, 200)).toEqual({ kind: 'signed_in', orgId: ORG });
     expect(posted).toEqual([{ type: 'OMNIVYRA_REQUEST_AUTH_STATE', product: 'salesnav' }]);
   });
@@ -38,9 +38,9 @@ describe('Sales Navigator page: extension sign-in state', () => {
   });
 
   it('CONTROL: an installed, signed-out extension is "signed_out"; another company is "other_company"', async () => {
-    expect(await readSalesNavExtensionState(ORG, fakeWindow(() => ({ type: 'OMNIVYRA_EXTENSION_AUTH_STATE', data: { isAuthenticated: false } })).win, 200))
+    expect(await readSalesNavExtensionState(ORG, fakeWindow(() => ({ type: 'OMNIVYRA_EXTENSION_AUTH_STATE', product: 'salesnav', data: { isAuthenticated: false } })).win, 200))
       .toEqual({ kind: 'signed_out' });
-    expect(await readSalesNavExtensionState(ORG, fakeWindow(() => ({ type: 'OMNIVYRA_EXTENSION_AUTH_STATE', data: { isAuthenticated: true, orgId: 'other' } })).win, 200))
+    expect(await readSalesNavExtensionState(ORG, fakeWindow(() => ({ type: 'OMNIVYRA_EXTENSION_AUTH_STATE', product: 'salesnav', data: { isAuthenticated: true, orgId: 'other' } })).win, 200))
       .toEqual({ kind: 'other_company', orgId: 'other' });
   });
 });
@@ -51,7 +51,7 @@ describe('Sales Navigator page: connecting the extension', () => {
   it('requests a claim code FOR salesnav and hands it to the salesnav extension only', async () => {
     const calls: any[] = [];
     const fetcher = (async (url: string, init: any) => { calls.push({ url, body: JSON.parse(init.body) }); return (okFetch as any)(); }) as unknown as typeof fetch;
-    const { win, posted } = fakeWindow((m) => (m.type === 'OMNIVYRA_CLAIM_CODE' ? { type: 'OMNIVYRA_CLAIM_CODE_RESULT', data: { success: true } } : null));
+    const { win, posted } = fakeWindow((m) => (m.type === 'OMNIVYRA_CLAIM_CODE' ? { type: 'OMNIVYRA_CLAIM_CODE_RESULT', product: 'salesnav', data: { success: true } } : null));
     await connectSalesNavExtension(ORG, win, fetcher, 200);
     expect(calls).toEqual([{ url: '/api/extension/bootstrap', body: { organization_id: ORG, product: 'salesnav' } }]);
     expect(posted).toEqual([{ type: 'OMNIVYRA_CLAIM_CODE', product: 'salesnav', data: { claim_code: 'cc_x' } }]);
@@ -59,7 +59,7 @@ describe('Sales Navigator page: connecting the extension', () => {
 
   it('a silent extension, a refused redeem and an unavailable store each fail with their own message', async () => {
     await expect(connectSalesNavExtension(ORG, fakeWindow(() => null).win, okFetch, 50)).rejects.toThrow(/did not answer/);
-    await expect(connectSalesNavExtension(ORG, fakeWindow(() => ({ type: 'OMNIVYRA_CLAIM_CODE_RESULT', data: { success: false, message: 'REDEEM_FAILED' } })).win, okFetch, 200))
+    await expect(connectSalesNavExtension(ORG, fakeWindow(() => ({ type: 'OMNIVYRA_CLAIM_CODE_RESULT', product: 'salesnav', data: { success: false, message: 'REDEEM_FAILED' } })).win, okFetch, 200))
       .rejects.toThrow(/could not sign in \(REDEEM_FAILED\)/);
     const down = (async () => ({ ok: false, status: 503, json: async () => ({ success: false, error: 'CLAIM_STORE_UNAVAILABLE' }) })) as unknown as typeof fetch;
     await expect(connectSalesNavExtension(ORG, fakeWindow(() => null).win, down, 50)).rejects.toThrow(/temporarily unavailable/);

@@ -21,6 +21,7 @@ import { useRouter } from 'next/router';
 import { useCompanyContext } from '@/components/CompanyContext';
 import ProspectIntelligencePanel from '@/components/prospects/ProspectIntelligencePanel';
 import ProblemObservationsPanel from '@/components/prospects/ProblemObservationsPanel';
+import LinkedInMessageAction from '@/components/prospects/LinkedInMessageAction';
 
 export default function ProspectDetailPage() {
   const router = useRouter();
@@ -60,6 +61,7 @@ export default function ProspectDetailPage() {
               <>
                 <ProspectIntelligencePanel companyId={selectedCompanyId ?? ''} prospectId={prospectId} />
                 <ProblemObservationsPanel companyId={selectedCompanyId ?? ''} prospectId={prospectId} />
+                <LinkedInMessageAction companyId={selectedCompanyId ?? ''} prospectId={prospectId} />
               </>
             )
             : <p className="text-sm text-gray-500">No prospect selected.</p>}
