@@ -55,6 +55,9 @@ BEGIN
         AND platform = 'linkedin'
         AND action_type = 'dm'
         AND acting_user_id IS NOT NULL
+        -- IS NOT NULL is required: a regex match on NULL is NULL, which a CHECK treats as passing (local replay
+        -- 2026-11-22 caught a new DM with no sender account being accepted).
+        AND dm_sender_member_id IS NOT NULL
         AND dm_sender_member_id ~ '^ACoAA[A-Za-z0-9_-]{10,80}$'
         AND target_id ~ '^https://www\.linkedin\.com/in/[A-Za-z0-9_%-]{1,100}/$'
       )
