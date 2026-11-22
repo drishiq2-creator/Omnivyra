@@ -54,7 +54,17 @@ async function inferDevBypassOrgId(req: NextApiRequest): Promise<string | null> 
   return null;
 }
 
-export async function requireExtensionAuth(req: NextApiRequest, res: NextApiResponse) {
+/**
+ * product (owner 2026-11-22: two independently usable LinkedIn extensions): the product this route belongs to. A
+ * session issued to the OTHER product is refused (403 EXTENSION_PRODUCT_NOT_AUTHORIZED) before the request signature
+ * is checked, so nothing of the route runs. A session with no product (an extension built before the split) is
+ * accepted, as before. Routes that serve both products (validate, health, capabilities) pass no product.
+ */
+export async function requireExtensionAuth(
+  req: NextApiRequest,
+  res: NextApiResponse,
+  opts: { product?: 'linkedin_engagement' | 'salesnav' } = {},
+) {
   // Dev bypass — short-circuit the entire HMAC/session chain when the
   // operator opts in via env. Refuses to run in production no matter what
   // the env says, so a stray flag in a deployed env can't disable auth.
@@ -98,6 +108,10 @@ export async function requireExtensionAuth(req: NextApiRequest, res: NextApiResp
   const session = verifyExtensionSessionToken(bearer);
   if (!session) {
     res.status(401).json({ success: false, error: 'INVALID_SESSION' });
+    return null;
+  }
+  if (opts.product && session.product && session.product !== opts.product) {
+    res.status(403).json({ success: false, error: 'EXTENSION_PRODUCT_NOT_AUTHORIZED' });
     return null;
   }
 

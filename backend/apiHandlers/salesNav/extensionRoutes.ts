@@ -70,7 +70,7 @@ async function authed(req: NextApiRequest, res: NextApiResponse, deps: SalesNavE
   // ROUTE-AUTH-001: the primitive is INVOKED directly (provenance-checked by check-route-auth); deps only for tests
   const a = deps.auth
     ? await deps.auth(req, res)
-    : ((await requireExtensionAuth(req, res)) as unknown as { session: ExtSession } | null);
+    : ((await requireExtensionAuth(req, res, { product: 'salesnav' })) as unknown as { session: ExtSession } | null);
   if (!a) return null;                                   // the middleware already answered
   const s = a.session;
   const store = storeDepsFor(deps.binding ?? activeExtensionBinding, { ...(deps.store ?? {}), ...(deps.now ? { now: deps.now } : {}) });

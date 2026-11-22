@@ -23,7 +23,7 @@ import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeF
  */
 
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { redeemClaimCode } from '@/backend/services/extensionClaimCodeService';
+import { redeemClaimCode, isExtensionProduct } from '@/backend/services/extensionClaimCodeService';
 import {
   issueExtensionSessionToken,
   deriveExtensionHmacSecret,
@@ -38,14 +38,24 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     return res.status(405).json({ success: false, error: 'Method not allowed' });
   }
 
-  const body = (req.body || {}) as { claim_code?: string; claimCode?: string; runtime_id?: string };
+  const body = (req.body || {}) as { claim_code?: string; claimCode?: string; runtime_id?: string; product?: unknown };
   const claimCode = (body.claim_code ?? body.claimCode ?? '').toString().trim();
   if (!claimCode) {
     return res.status(400).json({ success: false, error: 'claim_code required' });
   }
 
   try {
-    const claim = redeemClaimCode(claimCode);
+    // product: the extension redeeming (owner 2026-11-22). Absent = an extension built before the split (a legacy
+    // session, accepted by both products' routes). Present: it must be known, it can only take a code issued for it
+    // (or by a pre-split page), and it is signed into the session token - the other product's routes refuse it.
+    if (body.product != null && !isExtensionProduct(body.product)) {
+      return res.status(400).json({ success: false, error: 'PRODUCT_INVALID' });
+    }
+    const product = isExtensionProduct(body.product) ? body.product : null;
+    const claim = await redeemClaimCode(claimCode, { product });
+    if (claim === 'unavailable') {
+      return res.status(503).json({ success: false, error: 'CLAIM_STORE_UNAVAILABLE' });
+    }
     if (!claim) {
       return res.status(400).json({ success: false, error: 'INVALID_OR_EXPIRED_CLAIM_CODE' });
     }
@@ -60,6 +70,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       orgId: claim.orgId,
       expiresAt,
       hmacNonce,
+      ...(product ? { product } : {}),
     });
 
     const hmacSecret = deriveExtensionHmacSecret({
@@ -79,6 +90,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
         expires_at: expiresAt,
         polling_interval: 60,
         sync_mode: 'batch',
+        product,
         capability_map_version: CAPABILITY_MAP_VERSION,
       },
     });

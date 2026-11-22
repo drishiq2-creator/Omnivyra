@@ -8,7 +8,12 @@ type ExtensionSessionPayload = {
   // Nonce bound into the session token so the server can re-derive the
   // extension's HMAC secret on every request without persisting raw secrets.
   hmacNonce?: string;
+  // Which Omnivyra LinkedIn extension the session belongs to (owner 2026-11-22). Absent = a session issued to an
+  // extension built before the split; signed with the rest of the payload, so it cannot be changed by the client.
+  product?: 'linkedin_engagement' | 'salesnav';
 };
+
+export type ExtensionSession = ExtensionSessionPayload;
 
 /**
  * SEC91-B1: dedicated secret, then AUTH_SECRET — nothing else. The chain used to continue
@@ -64,6 +69,9 @@ export function verifyExtensionSessionToken(token: string | null | undefined): E
 
   try {
     const payload = JSON.parse(fromBase64Url(payloadBase64)) as ExtensionSessionPayload;
+    if (payload.product !== undefined && payload.product !== 'linkedin_engagement' && payload.product !== 'salesnav') {
+      return null;
+    }
     if (!payload.userId || !payload.orgId || !payload.expiresAt) {
       return null;
     }

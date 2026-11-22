@@ -84,7 +84,8 @@ describe('route inventory', () => {
   it.each(TOKEN_ROUTES)('%s calls requireExtensionAuth and returns on failure before any DB access', (rel) => {
     const src = fs.readFileSync(path.join(ROUTE_DIR, rel), 'utf8');
     const handlerAt = src.indexOf('async function handler');
-    const authAt = src.indexOf('await requireExtensionAuth(req, res)', handlerAt);
+    // The call may name the route's product (owner 2026-11-22 extension split): match the call, not its closing paren.
+    const authAt = src.indexOf('await requireExtensionAuth(req, res', handlerAt);
     const bailAt = src.indexOf('if (!auth) return', authAt);
     const firstDb = (() => {
       const hits = ['.from(', 'supabase.', '.rpc('].map((n) => src.indexOf(n, handlerAt)).filter((i) => i >= 0);

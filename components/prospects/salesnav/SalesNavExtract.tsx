@@ -9,6 +9,7 @@
  * Anything the page could not read is shown as "couldn't check", never as "not accepted" / "not connected".
  */
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import SalesNavExtensionPanel from './SalesNavExtensionPanel';
 import {
   acceptSalesNavRestriction, cancelSalesNavRun, getSalesNavRun, getSalesNavSetup, resumeSalesNavRun,
   SalesNavApiError, startSalesNavRun, type SalesNavRunView, type SalesNavSetup,
@@ -137,6 +138,8 @@ export default function SalesNavExtract({ companyId }: { companyId: string }) {
   return (
     <div className="space-y-6">
       {setupError && <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800" role="alert">{setupError}</div>}
+
+      <SalesNavExtensionPanel companyId={companyId} />
 
       {!setup.gate.allowed && !needsAck && (
         <section className="rounded-2xl border border-gray-200 bg-white p-6 text-sm text-gray-700" data-testid="gate-closed">

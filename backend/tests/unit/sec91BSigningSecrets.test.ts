@@ -42,6 +42,7 @@ const AUTH = 'fake-auth-secret-value';
 const DEDICATED = 'fake-dedicated-extension-secret';
 
 const ext = () => require('../../services/extensionSessionService') as typeof import('../../services/extensionSessionService');
+import { claimCodeTableFake } from '../helpers/claimCodeTableFake';
 const claim = () => require('../../services/extensionClaimCodeService') as typeof import('../../services/extensionClaimCodeService');
 const rpa = () => require('../../services/rpaWorker/rpaAuthTokens') as typeof import('../../services/rpaWorker/rpaAuthTokens');
 const inv = () => require('../../services/invitationService') as typeof import('../../services/invitationService');
@@ -118,15 +119,18 @@ describe('extension session tokens', () => {
 });
 
 describe('extension claim codes', () => {
-  it('creating a claim code fails closed with no secret (no committed literal)', () => {
-    expect(() => claim().createClaimCode('u', 'o')).toThrow(/SIGNING_SECRET_UNAVAILABLE/);
+  it('creating a claim code fails closed with no secret (no committed literal)', async () => {
+    const db = claimCodeTableFake();
+    await expect(claim().createClaimCode('u', 'o', null, { table: db.table })).rejects.toThrow(/SIGNING_SECRET_UNAVAILABLE/);
+    expect(db.calls).toEqual([]);
   });
 
-  it('COMPAT: works with AUTH_SECRET and is single-use', () => {
+  it('COMPAT: works with AUTH_SECRET and is single-use', async () => {
     process.env.AUTH_SECRET = AUTH;
-    const c = claim().createClaimCode('u', 'o');
-    expect(claim().redeemClaimCode(c.code)).toEqual({ userId: 'u', orgId: 'o' });
-    expect(claim().redeemClaimCode(c.code)).toBeNull();
+    const db = claimCodeTableFake();
+    const c = await claim().createClaimCode('u', 'o', null, { table: db.table });
+    expect(await claim().redeemClaimCode(c.code, {}, { table: db.table })).toEqual({ userId: 'u', orgId: 'o', product: null });
+    expect(await claim().redeemClaimCode(c.code, {}, { table: db.table })).toBeNull();
   });
 });
 

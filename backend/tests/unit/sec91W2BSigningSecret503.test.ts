@@ -54,7 +54,7 @@ describe('SEC91-W2B-5 signing secret missing → 503 with a plain code, no env n
 
   it('extension/redeem: a claim minted before the secret went away → 503, no env names', async () => {
     process.env.AUTH_SECRET = 'sec91-w2b-5-test-auth-secret';
-    const claim = createClaimCode('user-x', CO_A);
+    const claim = await createClaimCode('user-x', CO_A);
     delete process.env.AUTH_SECRET;
     const r = await invoke(route('extension/redeem'), { method: 'POST', body: { claim_code: claim.code } });
     expect(r.status).toBe(503);
@@ -73,7 +73,7 @@ describe('COMPAT: with AUTH_SECRET configured (production) the routes issue toke
   });
 
   it('extension/redeem → 200 with a session token', async () => {
-    const claim = createClaimCode('user-x', CO_A);
+    const claim = await createClaimCode('user-x', CO_A);
     const r = await invoke(route('extension/redeem'), { method: 'POST', body: { claim_code: claim.code } });
     expect(r.status).toBe(200);
     expect(typeof r.body.data.session_token).toBe('string');

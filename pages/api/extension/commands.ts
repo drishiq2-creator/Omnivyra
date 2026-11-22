@@ -85,7 +85,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     return res.status(405).json({ success: false, error: 'Method not allowed' });
   }
 
-  const auth = await requireExtensionAuth(req, res);
+  const auth = await requireExtensionAuth(req, res, { product: 'linkedin_engagement' });
   if (!auth) return;
   const { session } = auth;
 
@@ -394,7 +394,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
  * Safe to call repeatedly: an already-acknowledged row returns idempotently.
  */
 async function handleAck(req: NextApiRequest, res: NextApiResponse) {
-  const auth = await requireExtensionAuth(req, res);
+  const auth = await requireExtensionAuth(req, res, { product: 'linkedin_engagement' });
   if (!auth) return;
   const { session } = auth;
 

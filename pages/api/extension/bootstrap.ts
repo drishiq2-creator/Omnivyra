@@ -13,7 +13,7 @@ import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeF
 
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { enforceCompanyAccess } from '@/backend/services/userContextService';
-import { createClaimCode } from '@/backend/services/extensionClaimCodeService';
+import { createClaimCode, isExtensionProduct, ClaimStoreUnavailableError } from '@/backend/services/extensionClaimCodeService';
 import { isSigningSecretUnavailable } from '@/backend/auth/signingSecrets';
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
@@ -22,7 +22,13 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     return res.status(405).json({ success: false, error: 'Method not allowed' });
   }
 
-  const body = (req.body || {}) as { organization_id?: string; organizationId?: string; companyId?: string };
+  const body = (req.body || {}) as { organization_id?: string; organizationId?: string; companyId?: string; product?: unknown };
+  // Which extension the page is pairing (owner 2026-11-22: two LinkedIn extensions). Absent = a page built before the
+  // split (an engagement page); anything else must be a known product.
+  if (body.product != null && !isExtensionProduct(body.product)) {
+    return res.status(400).json({ success: false, error: 'PRODUCT_INVALID' });
+  }
+  const product = isExtensionProduct(body.product) ? body.product : null;
   const organizationId = (body.organization_id ?? body.organizationId ?? body.companyId ?? '').toString().trim();
   if (!organizationId) {
     return res.status(400).json({ success: false, error: 'organization_id required' });
@@ -32,19 +38,23 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     const access = await enforceCompanyAccess({ req, res, companyId: organizationId, requireCampaignId: false });
     if (!access) return;
 
-    const claim = createClaimCode(access.userId, organizationId);
+    const claim = await createClaimCode(access.userId, organizationId, product);
     return res.status(200).json({
       success: true,
       data: {
         claim_code: claim.code,
         expires_at: claim.expiresAt,
         ttl_ms: claim.expiresAt - claim.createdAt,
+        product: claim.product,
       },
     });
   } catch (error) {
     console.error('[extension/bootstrap]', error);
     // SEC91-W2B-5: a missing signing secret is a service condition (503) with a plain
     // code; never echo the error text (it names configuration variables).
+    if (error instanceof ClaimStoreUnavailableError) {
+      return res.status(503).json({ success: false, error: 'CLAIM_STORE_UNAVAILABLE' });
+    }
     if (isSigningSecretUnavailable(error)) {
       return res.status(503).json({ success: false, error: 'SIGNING_SECRET_UNAVAILABLE' });
     }

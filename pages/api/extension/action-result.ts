@@ -73,7 +73,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     return res.status(405).json({ success: false, error: 'Method not allowed' });
   }
 
-  const auth = await requireExtensionAuth(req, res);
+  const auth = await requireExtensionAuth(req, res, { product: 'linkedin_engagement' });
   if (!auth) return;
   const { session } = auth;
 
