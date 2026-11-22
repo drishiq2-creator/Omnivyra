@@ -5,14 +5,16 @@
 -- REFUSES while any row holds 'executing' or 'sent_unverified': those records are real outcomes (a send whose delivery
 -- is unknown, or an execution in progress) and are never rewritten or discarded by a rollback. An operator resolves
 -- them first.
--- Only the exact seven-status rule written by the forward migration is replaced; when the old rule is already in place
--- this is a no-op; any other shape is refused (nothing changed). Re-running is safe.
+-- Only the exact seven-status rule written by the forward migration is replaced - validated, or still NOT VALID when its
+-- second transaction never ran (review F3); when the old rule is already in place this is a no-op; any other shape is
+-- refused (nothing changed). Re-running is safe.
 -- Note: the code on main also writes these statuses, so after a rollback executions fail again exactly as before.
 
 BEGIN;
 SET LOCAL lock_timeout = '5s';
--- Block writes while checking and replacing, so no row can take a new status between the check and the swap.
-LOCK TABLE public.community_ai_actions IN SHARE ROW EXCLUSIVE MODE;
+-- The lock the swap needs, taken up front (review F4): no row can take a new status between the check and the swap,
+-- and there is no lock upgrade to wait on half-way. lock_timeout bounds the wait; on timeout nothing has changed.
+LOCK TABLE public.community_ai_actions IN ACCESS EXCLUSIVE MODE;
 
 DO $rollback$
 DECLARE
@@ -28,7 +30,7 @@ BEGIN
   IF v_def = v_old THEN
     RETURN;   -- already rolled back
   END IF;
-  IF v_def IS DISTINCT FROM v_new THEN
+  IF v_def IS DISTINCT FROM v_new AND v_def IS DISTINCT FROM v_new || ' NOT VALID' THEN
     RAISE EXCEPTION 'CAS rollback refused: community_ai_actions_status_check is not the rule this migration wrote (found: %) - nothing changed', coalesce(v_def, '<absent>');
   END IF;
 
