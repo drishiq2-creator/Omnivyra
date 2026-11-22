@@ -163,7 +163,10 @@ export function useCommunityActions() {
 
   const filteredActions = useMemo(() => {
     const tabMatches = actions.filter(
-      (action) => action.status.toLowerCase() === activeTab.toLowerCase()
+      (action) =>
+        action.status.toLowerCase() === activeTab.toLowerCase() ||
+        // An approved LinkedIn new DM not yet queued stays visible under Pending, with its "Send" button (review 3 F1).
+        (activeTab === 'Pending' && Boolean(action.dm_lead_id) && action.status.toLowerCase() === 'approved')
     );
     const statusFiltered =
       statusFilter === 'failed'
@@ -276,6 +279,25 @@ export function useCommunityActions() {
       const data = await response.json().catch(() => null);
       if (!response.ok) {
         throw new Error(data?.error || 'Approval failed');
+      }
+      // A LinkedIn new DM ("Message on LinkedIn") has one way out: approving it queues it for the requester's Sales
+      // Navigator extension. No mode and no text override are sent - the server forces both (review 3 F1).
+      if (action.dm_lead_id && !data?.idempotent) {
+        const queued = await fetchWithAuth('/api/community-ai/actions/execute', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            tenant_id: tenantId,
+            organization_id: tenantId,
+            action_id: action.action_id,
+            approved: true,
+          }),
+        });
+        const queuedData = await queued.json().catch(() => null);
+        if (!queued.ok) {
+          await loadActions();
+          throw new Error(`Approved, but not yet queued for sending (${queuedData?.error || queued.status}). Use "Send" to queue it.`);
+        }
       }
       setActions((prev) =>
         prev.map((entry) =>

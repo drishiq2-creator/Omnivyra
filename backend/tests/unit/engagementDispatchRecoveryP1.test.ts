@@ -274,3 +274,20 @@ describe('bounds', () => {
     expect(r).toMatchObject({ scanned: 0, released: 0, errors: [] });
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+describe('review 3 T / N5 — a "Message on LinkedIn" new DM is never released as abandoned', () => {
+  it('an approved new DM queued for hours (its sender has not polled yet) stays pending', async () => {
+    const dm = action({ dm_lead_id: 'lead-1', target_id: 'https://www.linkedin.com/in/lead/' });
+    const r = await recoverAbandonedBrowserDispatches();
+    expect(r.released).toBe(0);
+    expect(dm.status).toBe('pending');
+  });
+
+  it('CONTROL: the same row without dm_lead_id IS released', async () => {
+    const plain = action({ dm_lead_id: null, target_id: 'https://www.linkedin.com/in/lead/' });
+    const r = await recoverAbandonedBrowserDispatches();
+    expect(r.released).toBe(1);
+    expect(plain.status).toBe('skipped');
+  });
+});

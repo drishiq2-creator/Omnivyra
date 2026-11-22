@@ -10,14 +10,22 @@ const ORG = 'org-1';
 let actionRow: Row;
 const executed: Array<{ action: Row; approved: boolean; options: Row }> = [];
 const transitions: Row[] = [];
+// What the route's READ returns, when it differs from the row the UPDATE meets (a change between read and write).
+let readSnapshot: Row | null = null;
+// The filters of each UPDATE, as written by the route ([op, column, value]); an UPDATE matches only if the row passes.
+const updateFilters: Array<Array<[string, string, unknown]>> = [];
 
 const supabaseDouble = {
   from: (_t: string) => {
     let patch: Row | null = null;
+    const filters: Array<[string, string, unknown]> = [];
+    const add = (op: string) => (k: string, v: unknown) => { if (patch) filters.push([op, k, v]); return q; };
+    const passes = () => filters.every(([op, k, v]) =>
+      op === 'eq' ? actionRow[k] === v : op === 'in' ? (v as unknown[]).includes(actionRow[k]) : (actionRow[k] ?? null) === v);
     const q: any = {
-      select: () => q, eq: () => q, in: () => q, is: () => q,
-      update: (p: Row) => { patch = p; transitions.push(p); return q; },
-      maybeSingle: async () => (patch ? { data: { ...actionRow, ...patch }, error: null } : { data: null, error: null }),
+      select: () => q, eq: add('eq'), in: add('in'), is: add('is'),
+      update: (p: Row) => { patch = p; transitions.push(p); updateFilters.push(filters); return q; },
+      maybeSingle: async () => (patch && passes() ? { data: { ...actionRow, ...patch }, error: null } : { data: null, error: null }),
     };
     return q;
   },
@@ -25,7 +33,7 @@ const supabaseDouble = {
 
 jest.mock('../../../lib/platform/routeFactory', () => ({ createApiRoute: (h: unknown) => h }));
 jest.mock('../../db/supabaseClient', () => ({ supabase: supabaseDouble }));
-jest.mock('../../db/communityAiActionStore', () => ({ getCommunityAiActionById: async () => ({ data: actionRow, error: null }) }));
+jest.mock('../../db/communityAiActionStore', () => ({ getCommunityAiActionById: async () => ({ data: readSnapshot ?? actionRow, error: null }) }));
 jest.mock('../../../pages/api/community-ai/utils', () => ({
   requireTenantScope: async () => ({ organizationId: ORG, tenantId: ORG }),
   enforceActionRole: async () => ({ userId: 'approver-1', role: 'COMPANY_ADMIN' }),
@@ -58,7 +66,7 @@ async function execute(body: Row) {
   return res;
 }
 
-beforeEach(() => { executed.length = 0; transitions.length = 0; actionRow = newDmRow(); jest.spyOn(console, 'warn').mockImplementation(() => undefined); });
+beforeEach(() => { readSnapshot = null; executed.length = 0; transitions.length = 0; updateFilters.length = 0; actionRow = newDmRow(); jest.spyOn(console, 'warn').mockImplementation(() => undefined); });
 afterEach(() => jest.restoreAllMocks());
 
 describe('execute route: an approved "Message on LinkedIn" request', () => {
@@ -87,10 +95,43 @@ describe('execute route: an approved "Message on LinkedIn" request', () => {
     expect(executed).toHaveLength(1);
   });
 
+  it('review 3 N-a: an already QUEUED new DM (pending with approved_at) is never executed again', async () => {
+    actionRow = newDmRow({ status: 'pending' });
+    const res = await execute({});
+    expect(res.statusCode).toBe(409);
+    expect(res.body.error).toBe('NEW_DM_ALREADY_QUEUED');
+    expect(executed).toHaveLength(0);
+    expect(transitions).toHaveLength(0);
+  });
+
+  it('review 3 N-a: a CLAIMED new DM is never executed again', async () => {
+    actionRow = newDmRow({ dispatch_lease_id: 'lease-1' });
+    expect((await execute({})).body.error).toBe('NEW_DM_ALREADY_QUEUED');
+    expect(executed).toHaveLength(0);
+  });
+
+  it('review 3 N-a: claimed between the route\'s read and its update -> the transition matches nothing, nothing executes', async () => {
+    readSnapshot = newDmRow();                                  // the route reads an approved, unclaimed row ...
+    actionRow = newDmRow({ dispatch_lease_id: 'lease-race' });  // ... but by the update an extension has claimed it
+    const res = await execute({});
+    expect(updateFilters[0]).toEqual(expect.arrayContaining([['eq', 'status', 'approved'], ['is', 'dispatch_lease_id', null]]));
+    expect(executed).toHaveLength(0);
+    expect(res.statusCode).toBeGreaterThanOrEqual(400);
+  });
+
+  it('CONTROL for the race: the same read/update pair with the row still unclaimed executes once', async () => {
+    readSnapshot = newDmRow();
+    actionRow = newDmRow();
+    expect((await execute({})).statusCode).toBeLessThan(300);
+    expect(executed).toHaveLength(1);
+  });
+
   it('CONTROL: an ordinary action keeps the caller\'s mode and key behaviour (manual default, no newdm key)', async () => {
     actionRow = newDmRow({ dm_lead_id: null, dm_sender_member_id: null, action_type: 'reply', target_id: 'post-1', suggested_text: 'Thanks' });
     await execute({});
     expect(executed[0].action.execution_mode).toBe('manual');
     expect(executed[0].options.idempotency_key).toBeUndefined();
+    // and its transition keeps the ordinary status set (no new-DM narrowing)
+    expect(updateFilters[0]).toEqual(expect.arrayContaining([['in', 'status', ['pending', 'approved', 'scheduled']]]));
   });
 });

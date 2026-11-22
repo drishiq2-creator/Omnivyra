@@ -230,3 +230,20 @@ describe('the claim is atomic against a release-and-requeue between read and cla
     expect((await poll()).ids).toEqual([dm.id]);
   });
 });
+
+describe('review 3 T / N4: a new-DM row without its job never blocks the one-row page', () => {
+  it('a newer approved new DM that has NO command_chain is not offered; the older valid one is', async () => {
+    const valid = newDm({ dm_lead_id: 'lead-a' });
+    const stepless = newDm({ dm_lead_id: 'lead-b', command_chain: null });   // created later -> sorts first
+    db.actions = [valid, stepless];
+    expect((await poll()).ids).toEqual([valid.id]);
+    expect(claimed(stepless.id)).toBe(false);
+  });
+
+  it('CONTROL: with the job present, the newer row is the one offered (the page really is one row)', async () => {
+    const older = newDm({ dm_lead_id: 'lead-a' });
+    const newer = newDm({ dm_lead_id: 'lead-b' });
+    db.actions = [older, newer];
+    expect((await poll()).ids).toEqual([newer.id]);
+  });
+});

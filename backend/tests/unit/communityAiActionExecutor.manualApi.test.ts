@@ -155,6 +155,28 @@ describe('communityAiActionExecutor — manual api-mode', () => {
     expect(result.response?.api_error).toBe('LINKEDIN_RATE_LIMIT');
   });
 
+  // Review 3 T: the runtime guard - a "Message on LinkedIn" row whose start_new_dm step cannot be built is FAILED,
+  // never queued as a bare browser dispatch with no job.
+  const newDmRow = (over: Record<string, unknown> = {}) => ({
+    ...baseAction(), action_type: 'dm' as const, target_id: 'https://www.linkedin.com/in/alice-example/',
+    suggested_text: 'Hello Alice', execution_mode: 'browser', acting_user_id: 'user-1', dm_lead_id: 'lead-1',
+    dm_sender_member_id: 'ACoAAMEMEMEMEMEMEMEMEMEMEME01', ...over,
+  });
+
+  it('a new DM whose step cannot be built (no sender account) is failed NEW_DM_COMMAND_INVALID, not dispatched', async () => {
+    const result = await executeAction(newDmRow({ dm_sender_member_id: null }) as any, true,
+      { source: 'manual', notify: false, webhook: false });
+    expect(result.status).toBe('failed');
+    expect(result.error).toBe('NEW_DM_COMMAND_INVALID');
+    expect((result as any).command_chain).toBeUndefined();
+  });
+
+  it('CONTROL: a complete new DM is dispatched as exactly one start_new_dm step', async () => {
+    const result = await executeAction(newDmRow() as any, true, { source: 'manual', notify: false, webhook: false });
+    expect(result.status).toBe('dispatched');
+    expect(((result as any).command_chain || []).map((st: any) => st.action_type)).toEqual(['start_new_dm']);
+  });
+
   it('queues LinkedIn DM triage as continue_thread, not start_new_dm', async () => {
     const result = await executeAction(
       {

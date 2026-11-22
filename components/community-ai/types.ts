@@ -72,6 +72,8 @@ export type PendingAction = TenantScoped & {
   acting_user_id?: string | null;
   dm_lead_id?: string | null;
   dm_sender_member_id?: string | null;
+  approved_at?: string | null;
+  dm_claimed?: boolean;
   suggested_text?: string | null;
   final_text?: string | null;
   risk_level: string;

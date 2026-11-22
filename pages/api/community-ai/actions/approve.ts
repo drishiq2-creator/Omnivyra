@@ -61,6 +61,12 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     return res.status(200).json({ ...action, idempotent: true });
   }
 
+  // A LinkedIn new DM that is already approved and queued for its extension is stored as 'pending' WITH approved_at.
+  // Approving it again would move it out of the extension's queue under a running send (review 3 N-a): no-op.
+  if ((action as any).dm_lead_id && action.approved_at) {
+    return res.status(200).json({ ...action, idempotent: true });
+  }
+
   if (action.status !== 'pending') {
     return res.status(409).json({ error: 'ACTION_NOT_PENDING', current_status: action.status });
   }

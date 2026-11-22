@@ -177,7 +177,10 @@ const resolveActionRecord = async (
     .eq('organization_id', organizationId)
     .eq('platform', platform)
     .eq('action_type', actionType)
-    .eq('target_id', targetId);
+    .eq('target_id', targetId)
+    // A LinkedIn new DM (dm_lead_id set) is sent only through its own human-approved, sender-bound path. Auto rules
+    // must never adopt it: they would execute it without approval and without its sender binding.
+    .is('dm_lead_id', null);
 
   if (!options?.allowAnyStatus) {
     query = query.eq('status', 'pending');
@@ -440,6 +443,10 @@ export const evaluateAutoRules = async (input: AutoRuleInput) => {
           ...action,
           blocked_reason: 'No applicable playbook',
         };
+      }
+      // Belt and braces for the lookup filter above: never auto-execute a LinkedIn new DM.
+      if ((record as { dm_lead_id?: string | null }).dm_lead_id) {
+        return { ...action, blocked_reason: 'LinkedIn new DMs are sent only after human approval' };
       }
 
       let playbook = null;

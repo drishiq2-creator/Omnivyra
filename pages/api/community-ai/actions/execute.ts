@@ -110,6 +110,11 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (isLinkedInNewDm && body.final_text != null && String(body.final_text) !== String(action.suggested_text ?? '')) {
     return res.status(409).json({ error: 'NEW_DM_TEXT_CHANGE_NOT_ALLOWED' });
   }
+  // A new DM is queued for its extension exactly once: only from 'approved', never claimed. Once queued it is stored as
+  // 'pending' with approved_at set; executing it again would rewrite its job under a running extension (review 3 N-a).
+  if (isLinkedInNewDm && (action.status !== 'approved' || (action as any).dispatch_lease_id)) {
+    return res.status(409).json({ error: 'NEW_DM_ALREADY_QUEUED', current_status: action.status });
+  }
 
   const requestedMode = (body.execution_mode || action.execution_mode || '').toString();
   // Manual is the human-driven simulation path; everything else is delegated
@@ -165,11 +170,13 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (isLinkedInNewDm) transitionPayload.idempotency_key = `newdm:${action.id}`;
   else if (idempotencyKey) transitionPayload.idempotency_key = idempotencyKey;
 
-  const { data: claimed, error: claimError } = await supabase
+  const transition = supabase
     .from('community_ai_actions')
     .update(transitionPayload)
-    .eq('id', actionId)
-    .in('status', Array.from(EXECUTABLE_FROM_STATUSES))
+    .eq('id', actionId);
+  const { data: claimed, error: claimError } = await (isLinkedInNewDm
+    ? transition.eq('status', 'approved').is('dispatch_lease_id', null)
+    : transition.in('status', Array.from(EXECUTABLE_FROM_STATUSES)))
     .select('id, status')
     .maybeSingle();
 

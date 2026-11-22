@@ -15,7 +15,9 @@ BEGIN;
 UPDATE public.community_ai_actions
    SET status = 'skipped', skip_reason = 'rollback: linkedin new dm withdrawn before the previous build', updated_at = now()
  WHERE dm_lead_id IS NOT NULL
-   AND status IN ('pending', 'approved', 'dispatched', 'acknowledged', 'executing')
+   -- Not 'executing': an executor may be writing that row right now and would overwrite 'skipped' (review 3 N-b). It
+   -- stays open, so the guard below refuses; run this file again once execution has finished.
+   AND status IN ('pending', 'approved', 'dispatched', 'acknowledged')
    AND dispatch_lease_id IS NULL
    AND dispatch_acknowledged_at IS NULL;
 
@@ -24,7 +26,7 @@ BEGIN
   IF EXISTS (SELECT 1 FROM public.community_ai_actions
               WHERE dm_lead_id IS NOT NULL
                 AND status IN ('pending', 'approved', 'dispatched', 'acknowledged', 'executing')) THEN
-    RAISE EXCEPTION 'LND rollback prepare refused: a CLAIMED new LinkedIn DM is still open (delivery unknown) - resolve it first';
+    RAISE EXCEPTION 'LND rollback prepare refused: a new LinkedIn DM is CLAIMED (delivery unknown - an operator resolves it) or still EXECUTING (re-run this file shortly)';
   END IF;
 END
 $guard$;

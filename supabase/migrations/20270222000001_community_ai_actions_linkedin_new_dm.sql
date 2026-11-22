@@ -17,6 +17,14 @@
 -- DEPLOY ORDER (review B2): apply 20270222000000 and this file BEFORE deploying the code that reads them - the command
 -- hand-out, the abandoned-dispatch recovery and pairing all depend on them.
 --
+-- HOW TO APPLY (review 3 M1): this file mixes two transactions with a CREATE INDEX CONCURRENTLY, which cannot run
+-- inside a transaction block. Apply it ONLY with `psql -v ON_ERROR_STOP=1 -f <file>` (as the CI replay does), or
+-- statement by statement. NEVER as one query - `psql -c "$(cat file)"`, `supabase db push`, or the whole file in ONE
+-- Management-API call: that is one implicit transaction, so the index step fails AFTER the first transaction has
+-- committed (measured on PG17, 2026-11-22: columns + NOT VALID CHECK present, no index). Do not use `psql -1` either:
+-- it only works because this file's own COMMIT ends psql's wrapper. Re-running with `psql -f` after a failure at any
+-- step converges (the index step drops a half-built index first - review 3 M2; measured).
+--
 -- This version: never applied anywhere.
 
 BEGIN;
@@ -77,8 +85,12 @@ $checks$;
 COMMIT;
 
 -- One OPEN request per (company, lead, sending user) (review N1): closes the request route's select-then-insert race.
--- Every non-terminal status of the status CHECK counts as open. CONCURRENTLY: built without blocking writes (it cannot
--- run inside a transaction block). Only new-DM rows are indexed.
+-- The open statuses are the ones a new DM can be in ('scheduled' is not: a new DM is never scheduled - the actions
+-- route refuses it). CONCURRENTLY: built without blocking writes (it cannot run inside a transaction block). Only
+-- new-DM rows are indexed.
+-- A failed earlier CONCURRENTLY build leaves an INVALID index that IF NOT EXISTS would skip; drop it first so a re-run
+-- heals itself (review 3 M2). The file is never applied anywhere yet, so this drops nothing in use.
+DROP INDEX CONCURRENTLY IF EXISTS public.community_ai_actions_one_open_linkedin_new_dm;
 CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS community_ai_actions_one_open_linkedin_new_dm
   ON public.community_ai_actions (organization_id, dm_lead_id, acting_user_id)
   WHERE dm_lead_id IS NOT NULL AND status IN ('pending', 'approved', 'dispatched', 'acknowledged', 'executing');

@@ -162,6 +162,9 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       acting_user_id: action.acting_user_id ?? null,
       dm_lead_id: action.dm_lead_id ?? null,
       dm_sender_member_id: action.dm_sender_member_id ?? null,
+      // A new DM's progress: approved_at set while 'pending' means queued for the extension; a lease means taken.
+      approved_at: action.dm_lead_id ? action.approved_at ?? null : undefined,
+      dm_claimed: action.dm_lead_id ? Boolean(action.dispatch_lease_id) : undefined,
       suggested_text: action.suggested_text,
       final_text: action.final_text,
       tone: action.tone,
@@ -299,6 +302,35 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
 
     if (action.tenant_id !== scope.tenantId || action.organization_id !== scope.organizationId) {
       return res.status(403).json({ error: 'TENANT_SCOPE_VIOLATION' });
+    }
+
+    // A LinkedIn new DM is sent only by its requester's Sales Navigator extension after approval; the scheduler
+    // cannot run it (review 3 F1), so it is never scheduled.
+    if (body.status === 'scheduled' && action.dm_lead_id) {
+      return res.status(409).json({ error: 'NEW_DM_SCHEDULE_NOT_SUPPORTED' });
+    }
+
+    // A claimed new DM may be on its way out of the user's browser: skipping it now would drop its real outcome.
+    // It can be skipped only while no extension has taken it.
+    if (body.status === 'skipped' && action.dm_lead_id) {
+      const { data: skippedRow, error: skipError } = await supabase
+        .from('community_ai_actions')
+        .update({ status: 'skipped', updated_at: new Date().toISOString() })
+        .eq('id', actionId)
+        .in('status', ['pending', 'approved'])
+        .is('dispatch_lease_id', null)
+        .select('id')
+        .maybeSingle();
+      if (skipError) return res.status(500).json({ error: 'FAILED_TO_SKIP' });
+      if (!skippedRow) return res.status(409).json({ error: 'NEW_DM_IN_PROGRESS' });
+      await logCommunityAiActionEvent({
+        action_id: actionId,
+        tenant_id: scope.tenantId,
+        organization_id: scope.organizationId,
+        event_type: 'skipped',
+        event_payload: null,
+      });
+      return res.status(200).json({ status: 'skipped' });
     }
 
     if (body.status === 'scheduled') {

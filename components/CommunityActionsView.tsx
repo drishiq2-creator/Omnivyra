@@ -198,24 +198,33 @@ export default function CommunityActionsView({ d }: { d: S }) {
                 const hasManualConfig = Boolean(executionConfig);
                 const isApproved = status === 'approved';
                 const isPending = status === 'pending';
+                // "Message on LinkedIn" (review 3 F1): a new DM has exactly one path - approve (which queues it for the
+                // requester's Sales Navigator extension), or "Send" if it was approved but not yet queued. While it is
+                // 'pending' WITH approved_at it is queued; once an extension has taken it, it can no longer be skipped.
+                const isNewDm = Boolean(action.dm_lead_id);
+                const newDmQueued = isNewDm && isPending && Boolean(action.approved_at);
+                const showSendNewDm = isNewDm && isApproved && permissions.canExecute;
                 const showApprove =
                   requiresApproval &&
                   isPending &&
                   !isTerminal &&
                   permissions.canApprove &&
-                  !isManualExecution;
+                  !isManualExecution &&
+                  !newDmQueued;
                 const showManualExecute =
+                  !isNewDm &&
                   !isTerminal &&
                   permissions.canExecute &&
                   isApproved &&
                   hasManualConfig &&
                   manualAllowedByPlaybook;
                 const showAutoExecute =
-                  !requiresApproval && !isTerminal && permissions.canExecute;
-                const showPlatformView = !isTerminal && isManualExecution;
-                const showSchedule = !isTerminal && permissions.canSchedule;
-                const showSkip = !isTerminal && permissions.canSkip;
+                  !isNewDm && !requiresApproval && !isTerminal && permissions.canExecute;
+                const showPlatformView = !isNewDm && !isTerminal && isManualExecution;
+                const showSchedule = !isNewDm && !isTerminal && permissions.canSchedule;
+                const showSkip = !isTerminal && permissions.canSkip && !(isNewDm && action.dm_claimed);
                 const showNoPermission =
+                  !showSendNewDm &&
                   !showApprove &&
                   !showManualExecute &&
                   !showAutoExecute &&
@@ -248,6 +257,13 @@ export default function CommunityActionsView({ d }: { d: S }) {
                           New LinkedIn message to a lead. Sent only after approval, only by the requester&apos;s own Sales
                           Navigator extension, from LinkedIn account …{String(action.dm_sender_member_id || '').slice(-6)}
                           {' '}(requested by user …{String(action.acting_user_id || '').slice(-6)}). First-degree connections only.
+                          {newDmQueued && (
+                            <div className="mt-1 font-medium" data-testid="linkedin-new-dm-progress">
+                              {action.dm_claimed
+                                ? 'Being sent by the Sales Navigator extension - delivery not yet confirmed.'
+                                : "Approved and queued - waiting for the requester's Sales Navigator extension."}
+                            </div>
+                          )}
                         </div>
                       )}
                     </td>
@@ -313,7 +329,17 @@ export default function CommunityActionsView({ d }: { d: S }) {
                             onClick={() => handleApprove(action)}
                             disabled={isExecuting}
                           >
-                            {isExecuting ? 'Approving...' : 'Approve'}
+                            {isExecuting ? 'Approving...' : isNewDm ? 'Approve and send' : 'Approve'}
+                          </button>
+                        )}
+                        {showSendNewDm && (
+                          <button
+                            className="px-2 py-1 text-xs rounded border border-emerald-500 text-emerald-600"
+                            onClick={() => handleExecute(action)}
+                            disabled={isExecuting}
+                            data-testid="linkedin-new-dm-send"
+                          >
+                            {isExecuting ? 'Queuing...' : 'Send'}
                           </button>
                         )}
                         {showManualExecute && (

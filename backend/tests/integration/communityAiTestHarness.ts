@@ -143,6 +143,8 @@ const resolveSelect = (table: string, state: any) => {
     if (state.filters.action_type) rows = rows.filter((row) => row.action_type === state.filters.action_type);
     if (state.filters.target_id) rows = rows.filter((row) => row.target_id === state.filters.target_id);
     if (state.filters.status) rows = rows.filter((row) => row.status === state.filters.status);
+    // .is(field, null) - e.g. auto rules never adopt a LinkedIn new DM (dm_lead_id must be NULL).
+    for (const [field, value] of state.isFilters || []) rows = rows.filter((row) => (row[field] ?? null) === value);
     if (state.lteFilter) {
       rows = rows.filter((row) => {
         const value = row[state.lteFilter.field];
@@ -407,6 +409,7 @@ export const buildQuery = (table: string) => {
     insertRows?: any[];
     limitValue?: number;
     single?: boolean;
+    isFilters?: Array<[string, any]>;
   } = { filters: {} };
   const query: any = {
     select: jest.fn().mockReturnThis(),
@@ -418,6 +421,7 @@ export const buildQuery = (table: string) => {
     order: jest.fn((field: string, options?: any) => { state.order = { field, ascending: options?.ascending !== false }; return query; }),
     single: jest.fn(async () => { state.single = true; return resolveSelect(table, state); }),
     maybeSingle: jest.fn(async () => { state.single = true; return resolveSelect(table, state); }),
+    is: jest.fn((field: string, value: any) => { (state.isFilters ||= []).push([field, value]); return query; }),
     not: jest.fn(() => query),
     or: jest.fn(() => query),
     then: (resolve: any, reject: any) => Promise.resolve(resolveSelect(table, state)).then(resolve, reject),
