@@ -222,6 +222,9 @@ async function writeOutboundDmToThread(input: {
       .eq('platform', input.platform)
       .eq('action_type', 'dm')
       .eq('status', 'pending')
+      // A LinkedIn new DM ("Message on LinkedIn") is never superseded here: it belongs to one requester and may be on
+      // its way out of that requester's browser; failing it would discard its real outcome (final review #4).
+      .is('dm_lead_id', null)
       .in('target_id', staleTargets);
     if (supersedeError) {
       console.warn('[engagement/outbound-mirror] pending DM supersede failed:', supersedeError.message);

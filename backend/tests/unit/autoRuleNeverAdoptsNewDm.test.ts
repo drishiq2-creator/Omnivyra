@@ -8,6 +8,7 @@
 
 type Row = Record<string, any>;
 const rows: Row[] = [];
+let failActionReads = false;   // final review #2: a failed read of community_ai_actions
 
 function table(name: string) {
   const filters: Array<(r: Row) => boolean> = [];
@@ -15,6 +16,7 @@ function table(name: string) {
   const result = () => {
     if (inserted) return { data: [inserted], error: null };
     if (name !== 'community_ai_actions') return { data: [], error: null };
+    if (failActionReads) return { data: null, error: { code: '42703', message: 'column does not exist' } };
     return { data: rows.filter((r) => filters.every((f) => f(r))), error: null };
   };
   const chain: any = {
@@ -101,7 +103,15 @@ async function run() {
 }
 
 describe('auto rules never adopt a LinkedIn new DM (third review N-d)', () => {
-  beforeEach(() => (executeAction as jest.Mock).mockClear());
+  beforeEach(() => { (executeAction as jest.Mock).mockClear(); failActionReads = false; });
+
+  it('final review #2: a FAILED lookup is never "no record" - nothing is inserted and nothing is executed', async () => {
+    seed({ dm_lead_id: null });
+    failActionReads = true;
+    await run();
+    expect(executeAction).not.toHaveBeenCalled();
+    expect(rows).toHaveLength(1);   // no second record for the same action
+  });
 
   it('CONTROL: an ordinary existing row with the same key IS auto-executed (the test reaches execution)', async () => {
     seed({ dm_lead_id: null });

@@ -8,7 +8,15 @@
 --   1. this file: every OPEN new-DM row that was NEVER claimed -> 'skipped' (provably unsent). Refuses if a CLAIMED
 --      open row exists (its delivery is unknown: an operator decides; it is never released to anyone).
 --   2. deploy the previous server build.
+--   2b. run THIS file AGAIN (it is idempotent): a request created between step 1 and the end of step 2 by the still-live
+--       new build would otherwise survive into the old build (final review #5).
 --   3. supabase/migrations/rollbacks/community_ai_actions_linkedin_new_dm_rollback.sql (drops the index, constraint and columns).
+--
+-- If this file keeps refusing:
+--   - a CLAIMED row (dispatch_lease_id set): its delivery is UNKNOWN. An operator checks the sender's LinkedIn
+--     conversation, then sets status 'executed' (it was sent) or 'failed' (it was not) by hand - never 'pending'.
+--   - a row stuck in 'executing' with no lease (an execute call that died before queuing): nothing was handed to an
+--     extension, so nothing was sent; an operator sets it to 'skipped' by hand once no execute call is running.
 
 BEGIN;
 

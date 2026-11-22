@@ -186,7 +186,13 @@ const resolveActionRecord = async (
     query = query.eq('status', 'pending');
   }
 
-  const { data: existing } = await query.limit(1);
+  const { data: existing, error: lookupError } = await query.limit(1);
+  // A failed read is never "no existing record" (final review #2): inserting then would create a second record for the
+  // same action and auto-execute it. Refuse instead.
+  if (lookupError) {
+    console.warn('[community-ai/auto-rules] action lookup failed; nothing recorded or executed:', lookupError.code || lookupError.message);
+    return null;
+  }
 
   if (existing && existing.length > 0) {
     return existing[0];

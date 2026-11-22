@@ -112,6 +112,14 @@ BEGIN
                   AND conrelid = 'public.community_ai_actions'::regclass AND convalidated) THEN
     RAISE EXCEPTION 'LND postcondition: community_ai_actions_linkedin_new_dm_shape missing or not validated';
   END IF;
+  -- The constraint is THIS one, not a weaker earlier draft adopted by IF NOT EXISTS (final review #6): it must bind the
+  -- sender account and the sending user.
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'community_ai_actions_linkedin_new_dm_shape'
+                  AND conrelid = 'public.community_ai_actions'::regclass
+                  AND pg_get_constraintdef(oid) LIKE '%dm_sender_member_id IS NOT NULL%'
+                  AND pg_get_constraintdef(oid) LIKE '%acting_user_id IS NOT NULL%') THEN
+    RAISE EXCEPTION 'LND postcondition: community_ai_actions_linkedin_new_dm_shape has an unexpected definition - drop it and re-run';
+  END IF;
   -- A CONCURRENTLY build that failed leaves an INVALID index: refuse rather than run without the guard.
   IF NOT EXISTS (SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
                   WHERE c.relname = 'community_ai_actions_one_open_linkedin_new_dm' AND i.indisvalid AND i.indisunique) THEN
