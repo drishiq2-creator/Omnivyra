@@ -5,9 +5,12 @@ import { chromium, type Browser, type BrowserContext, type Page } from 'playwrig
 import { createClient } from '@supabase/supabase-js';
 import dotenv from 'dotenv';
 import {
-  assertNonProductionE2EEnvironment,
+  assertLocalStackReachable,
+  createGuardedAdminFetch,
   loadE2EEnvFile,
+  resolveAuthE2ETarget,
   type E2EGuardResult,
+  type ResolvedAuthE2ETarget,
 } from './e2eEnvironmentGuard';
 import { findAuthStateKeys, isAuthStateKey } from './authStateKeys';
 import { cleanupIdentity } from './e2eIdentityCleanup';
@@ -18,53 +21,66 @@ import { cleanupIdentity } from './e2eIdentityCleanup';
 // There is deliberately no fallback to .env.local.
 loadE2EEnvFile(dotenv.config);
 
-export const BASE_URL = process.env.AUTH_E2E_BASE_URL || 'http://127.0.0.1:3000';
+// ONE authoritative target resolution (tests/auth/e2eEnvironmentGuard.ts,
+// resolveAuthE2ETarget). Fail-closed and pure: it runs at module load, before
+// any admin API call or browser request is reachable. AUTH_E2E_TARGET unset =
+// the hosted E2E project exactly as before; AUTH_E2E_TARGET=local = a disposable
+// loopback stack only. Production is refused in every mode, across every
+// target-bearing variable; there is no fallback target.
+const resolvedTarget: ResolvedAuthE2ETarget = resolveAuthE2ETarget(process.env);
+
+export const BASE_URL = resolvedTarget.baseUrl;
 export const TEST_PASSWORD = 'CodexTest9!';
 const DEFAULT_TIMEOUT_MS = Number(process.env.AUTH_E2E_TIMEOUT_MS ?? 120_000);
 const POLL_INTERVAL_MS = 250;
 
-const supabaseUrl =
-  process.env.E2E_SUPABASE_URL ||
-  process.env.E2E_NEXT_PUBLIC_SUPABASE_URL ||
-  process.env.SUPABASE_URL ||
-  process.env.NEXT_PUBLIC_SUPABASE_URL;
+const supabaseUrl = resolvedTarget.supabaseUrl;
 // Secret key (sb_secret_...) first; the legacy service_role names remain a
-// migration-only fallback for E2E projects that have not moved to the new model.
-const serviceRoleKey =
-  process.env.E2E_SUPABASE_SECRET_KEY ||
-  process.env.SUPABASE_SECRET_KEY ||
-  process.env.E2E_SUPABASE_SERVICE_ROLE_KEY ||
-  process.env.SUPABASE_SERVICE_ROLE_KEY;
+// migration-only fallback (precedence is defined once, in SERVICE_KEY_VARIABLES).
+const serviceRoleKey = resolvedTarget.serviceRoleKey;
 
-// Fail-closed: refuses production, empty, malformed, local and placeholder
-// targets. Runs at module load, i.e. before any admin API call is reachable.
-// This replaces the two `assert` calls that only checked for presence — a
-// present-but-production URL was exactly the hazard.
-export const e2eEnvironment: E2EGuardResult = assertNonProductionE2EEnvironment({
-  supabaseUrl,
-  serviceRoleKey,
-  expectedProjectRef: process.env.AUTH_E2E_EXPECTED_PROJECT_REF ?? undefined,
-});
+export const e2eEnvironment: E2EGuardResult = resolvedTarget.guard;
 
 /**
- * Re-asserts the guard immediately before every privileged admin call, so that
- * removing the module-level assertion alone cannot re-open the production path.
+ * Re-resolves the target immediately before every privileged admin call, so that
+ * removing the module-level resolution alone cannot re-open the production path,
+ * and a target that changed after module load is refused rather than followed.
  */
 function assertGuardedAdminCall(operation: string): void {
   try {
-    assertNonProductionE2EEnvironment({
-      supabaseUrl,
-      serviceRoleKey,
-      expectedProjectRef: process.env.AUTH_E2E_EXPECTED_PROJECT_REF ?? undefined,
-    });
+    const again = resolveAuthE2ETarget(process.env);
+    if (again.mode !== resolvedTarget.mode || again.supabaseUrl !== supabaseUrl) {
+      throw new Error('the Supabase target changed after module load; refusing to follow it.');
+    }
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     throw new Error(`refusing admin operation "${operation}": ${reason}`);
   }
 }
 
+/**
+ * Readiness gate run before EVERY network entry point of the harness (admin requests, dev-server
+ * checks, route warm-up, browser sessions), not only assertDevServer (v3 of C2; review finding F9):
+ *   - the target is re-resolved (a changed or newly invalid environment is refused);
+ *   - in local mode the disposable stack's /auth/v1/health must answer once (memoised; a failure
+ *     stays a failure for the rest of the run, there is no retry onto another target).
+ * Target VALIDATION itself already ran synchronously at module load, before any of these exist.
+ */
+let localStackReady: Promise<void> | null = null;
+export async function ensureTargetReady(operation: string): Promise<void> {
+  assertGuardedAdminCall(operation);
+  if (resolvedTarget.mode !== 'local') return;
+  localStackReady ??= assertLocalStackReachable(resolvedTarget, (url, init) => fetch(url, init));
+  await localStackReady;
+}
+
+// Every admin request goes through the guarded fetch: validated origin only, readiness first,
+// redirects refused so the service key is never forwarded (review findings F8, F9, F10).
+const guardedAdminFetch = createGuardedAdminFetch(resolvedTarget, (input, init) => fetch(input, init), () => ensureTargetReady('admin request'));
+
 export const adminSupabase = createClient(supabaseUrl as string, serviceRoleKey as string, {
   auth: { persistSession: false, autoRefreshToken: false },
+  global: { fetch: guardedAdminFetch },
 });
 
 export type BrowserAuthSnapshot = {
@@ -91,11 +107,15 @@ export function testEmail(prefix: string): string {
 }
 
 export async function assertDevServer(): Promise<void> {
+  // Local mode: the disposable Supabase stack must answer before anything else
+  // runs. A failure throws; it never falls back to another target.
+  await ensureTargetReady('dev-server check');
   const res = await fetch(BASE_URL);
   assert(res.status < 500, `dev server is not healthy at ${BASE_URL}; status=${res.status}`);
 }
 
 export async function warmAuthRoutes(): Promise<void> {
+  await ensureTargetReady('route warm-up');
   for (const path of ['/login', '/create-account', '/auth/callback?warmup=1']) {
     await fetch(`${BASE_URL}${path}`).catch(() => undefined);
   }
@@ -148,6 +168,7 @@ export async function cleanupUsersByEmail(emails: string[]): Promise<void> {
 export async function withBrowser<T>(
   fn: (browser: Browser, context: BrowserContext, page: Page) => Promise<T>,
 ): Promise<T> {
+  await ensureTargetReady('browser session');
   const browser = await chromium.launch({ headless: true, executablePath: chromium.executablePath() });
   const context = await browser.newContext();
   const page = await context.newPage();

@@ -35,7 +35,7 @@
  * identity resolves, nothing is deleted. An empty id list short-circuits rather
  * than issuing an unpredicated delete.
  */
-import type { SupabaseClient } from '@supabase/supabase-js';
+import type { SupabaseClient, User } from '@supabase/supabase-js';
 
 export type IdentityCleanupResult = {
   email: string;
@@ -89,7 +89,11 @@ export async function cleanupIdentity(
     perPage: AUTH_LIST_PAGE_SIZE,
   });
   if (listError) failures.push(`listUsers: ${listError.message}`);
-  const authUser = authList?.users.find((u) => u.email?.toLowerCase() === normalized);
+  // Explicit element type: with the repository's non-strict settings, listUsers()'s
+  // `User[] | []` union can resolve the callback parameter to `never` depending on the
+  // order the program creates types in (behaviour is unchanged; types only).
+  const authUsers: User[] = authList?.users ?? [];
+  const authUser = authUsers.find((u) => u.email?.toLowerCase() === normalized);
 
   const { data: appUsers, error: appSelectError } = await admin
     .from('users')
