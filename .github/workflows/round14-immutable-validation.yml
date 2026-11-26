@@ -1,0 +1,479 @@
+# Round 14: immutable unit and regression validation (CI-only; owner-approved 2026-11-26).
+# Runs the round-12 remediation suites and the Market Pulse comparison against three PINNED full SHAs.
+# No deploy, no secrets, read-only token. workflow_dispatch only works for workflows on the default
+# branch, so this file also triggers on a push to THIS branch only (the owner-approved push is the trigger).
+name: Round 14 — Immutable Unit and Regression Validation
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [round14/ci-unit-regression-validation]
+
+permissions:
+  contents: read
+
+env:
+  BASE_SHA: 2bc52db7a4027c1cf0276017719c821b537f48bf
+  CRM_SHA: 4cca827d4718efcfaaec4cf9dd074d3753f33fdc
+  PROV_SHA: 7611ec2fd9062775623ddf3b3a1d62af3f11b779
+
+jobs:
+  crm:
+    name: Outbound CRM security tests (4cca827d4)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.CRM_SHA }}
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Verify the checked-out commit is the pinned SHA
+        run: |
+          actual="$(git rev-parse HEAD)"
+          expected="${{ env.CRM_SHA }}"
+          echo "expected=$expected actual=$actual"
+          test "$actual" = "$expected" || { echo "::error::checked-out SHA $actual != pinned $expected"; exit 1; }
+          parent="$(git rev-parse HEAD^)"
+          test "$parent" = "${{ env.BASE_SHA }}" || { echo "::error::parent $parent != baseline"; exit 1; }
+          echo "ACTUAL_SHA=$actual" >> "$GITHUB_ENV"
+      - name: Discover the commit's test files from its own diff and compare with the pinned list
+        run: |
+          git diff --name-only HEAD^ HEAD -- backend/tests tests | sort > discovered.txt
+          printf '%s\n' backend/tests/unit/outboundCrmSyncRoute.test.ts backend/tests/unit/outboundCrmSyncService.test.ts | sort > pinned.txt
+          echo "discovered:"; cat discovered.txt
+          diff pinned.txt discovered.txt || { echo "::error::diff-derived test files differ from the pinned list"; exit 1; }
+      - name: Setup Node (repo convention)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Install dependencies from the existing lockfile
+        run: npm ci
+      - name: Run jest (repo invocation; hermetic placeholders, no secrets)
+        env:
+          SUPABASE_URL: https://placeholder.supabase.co
+          SUPABASE_SERVICE_ROLE_KEY: ci-hermetic-placeholder-service-role-key
+          NEXT_PUBLIC_SUPABASE_URL: https://placeholder.supabase.co
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ci-hermetic-placeholder-anon-key
+          REDIS_URL: 'redis://localhost:6379'
+          OPENAI_API_KEY: 'sk-ci-hermetic-placeholder'
+          ENCRYPTION_KEY: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+        run: |
+          set +e
+          node -v > node.txt; npm -v > npm.txt
+          node ./node_modules/jest/bin/jest.js --runTestsByPath \
+            backend/tests/unit/outboundCrmSyncRoute.test.ts \
+            backend/tests/unit/outboundCrmSyncService.test.ts \
+            backend/tests/unit/tenantAuthzDetectorParity.test.ts \
+            backend/tests/unit/platformOnlyRouteAuthorization.test.ts \
+            backend/tests/unit/sec91W2AVerticalRbac.test.ts \
+            --runInBand --forceExit --json --outputFile=results.json 2>&1 | tee jest.log
+          echo "JEST_EXIT=${PIPESTATUS[0]}" >> "$GITHUB_ENV"
+      - name: Route-auth checkers (existing repo scripts)
+        if: always()
+        run: |
+          rc=0; summary=""
+          for s in check-route-auth.js check-route-policy.js check-tenant-authz.js route-auth-ordering.js; do
+            node "scripts/$s" > "checker-$s.log" 2>&1; e=$?; echo "$s exit $e"; summary="$summary $s=$e"; [ $e -eq 0 ] || rc=1
+          done
+          echo "EXTRA=route checkers:$summary" >> "$GITHUB_ENV"
+          echo "CHECKERS_RC=$rc" >> "$GITHUB_ENV"
+      - name: Record metadata
+        if: always()
+        run: |
+          node -e "const fs=require('fs');const r=(f)=>{try{return fs.readFileSync(f,'utf8').trim()}catch{return null}};fs.writeFileSync('meta.json',JSON.stringify({job:process.env.JOB,expectedSha:process.env.EXP,actualSha:process.env.ACTUAL_SHA||null,node:r('node.txt'),npm:r('npm.txt'),jestExit:process.env.JEST_EXIT===undefined?null:Number(process.env.JEST_EXIT),extra:process.env.EXTRA||''}))"
+          cat meta.json
+        env:
+          JOB: crm
+          EXP: ${{ env.CRM_SHA }}
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crm
+          path: |
+            meta.json
+            results.json
+            jest.log
+            checker-*.log
+          if-no-files-found: warn
+      - name: Fail the job if jest failed
+        if: always()
+        run: test "${JEST_EXIT:-1}" = "0"
+      - name: Fail the job if a route checker failed
+        if: always()
+        run: test "${CHECKERS_RC:-1}" = "0"
+
+  prov:
+    name: Build provenance tests (7611ec2fd)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.PROV_SHA }}
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Verify the checked-out commit is the pinned SHA
+        run: |
+          actual="$(git rev-parse HEAD)"
+          expected="${{ env.PROV_SHA }}"
+          echo "expected=$expected actual=$actual"
+          test "$actual" = "$expected" || { echo "::error::checked-out SHA $actual != pinned $expected"; exit 1; }
+          parent="$(git rev-parse HEAD^)"
+          test "$parent" = "${{ env.BASE_SHA }}" || { echo "::error::parent $parent != baseline"; exit 1; }
+          echo "ACTUAL_SHA=$actual" >> "$GITHUB_ENV"
+      - name: Discover the commit's test files from its own diff and compare with the pinned list
+        run: |
+          git diff --name-only HEAD^ HEAD -- backend/tests tests | sort > discovered.txt
+          printf '%s\n' backend/tests/unit/authSubsystemBoot.test.ts backend/tests/unit/buildProvenanceRuntime.test.ts backend/tests/unit/buildProvenanceStamp.test.ts backend/tests/unit/provenanceEnvEmptyString.test.ts backend/tests/unit/schemaManifestHash.test.ts | sort > pinned.txt
+          echo "discovered:"; cat discovered.txt
+          diff pinned.txt discovered.txt || { echo "::error::diff-derived test files differ from the pinned list"; exit 1; }
+      - name: Confirm no real deployment stamp is present (tests build their own fixtures)
+        run: test ! -e generated/build-provenance/stamp.json
+      - name: Setup Node (repo convention)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Install dependencies from the existing lockfile
+        run: npm ci
+      - name: Run jest (repo invocation; hermetic placeholders, no secrets)
+        env:
+          SUPABASE_URL: https://placeholder.supabase.co
+          SUPABASE_SERVICE_ROLE_KEY: ci-hermetic-placeholder-service-role-key
+          NEXT_PUBLIC_SUPABASE_URL: https://placeholder.supabase.co
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ci-hermetic-placeholder-anon-key
+          REDIS_URL: 'redis://localhost:6379'
+          OPENAI_API_KEY: 'sk-ci-hermetic-placeholder'
+          ENCRYPTION_KEY: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+        run: |
+          set +e
+          node -v > node.txt; npm -v > npm.txt
+          node ./node_modules/jest/bin/jest.js --runTestsByPath \
+            backend/tests/unit/authSubsystemBoot.test.ts \
+            backend/tests/unit/buildProvenanceRuntime.test.ts \
+            backend/tests/unit/buildProvenanceStamp.test.ts \
+            backend/tests/unit/provenanceEnvEmptyString.test.ts \
+            backend/tests/unit/schemaManifestHash.test.ts \
+            backend/tests/unit/authSubsystemBootFailureLifecycle.test.ts \
+            backend/tests/unit/schemaManifestCheck.test.ts \
+            backend/tests/unit/authResolverBootLifecycle.test.ts \
+            backend/tests/unit/schemaHealthFailureLifecycle.test.ts \
+            backend/tests/unit/sec91W2BConnectorAuth.test.ts \
+            backend/tests/unit/piWs4bOwnedIdentityRegistryBinding.test.ts \
+            backend/tests/unit/evidencePlatform.test.ts \
+            backend/tests/unit/operationsCenterService.test.ts \
+            backend/tests/unit/mediaStorageContract.test.ts \
+            backend/tests/unit/platformOnlyRouteAuthorization.test.ts \
+            --runInBand --forceExit --json --outputFile=results.json 2>&1 | tee jest.log
+          echo "JEST_EXIT=${PIPESTATUS[0]}" >> "$GITHUB_ENV"
+      - name: Record metadata
+        if: always()
+        run: |
+          node -e "const fs=require('fs');const r=(f)=>{try{return fs.readFileSync(f,'utf8').trim()}catch{return null}};fs.writeFileSync('meta.json',JSON.stringify({job:process.env.JOB,expectedSha:process.env.EXP,actualSha:process.env.ACTUAL_SHA||null,node:r('node.txt'),npm:r('npm.txt'),jestExit:process.env.JEST_EXIT===undefined?null:Number(process.env.JEST_EXIT),extra:process.env.EXTRA||''}))"
+          cat meta.json
+        env:
+          JOB: prov
+          EXP: ${{ env.PROV_SHA }}
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: prov
+          path: |
+            meta.json
+            results.json
+            jest.log
+            checker-*.log
+          if-no-files-found: warn
+      - name: Fail the job if jest failed
+        if: always()
+        run: test "${JEST_EXIT:-1}" = "0"
+
+  baseline-prov:
+    name: Baseline counts of the two modified provenance test files (2bc52db7a)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BASE_SHA }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Verify the checked-out commit is the pinned SHA
+        run: |
+          actual="$(git rev-parse HEAD)"
+          expected="${{ env.BASE_SHA }}"
+          echo "expected=$expected actual=$actual"
+          test "$actual" = "$expected" || { echo "::error::checked-out SHA $actual != pinned $expected"; exit 1; }
+          echo "ACTUAL_SHA=$actual" >> "$GITHUB_ENV"
+      - name: Setup Node (repo convention)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Install dependencies from the existing lockfile
+        run: npm ci
+      - name: Run jest (repo invocation; hermetic placeholders, no secrets)
+        env:
+          SUPABASE_URL: https://placeholder.supabase.co
+          SUPABASE_SERVICE_ROLE_KEY: ci-hermetic-placeholder-service-role-key
+          NEXT_PUBLIC_SUPABASE_URL: https://placeholder.supabase.co
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ci-hermetic-placeholder-anon-key
+          REDIS_URL: 'redis://localhost:6379'
+          OPENAI_API_KEY: 'sk-ci-hermetic-placeholder'
+          ENCRYPTION_KEY: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+        run: |
+          set +e
+          node -v > node.txt; npm -v > npm.txt
+          node ./node_modules/jest/bin/jest.js --runTestsByPath \
+            backend/tests/unit/authSubsystemBoot.test.ts \
+            backend/tests/unit/provenanceEnvEmptyString.test.ts \
+            --runInBand --forceExit --json --outputFile=results.json 2>&1 | tee jest.log
+          echo "JEST_EXIT=${PIPESTATUS[0]}" >> "$GITHUB_ENV"
+      - name: Record metadata
+        if: always()
+        run: |
+          node -e "const fs=require('fs');const r=(f)=>{try{return fs.readFileSync(f,'utf8').trim()}catch{return null}};fs.writeFileSync('meta.json',JSON.stringify({job:process.env.JOB,expectedSha:process.env.EXP,actualSha:process.env.ACTUAL_SHA||null,node:r('node.txt'),npm:r('npm.txt'),jestExit:process.env.JEST_EXIT===undefined?null:Number(process.env.JEST_EXIT),extra:process.env.EXTRA||''}))"
+          cat meta.json
+        env:
+          JOB: baseline-prov
+          EXP: ${{ env.BASE_SHA }}
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: baseline-prov
+          path: |
+            meta.json
+            results.json
+            jest.log
+            checker-*.log
+          if-no-files-found: warn
+      - name: Fail the job if jest failed
+        if: always()
+        run: test "${JEST_EXIT:-1}" = "0"
+
+  market-pulse:
+    name: Market Pulse (${{ matrix.key }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - key: baseline
+            shaVar: BASE_SHA
+          - key: crm
+            shaVar: CRM_SHA
+          - key: prov
+            shaVar: PROV_SHA
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env[matrix.shaVar] }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Verify the checked-out commit is the pinned SHA
+        run: |
+          actual="$(git rev-parse HEAD)"; expected="${{ env[matrix.shaVar] }}"
+          echo "expected=$expected actual=$actual"
+          test "$actual" = "$expected" || { echo "::error::checked-out SHA $actual != pinned $expected"; exit 1; }
+          echo "ACTUAL_SHA=$actual" >> "$GITHUB_ENV"
+      - name: Setup Node (repo convention)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Install dependencies from the existing lockfile
+        run: npm ci
+      - name: Run jest (repo invocation; hermetic placeholders, no secrets)
+        env:
+          SUPABASE_URL: https://placeholder.supabase.co
+          SUPABASE_SERVICE_ROLE_KEY: ci-hermetic-placeholder-service-role-key
+          NEXT_PUBLIC_SUPABASE_URL: https://placeholder.supabase.co
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ci-hermetic-placeholder-anon-key
+          REDIS_URL: 'redis://localhost:6379'
+          OPENAI_API_KEY: 'sk-ci-hermetic-placeholder'
+          ENCRYPTION_KEY: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+        run: |
+          set +e
+          node -v > node.txt; npm -v > npm.txt
+          node ./node_modules/jest/bin/jest.js --runTestsByPath \
+            backend/tests/unit/marketPulseAutomationDefaultOff.test.ts \
+            backend/tests/unit/marketPulseAutomationProducersGated.test.ts \
+            backend/tests/unit/marketPulseAutomationWriterGated.test.ts \
+            backend/tests/unit/marketPulseConsumer.test.ts \
+            backend/tests/unit/marketPulseFailedLoad.test.tsx \
+            backend/tests/unit/piProvIngestionMarketPulse.test.ts \
+            backend/tests/unit/piProvMarketPulseObservations.test.ts \
+            backend/tests/unit/piWs3MarketPulseConsumption.test.ts \
+            backend/tests/unit/profileMarketPulseMirror.test.ts \
+            backend/tests/unit/uiMarketPulseAdminLink.test.tsx \
+            --runInBand --forceExit --json --outputFile=results.json 2>&1 | tee jest.log
+          echo "JEST_EXIT=${PIPESTATUS[0]}" >> "$GITHUB_ENV"
+      - name: Record metadata
+        if: always()
+        run: |
+          node -e "const fs=require('fs');const r=(f)=>{try{return fs.readFileSync(f,'utf8').trim()}catch{return null}};fs.writeFileSync('meta.json',JSON.stringify({job:process.env.JOB,expectedSha:process.env.EXP,actualSha:process.env.ACTUAL_SHA||null,node:r('node.txt'),npm:r('npm.txt'),jestExit:process.env.JEST_EXIT===undefined?null:Number(process.env.JEST_EXIT),extra:process.env.EXTRA||''}))"
+          cat meta.json
+        env:
+          JOB: market-pulse-${{ matrix.key }}
+          EXP: ${{ env[matrix.shaVar] }}
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: market-pulse-${{ matrix.key }}
+          path: |
+            meta.json
+            results.json
+            jest.log
+            checker-*.log
+          if-no-files-found: warn
+      - name: Fail the job if jest failed
+        if: always()
+        run: test "${JEST_EXIT:-1}" = "0"
+
+  consolidate:
+    name: Consolidated results
+    needs: [crm, prov, baseline-prov, market-pulse]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Download all job results
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Consolidate (fails if any required suite is missing, failed or not executed)
+        run: |
+          cat > consolidate.js <<'CONSOLIDATE_EOF'
+          // Round 14 consolidation. Reads artifacts/<job>/{meta.json,results.json}; writes a markdown summary to
+          // stdout; exits 1 if any REQUIRED expectation is not met. Never treats a missing/unexecuted test as passing.
+          const fs = require('fs');
+          const path = require('path');
+          const root = process.argv[2] || 'artifacts';
+          const strip = (s) => String(s || '').replace(/\u001b\[[0-9;]*m/g, '');
+          const base = (p) => String(p).split(/[\\/]/).pop();
+          const out = [];
+          const problems = [];
+          const load = (job) => {
+            const dir = path.join(root, job);
+            const read = (f) => { try { return JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')); } catch { return null; } };
+            return { meta: read('meta.json'), res: read('results.json') };
+          };
+          const perFile = (res) => {
+            const m = {};
+            for (const t of (res && res.testResults) || []) {
+              const a = t.assertionResults || [];
+              m[base(t.name)] = {
+                total: a.length,
+                passed: a.filter((x) => x.status === 'passed').length,
+                failed: a.filter((x) => x.status === 'failed').length,
+                notRun: a.filter((x) => x.status !== 'passed' && x.status !== 'failed').length,
+                suiteStatus: t.status,
+                suiteError: t.status === 'failed' && a.length === 0 ? strip(t.message).slice(0, 300) : '',
+                failures: a.filter((x) => x.status === 'failed').map((x) => ({
+                  name: x.fullName,
+                  // signature: first non-empty line of the first failure message, with paths/line numbers normalised
+                  sig: strip((x.failureMessages || [''])[0]).split('\n').map((l) => l.trim()).filter(Boolean)[0] || '',
+                  message: strip((x.failureMessages || []).join('\n')).slice(0, 4000),
+                })),
+              };
+            }
+            return m;
+          };
+          const norm = (s) => s.replace(/[A-Za-z]:[\\/][^\s)]+|\/home\/runner\/[^\s)]+/g, '<path>').replace(/:\d+:\d+/g, ':L:C');
+
+          function section(job, title, expected) {
+            const { meta, res } = load(job);
+            out.push(`## ${title}`);
+            if (!meta) { problems.push(`${job}: no meta.json (job did not complete)`); out.push('**NO RESULT: job did not produce metadata.**', ''); return null; }
+            out.push(`- expected SHA \`${meta.expectedSha}\`; checked-out SHA \`${meta.actualSha}\` → ${meta.expectedSha === meta.actualSha ? 'MATCH' : '**MISMATCH**'}`);
+            out.push(`- node ${meta.node}, npm ${meta.npm}, jest exit ${meta.jestExit}${meta.extra ? `; ${meta.extra}` : ''}`);
+            if (meta.expectedSha !== meta.actualSha) problems.push(`${job}: SHA mismatch`);
+            if (!res) { problems.push(`${job}: no jest results`); out.push('**NO RESULT: jest produced no JSON.**', ''); return null; }
+            const pf = perFile(res);
+            out.push(`- totals: tests ${res.numTotalTests}, passed ${res.numPassedTests}, failed ${res.numFailedTests}, pending ${res.numPendingTests}, todo ${res.numTodoTests || 0}; suites ${res.numTotalTestSuites} (failed ${res.numFailedTestSuites}, runtime-error ${res.numRuntimeErrorTestSuites || 0})`, '');
+            out.push('| file | total | passed | failed | not run |', '|---|---|---|---|---|');
+            for (const [f, s] of Object.entries(pf).sort()) out.push(`| ${f} | ${s.total} | ${s.passed} | ${s.failed} | ${s.notRun} |`);
+            out.push('');
+            if (expected) {
+              for (const f of expected.files) {
+                const s = pf[f];
+                if (!s) { problems.push(`${job}: required file ${f} did not execute`); continue; }
+                if (s.total === 0) problems.push(`${job}: ${f} executed 0 tests${s.suiteError ? ` (${s.suiteError})` : ''}`);
+                if (s.failed > 0) problems.push(`${job}: ${f} has ${s.failed} failed test(s)`);
+                if (s.notRun > 0) problems.push(`${job}: ${f} has ${s.notRun} test(s) not run (skipped/pending/todo)`);
+              }
+              for (const [label, files, n] of expected.counts || []) {
+                const got = files.reduce((acc, f) => acc + ((pf[f] && pf[f].total) || 0), 0);
+                out.push(`- count check **${label}**: expected ${n}, got ${got} → ${got === n ? 'OK' : '**MISMATCH**'}`);
+                if (got !== n) problems.push(`${job}: ${label} expected ${n}, got ${got}`);
+              }
+              if (expected.requireExitZero && meta.jestExit !== 0) problems.push(`${job}: jest exit ${meta.jestExit}`);
+            }
+            for (const [f, s] of Object.entries(pf)) for (const x of s.failures) out.push(`- FAILED \`${f}\` › ${x.name}`, '```', x.message.slice(0, 1500), '```');
+            out.push('');
+            return pf;
+          }
+
+          const CRM_NEW = ['outboundCrmSyncService.test.ts', 'outboundCrmSyncRoute.test.ts'];
+          const CRM_REG = ['tenantAuthzDetectorParity.test.ts', 'platformOnlyRouteAuthorization.test.ts', 'sec91W2AVerticalRbac.test.ts'];
+          const PROV_NEW = ['buildProvenanceRuntime.test.ts', 'buildProvenanceStamp.test.ts', 'schemaManifestHash.test.ts'];
+          const PROV_MOD = ['authSubsystemBoot.test.ts', 'provenanceEnvEmptyString.test.ts'];
+          const PROV_REG = ['authSubsystemBootFailureLifecycle.test.ts', 'schemaManifestCheck.test.ts', 'authResolverBootLifecycle.test.ts',
+            'schemaHealthFailureLifecycle.test.ts', 'sec91W2BConnectorAuth.test.ts', 'piWs4bOwnedIdentityRegistryBinding.test.ts',
+            'evidencePlatform.test.ts', 'operationsCenterService.test.ts', 'mediaStorageContract.test.ts', 'platformOnlyRouteAuthorization.test.ts'];
+          const MP = ['marketPulseAutomationDefaultOff.test.ts', 'marketPulseAutomationProducersGated.test.ts', 'marketPulseAutomationWriterGated.test.ts',
+            'marketPulseConsumer.test.ts', 'marketPulseFailedLoad.test.tsx', 'piProvIngestionMarketPulse.test.ts', 'piProvMarketPulseObservations.test.ts',
+            'piWs3MarketPulseConsumption.test.ts', 'profileMarketPulseMirror.test.ts', 'uiMarketPulseAdminLink.test.tsx'];
+
+          out.push('# Round 14: immutable unit and regression validation', '');
+          const crm = section('crm', 'Outbound CRM security @ 4cca827d4718efcfaaec4cf9dd074d3753f33fdc',
+            { files: [...CRM_NEW, ...CRM_REG], counts: [['new CRM tests', CRM_NEW, 40]], requireExitZero: true });
+          const prov = section('prov', 'Build provenance @ 7611ec2fd9062775623ddf3b3a1d62af3f11b779',
+            { files: [...PROV_NEW, ...PROV_MOD, ...PROV_REG], counts: [['new provenance tests', PROV_NEW, 55]], requireExitZero: true });
+          const bprov = section('baseline-prov', 'Baseline modified-file counts @ 2bc52db7a4027c1cf0276017719c821b537f48bf',
+            { files: PROV_MOD, requireExitZero: true });
+          if (prov && bprov) {
+            const d = PROV_MOD.reduce((acc, f) => acc + (((prov[f] || {}).total || 0) - ((bprov[f] || {}).total || 0)), 0);
+            out.push(`## Additions to existing files`, `- tests in ${PROV_MOD.join(', ')}: branch minus baseline = ${d} (expected 3) → ${d === 3 ? 'OK' : '**MISMATCH**'}`, '');
+            if (d !== 3) problems.push(`additions delta expected 3, got ${d}`);
+          }
+          const mp = {};
+          for (const k of ['baseline', 'crm', 'prov']) mp[k] = section(`market-pulse-${k}`, `Market Pulse @ ${k}`, { files: MP });
+          out.push('## Market Pulse comparison', '', '| suite | baseline | crm | prov | signatures match |', '|---|---|---|---|---|');
+          for (const f of MP) {
+            const cell = (k) => { const s = mp[k] && mp[k][f]; return s ? `${s.passed}/${s.total}${s.failed ? ` (${s.failed} failed)` : ''}` : 'not run'; };
+            const sigs = ['baseline', 'crm', 'prov'].map((k) => {
+              const s = mp[k] && mp[k][f];
+              return s ? JSON.stringify(s.failures.map((x) => `${x.name} :: ${norm(x.sig)}`).sort()) : 'missing';
+            });
+            out.push(`| ${f} | ${cell('baseline')} | ${cell('crm')} | ${cell('prov')} | ${sigs.every((s) => s === sigs[0]) ? 'yes' : '**NO**'} |`);
+          }
+          out.push('');
+          const introduced = [];
+          for (const k of ['crm', 'prov']) for (const f of MP) {
+            const b = new Set(((mp.baseline || {})[f] || { failures: [] }).failures.map((x) => x.name));
+            for (const x of ((mp[k] || {})[f] || { failures: [] }).failures) if (!b.has(x.name)) introduced.push(`${k}: ${f} › ${x.name}`);
+          }
+          out.push(`- Market Pulse failures on a branch but NOT on baseline (introduced): ${introduced.length ? introduced.join('; ') : 'none'}`, '');
+          if (introduced.length) problems.push(`Market Pulse: ${introduced.length} failure(s) not present at baseline`);
+          out.push('## Verdict', problems.length ? problems.map((p) => `- ❌ ${p}`).join('\n') : '- ✅ every required expectation met', '');
+          process.stdout.write(out.join('\n') + '\n');
+          process.exit(problems.length ? 1 : 0);
+          CONSOLIDATE_EOF
+          set +e
+          node consolidate.js artifacts > summary.md; rc=$?
+          cat summary.md >> "$GITHUB_STEP_SUMMARY"; cat summary.md
+          exit $rc
+      - name: Upload consolidated summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: consolidated-summary
+          path: summary.md
