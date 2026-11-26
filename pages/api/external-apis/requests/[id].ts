@@ -12,6 +12,7 @@ import {
   isPlatformSuperAdmin,
 } from '../../../../backend/services/rbacService';
 import { getLegacySuperAdminSession } from '../../../../backend/services/superAdminSession';
+import { isEnvVarName } from '../../../../backend/security/credentialSafety';
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
   const { id } = req.query;
@@ -146,6 +147,16 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       const tenantCompanyId = requestRow.company_id || companyId;
       if (!tenantCompanyId) {
         return res.status(400).json({ error: 'companyId required' });
+      }
+      // Round 23 B/C: a request submitted before validation existed may carry a secret in
+      // api_key_env_name. Never copy it into external_api_sources; fail explicitly, without
+      // echoing the value. Nothing is written before this point.
+      if (requestRow.api_key_env_name && !isEnvVarName(requestRow.api_key_env_name)) {
+        return res.status(400).json({
+          error: 'INVALID_ENV_VAR_NAME',
+          field: 'api_key_env_name',
+          detail: 'This request holds an invalid credential reference (not an environment-variable name). Reject it and ask the requester to resubmit with an environment-variable NAME.',
+        });
       }
       await saveTenantPlatformConfig({
         name: requestRow.name,

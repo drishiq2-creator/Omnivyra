@@ -14,6 +14,15 @@ import {
   isPlatformSuperAdmin,
   isSuperAdmin,
 } from '../../../backend/services/rbacService';
+import {
+  isEnvVarName,
+  describeRejectedEnvVarName,
+} from '../../../backend/security/credentialSafety';
+import {
+  isRedactionMarker,
+  looksLikeSecretValue,
+  redactSourceCredentialFields,
+} from '../../../backend/services/externalApi/credentialReference';
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
   const { id } = req.query;
@@ -122,7 +131,9 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       .select('*')
       .eq('api_source_id', id)
       .single();
-    return res.status(200).json({ api: { ...data, health: healthData || null } });
+    // Round 23 B/C: read-path redaction (same rule as GET /api/external-apis). A secret
+    // pasted into api_key_env_name / api_key_name is never served back.
+    return res.status(200).json({ api: { ...redactSourceCredentialFields(data), health: healthData || null } });
   }
 
   if (req.method === 'PUT') {
@@ -155,11 +166,35 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       requires_admin,
     } = req.body || {};
 
+    // Round 23 B/C: write-path validation, mirroring POST (indexMutations). The redaction
+    // marker served by GET means "unchanged" (so a UI round-trip never stores the marker);
+    // any other value supplied for these fields must be an env-var NAME, never a secret.
+    // The 400 describes the shape of the problem and never echoes the value.
+    const suppliedApiKeyEnvName = isRedactionMarker(api_key_env_name) ? undefined : api_key_env_name;
+    const suppliedApiKeyName = isRedactionMarker(api_key_name) ? undefined : api_key_name;
+    if (
+      suppliedApiKeyEnvName !== undefined && suppliedApiKeyEnvName !== null && suppliedApiKeyEnvName !== ''
+      && !isEnvVarName(suppliedApiKeyEnvName)
+    ) {
+      return res.status(400).json({
+        error: 'INVALID_ENV_VAR_NAME',
+        field: 'api_key_env_name',
+        detail: describeRejectedEnvVarName(suppliedApiKeyEnvName),
+      });
+    }
+    if (looksLikeSecretValue(suppliedApiKeyName)) {
+      return res.status(400).json({
+        error: 'INVALID_ENV_VAR_NAME',
+        field: 'api_key_name',
+        detail: describeRejectedEnvVarName(suppliedApiKeyName),
+      });
+    }
+
     let existingRecord: any = null;
     let resolvedPlatformType = platform_type;
     // SEC91-B2: a tenant PUT is always compared with the stored row (see the whitelist
     // reset below), so the row is loaded whenever the caller lacks platform scope.
-    if (!hasPlatformScope || !resolvedPlatformType || !auth_type || !api_key_name || !api_key_env_name || !method) {
+    if (!hasPlatformScope || !resolvedPlatformType || !auth_type || !suppliedApiKeyName || !suppliedApiKeyEnvName || !method) {
       let existingQuery = supabase.from('external_api_sources').select('*').eq('id', id);
       if (!platformScopeGranted && companyId) existingQuery = existingQuery.eq('company_id', companyId);
       const { data: existing } = await existingQuery.single();
@@ -225,8 +260,8 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     }
 
     const resolvedAuthType = auth_type ?? existingRecord?.auth_type ?? 'none';
-    const resolvedApiKeyName = api_key_name ?? existingRecord?.api_key_name ?? null;
-    const resolvedApiKeyEnv = api_key_env_name ?? existingRecord?.api_key_env_name ?? null;
+    const resolvedApiKeyName = suppliedApiKeyName ?? existingRecord?.api_key_name ?? null;
+    const resolvedApiKeyEnv = suppliedApiKeyEnvName ?? existingRecord?.api_key_env_name ?? null;
     const resolvedMethod = method ?? existingRecord?.method ?? 'GET';
     const resolvedHeaders = headers ?? existingRecord?.headers ?? {};
     const resolvedQueryParams = query_params ?? existingRecord?.query_params ?? {};
@@ -236,6 +271,21 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     const resolvedRateLimit = rate_limit_per_min ?? existingRecord?.rate_limit_per_min ?? 60;
 
     const resolvedKeyEnv = resolvedApiKeyEnv || resolvedApiKeyName || null;
+    // The effective env reference (which may fall back to api_key_name, as in POST) must be
+    // a valid name when this request CHANGES it. An unchanged legacy value is left as stored
+    // (no DB rewrite of existing rows here); it is redacted on every read and reported as an
+    // invalid credential reference at execution time.
+    if (
+      resolvedKeyEnv
+      && !isEnvVarName(resolvedKeyEnv)
+      && resolvedKeyEnv !== (existingRecord?.api_key_env_name || existingRecord?.api_key_name || null)
+    ) {
+      return res.status(400).json({
+        error: 'INVALID_ENV_VAR_NAME',
+        field: 'api_key_env_name',
+        detail: describeRejectedEnvVarName(resolvedKeyEnv),
+      });
+    }
 
     // SEC91-B2: Super Admin approval (is_whitelisted) covers the configuration that was
     // approved. When a TENANT changes where the request goes (base_url, method) or which
@@ -309,7 +359,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       });
     }
     await invalidateCompanyConfigCacheForApiSource(id);
-    return res.status(200).json({ api: data, ...(whitelistReset ? { whitelist_reset: true } : {}) });
+    return res.status(200).json({ api: redactSourceCredentialFields(data), ...(whitelistReset ? { whitelist_reset: true } : {}) });
   }
 
   if (req.method === 'DELETE') {

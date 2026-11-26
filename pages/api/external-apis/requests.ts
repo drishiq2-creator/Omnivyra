@@ -11,6 +11,8 @@ import {
   isSuperAdmin,
 } from '../../../backend/services/rbacService';
 import { getLegacySuperAdminSession } from '../../../backend/services/superAdminSession';
+import { isEnvVarName, describeRejectedEnvVarName } from '../../../backend/security/credentialSafety';
+import { redactSourceCredentialFields } from '../../../backend/services/externalApi/credentialReference';
 
 const authTypeRequiresKey = (authType?: string | null) =>
   ['api_key', 'bearer', 'query', 'header'].includes(String(authType || 'none'));
@@ -39,7 +41,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
         if (listError) {
           return res.status(500).json({ error: 'Failed to load API requests' });
         }
-        return res.status(200).json({ requests: data || [] });
+        return res.status(200).json({ requests: redactSourceCredentialFields(data || []) });
       }
       return res.status(403).json({ error: 'FORBIDDEN_ROLE' });
     }
@@ -52,7 +54,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
           .order('created_at', { ascending: false });
       const scopedResult = await createQuery().eq('company_id', companyId);
       if (!scopedResult.error) {
-        return res.status(200).json({ requests: scopedResult.data || [] });
+        return res.status(200).json({ requests: redactSourceCredentialFields(scopedResult.data || []) });
       }
       const message = scopedResult.error.message || '';
       if (!message.toLowerCase().includes('company_id')) {
@@ -68,7 +70,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
           detail: fallbackResult.error.message,
         });
       }
-      return res.status(200).json({ requests: fallbackResult.data || [] });
+      return res.status(200).json({ requests: redactSourceCredentialFields(fallbackResult.data || []) });
     }
     const legacyAdmin = legacySession ? true : await isSuperAdmin(user.id);
     if (legacyAdmin) {
@@ -87,7 +89,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
           detail: legacyError.message,
         });
       }
-      return res.status(200).json({ requests: data || [] });
+      return res.status(200).json({ requests: redactSourceCredentialFields(data || []) });
     }
     let { role, error: roleError } = await getUserRole(user.id, companyId);
     if (!role && (roleError === 'COMPANY_ACCESS_DENIED' || roleError === null)) {
@@ -111,7 +113,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       const filtered = canManage
         ? list
         : list.filter((r) => r.created_by_user_id === user.id);
-      return res.status(200).json({ requests: filtered });
+      return res.status(200).json({ requests: redactSourceCredentialFields(filtered) });
     }
     const requestMessage = requestError.message || '';
     if (!requestMessage.toLowerCase().includes('company_id')) {
@@ -131,7 +133,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     const fallbackFiltered = canManage ? fallbackList : fallbackList.filter(
       (r: { created_by_user_id?: string | null }) => r.created_by_user_id === user.id
     );
-    return res.status(200).json({ requests: fallbackFiltered });
+    return res.status(200).json({ requests: redactSourceCredentialFields(fallbackFiltered) });
   }
 
   if (req.method === 'POST') {
@@ -185,6 +187,16 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     if (authTypeRequiresKey(auth_type) && !resolvedApiKeyEnv) {
       return res.status(400).json({ error: 'API key env var name is required' });
     }
+    // Round 23 B/C: an approved request becomes an external_api_sources row with this
+    // value as api_key_env_name. Reject a secret here (same rule as POST /api/external-apis);
+    // never echo it.
+    if (resolvedApiKeyEnv && !isEnvVarName(resolvedApiKeyEnv)) {
+      return res.status(400).json({
+        error: 'INVALID_ENV_VAR_NAME',
+        field: 'api_key_env_name',
+        detail: describeRejectedEnvVarName(resolvedApiKeyEnv),
+      });
+    }
 
     const insertPayload = {
       name,
@@ -220,7 +232,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       .single();
 
     if (!insertWithCompany.error) {
-      return res.status(201).json({ request: insertWithCompany.data });
+      return res.status(201).json({ request: redactSourceCredentialFields(insertWithCompany.data) });
     }
     const insertMessage = insertWithCompany.error.message || '';
     if (!insertMessage.toLowerCase().includes('company_id')) {
@@ -243,7 +255,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
         detail: insertFallback.error.message,
       });
     }
-    return res.status(201).json({ request: insertFallback.data });
+    return res.status(201).json({ request: redactSourceCredentialFields(insertFallback.data) });
   }
 
   return res.status(405).json({ error: 'Method not allowed' });

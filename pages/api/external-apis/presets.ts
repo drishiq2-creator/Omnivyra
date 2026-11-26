@@ -15,6 +15,7 @@ import {
   isSuperAdmin,
   Role,
 } from '../../../backend/services/rbacService';
+import { redactEnvVarName } from '../../../backend/security/credentialSafety';
 
 // Phase 2: requirePlatformAdmin migrated to canonical capability gate.
 // Replaces the previous legacy-session-synthesizer + Supabase + role-string
@@ -137,7 +138,8 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
         headers: (preset.headers || {}) as Record<string, string>,
         query_params: (preset.query_params || {}) as Record<string, string | number>,
         auth_type: preset.auth_type || 'none',
-        api_key_env_name: preset.api_key_env_name || preset.api_key_name || null,
+        // Round 23 B/C: never serve a secret pasted into the env-name field.
+        api_key_env_name: redactEnvVarName(preset.api_key_env_name || preset.api_key_name || null),
         example_response_type: 'json',
         is_preset: true,
       }));
@@ -232,7 +234,9 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       headers: (preset.headers || {}) as Record<string, string>,
       query_params: (preset.query_params || {}) as Record<string, string | number>,
       auth_type: preset.auth_type || 'none',
-      api_key_env_name: preset.api_key_env_name || preset.api_key_name || null,
+      // Round 23 B/C: this branch is TENANT-visible (any company role) and lists platform
+      // preset rows; a secret pasted into the env-name field must never be served.
+      api_key_env_name: redactEnvVarName(preset.api_key_env_name || preset.api_key_name || null),
       example_response_type: 'json',
       is_preset: true,
     }));

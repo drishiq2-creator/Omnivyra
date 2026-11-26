@@ -27,6 +27,7 @@ import { ownedDbTable } from '../../db/writeOwner';
 // SEC91-B2: execution-path env resolution is restricted to declared provider credentials
 // sent to approved destinations — never process.env[anyName].
 import { createSourceEnvResolver } from './envResolutionPolicy';
+import { reportableMissingEnvName } from './credentialReference';
 
 const UNKNOWN_ORG = '00000000-0000-0000-0000-000000000000';
 
@@ -403,7 +404,14 @@ export const buildExternalApiRequest = (
     maskedUrl.searchParams.set(key, value);
   });
 
-  const dedupedMissing = Array.from(new Set(missingEnv));
+  // Round 23 B/C: `missingEnv` reaches logs, Super Admin test responses,
+  // `missing_env_placeholders` and recommendation metadata. A credential reference that is
+  // not a valid env-var name (e.g. a key pasted into api_key_env_name) was refused by the
+  // resolver above, but used to be reported verbatim here — i.e. the secret itself. It is
+  // now reported as a fixed diagnostic naming the source id only. Valid names are unchanged.
+  const dedupedMissing = Array.from(
+    new Set(missingEnv.map((name) => reportableMissingEnvName(name, source.id)))
+  );
 
   return {
     details: {
