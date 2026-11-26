@@ -13,13 +13,61 @@ import {
 } from './externalApiService';
 import { updateApiHealth } from './externalApiHealthService';
 import { decryptCredential } from '../auth/credentialEncryption';
+import {
+  isSecretShapedMapValue,
+  redactDiagnosticMessage,
+} from './externalApi/credentialReference';
 
 export type TestConnectionResult = {
   success: boolean;
   status: number;
   message: string;
   latency_ms: number;
+  /** Set only when the test was refused before any request (see PLATFORM_SOURCE_SUPER_ADMIN_ONLY). */
+  code?: string;
 };
+
+/**
+ * Round 26 (H-3): a platform row (company_id IS NULL) is tested with PLATFORM credentials and
+ * its result is written to the platform health record that gates polling for every tenant.
+ * Only a Super Admin may run it.
+ */
+export const PLATFORM_SOURCE_SUPER_ADMIN_ONLY = 'PLATFORM_SOURCE_SUPER_ADMIN_ONLY';
+
+/** A company id that is safe to place inside a PostgREST `or=(...)` filter. */
+const SAFE_COMPANY_ID = /^[A-Za-z0-9_-]{1,64}$/;
+
+/**
+ * Round 26 (H-3): every credential value the test request actually carried. A provider error
+ * body (or a thrown error) may echo it; it is cut out of the message before it is returned.
+ */
+function sentCredentialValues(details: {
+  url: string;
+  maskedUrl?: string;
+  headers: Record<string, unknown>;
+  maskedHeaders?: Record<string, unknown>;
+}): string[] {
+  const out: string[] = [];
+  const masked = details.maskedHeaders ?? {};
+  for (const [k, v] of Object.entries(details.headers || {})) {
+    if (typeof v !== 'string') continue;
+    if (v !== masked[k] || isSecretShapedMapValue(k, v)) {
+      out.push(v);
+      const bare = v.replace(/^(?:Bearer|Basic|Token|Key)\s+/i, '');
+      if (bare !== v) out.push(bare);
+    }
+  }
+  try {
+    const sent = new URL(details.url).searchParams;
+    const maskedParams = details.maskedUrl ? new URL(details.maskedUrl).searchParams : new URLSearchParams();
+    sent.forEach((v, k) => {
+      if (v !== maskedParams.get(k) || isSecretShapedMapValue(k, v)) out.push(v);
+    });
+  } catch {
+    // an unparseable URL carries nothing we can enumerate; redactSecretsInText still runs
+  }
+  return out;
+}
 
 const DEFAULT_TIMEOUT_MS = 8000;
 
@@ -41,12 +89,19 @@ async function resolveApiSource(
   platformScope?: boolean
 ): Promise<ExternalApiSource | null> {
   let query = supabase.from('external_api_sources').select('*').eq('id', apiId);
-  if (!platformScope && companyId) {
+  if (!platformScope) {
+    // Round 26: a non-platform caller reaches its own company's rows and platform rows (the
+    // latter are then refused unless the caller is a Super Admin, see testApiConnection).
+    // The company id is interpolated into a PostgREST filter, so its shape is checked, and the
+    // scope is re-checked in process so a filter the data layer ignores cannot widen it.
+    if (!companyId || !SAFE_COMPANY_ID.test(companyId)) return null;
     query = query.or(`company_id.eq.${companyId},company_id.is.null`);
   }
   const { data, error } = await query.single();
   if (error || !data) return null;
-  return data as ExternalApiSource;
+  const row = data as ExternalApiSource & { company_id?: string | null };
+  if (!platformScope && row.company_id != null && row.company_id !== companyId) return null;
+  return row as ExternalApiSource;
 }
 
 /**
@@ -56,6 +111,12 @@ export async function testApiConnection(input: {
   apiId: string;
   companyId?: string | null;
   platformScope?: boolean;
+  /**
+   * Round 26 (H-3): true only when the CALLER is a Super Admin. Without it a platform row
+   * (company_id IS NULL) is refused before any credential is resolved, any request is sent
+   * or any health record is written. `platformScope` callers are Super Admins by route gate.
+   */
+  allowPlatformRows?: boolean;
 }): Promise<TestConnectionResult> {
   const start = Date.now();
   const source = await resolveApiSource(
@@ -68,6 +129,16 @@ export async function testApiConnection(input: {
       success: false,
       status: 404,
       message: 'API source not found',
+      latency_ms: Date.now() - start,
+    };
+  }
+  if ((source as { company_id?: string | null }).company_id == null
+    && !input.platformScope && input.allowPlatformRows !== true) {
+    return {
+      success: false,
+      status: 403,
+      code: PLATFORM_SOURCE_SUPER_ADMIN_ONLY,
+      message: 'Platform API sources can only be tested by a Super Admin.',
       latency_ms: Date.now() - start,
     };
   }
@@ -100,6 +171,7 @@ export async function testApiConnection(input: {
     await persistTestResult(source.id, result);
     return result;
   }
+  const sentSecrets = sentCredentialValues(details as any);
 
   try {
     // HARDEN-005: `details.url` is a user-supplied API endpoint under test —
@@ -136,7 +208,8 @@ export async function testApiConnection(input: {
     const result: TestConnectionResult = {
       success: response.ok,
       status: response.status,
-      message,
+      // Round 26 (H-3): provider error text may echo the credential that was sent.
+      message: redactDiagnosticMessage(message, sentSecrets),
       latency_ms: latencyMs,
     };
     await persistTestResult(source.id, result);
@@ -150,7 +223,7 @@ export async function testApiConnection(input: {
     const result: TestConnectionResult = {
       success: false,
       status: 0,
-      message: msg,
+      message: redactDiagnosticMessage(msg, sentSecrets),
       latency_ms: latencyMs,
     };
     await persistTestResult(source.id, result);
@@ -162,9 +235,12 @@ async function testOAuthConnection(
   source: ExternalApiSource,
   start: number
 ): Promise<TestConnectionResult> {
+  const oauthSecrets: string[] = [];
   try {
     const clientId = decryptCredential(source.oauth_client_id_encrypted!);
     const clientSecret = decryptCredential(source.oauth_client_secret_encrypted!);
+    if (clientId) oauthSecrets.push(clientId);
+    if (clientSecret) oauthSecrets.push(clientSecret);
     if (!clientId || !clientSecret) {
       return {
         success: false,
@@ -221,7 +297,11 @@ async function testOAuthConnection(
     return {
       success: false,
       status: response.status,
-      message: typeof errMsg === 'string' ? errMsg : `HTTP ${response.status}`,
+      // Round 26 (H-3): the token endpoint's error text may echo the client credentials.
+      message: redactDiagnosticMessage(
+        typeof errMsg === 'string' ? errMsg : `HTTP ${response.status}`,
+        [clientId, clientSecret],
+      ),
       latency_ms: latencyMs,
     };
   } catch (error: any) {
@@ -232,7 +312,7 @@ async function testOAuthConnection(
     return {
       success: false,
       status: 0,
-      message: msg,
+      message: redactDiagnosticMessage(msg, oauthSecrets),
       latency_ms: Date.now() - start,
     };
   }

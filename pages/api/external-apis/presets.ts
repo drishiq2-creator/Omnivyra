@@ -16,6 +16,10 @@ import {
   Role,
 } from '../../../backend/services/rbacService';
 import { redactEnvVarName } from '../../../backend/security/credentialSafety';
+import { redactSecretShapedMap } from '../../../backend/services/externalApi/credentialReference';
+
+/** A company id that is safe to place inside a PostgREST `or=(...)` filter. */
+const SAFE_COMPANY_ID = /^[A-Za-z0-9_-]{1,64}$/;
 
 // Phase 2: requirePlatformAdmin migrated to canonical capability gate.
 // Replaces the previous legacy-session-synthesizer + Supabase + role-string
@@ -135,8 +139,9 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
         description: preset.category || preset.purpose || 'Custom preset',
         base_url: preset.base_url,
         method: (preset.method || 'GET').toUpperCase() as 'GET' | 'POST',
-        headers: (preset.headers || {}) as Record<string, string>,
-        query_params: (preset.query_params || {}) as Record<string, string | number>,
+        // Round 26 (H-2): never serve a literal credential pasted into these maps.
+        headers: redactSecretShapedMap((preset.headers || {}) as Record<string, string>),
+        query_params: redactSecretShapedMap((preset.query_params || {}) as Record<string, string | number>),
         auth_type: preset.auth_type || 'none',
         // Round 23 B/C: never serve a secret pasted into the env-name field.
         api_key_env_name: redactEnvVarName(preset.api_key_env_name || preset.api_key_name || null),
@@ -211,11 +216,23 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       hiddenIds = new Set((hiddenResult.data || []).map((row) => row.api_source_id));
     }
 
-    const { data, error } = await supabase
+    // Round 26 (H-5): this branch is open to any company role. It used to list the is_preset
+    // rows of EVERY company (another tenant's base_url, headers and query params, and a
+    // same-named row that replaces the built-in preset). It now lists platform rows
+    // (company_id IS NULL) plus the caller's own company's rows only: filtered in the query
+    // and again in process, so a filter the data layer ignores cannot widen it.
+    if (!SAFE_COMPANY_ID.test(String(companyId))) {
+      return res.status(400).json({ error: 'Invalid companyId' });
+    }
+    const { data: rawData, error } = await supabase
       .from('external_api_sources')
       .select('*')
       .eq('is_preset', true)
+      .or(`company_id.is.null,company_id.eq.${companyId}`)
       .order('created_at', { ascending: true });
+    const data = (rawData || []).filter(
+      (row: { company_id?: string | null }) => row.company_id == null || row.company_id === companyId
+    );
 
     if (error) {
       if ((error.message || '').toLowerCase().includes('is_preset')) {
@@ -231,8 +248,9 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       description: preset.category || preset.purpose || 'Custom preset',
       base_url: preset.base_url,
       method: (preset.method || 'GET').toUpperCase() as 'GET' | 'POST',
-      headers: (preset.headers || {}) as Record<string, string>,
-      query_params: (preset.query_params || {}) as Record<string, string | number>,
+      // Round 26 (H-2): never serve a literal credential pasted into these maps.
+      headers: redactSecretShapedMap((preset.headers || {}) as Record<string, string>),
+      query_params: redactSecretShapedMap((preset.query_params || {}) as Record<string, string | number>),
       auth_type: preset.auth_type || 'none',
       // Round 23 B/C: this branch is TENANT-visible (any company role) and lists platform
       // preset rows; a secret pasted into the env-name field must never be served.

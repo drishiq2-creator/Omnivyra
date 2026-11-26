@@ -13,6 +13,10 @@ import {
 } from '../../../../backend/services/rbacService';
 import { getLegacySuperAdminSession } from '../../../../backend/services/superAdminSession';
 import { isEnvVarName } from '../../../../backend/security/credentialSafety';
+import {
+  findNewSecretShapedEntries,
+  secretInMapError,
+} from '../../../../backend/services/externalApi/credentialReference';
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
   const { id } = req.query;
@@ -143,6 +147,18 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   const now = new Date().toISOString();
 
   if (resolvedAction === 'approve' || resolvedAction === 'approved') {
+    // Round 26 (H-6, separation of duties): approval provisions an executable
+    // external_api_sources row that the poller runs (and that can reach platform credentials
+    // by preset origin). The company admin who asked for it must not be able to approve it;
+    // that is the Super Admin's decision. A company admin uses approve_by_admin /
+    // send_to_super_admin. Nothing is written before this point.
+    if (!isSuperAdminUser) {
+      return res.status(403).json({
+        error: 'FORBIDDEN_ROLE',
+        code: 'SUPER_ADMIN_APPROVAL_REQUIRED',
+        detail: 'Only a Super Admin can approve an API request. Use send_to_super_admin.',
+      });
+    }
     if (requestRow.status !== 'approved') {
       const tenantCompanyId = requestRow.company_id || companyId;
       if (!tenantCompanyId) {
@@ -157,6 +173,12 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
           field: 'api_key_env_name',
           detail: 'This request holds an invalid credential reference (not an environment-variable name). Reject it and ask the requester to resubmit with an environment-variable NAME.',
         });
+      }
+      // Round 26 (H-2): same rule for literal credentials in the request's headers /
+      // query_params (submitted before validation existed). Names only, never values.
+      for (const field of ['headers', 'query_params'] as const) {
+        const badKeys = findNewSecretShapedEntries(requestRow[field], {});
+        if (badKeys.length > 0) return res.status(400).json(secretInMapError(field, badKeys));
       }
       await saveTenantPlatformConfig({
         name: requestRow.name,

@@ -44,6 +44,13 @@ jest.mock('../../services/externalApiService', () => ({
   validatePlatformConfig: jest.fn(() => ({ ok: true })),
   VALID_API_CATEGORIES: ['social', 'others', 'news'],
 }));
+// Round 26 (H-4): a platform change of the credential reference now passes the provider-account
+// write gate (capability + step-up + platform authority); this suite runs as a stepped-up
+// platform Super Admin. The gate's refusals are covered by r26ExternalApiSourceWrites.test.ts.
+jest.mock('../../security/requireCapability', () => ({
+  requireCapability: jest.fn(async () => ({ ok: true, principal: { userId: 'user-platform-admin', organizations: [], legacyCookieSuperAdmin: false } })),
+}));
+jest.mock('../../security/platformWriteAuthority', () => ({ enforcePlatformWriteAuthority: jest.fn(async () => true) }));
 jest.mock('../../auth/credentialEncryption', () => ({ encryptCredential: jest.fn((v: string) => v) }));
 jest.mock('../../services/companyApiConfigCache', () => ({ invalidateCompanyConfigCacheForApiSource: jest.fn(async () => {}) }));
 jest.mock('../../../lib/platform/routeFactory', () => ({ createApiRoute: (h: unknown) => h }));

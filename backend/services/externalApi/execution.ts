@@ -536,7 +536,10 @@ export async function executeWithAccountLoop(input: {
     const account = accountSlots[attemptIdx];
     const attemptNumber = attemptIdx + 1;
     const accountId = account?.id ?? null;
-    const credentials = account ? resolveAccountCredentials(account) : null;
+    // Round 26 (S-3, Agent E's request B-1): the account credential is resolved FOR this
+    // destination row, so providerAccountService can refuse an env-referenced platform key
+    // towards a tenant-owned, unapproved row (requires r26-e's two-argument signature).
+    const credentials = account ? resolveAccountCredentials(account, input.source) : null;
 
     const rateLimitKey = accountId
       ? `${accountId}:${input.usageUserId}`

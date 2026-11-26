@@ -12,7 +12,11 @@ import {
 } from '../../../backend/services/rbacService';
 import { getLegacySuperAdminSession } from '../../../backend/services/superAdminSession';
 import { isEnvVarName, describeRejectedEnvVarName } from '../../../backend/security/credentialSafety';
-import { redactSourceCredentialFields } from '../../../backend/services/externalApi/credentialReference';
+import {
+  findNewSecretShapedEntries,
+  redactSourceCredentialFields,
+  secretInMapError,
+} from '../../../backend/services/externalApi/credentialReference';
 
 const authTypeRequiresKey = (authType?: string | null) =>
   ['api_key', 'bearer', 'query', 'header'].includes(String(authType || 'none'));
@@ -196,6 +200,14 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
         field: 'api_key_env_name',
         detail: describeRejectedEnvVarName(resolvedApiKeyEnv),
       });
+    }
+
+    // Round 26 (H-2): an approved request copies headers / query_params into
+    // external_api_sources, from where they are served and sent. Reject a literal credential;
+    // never echo it.
+    for (const [field, value] of [['headers', headers], ['query_params', query_params]] as const) {
+      const badKeys = findNewSecretShapedEntries(value, {});
+      if (badKeys.length > 0) return res.status(400).json(secretInMapError(field, badKeys));
     }
 
     const insertPayload = {

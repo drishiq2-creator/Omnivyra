@@ -167,8 +167,20 @@ describe('A — unauthenticated', () => {
 /* ── B / F — legitimate access is preserved ───────────────────────────── */
 
 describe('B — the owning company’s admin', () => {
-  it('can approve their OWN company’s request, and it provisions into their tenant', async () => {
+  // Round 26 (H-6, separation of duties): approval provisions an executable source, so the
+  // requesting company's admin may NOT approve its own request — that is the Super Admin's
+  // decision. (Before round 26 this case asserted a 200 self-approval.)
+  it('can NOT approve their OWN company’s request: 403, nothing written, nothing provisioned', async () => {
     const res = await act({ as: ADMIN_A, id: REQUEST_OF_A.id, action: 'approve', companyId: COMPANY_A });
+
+    expect(res.statusCode).toBe(403);
+    expect(res.body).toMatchObject({ code: 'SUPER_ADMIN_APPROVAL_REQUIRED' });
+    expect(updates).toEqual([]);
+    expect(provisioned).toEqual([]);
+  });
+
+  it('positive control: a Super Admin approves that same request, provisioning into ITS tenant', async () => {
+    const res = await act({ as: SUPER, id: REQUEST_OF_A.id, action: 'approve', companyId: COMPANY_A });
 
     expect(res.statusCode).toBe(200);
     expect(res.body).toEqual({ status: 'approved' });

@@ -34,6 +34,8 @@ const NEWS_PRESET: Row = {
 let tables: Record<string, Row[]> = {};
 const writes: Array<{ table: string; op: string; payload: unknown }> = [];
 let role = 'CONTENT_CREATOR';
+// Round 26 (H-6): approve is Super Admin only, so the approve cases below run as a Super Admin.
+let superAdmin = false;
 const saveTenantPlatformConfig = jest.fn(async (row: Row) => ({ id: 'new-src', ...row }));
 
 jest.mock('../../db/supabaseClient', () => ({
@@ -70,8 +72,8 @@ jest.mock('../../services/userContextService', () => ({
 }));
 jest.mock('../../services/rbacService', () => ({
   Role: { SUPER_ADMIN: 'SUPER_ADMIN', COMPANY_ADMIN: 'COMPANY_ADMIN', ADMIN: 'ADMIN' },
-  isPlatformSuperAdmin: jest.fn(async () => false),
-  isSuperAdmin: jest.fn(async () => false),
+  isPlatformSuperAdmin: jest.fn(async () => superAdmin),
+  isSuperAdmin: jest.fn(async () => superAdmin),
   getUserRole: jest.fn(async () => ({ role, error: null })),
   getCompanyRoleIncludingInvited: jest.fn(async () => null),
   hasPermission: jest.fn(async (r: string) => r === 'COMPANY_ADMIN'),
@@ -109,6 +111,7 @@ beforeEach(() => {
   tables = { external_api_sources: [{ ...NEWS_PRESET }], company_api_configs: [] };
   writes.length = 0;
   role = 'CONTENT_CREATOR';
+  superAdmin = false;
   saveTenantPlatformConfig.mockClear();
 });
 
@@ -173,6 +176,7 @@ describe('tenant writes', () => {
 
   it('PUT /requests/[id] approve refuses to copy a legacy secret into external_api_sources', async () => {
     role = 'COMPANY_ADMIN';
+    superAdmin = true; // Round 26 (H-6): only a Super Admin reaches the approve branch
     tables.external_api_source_requests = [{
       id: 'req-1', company_id: COMPANY, status: 'pending_admin_review', name: 'My news',
       base_url: 'https://newsapi.org/v2/everything', auth_type: 'api_key', api_key_env_name: FAKE_KEY,
@@ -186,6 +190,7 @@ describe('tenant writes', () => {
 
   it('positive control: approve with a valid env-var name still provisions the source', async () => {
     role = 'COMPANY_ADMIN';
+    superAdmin = true; // Round 26 (H-6): as COMPANY_ADMIN this control asserted self-approval
     tables.external_api_source_requests = [{
       id: 'req-2', company_id: COMPANY, status: 'pending_admin_review', name: 'My news',
       base_url: 'https://newsapi.org/v2/everything', auth_type: 'api_key', api_key_env_name: 'NEWS_API_KEY',
