@@ -217,7 +217,8 @@ async function runVerificationChecks(): Promise<VerificationReport> {
       component: 'redis',
       severity: 'critical',
       code: 'REDIS_URL_INVALID',
-      message: `REDIS_URL is not a valid URL: ${config.REDIS_URL}`,
+      // Never echo the value: an unparseable URL can still carry a password (review R6 / F17).
+      message: 'REDIS_URL is not a valid URL (value redacted).',
       remediation: 'Check REDIS_URL format (e.g., redis://host:6379 or rediss://..@upstash.io)',
     });
     return buildReport(false, issues, checks);
