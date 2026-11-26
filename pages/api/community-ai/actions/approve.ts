@@ -80,6 +80,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   // governance store refuses too (503, nothing was written, so a retry is
   // honest). The row stays 'pending' — no suppression is lifted or recorded.
   const contactGate = await checkCommunityActionContactGovernance({
+    id: actionId,
     organization_id: action.organization_id,
     platform: action.platform,
     action_type: action.action_type,
@@ -97,6 +98,10 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       });
     } catch (logErr: any) {
       console.warn('[community-ai/approve] contact-governance audit log failed:', logErr?.message || logErr);
+    }
+    // Round 26: an unidentifiable recipient/author is refused like a suppressed one (403, not retryable).
+    if (contactGate.code === 'CONTACT_IDENTITY_UNRESOLVED') {
+      return res.status(403).json({ error: 'CONTACT_IDENTITY_UNRESOLVED', reason: contactGate.reason });
     }
     return contactGate.code === 'CONTACT_SUPPRESSED'
       ? res.status(403).json({ error: 'CONTACT_SUPPRESSED', reason: contactGate.reason })

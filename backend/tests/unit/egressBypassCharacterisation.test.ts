@@ -208,6 +208,13 @@ beforeEach(() => {
   for (const k of Object.keys(db)) delete db[k];
   sends.fetch.length = 0; sends.connector.length = 0; sends.rpa.length = 0; sends.edge.length = 0;
   suppressEverywhere();
+  // Round 26 (S-1/S-2): the gate checks the PERSON a reply reaches — the author of the comment replied to,
+  // resolved from the engagement store. The suppressed person (HANDLE) is that author here.
+  db.engagement_messages = [
+    { id: 'm-1', organization_id: ORG, platform_message_id: 'comment-1', author_id: 'author-1' },
+    { id: 'm-2', organization_id: ORG, platform_message_id: 'urn:li:comment:comment-1', author_id: 'author-1' },
+  ];
+  db.engagement_authors = [{ id: 'author-1', profile_url: HANDLE }];
   (global as unknown as { fetch: unknown }).fetch = async (url: string) => {
     sends.fetch.push(String(url));
     return { ok: true, status: 200, json: async () => ({ id: 'reply-1', messages: [{ id: 'wamid.1' }] }) };
@@ -298,10 +305,11 @@ const ENFORCED_PATHS: Array<[string, () => Promise<number>]> = [
   ['community runExecution RPA mode (runRpaExecution → executeRpaTask)', communityRpaReply],
   ['community runExecution browser dispatch (prepareBrowserDispatch)', communityBrowserDm],
   ['extension lease handout (GET /api/extension/commands)', extensionLeaseHandout],
+  // Round 26 (review S-4 / GD-3, owner: D): the direct reply is now gated on the comment's author.
+  ['social/comments direct reply (pages/api/social/comments.ts)', socialCommentReply],
 ];
 
 const PATHS: Array<[string, () => Promise<number>]> = [
-  ['social/comments direct reply (pages/api/social/comments.ts)', socialCommentReply],
   ['WhatsApp broadcast person anchor (whatsappBroadcastService.processBatch)', whatsappPersonAnchor],
   // K-6 is undecided for these; only E4 (domain reminder) is a decided exemption and is not listed.
   ['transactional company_referral email (emailService.sendCompanyAdminReferral)', () => transactionalEmail('company_referral')],

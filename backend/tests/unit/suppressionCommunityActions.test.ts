@@ -189,7 +189,7 @@ describe('executor boundary (runExecution via executeAction)', () => {
     it('a suppressed DM recipient is BLOCKED before any side effect, with an auditable reason', async () => {
       suppress();
       const r = await executeAction(action({ execution_mode: mode }), true, { source: 'manual' });
-      expect(r).toMatchObject({ ok: false, status: 'blocked', reason: 'CONTACT_SUPPRESSED' });
+      expect(r).toMatchObject({ ok: false, status: 'skipped', reason: 'CONTACT_SUPPRESSED' });
       expect((r as any).error).toMatchObject({ code: 'CONTACT_SUPPRESSED', reason: 'dnc_channel', store: 'canonical' });
       expect(sideEffects()).toBe(0);
       const audit = (logCommunityAiActionEvent as jest.Mock).mock.calls.map((c) => c[0]).find((e) => e.event_payload?.gate === 'contact_governance');
@@ -210,8 +210,8 @@ describe('executor boundary (runExecution via executeAction)', () => {
     suppress();
     const reply = await executeAction(action({ action_type: 'reply' }), true, { source: 'manual' });
     const follow = await executeAction(action({ action_type: 'follow' }), true, { source: 'manual' });
-    expect(reply).toMatchObject({ status: 'blocked', reason: 'CONTACT_SUPPRESSED' });
-    expect(follow).toMatchObject({ status: 'blocked', reason: 'CONTACT_SUPPRESSED' });
+    expect(reply).toMatchObject({ status: 'skipped', reason: 'CONTACT_SUPPRESSED' });
+    expect(follow).toMatchObject({ status: 'skipped', reason: 'CONTACT_SUPPRESSED' });
     expect(sideEffects()).toBe(0);
     const like = await executeAction(action({ action_type: 'like' }), true, { source: 'manual' });
     expect(like.ok).toBe(true);
@@ -222,7 +222,7 @@ describe('executor boundary (runExecution via executeAction)', () => {
     suppress({ channel: '*', governance_type: 'dnc_permanent' });
     // the scheduled path (approval of record present) is gated too
     const r = await executeAction(action({ approved_at: '2026-11-01T00:00:00Z' }), true, { source: 'scheduler' });
-    expect(r).toMatchObject({ status: 'blocked', reason: 'CONTACT_SUPPRESSED' });
+    expect(r).toMatchObject({ status: 'skipped', reason: 'CONTACT_SUPPRESSED' });
     expect((r as any).error).toMatchObject({ reason: 'dnc_permanent' });
     expect(sideEffects()).toBe(0);
   });
@@ -231,7 +231,7 @@ describe('executor boundary (runExecution via executeAction)', () => {
     const thread = 'https://www.linkedin.com/messaging/thread/2-abc/';
     suppress({ target_normalized: thread.toLowerCase() });
     const blocked = await executeAction(action({ metadata: { dm_thread_url: thread } }), true, { source: 'manual' });
-    expect(blocked).toMatchObject({ status: 'blocked', reason: 'CONTACT_SUPPRESSED' });
+    expect(blocked).toMatchObject({ status: 'skipped', reason: 'CONTACT_SUPPRESSED' });
     expect(sideEffects()).toBe(0);
     const ok = await executeAction(action(), true, { source: 'manual' });
     expect(ok.ok).toBe(true);
@@ -260,7 +260,7 @@ describe('executor boundary (runExecution via executeAction)', () => {
     it('CONTROL: the same suppression DOES block tenant A', async () => {
       suppress({ organization_id: ORG_A });
       const r = await executeAction(action(), true, { source: 'manual' });
-      expect(r).toMatchObject({ status: 'blocked', reason: 'CONTACT_SUPPRESSED' });
+      expect(r).toMatchObject({ status: 'skipped', reason: 'CONTACT_SUPPRESSED' });
     });
 
     it('a tenant-less action fails closed (no governance question without a tenant)', async () => {

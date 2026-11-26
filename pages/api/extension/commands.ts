@@ -174,7 +174,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
 
     let query = supabase
       .from('community_ai_actions')
-      .select('id, organization_id, platform, action_type, target_id, suggested_text, execution_mode, created_at, dispatch_lease_expires_at, execution_correlation_id, command_chain, command_chain_index, approved_at, metadata')
+      .select('id, organization_id, platform, action_type, target_id, suggested_text, execution_mode, created_at, dispatch_lease_expires_at, execution_correlation_id, command_chain, command_chain_index, approved_at')
       .eq('organization_id', session.orgId)
       .eq('status', 'pending')
       .eq('execution_mode', 'browser');
@@ -247,18 +247,25 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
         // the last point before the browser sends: a recipient suppressed
         // after the row was prepared (or between chain steps) must not be
         // contacted. Tenant = the session's org (the query is scoped to it).
-        // A real suppression terminalizes the row as 'blocked' (auditable,
+        // A real suppression terminalizes the row as 'skipped' + skip_reason (auditable,
         // never re-offered); an unreadable governance store leaves the row
         // unclaimed, which is provably unsent.
+        // Round 26: `community_ai_actions` has NO `metadata` column (repo schema: baseline + every ALTER), so the
+        // round-24 select of it would fail the whole hand-out (500 COMMANDS_QUERY_FAILED). The person is resolved
+        // by the gate from the engagement store (the DM thread's author / the comment's author); unresolvable is
+        // a terminal CONTACT_IDENTITY_UNRESOLVED below.
         const contactGate = await checkCommunityActionContactGovernance({
+          id: row.id,
           organization_id: session.orgId,
           platform: row.platform,
           action_type: row.action_type,
           target_id: row.target_id,
-          metadata: (row as any).metadata ?? null,
+          metadata: null,
         });
         if (contactGate.allowed === false) {
-          if (contactGate.code === 'CONTACT_SUPPRESSED') {
+          // Round 26: an unidentifiable recipient is terminal exactly like a suppressed one (never re-offered).
+          if (contactGate.code === 'CONTACT_SUPPRESSED' || contactGate.code === 'CONTACT_IDENTITY_UNRESOLVED') {
+            const blockCode = contactGate.code;
             try {
               const { persistExecutionResult } = await import('@/backend/services/communityAiExecutionResultService');
               await persistExecutionResult({
@@ -268,9 +275,14 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
                 expectedFromStatuses: ['pending'],
                 result: {
                   ok: false,
-                  status: 'blocked',
-                  reason: 'CONTACT_SUPPRESSED',
-                  error: { code: 'CONTACT_SUPPRESSED', reason: contactGate.reason, store: contactGate.store },
+                  // Production has no 'blocked' status (CHECK): terminal 'skipped' + skip_reason.
+                  status: 'skipped',
+                  reason: blockCode,
+                  error: {
+                    code: blockCode,
+                    reason: contactGate.reason,
+                    store: contactGate.code === 'CONTACT_SUPPRESSED' ? contactGate.store : null,
+                  },
                   response: {
                     source: 'extension_commands',
                     gate: 'contact_governance',

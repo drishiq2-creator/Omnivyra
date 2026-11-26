@@ -122,11 +122,18 @@ export async function persistExecutionResult(input: {
   command_chain?: CommandChainStep[];
 }): Promise<{ ok: boolean; current_status?: string; error?: string; deduplicated?: boolean; prior_action_id?: string | null }> {
   const result = input.result;
-  const finalStatus = result.status === 'dispatched' ? 'pending' : result.status;
+  // Round 26 (integration review H-2): Production's community_ai_actions_status_check admits only
+  // pending | approved | executed | failed | skipped — there is NO 'blocked'. A 'blocked' write is rejected, the row
+  // stays 'pending' and is re-offered / re-gated forever. A terminal refusal is therefore stored as 'skipped' with its
+  // reason in skip_reason (a column Production has). The in-memory result handed back to the caller is unchanged.
+  const finalStatus = result.status === 'dispatched' ? 'pending' : result.status === 'blocked' ? 'skipped' : result.status;
+  const errorCode = result.error && typeof result.error === 'object' ? (result.error as { code?: unknown }).code : result.error;
+  const skipReason = finalStatus === 'skipped' ? (String(result.reason ?? errorCode ?? '').slice(0, 200) || null) : null;
   const effectiveMode = result.execution_mode || null;
 
   const update: Record<string, unknown> = {
     status: finalStatus,
+    ...(skipReason ? { skip_reason: skipReason } : {}),
     execution_correlation_id: input.correlationId,
     execution_result: {
       ...result,
@@ -212,7 +219,7 @@ export async function persistExecutionResult(input: {
         platform_id: result.platform_id ?? null,
       },
     });
-  } else if (finalStatus === 'failed' || finalStatus === 'blocked' || finalStatus === 'skipped') {
+  } else if (finalStatus === 'failed' || finalStatus === 'skipped') {
     await recordExecutionMetric({
       organization_id: input.organizationId,
       action_id: input.actionId,

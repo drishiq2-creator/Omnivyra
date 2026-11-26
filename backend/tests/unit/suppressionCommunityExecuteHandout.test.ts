@@ -244,7 +244,7 @@ describe('extension command hand-out', () => {
     expect(persisted).toHaveLength(1);
     expect(persisted[0]).toMatchObject({
       actionId: 'act-1', organizationId: ORG_A, expectedFromStatuses: ['pending'],
-      result: { status: 'blocked', reason: 'CONTACT_SUPPRESSED' },
+      result: { status: 'skipped', reason: 'CONTACT_SUPPRESSED' },
     });
     expect(persisted[0].rowHint).toBeUndefined();
   });

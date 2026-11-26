@@ -167,11 +167,18 @@ export async function persistExecutionResult(input: {
   command_chain?: CommandChainStep[];
 }): Promise<{ ok: boolean; current_status?: string; error?: string; deduplicated?: boolean; prior_action_id?: string | null }> {
   const result = input.result;
-  const finalStatus = result.status === 'dispatched' ? 'pending' : result.status;
+  // Round 26 (integration review H-2): Production's community_ai_actions_status_check admits only
+  // pending | approved | executed | failed | skipped — there is NO 'blocked'. A 'blocked' write is rejected, the row
+  // stays 'pending' and is re-offered / re-gated forever. A terminal refusal is therefore stored as 'skipped' with its
+  // reason in skip_reason (a column Production has). The in-memory result handed back to the caller is unchanged.
+  const finalStatus = result.status === 'dispatched' ? 'pending' : result.status === 'blocked' ? 'skipped' : result.status;
+  const errorCode = result.error && typeof result.error === 'object' ? (result.error as { code?: unknown }).code : result.error;
+  const skipReason = finalStatus === 'skipped' ? (String(result.reason ?? errorCode ?? '').slice(0, 200) || null) : null;
   const effectiveMode = result.execution_mode || null;
 
   const update: Record<string, any> = {
     status: finalStatus,
+    ...(skipReason ? { skip_reason: skipReason } : {}),
     execution_correlation_id: input.correlationId,
     execution_result: {
       ...result,
@@ -266,7 +273,7 @@ export async function persistExecutionResult(input: {
         platform_id: result.platform_id ?? null,
       },
     });
-  } else if (finalStatus === 'failed' || finalStatus === 'blocked' || finalStatus === 'skipped') {
+  } else if (finalStatus === 'failed' || finalStatus === 'skipped') {
     await recordExecutionMetric({
       organization_id: input.organizationId,
       action_id: input.actionId,
@@ -538,7 +545,7 @@ const runExecution = async (
   // command chain, manual) passes here before any side effect, so a
   // suppressed recipient is refused for every caller (execute route,
   // scheduler, auto rules, bulk, engagement reply, response orchestrator).
-  // A real suppression is a terminal 'blocked'; an unreadable governance
+  // A real suppression is a terminal 'skipped' (skip_reason CONTACT_SUPPRESSED; Production has no 'blocked'); an unreadable governance
   // store is fail-closed as 'skipped' (no false suppression is recorded).
   const contactGate = await checkCommunityActionContactGovernance(action);
   if (contactGate.allowed === false) {
@@ -552,9 +559,20 @@ const runExecution = async (
     if (contactGate.code === 'CONTACT_SUPPRESSED') {
       return {
         ok: false,
-        status: 'blocked',
+        status: 'skipped',
         reason: 'CONTACT_SUPPRESSED',
         error: { code: 'CONTACT_SUPPRESSED', reason: contactGate.reason, store: contactGate.store },
+      };
+    }
+    // Round 26 (S-1/S-2): the recipient/author could not be identified, so it
+    // cannot be proven unsuppressed. Terminal for every caller (automated sends
+    // fail closed and are not retried; a manual caller gets the reason code).
+    if (contactGate.code === 'CONTACT_IDENTITY_UNRESOLVED') {
+      return {
+        ok: false,
+        status: 'skipped',
+        reason: 'CONTACT_IDENTITY_UNRESOLVED',
+        error: { code: 'CONTACT_IDENTITY_UNRESOLVED', reason: contactGate.reason },
       };
     }
     return {

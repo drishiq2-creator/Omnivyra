@@ -7,6 +7,7 @@ import { enqueueRpaRetry, flushRpaRetryQueueRoundRobin } from './rpaRetryQueue';
 import { withHeavyJobSlot } from '../../queue/bullmqClient';
 import { getCommunityAiPlatformPolicy } from '../communityAiPlatformPolicyService';
 import { ownedDbTable } from '../../db/writeOwner';
+import { checkCommunityActionContactGovernance } from '../communityAiContactGovernanceGate';
 
 export type RpaTask = {
   tenant_id: string;
@@ -27,6 +28,8 @@ export type RpaResult = {
   /** Durable public URL of the screenshot stored in the rpa-artifacts bucket. */
   screenshot_url?: string;
   error?: string;
+  /** Round 26: a refusal that can never succeed on retry (the retry row is retired, not re-attempted). */
+  terminal?: boolean;
 };
 
 type RpaHandler = (task: RpaTask) => Promise<RpaResult>;
@@ -80,7 +83,7 @@ export const rpaSchedulerHooks = {
         const gate = await checkRpaRetryAuthorised(task);
         if (gate.ok === false) {
           console.warn(`[rpaRetryQueueFlush] refused action=${task.action_id} reason=${gate.reason}`);
-          return { success: false, error: gate.reason };
+          return { success: false, error: gate.reason, ...(gate.terminal ? { terminal: true } : {}) };
         }
         const h = handlers[normalizePlatform(task.platform)];
         if (!h) return { success: false, error: 'RPA_PLATFORM_NOT_SUPPORTED' };
@@ -101,7 +104,7 @@ export const rpaSchedulerHooks = {
  */
 const RPA_RETRY_REEXECUTABLE_STATUSES = new Set(['approved', 'failed']);
 
-export type RpaRetryGate = { ok: true } | { ok: false; reason: string };
+export type RpaRetryGate = { ok: true } | { ok: false; reason: string; terminal?: boolean };
 
 /**
  * Gate for re-executing a retry-queue row (port of the eec0117d intent:
@@ -116,6 +119,14 @@ export type RpaRetryGate = { ok: true } | { ok: false; reason: string };
  *   4. it carries a recorded approval (`approved_at`). This also satisfies
  *      the executor's require_human_approval / high-risk gates, which both
  *      key on approved_at.
+ *   5. (round 26, review S-3 / C-5) CONTACT GOVERNANCE: the retry re-runs the
+ *      Playwright handler directly, bypassing runExecution's gate, so the same
+ *      gate is asked here on the row of record (its own tenant, platform,
+ *      action type and target; the author of the comment replied to is
+ *      resolved by the gate). Suppressed or unidentifiable → TERMINAL refusal
+ *      (retired, never re-attempted); governance unreadable → refused this
+ *      round, retried later (nothing was sent).
+ *      The platform kill switch (step 1, review P-3) is untouched here.
  *
  * Any read error refuses.
  */
@@ -128,7 +139,7 @@ export async function checkRpaRetryAuthorised(task: RpaTask): Promise<RpaRetryGa
   let row: Record<string, any> | null = null;
   try {
     const { data, error } = await ownedDbTable('community_ai_actions')
-      .select('id, organization_id, status, approved_at')
+      .select('id, organization_id, status, approved_at, platform, action_type, target_id')
       .eq('id', task.action_id)
       .eq('organization_id', task.organization_id)
       .maybeSingle();
@@ -144,6 +155,19 @@ export async function checkRpaRetryAuthorised(task: RpaTask): Promise<RpaRetryGa
     return { ok: false, reason: 'RPA_RETRY_ACTION_NOT_RETRYABLE' };
   }
   if (!row.approved_at) return { ok: false, reason: 'RPA_RETRY_NOT_APPROVED' };
+  const contactGate = await checkCommunityActionContactGovernance({
+    id: String(row.id),
+    organization_id: task.organization_id,
+    platform: (row.platform as string | null) ?? task.platform,
+    action_type: (row.action_type as string | null) ?? task.action_type,
+    target_id: (row.target_id as string | null) ?? task.target_url,
+    metadata: null,
+  });
+  if (contactGate.allowed === false) {
+    if (contactGate.code === 'CONTACT_SUPPRESSED') return { ok: false, reason: 'RPA_RETRY_CONTACT_SUPPRESSED', terminal: true };
+    if (contactGate.code === 'CONTACT_IDENTITY_UNRESOLVED') return { ok: false, reason: 'RPA_RETRY_CONTACT_IDENTITY_UNRESOLVED', terminal: true };
+    return { ok: false, reason: 'RPA_RETRY_CONTACT_GOVERNANCE_UNAVAILABLE' };
+  }
   return { ok: true };
 }
 

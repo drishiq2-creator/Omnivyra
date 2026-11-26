@@ -113,6 +113,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   // checked here. Refusal leaves the row in its current state: no transition,
   // no execution, no suppression lifted or recorded.
   const contactGate = await checkCommunityActionContactGovernance({
+    id: actionId,
     organization_id: action.organization_id,
     platform: action.platform,
     action_type: action.action_type,
@@ -127,6 +128,10 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       event_type: 'skipped',
       event_payload: contactGateAuditPayload(contactGate, { boundary: 'execute', user_id: roleGate.userId }),
     });
+    // Round 26: an unidentifiable recipient/author is refused like a suppressed one (403, not retryable).
+    if (contactGate.code === 'CONTACT_IDENTITY_UNRESOLVED') {
+      return res.status(403).json({ error: 'CONTACT_IDENTITY_UNRESOLVED', reason: contactGate.reason });
+    }
     return contactGate.code === 'CONTACT_SUPPRESSED'
       ? res.status(403).json({ error: 'CONTACT_SUPPRESSED', reason: contactGate.reason })
       : res.status(503).json({ error: 'CONTACT_GOVERNANCE_UNAVAILABLE', reason: contactGate.reason });

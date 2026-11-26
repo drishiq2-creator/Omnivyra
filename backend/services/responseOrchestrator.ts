@@ -10,6 +10,7 @@ import { formatForPlatform } from './platformResponseFormatter';
 import { checkResponseSafety } from './responseSafetyGuard';
 import { executeAction } from './communityAiActionExecutor';
 import { listPlaybooks } from './playbooks/playbookService';
+import { resolveEngagementAuthorIdentity, personIdentityMetadata } from './communityAiContactGovernanceGate';
 
 export type OrchestrateInput = {
   message_id: string;
@@ -127,6 +128,13 @@ export async function orchestrateResponse(
     };
   }
 
+  // Round 26 (S-2): the reply reaches the author of the message; stamp that person for the contact-governance gate.
+  const authorLookup = await resolveEngagementAuthorIdentity(input.organization_id, { messageId: String(message.id) });
+  if (authorLookup.ok === false) {
+    return { ok: false, suggested_text: formatted, executed: false, reason: 'CONTACT_GOVERNANCE_UNAVAILABLE' };
+  }
+  const personMetadata = personIdentityMetadata('reply', authorLookup.value);
+
   // uuid removed — use crypto.randomUUID()
   const normalizedPlatform = (input.platform || '').toLowerCase() === 'x' ? 'twitter' : input.platform;
   const result = await executeAction(
@@ -140,6 +148,7 @@ export async function orchestrateResponse(
       suggested_text: formatted,
       playbook_id: playbookId,
       execution_mode: 'manual',
+      metadata: Object.keys(personMetadata).length ? personMetadata : null,
     },
     true,
     { source: 'manual', persist: true, auto_insert: true, final_text: formatted }
