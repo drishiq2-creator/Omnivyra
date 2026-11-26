@@ -1,0 +1,62 @@
+# Disposable, CI-ONLY Supabase stack for the auth E2E suite (workstream C1).
+#
+# Used ONLY through:   supabase <command> --workdir tests/supabase-local
+# Started ONLY by:     tests/supabase-local/bootstrap.sh up   (on a GitHub-hosted CI runner)
+#
+# Why a dedicated workdir instead of the repository-root supabase/ folder:
+#   - the Supabase GitHub integration watches the repository root; a root config.toml
+#     could be picked up by its preview-branch automation;
+#   - developer checkouts keep supabase/.temp/ linked to a HOSTED project; a separate
+#     workdir has no link file, so no command run here can resolve a hosted project.
+#
+# No secrets: the local stack generates its own development keys at start-up.
+# Ports MUST stay equal to LOCAL_STACK_PORTS in tests/auth/e2eEnvironmentGuard.ts
+# (a unit test cross-checks [api].port and [db].port).
+# Settings below are deliberately minimal; anything not listed takes the CLI default
+# of the pinned CLI version (see tests/supabase-local/README.md).
+
+project_id = "omnivyra-auth-e2e-local"
+
+[api]
+enabled = true
+port = 54321
+schemas = ["public", "graphql_public"]
+extra_search_path = ["public", "extensions"]
+max_rows = 1000
+
+[db]
+port = 54322
+shadow_port = 54320
+# Production runs PostgreSQL 17 (17.6 on 2026-11-26); the disposable stack matches the major version.
+major_version = 17
+
+[db.pooler]
+enabled = false
+
+[db.seed]
+# The auth suite creates and deletes its own users through the admin API; no seed data is needed.
+enabled = false
+
+[realtime]
+enabled = false
+
+[studio]
+enabled = false
+
+[analytics]
+enabled = false
+
+[edge_runtime]
+enabled = false
+
+[auth]
+enabled = true
+# The app under test is served at http://localhost:3000 (AUTH_E2E_BASE_URL); the app
+# 307-redirects 127.0.0.1 to localhost, so localhost is the canonical site URL.
+site_url = "http://localhost:3000"
+additional_redirect_urls = ["http://localhost:3000/auth/callback", "http://127.0.0.1:3000/auth/callback"]
+jwt_expiry = 3600
+enable_signup = true
+
+[auth.email]
+enable_signup = true

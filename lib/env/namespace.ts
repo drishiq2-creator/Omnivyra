@@ -181,10 +181,14 @@ export function enforceEnvIsolationFatal(): void {
   if (supabaseUrl && redisUrl && looksRemote(supabaseUrl) && looksLocalRedis(redisUrl)) {
     let host = 'unknown';
     try { host = new URL(supabaseUrl).host; } catch { /* leave unknown */ }
+    // Scheme, host and port only: never the user name, password, path, query or fragment of the
+    // Redis URL (this message reaches server logs and CI artifacts; review finding F17).
+    let redisShown = 'unparseable (value redacted)';
+    try { const r = new URL(redisUrl); redisShown = `${r.protocol}//${r.host}`; } catch { /* keep redacted */ }
     const msg =
       `[env-isolation] FATAL: prod-Supabase + local-Redis detected.\n` +
       `  SUPABASE_URL host: ${host}\n` +
-      `  REDIS_URL:         ${redisUrl}\n\n` +
+      `  REDIS_URL:         ${redisShown}\n\n` +
       `  This combination is production-dangerous: writes against prod Supabase\n` +
       `  happen normally, but queue jobs land in local Redis and remote workers\n` +
       `  never see them. Production state can be partially mutated by a local\n` +
