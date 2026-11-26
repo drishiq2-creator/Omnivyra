@@ -46,7 +46,8 @@ export default function LeadsView({ d }: { d: S }) {
     fromForms,
     fromWebhooks,
     isAdmin,
-    webhookSecretsVisible,
+    testSecrets,
+    setTestSecret,
     formsAccess,
     retryFormsAccess,
     deleteError,
@@ -426,8 +427,12 @@ export default function LeadsView({ d }: { d: S }) {
                   <div className="space-y-4">
                     {webhookIntegrations.map(integration => {
                       const test = testResults[integration.id];
-                      // A redacted secret ('********') is not a secret: never copy it, never send it.
-                      const secret = webhookSecretsVisible ? integration.config.secret : undefined;
+                      // R26 T-2: the server never returns a stored secret, only '********' (stored) or '' (not set).
+                      // The inbound secret, when set, is what authenticates POST /api/leads; before it is set the
+                      // outbound secret still does (legacy, CT-ROUND26 T-3).
+                      const inboundStored = integration.config.inbound_secret === '********';
+                      const outboundStored = integration.config.secret === '********';
+                      const typedSecret = testSecrets[integration.id] ?? '';
                       const webhookLeads = leads.filter(l => l.integration_id === integration.id && !l.is_test).length;
                       return (
                         <div key={integration.id} className="bg-white rounded-xl border border-gray-200/60 shadow-sm p-5">
@@ -451,20 +456,40 @@ export default function LeadsView({ d }: { d: S }) {
                             </div>
                             <div className="bg-gray-50 rounded-lg p-3 sm:col-span-2">
                               <div className="flex justify-between mb-1">
-                                <span className="text-xs text-gray-500 font-medium">Webhook Secret</span>
-                                {!webhookSecretsVisible
-                                  ? <span className="text-xs text-gray-500">Only company admins can view this secret</span>
-                                  : secret ? <CopyButton text={secret} /> : <span className="text-xs text-amber-600">Not set — edit in Integrations</span>}
+                                <span className="text-xs text-gray-500 font-medium">Inbound secret</span>
+                                {!inboundStored && !outboundStored && <span className="text-xs text-amber-600">Not set — edit in Integrations</span>}
                               </div>
-                              <code className="text-xs text-gray-700">{!webhookSecretsVisible ? 'Hidden' : secret ? '••••••••••••••••' : 'Not configured'}</code>
+                              <code className="text-xs text-gray-700">
+                                {inboundStored ? 'Stored (hidden)' : outboundStored ? 'Not set: the outbound signing secret is accepted until you set one' : 'Not configured'}
+                              </code>
+                              {isAdmin && (inboundStored || outboundStored) && (
+                                <input
+                                  type="password"
+                                  autoComplete="off"
+                                  value={typedSecret}
+                                  onChange={(event) => setTestSecret(integration.id, event.target.value)}
+                                  placeholder="Type the secret to send a test lead"
+                                  className="mt-2 w-full rounded-lg border border-gray-300 px-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                />
+                              )}
                             </div>
                           </div>
+                          {integration.webhook_destination && integration.webhook_destination.ok === false && (
+                            <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+                              Deliveries paused: {integration.webhook_destination.reason}. Edit the integration and set an https:// Webhook URL.
+                            </div>
+                          )}
+                          {integration.webhook_signing?.deprecation_warning && (
+                            <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                              {integration.webhook_signing.deprecation_warning}
+                            </div>
+                          )}
                           <div className="bg-gray-900 rounded-lg p-3 mb-4 overflow-x-auto">
                             <div className="flex justify-between mb-2"><span className="text-xs text-gray-400 font-medium">Sample Payload</span><CopyButton text={samplePayload(integration)} label="Copy" /></div>
                             <pre className="text-xs text-green-400 whitespace-pre">{samplePayload(integration)}</pre>
                           </div>
                           <div className="flex flex-col sm:flex-row items-start sm:items-center gap-3">
-                            <button onClick={() => sendTestLead(integration)} disabled={!secret || test?.loading}
+                            <button onClick={() => sendTestLead(integration)} disabled={!typedSecret || test?.loading}
                               className="flex items-center gap-1.5 bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm font-semibold hover:bg-indigo-700 disabled:opacity-50 transition-colors">
                               {test?.loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <TestTube2 className="h-4 w-4" />}
                               Send Test Lead

@@ -243,9 +243,23 @@ export async function deleteLead(id: string, companyId: string): Promise<void> {
 
 /**
  * Validate inbound webhook credentials.
- * Checks: integration exists, type is lead_webhook, secret matches config.secret.
+ * Checks: integration exists, type is lead_webhook, the presented secret matches the INBOUND secret.
  * Returns company_id on success, null on failure.
+ *
+ * R26 T-3: `secret` is the OUTBOUND secret (it signs, and in 'legacy' mode is sent to, the tenant's third-party
+ * webhook_url), so it must not also be the key to POST /api/leads. Rules:
+ *   - an integration with `inbound_secret` accepts ONLY that; the outbound `secret` is refused;
+ *   - an integration without one (every row created before round 26) still accepts `secret`, so no live inbound
+ *     sender breaks, UNLESS the owner sets LEAD_WEBHOOK_INBOUND_REQUIRE_SEPARATE_SECRET=true, which refuses it.
+ *     Turning that on is an OWNER decision (CT-ROUND26 T-3): every tenant must first set an inbound_secret.
  */
+/** The secret that authenticates inbound POST /api/leads for one lead_webhook config, or null (refuse). */
+export function inboundLeadWebhookSecret(cfg: Record<string, string> | null | undefined): string | null {
+  if (cfg?.inbound_secret) return cfg.inbound_secret;
+  if (String(process.env.LEAD_WEBHOOK_INBOUND_REQUIRE_SEPARATE_SECRET ?? '').trim().toLowerCase() === 'true') return null;
+  return cfg?.secret || null;
+}
+
 export async function validateWebhookAuth(
   integrationId: string,
   webhookSecret: string,
@@ -263,7 +277,8 @@ export async function validateWebhookAuth(
     data.config as Record<string, string>,
   );
   // STEP 3AH-91 W2F-2: constant-time, exact match, fails closed (was !==).
-  if (!cfg?.secret || !constantTimeEqual(webhookSecret, cfg.secret)) return null;
+  const inboundSecret = inboundLeadWebhookSecret(cfg);
+  if (!inboundSecret || !constantTimeEqual(webhookSecret, inboundSecret)) return null;
   return {
     company_id: data.company_id as string,
     website_id: (data as any).website_id ?? null,

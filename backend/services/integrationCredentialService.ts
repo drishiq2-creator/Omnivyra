@@ -12,6 +12,9 @@ export const SECRET_CONFIG_KEYS = new Set([
   'refresh_token',
   'client_secret',
   'webhook_secret',
+  // R26 T-3: the lead-webhook INBOUND secret (authenticates POST /api/leads). Kept apart from `secret`, which only
+  // signs OUTBOUND deliveries, so the third party that receives our deliveries never holds an inbound credential.
+  'inbound_secret',
   // Multi-provider CMS auth secrets (Ghost / Drupal / Joomla / Shopify).
   'admin_api_key',
   'api_token',
@@ -330,6 +333,28 @@ export async function deleteProviderCredentials(
     .eq('company_id', companyId)
     .eq('provider_key', providerKey);
   if (error) throw new Error(error.message);
+}
+
+/**
+ * R26 T-4 — delete every stored credential of one connection (the "disconnect" half that used to be missing:
+ * deleteIntegration removed the company_integrations row and left the ciphertext behind).
+ *
+ * Ownership is proven first, exactly like a read: a cross-tenant id raises CrossTenantCredentialError and deletes
+ * nothing. A missing connection deletes nothing and reports 0. Returns the number of rows removed, so the caller can
+ * audit what actually happened instead of assuming it.
+ */
+export async function deleteConnectionCredentials(
+  companyId: string,
+  connectionId: string,
+): Promise<number> {
+  if ((await assertConnectionBelongsToCompany(companyId, connectionId)) === 'missing') return 0;
+
+  const { data, error } = await ownedDbTable('integration_credentials')
+    .delete()
+    .eq('connection_id', connectionId)
+    .select('id');
+  if (error) throw new Error(error.message);
+  return ((data as unknown[] | null) ?? []).length;
 }
 
 export async function mergeConnectionConfig(

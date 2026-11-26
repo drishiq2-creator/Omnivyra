@@ -14,7 +14,10 @@ jest.mock('../../services/rbacService', () => ({
   getUserCompanyRole: jest.fn(async () => ({ role: 'COMPANY_ADMIN', userId: 'u1' })),
 }));
 let mockRead: () => Promise<unknown[]> = async () => [];
+jest.mock('../../db/writeOwner', () => ({ ownedDbTable: jest.fn(() => { throw new Error('no DB in this test'); }) }));
 jest.mock('../../services/integrationService', () => ({
+  // R26 T-2: the route shapes every integration with the REAL toPublicIntegration.
+  toPublicIntegration: jest.requireActual('../../services/integrationService').toPublicIntegration,
   getIntegrations: jest.fn(() => mockRead()),
   createIntegration: jest.fn(),
 }));

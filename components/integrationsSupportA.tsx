@@ -80,6 +80,14 @@ export interface Integration {
   last_tested_at: string | null;
   last_error: string | null;
   created_at: string;
+  /** lead_webhook only (server: integrationService.leadWebhookSigningStatus). */
+  webhook_signing?: {
+    configured_mode: 'legacy' | 'dual' | 'signed';
+    effective_mode: 'legacy' | 'dual' | 'signed';
+    raw_secret_sent: boolean;
+    legacy_sunset: string | null;
+    deprecation_warning: string | null;
+  };
 }
 
 export interface Website {
@@ -245,10 +253,25 @@ export const STATUS_BADGE: Record<IntegrationStatus, { label: string; cls: strin
   pending: { label: 'Pending', cls: 'bg-amber-50 text-amber-700 border-amber-200', icon: <Clock className="h-3.5 w-3.5" /> },
 };
 
-const CONFIG_FIELDS: Record<IntegrationType, { key: string; label: string; placeholder: string; type?: string; hint?: string }[]> = {
+/** What the server sends instead of a stored secret (integrationSecretRedaction.REDACTED_SECRET). Never a real value. */
+const REDACTED_SECRET_PLACEHOLDER = '********';
+
+const CONFIG_FIELDS: Record<IntegrationType, { key: string; label: string; placeholder: string; type?: string; hint?: string; options?: { value: string; label: string }[] }[]> = {
   lead_webhook: [
-    { key: 'webhook_url', label: 'Webhook URL', placeholder: 'https://your-crm.com/webhooks/leads', hint: 'Receives POST with { name, email, phone, source }' },
-    { key: 'secret', label: 'Secret (optional)', placeholder: 'my-secret-key', hint: 'Sent as X-Webhook-Secret header' },
+    { key: 'webhook_url', label: 'Webhook URL', placeholder: 'https://your-crm.com/webhooks/leads', hint: 'Must be https://. Receives POST with { name, email, phone, source }' },
+    { key: 'secret', label: 'Signing secret (optional)', placeholder: 'optional signing secret', type: 'password', hint: 'Each delivery carries X-Omnivyra-Signature: t=<unix seconds>,v1=<hex HMAC-SHA256 of "<t>.<body>">, keyed by this secret. Reject a signature older than 5 minutes.' },
+    {
+      key: 'signing_mode',
+      label: 'Delivery authentication',
+      placeholder: 'optional',
+      hint: 'Signed: the secret never leaves Omnivyra. Dual / Legacy also send the raw secret as X-Webhook-Secret, for receivers not yet verifying signatures; both stop at the platform sunset date.',
+      options: [
+        { value: 'signed', label: 'Signed (recommended)' },
+        { value: 'dual', label: 'Dual: signature + raw secret (migration, deprecated)' },
+        { value: 'legacy', label: 'Legacy: raw secret + signature (deprecated)' },
+      ],
+    },
+    { key: 'inbound_secret', label: 'Inbound secret (optional)', placeholder: 'optional, different from the signing secret', type: 'password', hint: 'Send as webhook_secret when POSTing leads to /api/leads. Must differ from the outbound secret. Until set, the outbound secret is still accepted inbound.' },
   ],
   wordpress: [
     { key: 'site_url', label: 'WordPress URL', placeholder: 'https://omnivyra.com/blog', hint: 'The actual WordPress publishing endpoint. Examples: https://omnivyra.com or https://omnivyra.com/blog. Production sites must use https:// (Application Passwords require HTTPS); localhost/dev can use http://.' },
@@ -411,7 +434,21 @@ interface ModalProps {
 export function IntegrationModal({ mode, initial, websites, onClose, onSave }: ModalProps) {
   const [type, setType] = useState<IntegrationType>(initial?.type || 'lead_webhook');
   const [name, setName] = useState(initial?.name || '');
-  const [config, setConfig] = useState<Record<string, string>>(initial?.config || {});
+  // R26 T-2: secrets are write-only. A stored secret arrives as the placeholder; it is never put into the input. Left
+  // blank, the server keeps the stored value; typing a new value replaces it.
+  const [storedSecretKeys] = useState<Set<string>>(
+    () => new Set(Object.entries(initial?.config || {}).filter(([, v]) => v === REDACTED_SECRET_PLACEHOLDER).map(([k]) => k)),
+  );
+  const [config, setConfig] = useState<Record<string, string>>(() => {
+    const base: Record<string, string> = Object.fromEntries(
+      Object.entries(initial?.config || {}).filter(([, v]) => v !== REDACTED_SECRET_PLACEHOLDER),
+    );
+    // Show the mode actually stored: a pre-R26 lead webhook has no key and is 'legacy'; a new one is 'signed'.
+    if ((initial?.type || 'lead_webhook') === 'lead_webhook' && !base.signing_mode) {
+      base.signing_mode = mode === 'edit' ? initial?.webhook_signing?.configured_mode || 'legacy' : 'signed';
+    }
+    return base;
+  });
   const [websiteId, setWebsiteId] = useState(initial?.website_id || websites[0]?.id || '');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -465,7 +502,9 @@ export function IntegrationModal({ mode, initial, websites, onClose, onSave }: M
       return;
     }
 
-    const requiredField = fields.find((field) => !field.placeholder.includes('optional') && !config[field.key]);
+    const requiredField = fields.find(
+      (field) => !field.placeholder.includes('optional') && !config[field.key] && !storedSecretKeys.has(field.key),
+    );
     if (requiredField) {
       setError(`${requiredField.label} is required.`);
       return;
@@ -551,6 +590,11 @@ export function IntegrationModal({ mode, initial, websites, onClose, onSave }: M
             )}
           </div>
 
+          {type === 'lead_webhook' && initial?.webhook_signing?.deprecation_warning && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+              {initial.webhook_signing.deprecation_warning}
+            </div>
+          )}
           <div className="space-y-3">
             <div className="border-t border-gray-100 pt-3 text-sm font-medium text-gray-700">Publishing destination — {TYPE_LABELS[type]}</div>
             {fields.map((field) => {
@@ -565,17 +609,30 @@ export function IntegrationModal({ mode, initial, websites, onClose, onSave }: M
               return (
                 <div key={field.key}>
                   <label className="mb-1 block text-sm font-medium text-gray-700">{field.label}</label>
+                  {field.options ? (
+                    <select
+                      value={value}
+                      onChange={(event) => setConfig((current) => ({ ...current, [field.key]: event.target.value }))}
+                      className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    >
+                      {field.options.map((option) => (
+                        <option key={option.value} value={option.value}>{option.label}</option>
+                      ))}
+                    </select>
+                  ) : (
                   <input
                     type={field.type || 'text'}
                     value={value}
+                    autoComplete={field.type === 'password' ? 'new-password' : undefined}
                     onChange={(event) => {
                       setConfig((current) => ({ ...current, [field.key]: event.target.value }));
                       if (isSiteUrl) setSiteUrlNormalizationWarning(null);
                     }}
                     onBlur={() => handleSiteUrlBlur(field.key)}
-                    placeholder={field.placeholder}
+                    placeholder={storedSecretKeys.has(field.key) && !value ? 'Stored (hidden): leave blank to keep' : field.placeholder}
                     className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   />
+                  )}
                   {field.hint && <p className="mt-1 text-xs text-gray-500">{field.hint}</p>}
                   {isSiteUrl && siteUrlNormalizationWarning && (
                     <p className="mt-1 text-xs text-red-700">{siteUrlNormalizationWarning}</p>
