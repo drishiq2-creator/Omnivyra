@@ -123,8 +123,11 @@ function record(raw: ProbeResult): ProbeResult {
   probesFailed += 1;
   failureStreak += 1;
   const ttlMs = rpaEnvFailureBackoffMs(failureStreak);
-  const reason = conciseReason(raw.reason) || 'PLAYWRIGHT_LAUNCH_FAILED';
-  const detail = failureStreak === 1 ? compactDetail(raw.reason) : '';
+  // `in` narrowing: the repo compiles with strict=false, where a boolean-literal discriminant (raw.ok)
+  // does not narrow the ProbeResult union, so `raw.reason` is a type error there.
+  const failReason = 'reason' in raw ? raw.reason : '';
+  const reason = conciseReason(failReason) || 'PLAYWRIGHT_LAUNCH_FAILED';
+  const detail = failureStreak === 1 ? compactDetail(failReason) : '';
   console.warn(
     `[rpaEnv] probe failed (streak=${failureStreak}); next probe in ${Math.round(ttlMs / 1000)}s: ${reason}` +
       (detail && detail !== reason ? ` || detail: ${detail}` : ''),
