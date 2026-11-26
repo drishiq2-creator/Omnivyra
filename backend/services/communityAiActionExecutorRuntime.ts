@@ -15,6 +15,7 @@ import { logUsageEvent } from './usageLedgerService';
 import { incrementUsageMeter } from './usageMeterService';
 import { checkUsageBeforeExecution } from './usageEnforcementService';
 import { ownedDbTable } from '../db/writeOwner';
+import { checkCommunityActionContactGovernance, contactGateAuditPayload } from './communityAiContactGovernanceGate';
 
 import { type CommunityAiAction, type ExecutionMode, type ResultStatus, type ExecutionResult, type MetricEventType, deriveAutoIdempotencyKey, recordExecutionMetric, TERMINAL_ROW_STATUSES, validateAction, requiresApproval, loadHistoryMetrics, resolveExecutionMode, recordManualSimulation, runApiExecution, runRpaExecution, prepareBrowserDispatch, buildDmCommandChain } from './communityAiActionExecutorContracts';
 
@@ -531,6 +532,37 @@ const runExecution = async (
 
   if (requiresApproval(action, approved)) {
     return { ok: false, status: 'failed', error: 'APPROVAL_REQUIRED' };
+  }
+
+  // Round 24D / G-7 — contact governance. Every mode (api, rpa, browser
+  // command chain, manual) passes here before any side effect, so a
+  // suppressed recipient is refused for every caller (execute route,
+  // scheduler, auto rules, bulk, engagement reply, response orchestrator).
+  // A real suppression is a terminal 'blocked'; an unreadable governance
+  // store is fail-closed as 'skipped' (no false suppression is recorded).
+  const contactGate = await checkCommunityActionContactGovernance(action);
+  if (contactGate.allowed === false) {
+    await logCommunityAiActionEvent({
+      action_id: action.id,
+      tenant_id: action.tenant_id,
+      organization_id: action.organization_id,
+      event_type: 'skipped',
+      event_payload: contactGateAuditPayload(contactGate, { source: options?.source || 'unknown', boundary: 'executor' }),
+    });
+    if (contactGate.code === 'CONTACT_SUPPRESSED') {
+      return {
+        ok: false,
+        status: 'blocked',
+        reason: 'CONTACT_SUPPRESSED',
+        error: { code: 'CONTACT_SUPPRESSED', reason: contactGate.reason, store: contactGate.store },
+      };
+    }
+    return {
+      ok: false,
+      status: 'skipped',
+      reason: 'CONTACT_GOVERNANCE_UNAVAILABLE',
+      error: { code: 'CONTACT_GOVERNANCE_UNAVAILABLE', reason: contactGate.reason },
+    };
   }
 
   const executionMode = await resolveExecutionMode(action);

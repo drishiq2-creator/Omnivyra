@@ -289,12 +289,19 @@ async function whatsappPersonAnchor(): Promise<number> {
 
 // ── The table ─────────────────────────────────────────────────────────────────
 
-const PATHS: Array<[string, () => Promise<number>]> = [
-  ['social/comments direct reply (pages/api/social/comments.ts)', socialCommentReply],
+// Round 24D / G-7 (round 18 S9, CT remediation R9): contact governance is now
+// enforced on the community_ai_actions path. Per this file's contract the
+// CURRENT test was deleted and the PENDING one became `it`; the CONTROL keeps
+// the "harness reaches the real send" proof by clearing the restriction.
+const ENFORCED_PATHS: Array<[string, () => Promise<number>]> = [
   ['community runExecution API mode (communityAiActionExecutorRuntime.runExecution)', communityApiReply],
   ['community runExecution RPA mode (runRpaExecution → executeRpaTask)', communityRpaReply],
   ['community runExecution browser dispatch (prepareBrowserDispatch)', communityBrowserDm],
   ['extension lease handout (GET /api/extension/commands)', extensionLeaseHandout],
+];
+
+const PATHS: Array<[string, () => Promise<number>]> = [
+  ['social/comments direct reply (pages/api/social/comments.ts)', socialCommentReply],
   ['WhatsApp broadcast person anchor (whatsappBroadcastService.processBatch)', whatsappPersonAnchor],
   // K-6 is undecided for these; only E4 (domain reminder) is a decided exemption and is not listed.
   ['transactional company_referral email (emailService.sendCompanyAdminReferral)', () => transactionalEmail('company_referral')],
@@ -311,6 +318,19 @@ beforeAll(() => { process.env.WHATSAPP_CONNECT_ENABLED = 'true'; });
 afterAll(() => {
   if (PRIOR_WA_GATE === undefined) delete process.env.WHATSAPP_CONNECT_ENABLED;
   else process.env.WHATSAPP_CONNECT_ENABLED = PRIOR_WA_GATE;
+});
+
+describe('egress enforced (R24D / G-7)', () => {
+  describe.each(ENFORCED_PATHS)('%s', (path, run) => {
+    it(`ENFORCED: ${path} refuses a suppressed recipient`, async () => {
+      expect(await run()).toBe(0);
+    });
+
+    it(`CONTROL: ${path} sends when the recipient holds no restriction`, async () => {
+      gov.records = [];
+      expect(await run()).toBeGreaterThan(0);
+    });
+  });
 });
 
 describe('egress bypass characterisation (GD-3 undecided)', () => {

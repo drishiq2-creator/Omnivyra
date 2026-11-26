@@ -10,6 +10,10 @@ import { notifyCommunityAi } from '../../../../backend/services/communityAiNotif
 import { sendCommunityAiWebhooks } from '../../../../backend/services/communityAiWebhookService';
 import { getPlaybookById } from '../../../../backend/services/playbooks/playbookService';
 import {
+  checkCommunityActionContactGovernance,
+  contactGateAuditPayload,
+} from '../../../../backend/services/communityAiContactGovernanceGate';
+import {
   validateActionAgainstPlaybook,
 } from '../../../../backend/services/playbooks/playbookValidator';
 
@@ -101,6 +105,31 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   // API can return a precise error rather than a generic CHECK violation.
   if (action.requires_human_approval === true && !action.approved_at) {
     return res.status(403).json({ error: 'APPROVAL_REQUIRED', reason: 'NOT_APPROVED' });
+  }
+
+  // Round 24D / G-7 — contact governance on the row of record, BEFORE the
+  // state transition. The executor checks again (defense in depth), but it is
+  // handed the row without its metadata, so the DM thread identifiers are
+  // checked here. Refusal leaves the row in its current state: no transition,
+  // no execution, no suppression lifted or recorded.
+  const contactGate = await checkCommunityActionContactGovernance({
+    organization_id: action.organization_id,
+    platform: action.platform,
+    action_type: action.action_type,
+    target_id: action.target_id,
+    metadata: (action as any).metadata ?? null,
+  });
+  if (contactGate.allowed === false) {
+    await logCommunityAiActionEvent({
+      action_id: actionId,
+      tenant_id: scope.tenantId,
+      organization_id: scope.organizationId,
+      event_type: 'skipped',
+      event_payload: contactGateAuditPayload(contactGate, { boundary: 'execute', user_id: roleGate.userId }),
+    });
+    return contactGate.code === 'CONTACT_SUPPRESSED'
+      ? res.status(403).json({ error: 'CONTACT_SUPPRESSED', reason: contactGate.reason })
+      : res.status(503).json({ error: 'CONTACT_GOVERNANCE_UNAVAILABLE', reason: contactGate.reason });
   }
 
   const requestedMode = (body.execution_mode || action.execution_mode || '').toString();

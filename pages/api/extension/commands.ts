@@ -30,6 +30,7 @@ import { validateCommandPayload, COMMAND_SCHEMA_VERSION } from '@/backend/servic
 import { recordExecutionMetric } from '@/backend/services/communityAiExecutionResultService';
 import { resolveAccountTier } from '@/backend/services/rpaWorker/rpaAccountTier';
 import { getCommunityAiPlatformPolicy } from '@/backend/services/communityAiPlatformPolicyService';
+import { checkCommunityActionContactGovernance } from '@/backend/services/communityAiContactGovernanceGate';
 import { EXTENSION_BROWSER_INGESTION_SUSPENDED, SUSPENDED_COLLECTION_COMMANDS } from '@/backend/services/extensionIngestionSuspension';
 
 const LEASE_TTL_SECONDS = 90; // longer than the extension's 30s handler timeout + retries
@@ -173,7 +174,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
 
     let query = supabase
       .from('community_ai_actions')
-      .select('id, platform, action_type, target_id, suggested_text, execution_mode, created_at, dispatch_lease_expires_at, execution_correlation_id, command_chain, command_chain_index, approved_at')
+      .select('id, organization_id, platform, action_type, target_id, suggested_text, execution_mode, created_at, dispatch_lease_expires_at, execution_correlation_id, command_chain, command_chain_index, approved_at, metadata')
       .eq('organization_id', session.orgId)
       .eq('status', 'pending')
       .eq('execution_mode', 'browser');
@@ -241,6 +242,52 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       if (!READ_ONLY_EXTENSION_ACTIONS.has(capabilityAction)) {
         if (!policy.execution_enabled) continue;
         if (policy.require_human_approval && !(row as any).approved_at) continue;
+
+        // Round 24D / G-7 — contact governance is re-checked at hand-out,
+        // the last point before the browser sends: a recipient suppressed
+        // after the row was prepared (or between chain steps) must not be
+        // contacted. Tenant = the session's org (the query is scoped to it).
+        // A real suppression terminalizes the row as 'blocked' (auditable,
+        // never re-offered); an unreadable governance store leaves the row
+        // unclaimed, which is provably unsent.
+        const contactGate = await checkCommunityActionContactGovernance({
+          organization_id: session.orgId,
+          platform: row.platform,
+          action_type: row.action_type,
+          target_id: row.target_id,
+          metadata: (row as any).metadata ?? null,
+        });
+        if (contactGate.allowed === false) {
+          if (contactGate.code === 'CONTACT_SUPPRESSED') {
+            try {
+              const { persistExecutionResult } = await import('@/backend/services/communityAiExecutionResultService');
+              await persistExecutionResult({
+                actionId: row.id,
+                organizationId: session.orgId,
+                correlationId: (row as any).execution_correlation_id ?? randomUUID(),
+                expectedFromStatuses: ['pending'],
+                result: {
+                  ok: false,
+                  status: 'blocked',
+                  reason: 'CONTACT_SUPPRESSED',
+                  error: { code: 'CONTACT_SUPPRESSED', reason: contactGate.reason, store: contactGate.store },
+                  response: {
+                    source: 'extension_commands',
+                    gate: 'contact_governance',
+                    identifier_kind: contactGate.identifierKind,
+                  },
+                  execution_mode: 'browser',
+                },
+                // No rowHint: the row's own idempotency_key is left untouched.
+              });
+            } catch (persistErr: any) {
+              console.warn('[extension/commands] contact-governance block persist failed:', persistErr?.message || persistErr);
+            }
+          } else {
+            console.warn('[extension/commands] contact governance unavailable; row left unclaimed:', row.id, contactGate.reason);
+          }
+          continue;
+        }
       }
 
       // Instagram DM business-tier enforcement. Instagram Direct is only
