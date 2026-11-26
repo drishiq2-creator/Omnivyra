@@ -101,6 +101,13 @@ function degradedBootSnapshot(error: unknown): AuthReadiness {
       nodeVersion: process.version,
       nodeEnv: process.env.NODE_ENV ?? 'unknown',
       deploymentId: null,
+      commitSha: null,
+      claimedCommitSha: null,
+      buildProvenance: 'unverified',
+      buildProvenanceReason: 'fingerprint_unavailable',
+      buildProvenanceSource: null,
+      platformDeploymentId: null,
+      schemaManifestStatus: 'unavailable',
       vercelEnv: null,
       railwayEnv: null,
       emittedAt: now,
@@ -157,7 +164,10 @@ export async function bootAuthSubsystem(): Promise<AuthReadiness> {
     const generation = bootGeneration;
     bootInFlight = (async () => {
       const schema = await getSchemaHealth();
-      const fingerprint = emitBootFingerprint({ schemaManifestHash: schema.checkedAt });
+      // ROUND 12: no hint. `schema.checkedAt` is a probe TIMESTAMP and was being
+      // cached as the "schema manifest hash"; the hash now comes only from the
+      // bundled committed manifest inside bootFingerprint.
+      const fingerprint = emitBootFingerprint();
       const reasons: string[] = [];
       if (!schema.ok) {
         reasons.push(

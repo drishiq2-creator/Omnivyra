@@ -156,3 +156,7 @@ test-results/
 # Renaming the directory would change that aggregate, so the directory is un-ignored instead.
 !research/cpg-u1/tooling/node_modules/
 !research/cpg-u1/tooling/node_modules/**
+
+# Round 12 build provenance: deploy-time stamp + build-time result. Generated,
+# uploaded to Vercel (NOT in .vercelignore), never committed (no SHA in git).
+generated/build-provenance/
