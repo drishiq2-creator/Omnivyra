@@ -24,17 +24,18 @@ const processQueue = async () => {
 
     try {
       const result = await currentHandler(item.task);
-      if (!result.success && item.attempts < MAX_ATTEMPTS) {
+      // An unknown outcome (the action may already have happened) is never
+      // re-run in-process: a second run could double-post or un-like.
+      if (!result.success && !result.outcome_unknown && item.attempts < MAX_ATTEMPTS) {
         queue.push({ ...item, attempts: item.attempts + 1 });
         continue;
       }
       item.resolve(result);
-    } catch (error) {
-      if (item.attempts < MAX_ATTEMPTS) {
-        queue.push({ ...item, attempts: item.attempts + 1 });
-        continue;
-      }
-      item.reject(error);
+    } catch (error: any) {
+      // A throw from the handler can come mid-action: unknown outcome, not a
+      // failure, and not retried (previously re-run once, then rejected).
+      const msg = String(error?.message || error || 'RPA_HANDLER_THREW').split(/\r?\n/)[0].slice(0, 300);
+      item.resolve({ success: false, outcome_unknown: true, error: `RPA_OUTCOME_UNKNOWN:${msg}` });
     }
   }
 

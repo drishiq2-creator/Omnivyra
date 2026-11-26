@@ -4,7 +4,7 @@ import { loadRpaSession } from './rpaSessionStore';
 import { resolveSelector, waitForAny, type ResolverCandidate } from './selectorResolver';
 import { makeCancellationChecker, RpaCancelledError, type CancellationChecker } from './rpaCancellationChecker';
 import { saveRpaArtifact } from './rpaArtifactStore';
-import { isProbeFailure, rpaEnvReady } from './rpaEnv';
+import { isProbeFailure, rpaEnvReady, loadPlaywrightModule } from './rpaEnv';
 import type { RpaTask, RpaResult } from './rpaWorkerService';
 
 /**
@@ -49,20 +49,28 @@ export type RpaScript = {
 };
 
 async function loadPlaywright(): Promise<any | null> {
-  try {
-    const importer = new Function('specifier', 'return import(specifier);') as (specifier: string) => Promise<any>;
-    const pw = await importer('playwright');
-    return pw;
-  } catch {
-    return null;
-  }
+  // Same loader as the readiness probe (rpaEnv), so both see one module.
+  return loadPlaywrightModule();
 }
 
 async function checkpoint(cancelled: CancellationChecker) {
   if (await cancelled()) throw new RpaCancelledError();
 }
 
-async function runStep(page: any, step: RpaStep, cancelled: CancellationChecker): Promise<void> {
+/**
+ * `interacted` is called immediately BEFORE the first call that can change
+ * state on the platform (click / fill / key press / text insertion). From
+ * that point a thrown error or a missed post-condition no longer proves the
+ * action did not happen, so the runner reports `outcome_unknown` instead of
+ * a definite failure. A selector that was never resolved is still a definite
+ * failure (nothing was touched).
+ */
+async function runStep(
+  page: any,
+  step: RpaStep,
+  cancelled: CancellationChecker,
+  interacted: () => void = () => undefined,
+): Promise<void> {
   await checkpoint(cancelled);
 
   switch (step.kind) {
@@ -82,18 +90,21 @@ async function runStep(page: any, step: RpaStep, cancelled: CancellationChecker)
     case 'click': {
       const handle = await resolveSelector(page, step.selectors, { perAttemptMs: step.timeout ?? 8_000 });
       if (!handle) throw new Error(`SELECTOR_NOT_FOUND`);
+      interacted();
       await handle.click({ timeout: step.timeout ?? 8_000 });
       return;
     }
     case 'fill': {
       const handle = await resolveSelector(page, step.selectors, { perAttemptMs: step.timeout ?? 8_000 });
       if (!handle) throw new Error(`SELECTOR_NOT_FOUND`);
+      interacted();
       await handle.fill(step.text, { timeout: step.timeout ?? 8_000 });
       return;
     }
     case 'type_contenteditable': {
       const handle = await resolveSelector(page, step.selectors, { perAttemptMs: step.timeout ?? 8_000 });
       if (!handle) throw new Error(`SELECTOR_NOT_FOUND`);
+      interacted();
       await handle.click();
       await page.keyboard.insertText(step.text);
       return;
@@ -101,6 +112,7 @@ async function runStep(page: any, step: RpaStep, cancelled: CancellationChecker)
     case 'press': {
       const handle = await resolveSelector(page, step.selectors, { perAttemptMs: step.timeout ?? 8_000 });
       if (!handle) throw new Error(`SELECTOR_NOT_FOUND`);
+      interacted();
       await handle.press(step.key);
       return;
     }
@@ -141,6 +153,14 @@ export async function runRpaScript(task: RpaTask, script: RpaScript): Promise<Rp
   let context: any = null;
   let page: any = null;
   let platformId: string | null = null;
+  // Set just before the first state-changing interaction (see runStep).
+  let interacted = false;
+  const markInteracted = () => { interacted = true; };
+  const unknownOutcome = (cause: string): RpaResult => ({
+    success: false,
+    outcome_unknown: true,
+    error: `RPA_OUTCOME_UNKNOWN:${cause.split(/\r?\n/)[0].slice(0, 300)}`,
+  });
   try {
     await checkpoint(cancelled);
     browser = await pw.chromium.launch({ headless: true });
@@ -152,7 +172,7 @@ export async function runRpaScript(task: RpaTask, script: RpaScript): Promise<Rp
     await page.waitForTimeout(500);
 
     for (const step of script.steps) {
-      await runStep(page, step, cancelled);
+      await runStep(page, step, cancelled, markInteracted);
     }
     platformId = (page as any).__extractedPlatformId ?? null;
 
@@ -194,9 +214,11 @@ export async function runRpaScript(task: RpaTask, script: RpaScript): Promise<Rp
     } catch { /* screenshots are audit-only */ }
 
     if (!confirmed) {
+      // After an interaction a missed confirmation does not prove the action
+      // failed (the reply may be posted, the like toggled): unknown, never
+      // retried. Without any interaction it stays a definite failure.
       return {
-        success: false,
-        error: 'RPA_POST_CONDITION_FAILED',
+        ...(interacted ? unknownOutcome('RPA_POST_CONDITION_FAILED') : { success: false, error: 'RPA_POST_CONDITION_FAILED' }),
         screenshot_path: screenshotPath,
         screenshot_url: screenshotUrl ?? undefined,
       };
@@ -209,9 +231,13 @@ export async function runRpaScript(task: RpaTask, script: RpaScript): Promise<Rp
     };
   } catch (err: any) {
     if (err instanceof RpaCancelledError) {
-      return { success: false, error: 'RPA_CANCELLED' };
+      return interacted ? unknownOutcome('RPA_CANCELLED') : { success: false, error: 'RPA_CANCELLED' };
     }
-    return { success: false, error: err?.message || 'RPA_SCRIPT_FAILED' };
+    const msg = String(err?.message || 'RPA_SCRIPT_FAILED');
+    // A crash / lost response after the first interaction is an UNKNOWN
+    // outcome, not a failure: retrying it could double-post or un-like.
+    if (interacted) return unknownOutcome(msg);
+    return { success: false, error: msg };
   } finally {
     try { if (page) await page.close(); } catch { /* swallow */ }
     try { if (context) await context.close(); } catch { /* swallow */ }

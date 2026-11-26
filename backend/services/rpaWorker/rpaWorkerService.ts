@@ -1,9 +1,9 @@
 import { enqueueRpaTask, startRpaWorker } from './rpaTaskQueue';
 import { buildScript } from './rpaPlatformScripts';
 import { runRpaScript } from './rpaPlaywrightRunner';
-import { rpaEnvReady, assertRpaEnvReady, isProbeFailure } from './rpaEnv';
+import { rpaEnvReady, assertRpaEnvReady, isProbeFailure, getRpaEnvProbeDiagnostics } from './rpaEnv';
 import { admitRpaTask, observeAllActiveOrgs } from './rpaQueueState';
-import { enqueueRpaRetry, flushRpaRetryQueueRoundRobin } from './rpaRetryQueue';
+import { enqueueRpaRetry, flushRpaRetryQueueRoundRobin, countDueRpaRetries } from './rpaRetryQueue';
 import { withHeavyJobSlot } from '../../queue/bullmqClient';
 import { getCommunityAiPlatformPolicy } from '../communityAiPlatformPolicyService';
 import { ownedDbTable } from '../../db/writeOwner';
@@ -27,6 +27,13 @@ export type RpaResult = {
   /** Durable public URL of the screenshot stored in the rpa-artifacts bucket. */
   screenshot_url?: string;
   error?: string;
+  /**
+   * The browser may already have performed the action (a click / submit was
+   * issued) but success could not be confirmed: lost response, crash or
+   * post-condition miss after the interaction. NOT a definite failure and
+   * never auto-retried (a retry could double-post or un-like).
+   */
+  outcome_unknown?: boolean;
 };
 
 type RpaHandler = (task: RpaTask) => Promise<RpaResult>;
@@ -53,24 +60,52 @@ export { assertRpaEnvReady };
  */
 export const rpaSchedulerHooks = {
   observeBackpressure: observeAllActiveOrgs,
-  flushRetries: async (opts?: { limit_per_org?: number; max_orgs?: number }) => {
-    // Single env readiness check per tick. If Playwright/Chromium is
-    // unavailable, skip the whole tick cleanly instead of iterating every
-    // due row (each would otherwise fail downstream identically).
-    const ready = await rpaEnvReady();
-    if (isProbeFailure(ready)) {
-      console.warn(`[rpaRetryQueueFlush] skipped — RPA env not ready: ${ready.reason}`);
-      return { orgs_visited: 0, claimed: 0, succeeded: 0, failed: 0, errors: 0, remaining: 0 };
+  flushRetries: async (opts?: { limit_per_org?: number; max_orgs?: number }): Promise<RpaFlushTickResult> => {
+    // Order (24C): every step below is cheaper than the next and each one
+    // short-circuits the rest.
+    //   1. due-row count (one head-only DB count) — an empty queue never
+    //      reads policy and never launches Chromium;
+    //   2. platform kill switch — disabled execution never launches Chromium
+    //      and never touches a row (fail-closed on an unreadable policy);
+    //   3. env readiness probe (Chromium launch, memoized; failures back off
+    //      exponentially in rpaEnv and log once per real probe, not per tick);
+    //   4. per-row gate (kill switch + approval of record) before any handler.
+    const idle = (extra: Partial<RpaFlushTickResult>): RpaFlushTickResult => ({
+      orgs_visited: 0, claimed: 0, succeeded: 0, failed: 0, unknown: 0, errors: 0, remaining: 0,
+      due: 0, skipped_empty: 0, skipped_policy: 0, skipped_env: 0, env_failure_streak: 0, env_next_probe_in_s: 0,
+      ...extra,
+    });
+    const dueCheck = await countDueRpaRetries();
+    if (dueCheck.error) {
+      console.warn(`[rpaRetryQueueFlush] due-count read failed: ${String(dueCheck.error).split(/\r?\n/)[0].slice(0, 200)}`);
+      return idle({ errors: 1 });
     }
+    if (dueCheck.due === 0) return idle({ skipped_empty: 1 });
+
     // Platform kill switch: when execution is disabled nothing is run and
     // no retry row is touched (mirrors the community scheduler). An
     // unreadable policy is fail-closed (execution_enabled=false).
     const policy = await getCommunityAiPlatformPolicy();
     if (!policy?.execution_enabled) {
       console.warn('[rpaRetryQueueFlush] skipped — community execution disabled by platform policy');
-      return { orgs_visited: 0, claimed: 0, succeeded: 0, failed: 0, errors: 0, remaining: 0 };
+      return idle({ due: dueCheck.due, skipped_policy: 1 });
     }
-    return flushRpaRetryQueueRoundRobin({
+
+    // Single env readiness check per tick. If Playwright/Chromium is
+    // unavailable, skip the whole tick cleanly instead of iterating every
+    // due row (each would otherwise fail downstream identically). The
+    // probe itself logs one line per real (backed-off) probe failure.
+    const ready = await rpaEnvReady();
+    if (isProbeFailure(ready)) {
+      const diag = typeof getRpaEnvProbeDiagnostics === 'function' ? getRpaEnvProbeDiagnostics() : null;
+      return idle({
+        due: dueCheck.due,
+        skipped_env: 1,
+        env_failure_streak: diag?.failure_streak ?? 0,
+        env_next_probe_in_s: diag?.next_probe_in_s ?? 0,
+      });
+    }
+    const flushed = await flushRpaRetryQueueRoundRobin({
       handler: async (task) => {
         // Retry path bypasses the admission gate to avoid infinite
         // deferral during partial outages. Env readiness is still
@@ -89,7 +124,39 @@ export const rpaSchedulerHooks = {
       limitPerOrg: opts?.limit_per_org,
       maxOrgs: opts?.max_orgs,
     });
+    return {
+      ...idle({ due: dueCheck.due }),
+      orgs_visited: flushed.orgs_visited,
+      claimed: flushed.claimed,
+      succeeded: flushed.succeeded,
+      failed: flushed.failed,
+      unknown: flushed.unknown ?? 0,
+      errors: flushed.errors,
+      remaining: flushed.remaining,
+    };
   },
+};
+
+/** Counters returned by one `flushRetries` tick (all safe numbers). */
+export type RpaFlushTickResult = {
+  orgs_visited: number;
+  claimed: number;
+  succeeded: number;
+  failed: number;
+  /** Executed, outcome unknown — row parked for reconciliation, not failed. */
+  unknown: number;
+  errors: number;
+  remaining: number;
+  /** Due rows seen by the pre-check. */
+  due: number;
+  /** 1 when the tick stopped at the empty-queue pre-check (no probe, no policy read). */
+  skipped_empty: number;
+  /** 1 when the kill switch stopped the tick (no probe). */
+  skipped_policy: number;
+  /** 1 when the env probe (cached / backed off) stopped the tick. */
+  skipped_env: number;
+  env_failure_streak: number;
+  env_next_probe_in_s: number;
 };
 
 /**
