@@ -102,6 +102,10 @@ const CreatorOperationsTab = dynamic(() => import('../components/super-admin/tab
   loading: SuperAdminTabLoader,
 });
 
+type PolicyToggleKey = 'execution_enabled' | 'auto_rules_enabled' | 'require_human_approval';
+const isPolicyToggleKey = (key: string): key is PolicyToggleKey =>
+  key === 'execution_enabled' || key === 'auto_rules_enabled' || key === 'require_human_approval';
+
 export default function SuperAdminPanel() {
   const router = useRouter();
   const { userRole } = useCompanyContext();
@@ -130,6 +134,10 @@ export default function SuperAdminPanel() {
   const [showPolicyConfirm, setShowPolicyConfirm] = useState(false);
   const [pendingPolicy, setPendingPolicy] = useState<CommunityAiPolicy | null>(null);
   const [pendingPolicyLabel, setPendingPolicyLabel] = useState('');
+  // R26 F-1: the one field the pending save changes (only that field is sent),
+  // and whether the current policy was read (until it is, no toggle may be saved).
+  const [pendingPolicyKey, setPendingPolicyKey] = useState<PolicyToggleKey | null>(null);
+  const [communityPolicyLoaded, setCommunityPolicyLoaded] = useState(false);
   const [isLoggingOut, setIsLoggingOut] = useState(false);
   const [pricingPlans, setPricingPlans] = useState<Array<{ id: string; plan_key: string; name: string; description?: string | null; monthly_price?: number | null }>>([]);
   const [plansLimits, setPlansLimits] = useState<Record<string, Record<string, number | null>>>({});
@@ -254,7 +262,12 @@ export default function SuperAdminPanel() {
         const policyData = await policyResponse.json();
         setCommunityPolicy(policyData?.policy || null);
         setCommunityPolicyUpdatedBy(policyData?.updated_by_email || null);
+        setCommunityPolicyLoaded(true);
         setIsSuperAdminSession(true);
+      } else {
+        // A failed read is not "no policy": keep toggles from saving defaults over the real row.
+        setCommunityPolicy(null);
+        setCommunityPolicyLoaded(false);
       }
 
       const healthRes = await fetchWithAuth('/api/external-apis/health-summary');
@@ -293,34 +306,42 @@ export default function SuperAdminPanel() {
     }
   };
 
+  // What the runtime applies when no policy row exists
+  // (communityAiPlatformPolicyService DEFAULT_POLICY): manual sends on,
+  // automation OFF. R26 F-1: auto rules was shown (and saved) as true.
   const defaultPolicy: CommunityAiPolicy = {
     execution_enabled: true,
-    auto_rules_enabled: true,
+    auto_rules_enabled: false,
     require_human_approval: false,
     updated_at: null,
     updated_by: null,
   };
 
   const openPolicyConfirm = (key: keyof CommunityAiPolicy, label: string) => {
+    if (!isPolicyToggleKey(key)) return;
+    if (!communityPolicyLoaded) {
+      alert('The current Community-AI policy could not be read. Reload the page before changing it.');
+      return;
+    }
     const basePolicy = communityPolicy || defaultPolicy;
     setPendingPolicy({ ...basePolicy, [key]: !basePolicy[key] });
+    setPendingPolicyKey(key);
     setPendingPolicyLabel(label);
     setShowPolicyConfirm(true);
   };
 
   const savePolicy = async () => {
-    if (!pendingPolicy) return;
+    if (!pendingPolicy || !pendingPolicyKey) return;
     setIsSavingPolicy(true);
     try {
       // Platform write: may need a passkey step-up; fire() builds a fresh request per attempt.
       const r = await performSuperAdminWrite(() => fetchWithAuth('/api/super-admin/community-ai-policy', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          execution_enabled: pendingPolicy.execution_enabled,
-          auto_rules_enabled: pendingPolicy.auto_rules_enabled,
-          require_human_approval: pendingPolicy.require_human_approval,
-        }),
+        // Send only the toggled field: the server preserves the stored row's
+        // other values (or the no-row defaults), so one toggle cannot also
+        // flip another setting from a stale or default view.
+        body: JSON.stringify({ [pendingPolicyKey]: pendingPolicy[pendingPolicyKey] }),
       }));
       if (!r.ok) {
         alert(r.message);
@@ -337,6 +358,7 @@ export default function SuperAdminPanel() {
       setIsSavingPolicy(false);
       setShowPolicyConfirm(false);
       setPendingPolicy(null);
+      setPendingPolicyKey(null);
       setPendingPolicyLabel('');
     }
   };
@@ -637,7 +659,7 @@ export default function SuperAdminPanel() {
               </div>
               <div className="flex justify-end gap-3">
                 <button
-                  onClick={() => { if (isSavingPolicy) return; setShowPolicyConfirm(false); setPendingPolicy(null); setPendingPolicyLabel(''); }}
+                  onClick={() => { if (isSavingPolicy) return; setShowPolicyConfirm(false); setPendingPolicy(null); setPendingPolicyKey(null); setPendingPolicyLabel(''); }}
                   className="px-4 py-2 text-gray-600 hover:text-gray-800 transition-colors"
                 >
                   Cancel

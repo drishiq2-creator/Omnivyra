@@ -15,6 +15,56 @@ type PolicyInput = {
   require_human_approval?: boolean;
 };
 
+/**
+ * R26 F-1: values a save persists for fields the request does not name.
+ *
+ * With no policy row these are exactly the runtime's no-row defaults
+ * (communityAiPlatformPolicyService DEFAULT_POLICY), so a save changes only
+ * the field it names:
+ *   - auto_rules_enabled: false. An absent field must never enable automatic
+ *     execution (it was `?? true`, so the first save of ANY toggle - e.g.
+ *     "require human approval" - also switched platform-wide auto rules on).
+ *   - execution_enabled: true. Manual (human-initiated) sends stay available;
+ *     defaulting false would silently kill the live inbox.
+ *   - require_human_approval: false. Defaulting true would make every live
+ *     inbox reply (pages/api/engagement/reply.ts executes source 'manual'
+ *     with no approved_at) skip with HUMAN_APPROVAL_REQUIRED.
+ * With an existing row its values are preserved; a non-boolean stored
+ * auto_rules_enabled is never read as an authorisation (=== true).
+ */
+const NO_ROW_DEFAULTS = {
+  execution_enabled: true,
+  auto_rules_enabled: false,
+  require_human_approval: false,
+} as const;
+
+type StoredPolicy = {
+  execution_enabled?: unknown;
+  auto_rules_enabled?: unknown;
+  require_human_approval?: unknown;
+} | null;
+
+const resolveNextPolicy = (input: PolicyInput, existing: StoredPolicy) => {
+  const stored = (key: 'execution_enabled' | 'require_human_approval'): boolean => {
+    const value = existing?.[key];
+    return typeof value === 'boolean' ? value : NO_ROW_DEFAULTS[key];
+  };
+  return {
+    execution_enabled:
+      typeof input.execution_enabled === 'boolean' ? input.execution_enabled : stored('execution_enabled'),
+    auto_rules_enabled:
+      typeof input.auto_rules_enabled === 'boolean'
+        ? input.auto_rules_enabled
+        : existing
+          ? existing.auto_rules_enabled === true
+          : NO_ROW_DEFAULTS.auto_rules_enabled,
+    require_human_approval:
+      typeof input.require_human_approval === 'boolean'
+        ? input.require_human_approval
+        : stored('require_human_approval'),
+  };
+};
+
 // READ guard: bridge accepted via centralized helper (signature-validated +
 // dry-run-aware). Mutations gate separately on `requireCapability`.
 const requireSuperAdminRead = async (
@@ -35,16 +85,21 @@ const requireSuperAdminRead = async (
 };
 
 const fetchCurrentPolicy = async () => {
-  const { data, error } = await supabase
-    .from('community_ai_platform_policy')
-    .select('*')
-    .order('updated_at', { ascending: false })
-    .limit(1)
-    .maybeSingle();
-  if (error) {
-    return { policy: null, error };
+  // A thrown read is the same as an errored read: unreadable, never "no row".
+  try {
+    const { data, error } = await supabase
+      .from('community_ai_platform_policy')
+      .select('*')
+      .order('updated_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (error) {
+      return { policy: null, error };
+    }
+    return { policy: data || null, error: null };
+  } catch (thrown) {
+    return { policy: null, error: { code: (thrown as { code?: unknown })?.code ?? 'THREW' } };
   }
-  return { policy: data || null, error: null };
 };
 
 const resolveUpdatedByEmail = async (userId?: string | null) => {
@@ -60,9 +115,11 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     if (!admin) return;
     const { policy, error } = await fetchCurrentPolicy();
     if (error) {
-      // Table may not exist yet — return null policy rather than 500
-      console.warn('[community-ai-policy] DB error (table may not be migrated):', error?.message);
-      return res.status(200).json({ policy: null, updated_by_email: null });
+      // R26 F-1: a read failure is not "no policy". Answering 200 + null made
+      // the console render the no-row defaults over a row it could not read,
+      // and the next toggle saved those defaults over the real row.
+      console.warn('[community-ai-policy] policy read failed', { code: (error as { code?: unknown })?.code ?? null });
+      return res.status(503).json({ error: 'POLICY_UNREADABLE', policy: null, updated_by_email: null });
     }
     const updatedByEmail = await resolveUpdatedByEmail(policy?.updated_by);
     return res.status(200).json({
@@ -101,23 +158,11 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
 
   const { policy: existing, error: loadError } = await fetchCurrentPolicy();
   if (loadError) {
+    // Refuse to write: without the current row we cannot preserve its values.
     return res.status(500).json({ error: 'FAILED_TO_LOAD_POLICY' });
   }
 
-  const nextPolicy = {
-    execution_enabled:
-      typeof input.execution_enabled === 'boolean'
-        ? input.execution_enabled
-        : existing?.execution_enabled ?? true,
-    auto_rules_enabled:
-      typeof input.auto_rules_enabled === 'boolean'
-        ? input.auto_rules_enabled
-        : existing?.auto_rules_enabled ?? true,
-    require_human_approval:
-      typeof input.require_human_approval === 'boolean'
-        ? input.require_human_approval
-        : existing?.require_human_approval ?? false,
-  };
+  const nextPolicy = resolveNextPolicy(input, existing);
 
   const updatedBy = admin.userId === 'super_admin_session' ? null : admin.userId;
   let savedPolicy = null;
