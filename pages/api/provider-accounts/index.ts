@@ -15,8 +15,14 @@ import {
   createProviderAccount,
   listAccountsForApi,
 } from '../../../backend/services/providerAccountService';
-// Remediation: server-side env-var-name validation (no secrets in a name field).
-import { describeRejectedEnvVarName, isEnvVarName } from '../../../backend/security/credentialSafety';
+// Round 26: one guard module validates credential input, hardens the stored envelope and
+// serialises rows without credential material (shape-only `credential_state`).
+import {
+  checkPlatformOwnedSource,
+  checkProviderAccountCredentialsInput,
+  hardenCredentialEnvelope,
+  toSafeProviderAccount,
+} from '../../../backend/security/superAdminCredentialWriteGuards';
 import { requireCapability } from '../../../backend/security/requireCapability';
 import { requireAdminRateLimit } from '../../../backend/services/requestAccessService';
 import { enforcePlatformWriteAuthority } from '../../../backend/security/platformWriteAuthority';
@@ -63,8 +69,10 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     }
 
     const accounts = await listAccountsForApi(api_source_id);
-    // Strip credentials from list response — never expose to client
-    const safe = accounts.map(({ credentials_encrypted: _creds, ...rest }) => rest);
+    // Never expose credential material: credential-bearing columns are dropped by name and
+    // replaced by a shape-only state (encrypted / plaintext / invalid reference), so the
+    // Super Admin can see which accounts need a re-save without any value leaving the server.
+    const safe = accounts.map((a) => toSafeProviderAccount(a as unknown as Record<string, unknown>));
     return res.status(200).json({ accounts: safe });
   }
 
@@ -114,23 +122,25 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       return res.status(400).json({ error: 'credentials must contain at least one credential field' });
     }
 
-    // REMEDIATION: reject a secret pasted into the env-var-NAME field. Server-side, because
-    // the client is not the security boundary — this is the exact path by which live provider
-    // secrets reached a readable column.
-    if (credentials.api_key_env_name && !isEnvVarName(credentials.api_key_env_name)) {
-      return res.status(400).json({
-        error: 'INVALID_ENV_VAR_NAME',
-        // Describes the shape; never echoes the submitted value.
-        detail: describeRejectedEnvVarName(credentials.api_key_env_name),
-      });
-    }
+    // Server-side credential input validation — the client is not the security boundary.
+    // Refuses a secret in the env-var-NAME field (the exact path by which live provider keys
+    // reached a readable column), unknown fields, non-strings and plaintext `*_ref` values.
+    // Rejections describe the field and shape; they never echo the submitted value.
+    const checked = checkProviderAccountCredentialsInput(credentials, { allowClearEnvName: false });
+    if (checked.ok !== true) return res.status(checked.status).json(checked.body);
 
-    // REMEDIATION: one shared envelope builder encrypts `api_key_value` with the same
-    // `encryptCredential` already used for OAuth. Previously this endpoint wrote the raw key
-    // verbatim into a column named `credentials_encrypted`.
+    // Platform credentials belong to platform rows only (S-3): refuse a tenant-owned source.
+    const owner = await checkPlatformOwnedSource(api_source_id);
+    if (owner.ok !== true) return res.status(owner.status).json(owner.body);
+
+    // The shared envelope builder encrypts `api_key_value` with `encryptCredential`; the
+    // hardening pass guarantees nothing unencrypted or secret-shaped is persisted.
     let credentialsEncrypted: string;
     try {
-      credentialsEncrypted = buildCredentialEnvelope({ existing: null, supplied: credentials });
+      credentialsEncrypted = hardenCredentialEnvelope(
+        buildCredentialEnvelope({ existing: null, supplied: checked.supplied }),
+        { suppliedKeys: checked.suppliedKeys },
+      );
     } catch {
       // Fail CLOSED — never fall back to storing plaintext.
       return res.status(500).json({ error: 'Failed to encrypt credentials' });
@@ -146,11 +156,11 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
         priority: typeof priority === 'number' ? priority : 1,
       });
 
-      const { credentials_encrypted: _creds, ...safe } = account;
-      return res.status(201).json({ account: safe });
+      return res.status(201).json({ account: toSafeProviderAccount(account as unknown as Record<string, unknown>) });
     } catch (err: any) {
       console.error('createProviderAccount failed', err?.message);
-      return res.status(500).json({ error: err?.message || 'Failed to create account' });
+      // A fixed message: a database error can quote the row being written.
+      return res.status(500).json({ error: 'Failed to create account' });
     }
   }
 
