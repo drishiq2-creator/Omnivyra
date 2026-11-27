@@ -393,6 +393,30 @@ export const runCommunityAiScheduler = async (now = new Date()): Promise<Schedul
       continue;
     }
 
+    // Review SF-1: claim the row before executing. The manual execute route
+    // (pages/api/community-ai/actions/execute.ts) takes the same row with a CAS
+    // approved/pending/scheduled -> 'executing'; without a CAS here a row the
+    // user approved and executed by hand while it also carried a due
+    // scheduled_at could run twice. Same transition, tenant/org-scoped, only
+    // from 'approved': exactly one of the two claims matches the row. 0 rows =
+    // someone else took it (or it changed state): skip, nothing executed. An
+    // error is also a skip (fail closed). The executor does not read or CAS
+    // status itself; its persistExecutionResult writes the terminal status
+    // from 'executing' (no expectedFromStatuses on this path).
+    const claimAt = new Date().toISOString();
+    const { data: claimedRow, error: claimError } = await ownedDbTable('community_ai_actions')
+      .update({ status: 'executing', updated_at: claimAt })
+      .eq('id', action.id)
+      .eq('tenant_id', action.tenant_id)
+      .eq('organization_id', action.organization_id)
+      .eq('status', 'approved')
+      .select('id, status')
+      .maybeSingle();
+    if (claimError || !claimedRow) {
+      if (claimError) console.warn('COMMUNITY_AI_SCHEDULER_CLAIM_FAILED', action.id, claimError.message);
+      continue;
+    }
+
     // Executor owns the terminal row write (persist:true). The scheduler
     // simply observes the outcome; notify + webhook fan-out lives inside
     // the executor so every entry point emits identically.
