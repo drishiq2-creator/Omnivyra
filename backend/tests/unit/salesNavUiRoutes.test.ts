@@ -33,6 +33,8 @@ function deps(db = fakeDb(), over: Partial<SalesNavUiDeps> = {}): SalesNavUiDeps
   return {
     requireTenant: signedIn(),
     gate: gateOpen,
+    // Round 30: these tests exercise the CLEARED path; the legal stop itself is r30SalesNavLegalStop.test.ts.
+    legalCleared: () => true,
     readAck: async () => ({ consent_version: SALESNAV_RESTRICTION_ACK.version, granted_by: USER, granted_at: 'x' }),
     store: { table: db.table, now: () => NOW },
     now: () => NOW,

@@ -19,7 +19,8 @@ import {
   pageReservationRequest, pageUrlFor, SALESNAV_SOURCE,
   type SalesNavCallerContext, type SalesNavPagePosition, type SalesNavRunStatus,
 } from './contract';
-import { salesNavRouteGate } from './gate';
+import { tallyProspectOutcomes } from '../../../lib/prospects/prospectOutcomeTally';
+import { SALESNAV_LEGAL_STOP_BODY, salesNavLegalCleared, salesNavRouteGate } from './gate';
 import { fromWire, registerSalesNavLeadSource, toBatchRecord } from './ingestAdapter';
 import {
   closeSalesNavRun, loadRun, markPendingReservation, pauseSalesNavRun, recordSalesNavPage, reserveSalesNavQuota,
@@ -31,6 +32,8 @@ export type BrowserRoute = 'extension' | 'rpa';
 export interface SalesNavLoopDeps {
   readonly store?: SalesNavStoreDeps;
   readonly gate?: typeof salesNavRouteGate;
+  /** Round 30: the legal switch checked by submitPage (default: the strict env read). Tests only. */
+  readonly legalCleared?: typeof salesNavLegalCleared;
   readonly screen?: ScreenFn;
   readonly ingest?: typeof ingestLeadBatch;
   readonly now?: () => Date;
@@ -135,6 +138,14 @@ export type SubmitResult =
 export async function submitPage(
   ctx: SalesNavCallerContext, runId: string | undefined, input: SubmitPageInput, deps: SalesNavLoopDeps = {},
 ): Promise<SubmitResult> {
+  // Round 30 / P0-1: the legal switch FIRST, for every browser route (the extension handler checks it too; the
+  // in-process RPA route reaches here directly). Before any read, so a stopped transport ingests nothing and reveals
+  // nothing; fail closed on any value but the exact 'true'. The next decideNextPage closes the run (gate_closed).
+  let cleared = false;
+  try { cleared = (deps.legalCleared ?? salesNavLegalCleared)(input.route) === true; } catch { cleared = false; }
+  if (!cleared) {
+    return { kind: 'refusal', http: 403, error: SALESNAV_LEGAL_STOP_BODY.error, extra: { reason: SALESNAV_LEGAL_STOP_BODY.reason } };
+  }
   const store = deps.store ?? {};
   const now = (deps.now ?? (() => new Date()))();
   const loaded = await runOrRefusal(ctx.organizationId, runId, store);
@@ -208,12 +219,14 @@ export async function submitPage(
       organizationId: ctx.organizationId, source: SALESNAV_SOURCE, records: screened.toIngest,
       ingestionRunId: run.id, now: capturedAt,
     });
-    for (const o of batch.outcomes) {
-      if (!o.ok) failed += 1;
-      else if (o.provenanceOutcome === 'created') created += 1;
-      else if (o.provenanceOutcome === 'changed') updated += 1;
-      else unchanged += 1;
-    }
+    // Round 30 / P0-2: "created" counts canonical PROSPECTS the resolver created (prospectOutcome), once each - not
+    // new EVIDENCE rows (provenanceOutcome), which counted a new source record for an existing prospect as a new
+    // lead. Every outcome lands in exactly one bucket, so accepted = created + updated + skipped + held + ... holds.
+    const t = tallyProspectOutcomes(batch.outcomes);
+    created = t.newProspects;
+    updated = t.updated + t.withoutProspect + t.unclassified;
+    unchanged = t.unchanged;
+    failed = t.rejected;
   }
   const skippedDuplicates = skippedInRun + screened.skippedDuplicates + unchanged;
   const recorded = await recordSalesNavPage(ctx, {

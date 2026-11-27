@@ -512,6 +512,7 @@ export default function ImportWizard({ companyId }: { companyId: string }) {
           transportError={transportError}
           aborted={aborted}
           profileSaveNote={profileSaveNote}
+          excludedRows={parsedRef.current?.excludedRows ?? 0}
           onRetry={handleRetry}
           onStartOver={handleStartOver}
         />

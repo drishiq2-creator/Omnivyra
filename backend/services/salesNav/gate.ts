@@ -17,6 +17,27 @@ export const SALESNAV_EXTRACTION_FLAG = 'salesnav_extraction';
 export const salesNavTransportFlag = (t: SalesNavTransport): string => `salesnav_transport_${t}`;
 export const salesNavLegalSwitch = (t: SalesNavTransport): string => `SALESNAV_${t.toUpperCase()}_LEGAL_CLEARED`;
 
+/**
+ * Round 30 / P0-1: the LEGAL switch alone, for the routes that must stop under the legal stop but cannot take the
+ * whole gate (/ack records the acknowledgement the gate requires; /bind precedes it). STRICT and FAIL-CLOSED: only the
+ * exact string 'true' clears; false, unset, '', 'TRUE', ' true', '1' - and an environment that cannot be read - do not.
+ */
+export function salesNavLegalCleared(
+  transport: SalesNavTransport, env: Record<string, string | undefined> = process.env,
+): boolean {
+  try {
+    return env[salesNavLegalSwitch(transport)] === 'true';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The ONE body a route answers while the legal switch is closed. It names the closed condition and nothing else:
+ * no run, binding, member, acknowledgement or tenant state, so a refused caller learns nothing about the company.
+ */
+export const SALESNAV_LEGAL_STOP_BODY = Object.freeze({ error: 'GATE_CLOSED', reason: 'legal_not_cleared' });
+
 export interface SalesNavGateDeps {
   readonly env?: Record<string, string | undefined>;
   readonly evaluate?: typeof evaluateFeatureFlag;
@@ -26,8 +47,7 @@ export interface SalesNavGateDeps {
 export async function salesNavRouteGate(
   ctx: SalesNavCallerContext, transport: SalesNavTransport, deps: SalesNavGateDeps = {},
 ): Promise<SalesNavGateDecision> {
-  const env = deps.env ?? process.env;
-  if (env[salesNavLegalSwitch(transport)] !== 'true') return { allowed: false, reason: 'legal_not_cleared' };
+  if (!salesNavLegalCleared(transport, deps.env ?? process.env)) return { allowed: false, reason: 'legal_not_cleared' };
 
   const evaluate = deps.evaluate ?? evaluateFeatureFlag;
   for (const flagKey of [SALESNAV_EXTRACTION_FLAG, salesNavTransportFlag(transport)]) {

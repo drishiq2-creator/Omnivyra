@@ -15,7 +15,7 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { requireTenantAccess } from '../../security/TenantGuard';
 import { SALESNAV_TRANSPORTS, type SalesNavTransport } from '../../services/salesNav/contract';
-import { salesNavRouteGate } from '../../services/salesNav/gate';
+import { SALESNAV_LEGAL_STOP_BODY, salesNavLegalCleared, salesNavRouteGate } from '../../services/salesNav/gate';
 import { activeExtensionBinding, storeDepsFor, type ExtensionMemberBindingPort } from '../../services/salesNav/memberBinding';
 import {
   ackCoversCurrentText, readLatestSalesNavAck, recordSalesNavAck, SALESNAV_RESTRICTION_ACK, SalesNavAckRefused,
@@ -27,6 +27,8 @@ import {
 export interface SalesNavUiDeps {
   readonly requireTenant?: typeof requireTenantAccess;
   readonly gate?: typeof salesNavRouteGate;
+  /** Round 30: the legal switch for /ack (default: the strict env read). Tests only. */
+  readonly legalCleared?: typeof salesNavLegalCleared;
   readonly readAck?: typeof readLatestSalesNavAck;
   readonly recordAck?: typeof recordSalesNavAck;
   readonly binding?: ExtensionMemberBindingPort;
@@ -96,6 +98,12 @@ export async function ackHandler(req: NextApiRequest, res: NextApiResponse, deps
   if (typeof b.shownVersion !== 'string' || typeof b.shownTextSha256 !== 'string') {
     return res.status(400).json({ error: 'SHOWN_TEXT_REQUIRED' });
   }
+  // Round 30 / P0-1 (closes K18): no acknowledgement is RECORDED while the transport is legally stopped. After the
+  // tenant check (a non-member learns nothing) and before the write. Fail closed: only the exact 'true' clears, and
+  // an unreadable switch refuses. The fixed legal-stop body carries no ack, binding or tenant state.
+  let cleared = false;
+  try { cleared = (deps.legalCleared ?? salesNavLegalCleared)(b.transport) === true; } catch { cleared = false; }
+  if (!cleared) return res.status(403).json({ ...SALESNAV_LEGAL_STOP_BODY });
   try {
     const out = await (deps.recordAck ?? recordSalesNavAck)(
       { organizationId: String(companyId), initiatedBy: tenant.userId },

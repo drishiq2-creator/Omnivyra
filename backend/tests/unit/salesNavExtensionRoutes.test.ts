@@ -37,12 +37,16 @@ function env(opts: { granted?: number; gate?: boolean } = {}) {
   });
   const ingest = jest.fn(async ({ records }: any) => ({
     organizationId: ORG, source: 's', total: records.length, succeeded: records.length, failed: 0,
-    outcomes: records.map(() => ({ externalId: 'x', ok: true, provenanceOutcome: 'created' })),
+    // Round 30 / P0-2: the orchestrator now reports the PROSPECT verdict; "created" is counted from it (one new
+    // prospect per record here). The old double carried only provenanceOutcome - the evidence verdict.
+    outcomes: records.map((_r: unknown, i: number) => ({ externalId: 'x', ok: true, prospectId: `p-${i}`, prospectOutcome: 'created', provenanceOutcome: 'created' })),
   }));
   const screen = jest.fn(async ({ records }: any) => ({ toIngest: records, skippedDuplicates: 0, heldForReview: 0, probeUnknown: 0 }));
   const deps: SalesNavExtensionDeps = {
     auth: async () => ({ session: { userId: USER, orgId: ORG, expiresAt: 9e12, hmacNonce: 'n' } }),
     gate: async () => ({ allowed: opts.gate ?? true, reason: opts.gate === false ? 'tenant_flag_off:salesnav_extraction' : 'cleared' }),
+    // Round 30: these tests exercise the CLEARED path; the legal stop itself is r30SalesNavLegalStop.test.ts.
+    legalCleared: () => true,
     store: { table: db.table, rpc, now: () => NOW },
     screen: screen as never,
     ingest: ingest as never,
@@ -333,7 +337,8 @@ describe('the SHARED loop (loop.ts), in-process as the RPA route calls it (89 R4
     expect(d).toMatchObject({ kind: 'refusal', http: 409, error: 'RUN_NOT_HELD_BY_ROUTE', extra: { heldBy: 'extension' } });
     expect(e.rpc).not.toHaveBeenCalled();
     const s = await loop.submitPage(ctx, e.runId, { route: 'rpa', pageIndex: 0, finalUrl: LIST, outcome: 'ok', hasNextPage: true,
-      listTotal: 1, leads: [lead('keyR00001')], readerVersion: 'snr-1', attestedMemberId: URN }, { store: e.deps.store });
+      // round 30: submitPage checks the legal switch first; this test is about the route holder, on the CLEARED path
+      listTotal: 1, leads: [lead('keyR00001')], readerVersion: 'snr-1', attestedMemberId: URN }, { store: e.deps.store, legalCleared: () => true });
     expect(s).toMatchObject({ kind: 'refusal', error: 'RUN_NOT_HELD_BY_ROUTE' });
   });
   it('reportClose accepts a transport failure before any read; an unlisted pair is refused; a second close is already_closed', async () => {
@@ -354,7 +359,7 @@ describe('submitPage marks a run-ending refusal EXPLICITLY (89 R4): extra.closed
   const submit = (e: any, over: Record<string, unknown> = {}, store = e.deps.store) => loop.submitPage(ctx, e.runId, {
     route: 'extension', pageIndex: 0, finalUrl: LIST, outcome: 'unknown', unknownCode: 'structure_unrecognised',
     hasNextPage: null, listTotal: null, leads: [], readerVersion: 'snr-1', attestedMemberId: URN, ...over,
-  }, { store });
+  }, { store, legalCleared: () => true });   // round 30: the CLEARED path (the legal stop: r30SalesNavLegalStop.test.ts)
   it('a close that APPLIED -> closed: true, with the code and the closed run view', async () => {
     const e = await withRun();
     expect(await submit(e)).toMatchObject({ kind: 'refusal', extra: { closed: true, code: 'structure_unrecognised', run: { status: 'unknown' } } });

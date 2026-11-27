@@ -114,6 +114,17 @@ export default function ProspectListPage() {
             <Link href="/lead-intelligence" className="mt-3 inline-block text-xs font-medium text-purple-600 hover:underline">
               ← Lead Intelligence workspace
             </Link>
+            {/* Round 30 / P0-3: the import route is reachable when the company already has prospects too, not only
+                from the empty state. Same switch as the empty-state link and the page itself. */}
+            {isProspectImportUiEnabled() ? (
+              <Link
+                href="/prospects/import"
+                className="ml-4 mt-3 inline-block text-xs font-medium text-purple-600 hover:underline"
+                data-testid="prospects-import-link"
+              >
+                Import prospects from a file →
+              </Link>
+            ) : null}
           </header>
 
           {selectedCompanyId ? <ImportReviewPanel companyId={selectedCompanyId} /> : null}

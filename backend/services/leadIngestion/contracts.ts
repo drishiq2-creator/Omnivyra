@@ -261,6 +261,13 @@ export interface IngestionRecordOutcome {
    */
   prospectId?: string | null;
   /**
+   * Round 30 / P0-2 — WS-1's verdict on the PROSPECT (`resolveOrCreateProspect`): `created` only for the one
+   * successful `canonical_leads` insert, `matched` for an existing prospect (including the loser of a concurrent
+   * create), `insufficient_evidence` when no source key let one be resolved. This, not `provenanceOutcome`
+   * (which is about the EVIDENCE row), is what "new prospects" counts - see lib/prospects/prospectOutcomeTally.ts.
+   */
+  prospectOutcome?: 'created' | 'matched' | 'insufficient_evidence';
+  /**
    * WS-4 → WS-2. A SUMMARY of the enrichment plan, present only when the caller
    * supplied ports. Counts rather than the plan itself: the outcome is an
    * ingestion report, and embedding a full plan would make it the plan's

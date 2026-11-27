@@ -34,7 +34,8 @@ const FAILURE_LABELS: Readonly<Record<string, string>> = {
 /** Plain language for the parser's diagnostics. */
 const DIAGNOSTIC_LABELS: Readonly<Record<CsvDiagnostic['kind'], string>> = {
   short_row: 'rows had fewer columns than the header — the missing values are treated as empty',
-  long_row: 'rows had extra columns beyond the header — the extras cannot be mapped',
+  // Round 30: such rows are LEFT OUT (csvParser `excludedRows`) - their values are likely in the wrong columns.
+  long_row: 'rows had more values than the header has columns, so they are left out of the import — their values may be in the wrong columns',
   duplicate_header: 'two columns share a heading, so they cannot be told apart',
   empty_header: 'a column has no heading, so it cannot be mapped',
   unterminated_quote: 'a quoted value was never closed, so the rest of the file ran together',
