@@ -18,6 +18,13 @@
  *   - Concurrent callers share one in-flight probe (one browser launch).
  */
 
+import {
+  __setBrowserRuntimeEnvForTests,
+  isBrowserRuntimeRefused,
+  launchBrowser,
+  releaseBrowserResources,
+} from '../browserRuntime/browserLauncher';
+
 export type ProbeResult = { ok: true } | { ok: false; reason: string };
 
 const SUCCESS_TTL_MS = 5 * 60 * 1000;
@@ -93,16 +100,18 @@ async function runProbe(): Promise<ProbeResult> {
     }
     let browser: any = null;
     try {
-      browser = await pw.chromium.launch({ headless: true });
+      browser = await launchBrowser({ purpose: 'rpa-env-probe', playwright: pw });
       return { ok: true };
     } catch (err: any) {
+      // Not the worker image (web/Vercel/local): nothing was spawned. Stable code, never retried here.
+      if (isBrowserRuntimeRefused(err)) return { ok: false, reason: `${err.code}:${err.reason}` };
       const msg = (err?.message || '').toString();
       if (msg.includes("Executable doesn't exist") || msg.includes('please run')) {
         return { ok: false, reason: 'PLAYWRIGHT_BROWSERS_NOT_INSTALLED' };
       }
       return { ok: false, reason: msg || 'PLAYWRIGHT_LAUNCH_FAILED' };
     } finally {
-      try { if (browser) await browser.close(); } catch { /* swallow */ }
+      await releaseBrowserResources({ browser });
     }
   } catch {
     return { ok: false, reason: 'PLAYWRIGHT_NOT_INSTALLED' };
@@ -207,4 +216,8 @@ export function __resetRpaEnvStateForTests(): void {
 /** Test-only: replace the dynamic `import('playwright')` (null restores it). */
 export function __setRpaPlaywrightLoaderForTests(loader: (() => Promise<any>) | null): void {
   playwrightLoaderOverride = loader;
+  // An injected (fake) Playwright stands in for the worker image, so the launcher's
+  // runtime gate is told it is the worker while the fake is installed; null restores
+  // the real environment. Production never calls this.
+  __setBrowserRuntimeEnvForTests(loader ? { OMNIVYRA_BROWSER_RUNTIME: 'worker' } : null);
 }

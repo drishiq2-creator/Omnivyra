@@ -1,4 +1,5 @@
-import { chromium, type Browser } from 'playwright';
+import type { Browser } from 'playwright';
+import { launchBrowser, releaseBrowserResources } from '../../browserRuntime/browserLauncher';
 
 type RedditRpaDiscoveryInput = {
   tenant_id: string;
@@ -46,7 +47,7 @@ export const discoverUsersFromRedditRpa = async (
   let browser: Browser | null = null;
   try {
     const max = typeof input.limit === 'number' && input.limit > 0 ? input.limit : 50;
-    browser = await chromium.launch({ headless: true });
+    browser = await launchBrowser({ purpose: 'reddit-discovery' });
     const context = await browser.newContext();
     const page = await context.newPage();
 
@@ -60,8 +61,6 @@ export const discoverUsersFromRedditRpa = async (
   } catch {
     return [];
   } finally {
-    if (browser) {
-      await browser.close();
-    }
+    await releaseBrowserResources({ browser });
   }
 };

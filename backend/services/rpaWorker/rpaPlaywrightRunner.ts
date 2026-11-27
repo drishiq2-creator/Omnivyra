@@ -6,6 +6,7 @@ import { makeCancellationChecker, RpaCancelledError, type CancellationChecker } 
 import { saveRpaArtifact } from './rpaArtifactStore';
 import { isProbeFailure, rpaEnvReady, loadPlaywrightModule } from './rpaEnv';
 import type { RpaTask, RpaResult } from './rpaWorkerService';
+import { launchBrowser, releaseBrowserResources } from '../browserRuntime/browserLauncher';
 
 /**
  * Playwright-backed RPA runner. Single place that knows how to drive a
@@ -163,7 +164,7 @@ export async function runRpaScript(task: RpaTask, script: RpaScript): Promise<Rp
   });
   try {
     await checkpoint(cancelled);
-    browser = await pw.chromium.launch({ headless: true });
+    browser = await launchBrowser({ purpose: 'rpa-script', playwright: pw });
     context = await browser.newContext({ storageState });
     page = await context.newPage();
 
@@ -239,8 +240,8 @@ export async function runRpaScript(task: RpaTask, script: RpaScript): Promise<Rp
     if (interacted) return unknownOutcome(msg);
     return { success: false, error: msg };
   } finally {
-    try { if (page) await page.close(); } catch { /* swallow */ }
-    try { if (context) await context.close(); } catch { /* swallow */ }
-    try { if (browser) await browser.close(); } catch { /* swallow */ }
+    // Bounded and never throws: a close that throws or hangs cannot skip the
+    // browser close, and a browser that will not close is force-killed.
+    await releaseBrowserResources({ page, context, browser });
   }
 }

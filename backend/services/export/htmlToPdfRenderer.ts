@@ -30,6 +30,13 @@ function resolveChromePath(): string | null {
   return null;
 }
 
+// DELIBERATELY NOT routed through backend/services/browserRuntime/browserLauncher.ts.
+// This renderer is served by the WEB app (pages/api/reports/[reportId].ts via
+// backend/apiHandlers/reports/reportIdShared.ts), not by the worker: on Vercel it
+// uses renderPdfWithServerlessChromium (@sparticuz/chromium), and in local dev this Playwright path
+// is what works. The launcher's runtime gate refuses everything except the worker
+// image, so routing this through it would break PDF export in local dev and the
+// non-serverless fallback. It keeps its own args and close-in-finally.
 async function renderPdfWithPlaywright(html: string): Promise<Buffer> {
   const { chromium } = await import('playwright');
   const launchArgs = [

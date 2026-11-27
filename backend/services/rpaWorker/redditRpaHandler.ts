@@ -1,3 +1,5 @@
+import { launchBrowser, releaseBrowserResources } from '../browserRuntime/browserLauncher';
+
 type RedditRpaTask = {
   tenant_id: string;
   organization_id: string;
@@ -39,7 +41,7 @@ export const executeRedditRpaTask = async (task: RedditRpaTask): Promise<RedditR
       return { success: false, error: 'PLAYWRIGHT_NOT_INSTALLED' };
     }
 
-    browser = await pw.chromium.launch({ headless: true });
+    browser = await launchBrowser({ purpose: 'reddit-rpa', playwright: pw });
     const context = await browser.newContext();
     const page = await context.newPage();
 
@@ -64,8 +66,6 @@ export const executeRedditRpaTask = async (task: RedditRpaTask): Promise<RedditR
   } catch (error: any) {
     return { success: false, error: error?.message || 'REDDIT_RPA_FAILED' };
   } finally {
-    if (browser) {
-      await browser.close();
-    }
+    await releaseBrowserResources({ browser });
   }
 };

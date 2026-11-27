@@ -36,8 +36,9 @@ export async function runProductionAdsAcquisitionCycle(): Promise<Record<string,
         // Imported HERE, not at composition time: with the flag off (or with nothing due)
         // `runAdsAcquisitionCycle` returns before opening a session, and a disabled worker
         // should not pay to load a browser driver it will never use.
-        const { chromium } = await import('playwright');
-        const browser = await chromium.launch({ headless: true });
+        // (The launcher imports playwright lazily too, and refuses outside the worker image.)
+        const { launchBrowser, releaseBrowserResources } = await import('../browserRuntime/browserLauncher');
+        const browser = await launchBrowser({ purpose: 'ads-acquisition' });
         return {
           session: {
             async withPage(fn) {
@@ -50,7 +51,7 @@ export async function runProductionAdsAcquisitionCycle(): Promise<Record<string,
               }
             },
           },
-          close: async () => { await browser.close().catch(() => undefined); },
+          close: async () => { await releaseBrowserResources({ browser }); },
         };
       },
       sink: createAdsEvidenceSink(),

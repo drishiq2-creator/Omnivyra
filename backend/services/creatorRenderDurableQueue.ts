@@ -203,10 +203,10 @@ export async function cancelDurableCreatorRenderJob(jobId: string): Promise<Crea
  */
 async function runCreatorRenderSoak(job: Job<unknown>): Promise<{ soak: true; chromiumMs: number; jobId: string; forcedThrow: boolean }> {
   const t0 = Date.now();
-  const { chromium } = await import('playwright');
-  let browser: Awaited<ReturnType<typeof chromium.launch>> | null = null;
+  const { launchBrowser, releaseBrowserResources } = await import('./browserRuntime/browserLauncher');
+  let browser: Awaited<ReturnType<typeof launchBrowser>> | null = null;
   try {
-    browser = await chromium.launch({ headless: true });
+    browser = await launchBrowser({ purpose: 'creator-render-soak' });
     const page = await browser.newPage();
     await page.goto('about:blank');
     await new Promise((r) => setTimeout(r, 800));
@@ -216,7 +216,7 @@ async function runCreatorRenderSoak(job: Job<unknown>): Promise<{ soak: true; ch
     }
     return { soak: true, chromiumMs, jobId: String(job.id), forcedThrow: false };
   } finally {
-    try { await browser?.close(); } catch { /* best-effort cleanup */ }
+    await releaseBrowserResources({ browser });
   }
 }
 
