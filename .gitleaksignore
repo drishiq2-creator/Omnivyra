@@ -1,0 +1,23 @@
+# gitleaks fingerprint ignores (exact commit:file:rule:line; nothing broader). Owner-approved, round 28 (2026-11-27).
+#
+# 15 generic-api-key findings, ALL synthetic test fixtures (FAKE_* constants such as FAKE_KEY / FAKE_NEWS_KEY /
+# FAKE_SEARCHAPI_24, and an inline oauth fixture) in backend/tests/unit/* introduced by aa3cc2bc6, 65919ea0b, d4e5cbb08
+# and fdb2d86b6. Verified: no value equals the leaked NewsAPI key or any credential field stored in Production
+# (in-DB md5 comparison, booleans only). Fingerprints pin the original commits, so a new real secret in these
+# files is still reported.
+
+65919ea0be953db10cf9fed9e339743040c67c38:backend/tests/unit/credentialRemediation.test.ts:generic-api-key:220
+aa3cc2bc6b513d419e61f91294cbd68d435a4187:backend/tests/unit/newsapiLeakExecution.test.ts:generic-api-key:25
+aa3cc2bc6b513d419e61f91294cbd68d435a4187:backend/tests/unit/newsapiLeakSourceRoute.test.ts:generic-api-key:21
+aa3cc2bc6b513d419e61f91294cbd68d435a4187:backend/tests/unit/newsapiLeakSuperAdminTests.test.ts:generic-api-key:14
+aa3cc2bc6b513d419e61f91294cbd68d435a4187:backend/tests/unit/newsapiLeakTenantRoutes.test.ts:generic-api-key:21
+aa3cc2bc6b513d419e61f91294cbd68d435a4187:backend/tests/unit/newsapiLeakTrendFetching.test.ts:generic-api-key:16
+d4e5cbb08cb9475ea8220b3fd532222485fc5c36:backend/tests/unit/r26ExternalApiCatalog.test.ts:generic-api-key:20
+d4e5cbb08cb9475ea8220b3fd532222485fc5c36:backend/tests/unit/r26ExternalApiCatalog.test.ts:generic-api-key:22
+d4e5cbb08cb9475ea8220b3fd532222485fc5c36:backend/tests/unit/r26ExternalApiRuntimePolicy.test.ts:generic-api-key:22
+d4e5cbb08cb9475ea8220b3fd532222485fc5c36:backend/tests/unit/r26ExternalApiSourceWrites.test.ts:generic-api-key:23
+d4e5cbb08cb9475ea8220b3fd532222485fc5c36:backend/tests/unit/r26ExternalApiTenantRoutes.test.ts:generic-api-key:20
+d4e5cbb08cb9475ea8220b3fd532222485fc5c36:backend/tests/unit/r26ExternalApiTenantRoutes.test.ts:generic-api-key:22
+d4e5cbb08cb9475ea8220b3fd532222485fc5c36:backend/tests/unit/r26ExternalApiTestConnection.test.ts:generic-api-key:19
+fdb2d86b6cfdfcefd627f89009776777225357ce:backend/tests/unit/r26SuperAdminCredentialSecurity.test.ts:generic-api-key:25
+fdb2d86b6cfdfcefd627f89009776777225357ce:backend/tests/unit/r26SuperAdminCredentialSecurity.test.ts:generic-api-key:331
