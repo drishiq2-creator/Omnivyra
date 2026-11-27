@@ -403,9 +403,9 @@ export const runCommunityAiScheduler = async (now = new Date()): Promise<Schedul
     // community_ai_actions_status_check (supabase/_schema/baseline.sql) admits
     // only pending/approved/executed/failed/skipped, so 'executing' would be
     // refused (backend/tests/realschema/r3comm_* proves it). Tenant/org scoped,
-    // only from 'approved', only when no live lease exists (same expiry rule as
-    // /api/extension/commands). The manual execute route's CAS requires the
-    // same "no live lease" condition, so exactly one side gets the row. 0 rows
+    // only from 'approved', only when the row carries NO lease (dispatch_lease_id
+    // null; an expired-but-unreleased lease is not free). The manual execute
+    // route's CAS requires the same condition, so exactly one side gets the row. 0 rows
     // or an error = skip, nothing executed.
     const leaseId = randomUUID();
     const claimAtMs = Date.now();
@@ -420,7 +420,11 @@ export const runCommunityAiScheduler = async (now = new Date()): Promise<Schedul
       .eq('tenant_id', action.tenant_id)
       .eq('organization_id', action.organization_id)
       .eq('status', 'approved')
-      .or(`dispatch_lease_expires_at.is.null,dispatch_lease_expires_at.lt.${new Date(claimAtMs).toISOString()}`)
+      // Only a row with NO lease at all. An expired lease that was never released (an extension that may have
+      // sent and lost its result, a tick that died mid-execute) is NOT free: re-claiming it could send twice.
+      // Every proper release nulls dispatch_lease_id (releaseSchedulerLease below, the extension's chain advance,
+      // terminal persistExecutionResult, the reaper).
+      .is('dispatch_lease_id', null)
       .select('id, status')
       .maybeSingle();
     if (claimError || !claimedRow) {

@@ -145,10 +145,41 @@ describe('SF-1: scheduler and manual execute claim the same row: exactly one run
     expect(db.actions[0].dispatch_lease_id).toBeNull();
   });
 
-  it('an EXPIRED scheduler lease (a tick that died) does not block the route', async () => {
+  // Lease predicate (coordinator, scheduler-lease item): only a row with NO lease is claimable. An expired lease
+  // that was never released (dispatch_lease_id still set) may already have sent - it blocks both sides.
+  it('an EXPIRED but UNRELEASED lease (a tick that died / an extension that lost its result) blocks the route: 409, nothing runs', async () => {
     db.actions[0].dispatch_lease_id = 'dead';
     db.actions[0].dispatch_lease_holder_id = 'community_ai_scheduler';
     db.actions[0].dispatch_lease_expires_at = '2026-01-01T00:00:00.000Z';
+    const r = await routeExecute();
+    expect(r.statusCode).toBe(409);
+    expect(runs).toEqual([]);
+  });
+});
+
+describe('scheduler lease predicate: dispatch_lease_id IS NULL, never "expired"', () => {
+  const tick = () => runCommunityAiScheduler(new Date('2026-11-28T00:00:00Z'));
+
+  it('expired-unreleased extension lease -> the scheduler skips the row (no run, lease untouched)', async () => {
+    Object.assign(db.actions[0], { dispatch_lease_id: 'lease-ext', dispatch_lease_holder_id: 'holder-ext', dispatch_lease_expires_at: '2026-01-01T00:00:00.000Z' });
+    await tick();
+    expect(runs).toEqual([]);
+    expect(db.actions[0]).toMatchObject({ dispatch_lease_id: 'lease-ext', dispatch_lease_holder_id: 'holder-ext' });
+  });
+
+  it('CONTROL: a RELEASED lease (all lease fields nulled, as every release does) -> claimable and run once', async () => {
+    Object.assign(db.actions[0], { dispatch_lease_id: null, dispatch_lease_holder_id: null, dispatch_lease_expires_at: null, dispatch_acknowledged_at: null });
+    await tick();
+    expect(runs).toEqual(['scheduler']);
+  });
+
+  it('CONTROL: a never-leased row -> claimable; the scheduler releases its own lease after (dispatch_lease_id null)', async () => {
+    await tick();
+    expect(runs).toEqual(['scheduler']);
+    expect(db.actions[0]).toMatchObject({ dispatch_lease_id: null, dispatch_lease_holder_id: null, dispatch_lease_expires_at: null });
+  });
+
+  it('CONTROL: a released row is executable by hand too (the route CAS uses the same predicate)', async () => {
     expect((await routeExecute()).statusCode).toBe(200);
     expect(runs).toEqual(['manual']);
   });
