@@ -88,8 +88,11 @@ RUN rm -f .env .env.local .env.production
 
 ENV NODE_ENV=production
 ENV PORT=8080
-# This image is the ONLY browser runtime (backend/services/browserRuntime/):
-# everywhere else a Chromium launch is refused before anything is spawned.
+# This image is the ONLY runtime for gated automation browsers
+# (backend/services/browserRuntime/): everywhere else a launch through
+# browserLauncher.ts is refused before anything is spawned. The web app's report
+# PDF export (backend/services/export/htmlToPdfRenderer.ts) is deliberately outside
+# that gate and runs its own headless Chromium on the web tier.
 ENV OMNIVYRA_BROWSER_RUNTIME=worker
 
 # wget is not present on debian-slim; use a node-based health probe.

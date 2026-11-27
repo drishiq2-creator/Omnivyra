@@ -1,11 +1,19 @@
 /**
- * Where may a real browser (Playwright Chromium) be launched?
+ * Where may a gated browser launch (Playwright Chromium via browserLauncher.ts:
+ * RPA, the RPA readiness probe, discovery and ads RPA) happen?
  *
  * Only on the designated worker image. Dockerfile.worker sets
- * OMNIVYRA_BROWSER_RUNTIME=worker. Vercel (VERCEL set) never launches a browser,
+ * OMNIVYRA_BROWSER_RUNTIME=worker. On Vercel (VERCEL set) this gate refuses,
  * even if the variable leaks into its environment. Anything else (local dev,
  * tests, the web app) is not a browser runtime unless the variable is set
  * explicitly - fail closed.
+ *
+ * SCOPE (review N-7): this gate covers launches that go through
+ * browserLauncher.ts. It does NOT cover the web app's PDF export
+ * (backend/services/export/htmlToPdfRenderer.ts), which deliberately launches
+ * its own headless Chromium on the web tier (@sparticuz/chromium on Vercel,
+ * Playwright in local dev) to render report PDFs. So "Vercel never launches
+ * Chromium" is NOT true; "Vercel never launches a gated (automation) browser" is.
  */
 export const BROWSER_RUNTIME_ENV = 'OMNIVYRA_BROWSER_RUNTIME';
 export const BROWSER_RUNTIME_WORKER = 'worker';

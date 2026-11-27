@@ -369,7 +369,7 @@ const validateTask = (task: RpaTask) => {
  * Phase C:
  *   - every accepted task gets a durable rpa_retry_queue row BEFORE anything
  *     runs; one row per action (a duplicate accept is a no-op and nothing runs);
- *   - NOT the browser worker (Vercel / web / dev): no probe, no launch. The task
+ *   - NOT the browser worker (Vercel / web / dev): no probe, no RPA launch. The task
  *     is queued durably for the worker and reported as not attempted;
  *   - on the worker the row is born CLAIMED by this process; the outcome is
  *     written through the token-matched finaliser. A crash or a lease that

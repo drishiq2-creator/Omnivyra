@@ -1,5 +1,8 @@
 /**
- * The ONE place a Playwright Chromium is launched and torn down.
+ * The ONE place an automation (worker) Playwright Chromium is launched and torn down.
+ * Not the only Chromium in the codebase: the web app's report PDF export
+ * (backend/services/export/htmlToPdfRenderer.ts) launches its own, deliberately
+ * outside this gate (see the note there and in browserRuntimeEnv.ts).
  *
  * Every browser launch site in the worker goes through launchBrowser(), so the
  * whole fleet gets the same:
