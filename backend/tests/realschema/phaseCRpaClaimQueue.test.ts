@@ -186,6 +186,7 @@ describe('privileges: service_role only', () => {
       expect(await attempt(`SELECT * FROM public.rpa_retry_queue_accept(gen_random_uuid(), gen_random_uuid(), 'p', 'like', 'u', NULL, NULL, NULL)`)).toBe('42501');
       expect(await attempt(`SELECT public.renew_rpa_retry_queue_claim(gen_random_uuid(), gen_random_uuid(), 60)`)).toBe('42501');
       expect(await attempt(`SELECT public.release_rpa_retry_queue_claim(gen_random_uuid(), gen_random_uuid())`)).toBe('42501');
+      expect(await attempt(`SELECT public.count_rpa_retry_queue_remaining()`)).toBe('42501');
     });
   });
 
@@ -196,6 +197,7 @@ describe('privileges: service_role only', () => {
       expect(await attempt(`SELECT * FROM public.claim_rpa_retry_queue('svc', 60, 1, $1)`, [ORG])).toBe('ok');
       expect(await attempt(`SELECT public.renew_rpa_retry_queue_claim(gen_random_uuid(), gen_random_uuid(), 60)`)).toBe('ok');
       expect(await attempt(`SELECT public.release_rpa_retry_queue_claim(gen_random_uuid(), gen_random_uuid())`)).toBe('ok');
+      expect(await attempt(`SELECT public.count_rpa_retry_queue_remaining()`)).toBe('ok');
     });
   });
 
@@ -204,9 +206,9 @@ describe('privileges: service_role only', () => {
       `SELECT p.proname, p.prosecdef, p.proconfig FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
         WHERE n.nspname = 'public' AND p.proname IN
           ('claim_rpa_retry_queue','rpa_retry_queue_accept','finalize_rpa_retry_queue_claim','park_expired_rpa_retry_claims',
-           'renew_rpa_retry_queue_claim','release_rpa_retry_queue_claim')
+           'renew_rpa_retry_queue_claim','release_rpa_retry_queue_claim','count_rpa_retry_queue_remaining')
         ORDER BY p.proname`);
-    expect(rows).toHaveLength(6);
+    expect(rows).toHaveLength(7);
     for (const r of rows) {
       expect(r.prosecdef).toBe(false);
       expect(r.proconfig).toEqual(['search_path=pg_catalog, public']);
@@ -274,7 +276,7 @@ describe('S-1: release_rpa_retry_queue_claim — a claim never attempted goes ba
       const { rows: [c] } = await claim(db, 'worker-r', 1, 60);
       await db.query(`UPDATE public.rpa_retry_queue SET claim_expires_at = now() - interval '1 second' WHERE id = $1`, [id]);
       const ok = await db.query(`SELECT public.release_rpa_retry_queue_claim($1, $2, 'LEASE_CHECK', 60) ok`, [id, c.claim_token]);
-      expect(ok.rows[0].ok).toBe(true);
+      expect(ok.rows[0].ok).toBe('released');
       const row = (await db.query(
         `SELECT attempts, claim_token, claim_expires_at, claimed_by, last_error, next_retry_at > now() later FROM public.rpa_retry_queue WHERE id = $1`, [id])).rows[0];
       expect(row).toMatchObject({ attempts: 2, claim_token: null, claim_expires_at: null, claimed_by: 'worker-r', later: true });
@@ -286,7 +288,7 @@ describe('S-1: release_rpa_retry_queue_claim — a claim never attempted goes ba
       const { rows: [c2] } = await claim(db, 'w', 1, 60);
       await db.query(`UPDATE public.rpa_retry_queue SET claim_expires_at = now() - interval '1 second' WHERE id = $1`, [id2]);
       await db.query(`SELECT public.park_expired_rpa_retry_claims()`);
-      expect((await db.query(`SELECT public.release_rpa_retry_queue_claim($1, $2) ok`, [id2, c2.claim_token])).rows[0].ok).toBe(false);
+      expect((await db.query(`SELECT public.release_rpa_retry_queue_claim($1, $2) ok`, [id2, c2.claim_token])).rows[0].ok).toBe('not_held');
       expect((await db.query(`SELECT last_error FROM public.rpa_retry_queue WHERE id = $1`, [id2])).rows[0].last_error)
         .toMatch(/^RPA_OUTCOME_UNKNOWN:CLAIM_EXPIRED/);
     });
@@ -296,7 +298,7 @@ describe('S-1: release_rpa_retry_queue_claim — a claim never attempted goes ba
     await inRollback(async () => {
       const id = await seedRow(db);
       await claim(db, 'w', 1, 60);
-      expect((await db.query(`SELECT public.release_rpa_retry_queue_claim($1, $2) ok`, [id, randomUUID()])).rows[0].ok).toBe(false);
+      expect((await db.query(`SELECT public.release_rpa_retry_queue_claim($1, $2) ok`, [id, randomUUID()])).rows[0].ok).toBe('not_held');
       expect((await db.query(`SELECT claim_token IS NOT NULL held FROM public.rpa_retry_queue WHERE id = $1`, [id])).rows[0].held).toBe(true);
     });
   });
@@ -350,4 +352,81 @@ describe('N-2: the migration preflight fails fast on a missing column', () => {
       expect(await attempt(preflight)).toBe('ok');
     });
   });
+});
+
+describe('N-b: release is bounded - the 5th release parks the row, never re-run', () => {
+  it('releases 1-4 requeue; the 5th parks RPA_CLAIM_RELEASE_CAP_NOT_ATTEMPTED with attempts = max; it is never claimable again', async () => {
+    await inRollback(async () => {
+      const id = await seedRow(db, { attempts: 1 });
+      const out: string[] = [];
+      for (let i = 0; i < 5; i += 1) {
+        await db.query(`UPDATE public.rpa_retry_queue SET next_retry_at = now() - interval '1 minute' WHERE id = $1`, [id]);
+        const { rows: [c] } = await claim(db, 'w', 1, 60);
+        expect(c.id).toBe(id);
+        out.push((await db.query(`SELECT public.release_rpa_retry_queue_claim($1, $2, 'LEASE_CHECK', 0) r`, [id, c.claim_token])).rows[0].r);
+      }
+      expect(out).toEqual(['released', 'released', 'released', 'released', 'parked_stuck']);
+      const row = (await db.query(`SELECT attempts, max_attempts, release_count, last_error, claim_token FROM public.rpa_retry_queue WHERE id = $1`, [id])).rows[0];
+      expect(row.attempts).toBe(row.max_attempts);
+      expect(row.release_count).toBe(5);
+      expect(row.claim_token).toBeNull();
+      expect(row.last_error).toMatch(/^RPA_CLAIM_RELEASE_CAP_NOT_ATTEMPTED: claim lost before the run 5 times \(last: LEASE_CHECK\)/);
+      await db.query(`UPDATE public.rpa_retry_queue SET next_retry_at = now() - interval '1 minute' WHERE id = $1`, [id]);
+      expect((await claim(db, 'w', 10)).rows).toHaveLength(0);
+    });
+  });
+
+  it('release_count is NOT NULL DEFAULT 0 on existing rows', async () => {
+    await inRollback(async () => {
+      const id = await seedRow(db);
+      expect((await db.query(`SELECT release_count FROM public.rpa_retry_queue WHERE id = $1`, [id])).rows[0].release_count).toBe(0);
+      expect(await attempt(`UPDATE public.rpa_retry_queue SET release_count = NULL WHERE id = $1`, [id])).toBe('23502');
+    });
+  });
+});
+
+describe('N-c: count_rpa_retry_queue_remaining uses each row\u2019s own max_attempts', () => {
+  it('counts unclaimed, uncompleted rows with attempts < their max_attempts only', async () => {
+    await inRollback(async () => {
+      await db.query(`DELETE FROM public.rpa_retry_queue`);
+      const due = await seedRow(db, { attempts: 1 });
+      const parked3 = await seedRow(db, { attempts: 3 });
+      await db.query(`UPDATE public.rpa_retry_queue SET max_attempts = 3 WHERE id = $1`, [parked3]);
+      const done = await seedRow(db, { attempts: 1 });
+      await db.query(`UPDATE public.rpa_retry_queue SET completed_at = now(), attempts = max_attempts WHERE id = $1`, [done]);
+      const claimed = await seedRow(db, { attempts: 1 });
+      await db.query(`UPDATE public.rpa_retry_queue SET claim_token = gen_random_uuid(), claimed_by = 'w', claimed_at = now(), claim_expires_at = now() + interval '1 hour' WHERE id = $1`, [claimed]);
+      expect((await db.query(`SELECT public.count_rpa_retry_queue_remaining() n`)).rows[0].n).toBe(1);
+      // CONTROL: a fixed "attempts < 5" count would also include the parked max-3 row
+      expect((await db.query(`SELECT count(*)::int n FROM public.rpa_retry_queue WHERE claim_token IS NULL AND completed_at IS NULL AND attempts < 5`)).rows[0].n).toBe(2);
+      void due;
+    });
+  });
+});
+
+describe('N-d: postconditions are exact (proconfig equality, proacl)', () => {
+  const fs = require('fs') as typeof import('fs');
+  const path = require('path') as typeof import('path');
+  const sql = fs.readFileSync(path.join(__dirname, '../../../supabase/migrations/20270314000001_rpa_retry_queue_claim.sql'), 'utf8');
+  const verify = sql.slice(sql.indexOf('DO $verify$'), sql.indexOf('$verify$;') + '$verify$;'.length);
+
+  it('CONTROL: the applied schema passes the postcondition block', async () => {
+    await inRollback(async () => { expect(await attempt(verify)).toBe('ok'); });
+  });
+
+  it('an EXTRA proconfig entry (which `@>` would accept) fails it', async () => {
+    await inRollback(async () => {
+      await db.query(`ALTER FUNCTION public.park_expired_rpa_retry_claims() SET work_mem = '64kB'`);
+      expect(await attempt(verify)).toBe('P0001');
+    });
+  });
+
+  it('EXECUTE granted to authenticator fails it (has_function_privilege on anon/authenticated alone would not see it)', async () => {
+    await inRollback(async () => {
+      await db.query(`DO $g$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticator') THEN CREATE ROLE authenticator NOLOGIN; END IF; END $g$`);
+      await db.query(`GRANT EXECUTE ON FUNCTION public.park_expired_rpa_retry_claims() TO authenticator`);
+      expect(await attempt(verify)).toBe('P0001');
+    });
+  });
+
 });

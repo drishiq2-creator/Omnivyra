@@ -52,10 +52,19 @@ const MAX_TASKS_PER_TICK = (() => {
  * heavy-job slot wait, so a healthy run finalises well inside it. A lease that
  * does expire is parked as outcome-unknown, never re-run.
  */
-export const RPA_CLAIM_LEASE_SECONDS = (() => {
-  const o = Number(process.env.RPA_CLAIM_LEASE_SECONDS);
-  return Number.isInteger(o) && o >= 60 && o <= 3600 ? o : 900;
-})();
+/**
+ * Lease floor (review N-e): the executor's RPA hard timeout is 300 s
+ * (EXECUTION_TIMEOUTS_MS.rpa); a lease at or below it could expire mid-run and
+ * the row be parked while it is still executing. Below the floor (or above
+ * 3600, or not an integer) the default 900 s is used.
+ */
+export const RPA_CLAIM_LEASE_MIN_SECONDS = 600;
+export const RPA_CLAIM_LEASE_DEFAULT_SECONDS = 900;
+export const resolveRpaClaimLeaseSeconds = (raw: unknown): number => {
+  const o = Number(raw);
+  return Number.isInteger(o) && o >= RPA_CLAIM_LEASE_MIN_SECONDS && o <= 3600 ? o : RPA_CLAIM_LEASE_DEFAULT_SECONDS;
+};
+export const RPA_CLAIM_LEASE_SECONDS = resolveRpaClaimLeaseSeconds(process.env.RPA_CLAIM_LEASE_SECONDS);
 
 /** Identity recorded in claimed_by (evidence on a parked expired claim). */
 export const rpaWorkerIdentity = (): string => {
@@ -226,14 +235,16 @@ export async function renewRpaClaim(
 /**
  * Give back a claim this process never attempted (token-matched). attempts is
  * unchanged; the row is due again after `retryDelaySeconds`. 'released' = it
- * is queued again; 'not_held' = the token is gone (already parked by another
+ * is queued again; 'parked_stuck' = the release cap was reached: the row is
+ * parked RPA_CLAIM_RELEASE_CAP_NOT_ATTEMPTED (terminal, never re-run without a
+ * human); 'not_held' = the token is gone (already parked by another
  * tick, or finalised): nothing written, and the row is NOT run.
  */
 export async function releaseRpaClaimNotAttempted(
   claim: RpaQueueClaim,
   reason: string,
   retryDelaySeconds = 60,
-): Promise<'released' | 'not_held' | 'release_failed'> {
+): Promise<'released' | 'parked_stuck' | 'not_held' | 'release_failed'> {
   try {
     const { data, error } = await ownedDbRpc('release_rpa_retry_queue_claim', {
       p_queue_id: claim.queue_id,
@@ -242,8 +253,8 @@ export async function releaseRpaClaimNotAttempted(
       p_retry_delay_seconds: Math.max(0, Math.min(86400, Math.floor(retryDelaySeconds))),
     });
     if (error) return 'release_failed';
-    if (data === true) return 'released';
-    if (data === false) return 'not_held';
+    // Review N-b: the 5th release of one row parks it (never attempted, stuck): terminal, human review.
+    if (data === 'released' || data === 'parked_stuck' || data === 'not_held') return data;
     return 'release_failed';
   } catch {
     return 'release_failed';
@@ -490,15 +501,13 @@ export async function flushRpaRetryQueueRoundRobin(input: {
   // run — not claimed (in flight), not a success tombstone, attempts left. Rows
   // backed off to a later next_retry_at are still backlog. Parked
   // outcome-unknown rows and tombstones (attempts = max) are excluded.
+  // Review N-c: against each row's OWN max_attempts (an RPC: PostgREST cannot
+  // compare two columns), so parked rows with a non-default max are excluded.
   let remaining = 0;
   try {
-    const { count, error } = await ownedDbTable('rpa_retry_queue')
-      .select('id', { count: 'exact', head: true })
-      .is('claim_token', null)
-      .is('completed_at', null)
-      .lt('attempts', MAX_ATTEMPTS);
-    if (error || typeof count !== 'number') errors += 1;
-    else remaining = count;
+    const { data, error } = await ownedDbRpc('count_rpa_retry_queue_remaining', {});
+    if (error || typeof data !== 'number') errors += 1;
+    else remaining = data;
   } catch {
     errors += 1;
   }

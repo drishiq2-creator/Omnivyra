@@ -465,7 +465,8 @@ export const executeRpaTask = async (task: RpaTask): Promise<RpaResult> => {
     if (rel === 'released') {
       return { success: false, not_attempted: true, queued_for_worker: true, claim_lost: true, error: `${RPA_CLAIM_LOST}:QUEUED_FOR_WORKER` };
     }
-    return { success: false, not_attempted: true, claim_lost: true, error: `${RPA_CLAIM_LOST}:${rel === 'not_held' ? 'PARKED' : 'RELEASE_FAILED'}` };
+    const why = rel === 'not_held' ? 'PARKED' : rel === 'parked_stuck' ? 'PARKED_STUCK' : 'RELEASE_FAILED';
+    return { success: false, not_attempted: true, claim_lost: true, error: `${RPA_CLAIM_LOST}:${why}` };
   }
 
   if (result.success) {
@@ -473,9 +474,11 @@ export const executeRpaTask = async (task: RpaTask): Promise<RpaResult> => {
   } else if (result.outcome_unknown) {
     await release('unknown', { error: result.error ?? 'UNKNOWN' });
   } else {
-    // A definite in-process failure is final for this direct path (it was
-    // already re-run once in-process, as before); the row is retired, not
-    // re-queued, so the caller's 'failed' is the whole story.
+    // A definite failure is final for this direct path; the row is retired
+    // (attempt counted), not re-queued, so the caller's 'failed' is the whole
+    // story. Review N-a: a durable claim is never re-run in-process (the task
+    // queue resolves its first definite failure), so this attempt is the one
+    // recorded here - never lost to a later lease check.
     await release('failed', { error: result.error ?? 'RPA_EXECUTION_FAILED', terminal: true });
   }
   return result;

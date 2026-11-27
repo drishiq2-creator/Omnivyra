@@ -9,8 +9,9 @@ import type { RpaTask, RpaResult, RpaRunContext } from './rpaWorkerService';
  * process dies with tasks in this array, their claims expire and are parked as
  * outcome-unknown: never silently lost, never re-run.
  *
- * A definite failure (nothing happened) is re-run once in-process; an unknown
- * outcome or a throw is never re-run.
+ * A definite failure (nothing happened) is re-run once in-process ONLY for an
+ * item without a durable claim context; an unknown outcome or a throw is never
+ * re-run.
  *
  * Review S-1: an item may carry a run context whose renewClaim() is called
  * immediately before EVERY handler call (first run and the in-process re-run).
@@ -53,7 +54,12 @@ const processQueue = async () => {
       const result = await currentHandler(item.task, item.ctx);
       // An unknown outcome (the action may already have happened) is never
       // re-run in-process: a second run could double-post or un-like.
-      if (!result.success && !result.outcome_unknown && item.attempts < MAX_ATTEMPTS) {
+      // Review N-a: an item that holds a DURABLE claim (ctx.renewClaim) is never
+      // re-run in-process either. The durable row owns the outcome: its first
+      // definite failure is returned and finalised as a counted attempt. (A
+      // re-run whose lease check then failed would release the row with the
+      // real first attempt uncounted.)
+      if (!result.success && !result.outcome_unknown && !item.ctx?.renewClaim && item.attempts < MAX_ATTEMPTS) {
         queue.push({ ...item, attempts: item.attempts + 1 });
         continue;
       }

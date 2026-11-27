@@ -411,6 +411,7 @@ describe('synthetic_page_check handler (no real platform)', () => {
       'rpa_retry_queue_accept', 'park_expired_rpa_retry_claims',
       'claim_rpa_retry_queue', 'renew_rpa_retry_queue_claim', 'finalize_rpa_retry_queue_claim',
       'claim_rpa_retry_queue', // one row at a time: the next claim finds nothing
+      'count_rpa_retry_queue_remaining', // N-c: remaining against each row's own max_attempts
     ]);
     expect(tables.rpa_retry_queue[0]).toMatchObject({ claim_token: null, attempts: 5, last_error: null });
     expect(tables.rpa_retry_queue[0].completed_at).toEqual(expect.any(String));
@@ -565,5 +566,71 @@ describe('N-6: remaining excludes in-flight claims and success tombstones', () =
     const out = await flushRpaRetryQueueRoundRobin({ handler: async () => ({ success: true }) });
     expect(out.claimed).toBe(0);
     expect(out.remaining).toBe(1);
+  });
+});
+
+// ───────────── round 2: N-a, N-b, N-c, N-e ─────────────
+describe('N-a: a definite failure on a durable claim is never re-run in-process; the attempt is counted', () => {
+  it('first run fails definitely, the lease would then be lost: handler ran ONCE, row finalised failed (attempt counted), not released', async () => {
+    asWorker();
+    const { supabase: sb } = jest.requireMock('../../db/supabaseClient');
+    let renews = 0;
+    (sb.rpc as jest.Mock).mockImplementation((fn: string, args: any) => {
+      if (fn === 'renew_rpa_retry_queue_claim') {
+        renews += 1;
+        // the lease runs out after the first run (the 3rd renew would precede an in-process re-run)
+        if (renews >= 3) { const r = tables.rpa_retry_queue.find((x) => x.id === args.p_queue_id); if (r) r.claim_expires_at = new Date(Date.now() - 1000).toISOString(); }
+      }
+      return queueRpc.rpc(fn, args);
+    });
+    (runRpaScript as jest.Mock).mockImplementation(async () => ({ success: false, error: 'RPA_SELECTOR_MISSING' }));
+    const r = await executeRpaTask(task(60));
+    expect(runRpaScript).toHaveBeenCalledTimes(1);
+    expect(r).toMatchObject({ success: false, error: 'RPA_SELECTOR_MISSING' });
+    expect(r.claim_lost).toBeUndefined();
+    const row = tables.rpa_retry_queue[0];
+    expect(row.last_error).toBe('RPA_SELECTOR_MISSING');
+    expect(row.attempts).toBe(5); // counted (terminal on the direct path)
+    expect(row.release_count).toBe(0);
+  });
+});
+
+describe('N-b: claim -> lost -> release cannot cycle forever', () => {
+  it('the 5th release parks the row as RPA_CLAIM_RELEASE_CAP_NOT_ATTEMPTED (terminal); CONTROL: the 4th still releases', async () => {
+    tables.rpa_retry_queue = [queueRow({ id: 'q1', attempts: 1 })];
+    const { releaseRpaClaimNotAttempted } = jest.requireActual('../../services/rpaWorker/rpaRetryQueue');
+    const outcomes: string[] = [];
+    for (let i = 0; i < 5; i += 1) {
+      tables.rpa_retry_queue[0].next_retry_at = new Date(Date.now() - 1000).toISOString();
+      const { rows } = await claimRpaRetryRows({ worker: 'A', limit: 1 });
+      expect(rows).toHaveLength(1);
+      outcomes.push(await releaseRpaClaimNotAttempted({ queue_id: 'q1', claim_token: rows[0].claim_token }, 'LEASE_CHECK'));
+    }
+    expect(outcomes).toEqual(['released', 'released', 'released', 'released', 'parked_stuck']);
+    expect(tables.rpa_retry_queue[0]).toMatchObject({ attempts: 5, release_count: 5, claim_token: null });
+    expect(tables.rpa_retry_queue[0].last_error).toMatch(/^RPA_CLAIM_RELEASE_CAP_NOT_ATTEMPTED:/);
+    tables.rpa_retry_queue[0].next_retry_at = new Date(Date.now() - 1000).toISOString();
+    expect((await claimRpaRetryRows({ worker: 'A', limit: 1 })).rows).toHaveLength(0); // never re-claimed
+  });
+});
+
+describe('N-c: remaining uses each row’s own max_attempts', () => {
+  it('a parked row with max_attempts 3 (attempts 3, not completed) is not backlog', async () => {
+    tables.rpa_retry_queue = [
+      queueRow({ id: 'parked3', action_id: ACT(70), attempts: 3, max_attempts: 3, last_error: 'RPA_OUTCOME_UNKNOWN:x' }),
+      queueRow({ id: 'later', action_id: ACT(71), attempts: 1, next_retry_at: new Date(Date.now() + 3_600_000).toISOString() }),
+    ];
+    const out = await flushRpaRetryQueueRoundRobin({ handler: async () => ({ success: true }) });
+    expect(out.remaining).toBe(1);
+  });
+});
+
+describe('N-e: the claim lease floor exceeds the 300 s RPA execution timeout', () => {
+  it('values at or below the timeout (and below 600) fall back to 900; 600..3600 are honoured', () => {
+    const { resolveRpaClaimLeaseSeconds, RPA_CLAIM_LEASE_MIN_SECONDS } = jest.requireActual('../../services/rpaWorker/rpaRetryQueue');
+    expect(RPA_CLAIM_LEASE_MIN_SECONDS).toBeGreaterThan(300);
+    for (const v of ['60', '300', '301', '599', 'abc', '3601', undefined]) expect(resolveRpaClaimLeaseSeconds(v)).toBe(900);
+    expect(resolveRpaClaimLeaseSeconds('600')).toBe(600);
+    expect(resolveRpaClaimLeaseSeconds('1800')).toBe(1800);
   });
 });

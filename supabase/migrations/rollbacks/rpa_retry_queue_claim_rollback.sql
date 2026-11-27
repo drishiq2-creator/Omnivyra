@@ -1,7 +1,7 @@
 -- ROLLBACK for 20270314000001_rpa_retry_queue_claim.sql
 --
 -- Restores the pre-migration shape of public.rpa_retry_queue: no claim columns,
--- no claim/accept/finalize/park/renew/release functions.
+-- no claim/accept/finalize/park/renew/release/remaining functions, no release_count.
 --
 -- REFUSES while any row is claimed (claim_token IS NOT NULL): such a row is being
 -- executed (or its lease expired and it has not been parked yet). Dropping the
@@ -39,6 +39,7 @@ DROP FUNCTION IF EXISTS public.finalize_rpa_retry_queue_claim(uuid, uuid, text, 
 DROP FUNCTION IF EXISTS public.park_expired_rpa_retry_claims();
 DROP FUNCTION IF EXISTS public.renew_rpa_retry_queue_claim(uuid, uuid, integer);
 DROP FUNCTION IF EXISTS public.release_rpa_retry_queue_claim(uuid, uuid, text, integer);
+DROP FUNCTION IF EXISTS public.count_rpa_retry_queue_remaining();
 
 DELETE FROM public.rpa_retry_queue WHERE completed_at IS NOT NULL;
 
@@ -49,12 +50,13 @@ ALTER TABLE public.rpa_retry_queue
   DROP COLUMN IF EXISTS claimed_by,
   DROP COLUMN IF EXISTS claimed_at,
   DROP COLUMN IF EXISTS claim_expires_at,
-  DROP COLUMN IF EXISTS completed_at;
+  DROP COLUMN IF EXISTS completed_at,
+  DROP COLUMN IF EXISTS release_count;
 
 DO $verify$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'public.rpa_retry_queue'::regclass
-              AND attname IN ('claim_token', 'claimed_by', 'claimed_at', 'claim_expires_at', 'completed_at')
+              AND attname IN ('claim_token', 'claimed_by', 'claimed_at', 'claim_expires_at', 'completed_at', 'release_count')
               AND NOT attisdropped) THEN
     RAISE EXCEPTION 'RPA-CLAIM rollback postcondition: claim columns still present';
   END IF;
@@ -62,7 +64,8 @@ BEGIN
               WHERE n.nspname = 'public'
                 AND p.proname IN ('rpa_retry_queue_accept', 'claim_rpa_retry_queue',
                                   'finalize_rpa_retry_queue_claim', 'park_expired_rpa_retry_claims',
-                                  'renew_rpa_retry_queue_claim', 'release_rpa_retry_queue_claim')) THEN
+                                  'renew_rpa_retry_queue_claim', 'release_rpa_retry_queue_claim',
+                                  'count_rpa_retry_queue_remaining')) THEN
     RAISE EXCEPTION 'RPA-CLAIM rollback postcondition: claim functions still present';
   END IF;
 END

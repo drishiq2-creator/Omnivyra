@@ -50,6 +50,7 @@ export function createRpaClaimRpc(rows: () => Row[]) {
         claimed_at: claimed ? iso(nowMs()) : null,
         claim_expires_at: claimed ? iso(nowMs() + Number(args.p_lease_seconds) * 1000) : null,
         completed_at: null,
+        release_count: 0,
       };
       table.push(row);
       return { data: [{ accepted: true, queue_id: row.id, claim_token: row.claim_token }], error: null };
@@ -113,12 +114,24 @@ export function createRpaClaimRpc(rows: () => Row[]) {
     }
     if (fn === 'release_rpa_retry_queue_claim') {
       const r = table.find((x) => x.id === args.p_queue_id && x.claim_token != null && x.claim_token === args.p_claim_token);
-      if (!r) return { data: false, error: null };
+      if (!r) return { data: 'not_held', error: null };
+      const why = args.p_reason || 'LEASE_LOST';
       r.claim_token = null;
       r.claim_expires_at = null;
+      r.release_count = Number(r.release_count ?? 0) + 1;
+      if (r.release_count >= 5) {
+        r.attempts = Math.max(Number(r.attempts), Number(r.max_attempts ?? 5));
+        r.last_error = `RPA_CLAIM_RELEASE_CAP_NOT_ATTEMPTED: claim lost before the run ${r.release_count} times (last: ${why}); never attempted; parked - re-run only after a human review`.slice(0, 500);
+        return { data: 'parked_stuck', error: null };
+      }
       r.next_retry_at = iso(nowMs() + Number(args.p_retry_delay_seconds ?? 60) * 1000);
-      r.last_error = `RPA_CLAIM_RELEASED_NOT_ATTEMPTED:${args.p_reason || 'LEASE_LOST'}`.slice(0, 500);
-      return { data: true, error: null };
+      r.last_error = `RPA_CLAIM_RELEASED_NOT_ATTEMPTED:${why}`.slice(0, 500);
+      return { data: 'released', error: null };
+    }
+    if (fn === 'count_rpa_retry_queue_remaining') {
+      const n = table.filter((r) => (r.claim_token ?? null) === null && (r.completed_at ?? null) === null
+        && Number(r.attempts ?? 0) < Number(r.max_attempts ?? 5)).length;
+      return { data: n, error: null };
     }
     if (fn === 'park_expired_rpa_retry_claims') {
       let n = 0;

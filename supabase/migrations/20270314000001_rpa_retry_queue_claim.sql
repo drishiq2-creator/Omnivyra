@@ -41,9 +41,15 @@
 --     (token-matched; attempts unchanged; due again after a short delay). Used when the
 --     renew refused an expired-but-still-held claim: the worker can prove it never ran
 --     the row, so it is not recorded as outcome-unknown. A row already parked stays
---     parked (its token is gone; release returns false) and is not run.
+--     parked (its token is gone; release returns 'not_held') and is not run.
+--     BOUNDED (review N-b): every release increments release_count; the 5th release
+--     parks the row as RPA_CLAIM_RELEASE_CAP_NOT_ATTEMPTED (attempts := max_attempts,
+--     terminal, never re-run without a human) instead of cycling claim -> lost ->
+--     release forever. Returns 'released' | 'parked_stuck' | 'not_held'.
+--   * count_rpa_retry_queue_remaining() - backlog count against each row's OWN
+--     max_attempts (review N-c; PostgREST cannot compare two columns).
 --
--- SECURITY. All six functions are SECURITY INVOKER (they run with the caller's
+-- SECURITY. All seven functions are SECURITY INVOKER (they run with the caller's
 -- rights; the table's RLS policy and ACL still apply), pin search_path, and are
 -- executable by service_role ONLY: EXECUTE is revoked from PUBLIC, anon and
 -- authenticated. The application calls them through ownedDbRpc (service-role
@@ -128,7 +134,8 @@ ALTER TABLE public.rpa_retry_queue
   ADD COLUMN IF NOT EXISTS claimed_by       text,
   ADD COLUMN IF NOT EXISTS claimed_at       timestamptz,
   ADD COLUMN IF NOT EXISTS claim_expires_at timestamptz,
-  ADD COLUMN IF NOT EXISTS completed_at     timestamptz;
+  ADD COLUMN IF NOT EXISTS completed_at     timestamptz,
+  ADD COLUMN IF NOT EXISTS release_count    integer NOT NULL DEFAULT 0;
 
 COMMENT ON COLUMN public.rpa_retry_queue.claim_token IS
   'Set while one worker holds the row (claim_rpa_retry_queue / born-claimed accept). '
@@ -137,6 +144,9 @@ COMMENT ON COLUMN public.rpa_retry_queue.claim_token IS
 COMMENT ON COLUMN public.rpa_retry_queue.claim_expires_at IS
   'Lease end. A claim past this instant is parked as RPA_OUTCOME_UNKNOWN by '
   'park_expired_rpa_retry_claims and is never re-executed (the side effect may have happened).';
+COMMENT ON COLUMN public.rpa_retry_queue.release_count IS
+  'Times a claim on this row was released as never attempted (lease lost before the run). '
+  'At 5 the row is parked RPA_CLAIM_RELEASE_CAP_NOT_ATTEMPTED and never re-run automatically.';
 COMMENT ON COLUMN public.rpa_retry_queue.completed_at IS
   'Success tombstone. The row is kept (attempts = max_attempts) so a duplicate '
   'enqueue of the same action is a no-op rather than a second execution.';
@@ -372,41 +382,73 @@ BEGIN
 END
 $fn$;
 
--- ── 4c. release a claim that was never attempted ────────────────────────────
-CREATE OR REPLACE FUNCTION public.release_rpa_retry_queue_claim(
+-- ── 4c. release a claim that was never attempted (bounded) ─────────────────
+-- Return type changed during review (boolean -> text); the function has never been
+-- applied anywhere, the DROP only keeps this file re-runnable on a throwaway replay.
+DROP FUNCTION IF EXISTS public.release_rpa_retry_queue_claim(uuid, uuid, text, integer);
+CREATE FUNCTION public.release_rpa_retry_queue_claim(
   p_queue_id            uuid,
   p_claim_token         uuid,
   p_reason              text DEFAULT NULL,
   p_retry_delay_seconds integer DEFAULT 60
 )
-RETURNS boolean
+RETURNS text
 LANGUAGE plpgsql
 SECURITY INVOKER
 SET search_path = pg_catalog, public
 AS $fn$
 DECLARE
-  v_id uuid;
+  c_cap   constant integer := 5;
+  v_count integer;
+  v_why   text := coalesce(nullif(p_reason, ''), 'LEASE_LOST');
 BEGIN
   IF p_retry_delay_seconds IS NULL OR p_retry_delay_seconds < 0 OR p_retry_delay_seconds > 86400 THEN
     RAISE EXCEPTION 'release_rpa_retry_queue_claim: retry delay must be 0..86400 seconds' USING ERRCODE = '22023';
   END IF;
   IF p_queue_id IS NULL OR p_claim_token IS NULL THEN
-    RETURN false;
+    RETURN 'not_held';
   END IF;
   -- Token-matched (expired or not): the caller proves the row was NOT attempted by
-  -- still holding the token and never having run it. attempts is unchanged; the
-  -- row is due again after the delay. claimed_by / claimed_at stay as evidence.
+  -- still holding the token and never having run it. attempts is unchanged and the
+  -- row is due again after the delay - until the release cap: the c_cap-th release
+  -- parks it (attempts := max_attempts, terminal, a human must look). claimed_by /
+  -- claimed_at stay as evidence.
   UPDATE public.rpa_retry_queue q
      SET claim_token      = NULL,
          claim_expires_at = NULL,
-         next_retry_at    = now() + make_interval(secs => p_retry_delay_seconds),
-         last_error       = left('RPA_CLAIM_RELEASED_NOT_ATTEMPTED:' || coalesce(nullif(p_reason, ''), 'LEASE_LOST'), 500),
+         release_count    = q.release_count + 1,
+         attempts         = CASE WHEN q.release_count + 1 >= c_cap THEN greatest(q.attempts, q.max_attempts) ELSE q.attempts END,
+         next_retry_at    = CASE WHEN q.release_count + 1 >= c_cap THEN q.next_retry_at
+                                 ELSE now() + make_interval(secs => p_retry_delay_seconds) END,
+         last_error       = CASE WHEN q.release_count + 1 >= c_cap
+                              THEN left('RPA_CLAIM_RELEASE_CAP_NOT_ATTEMPTED: claim lost before the run '
+                                        || (q.release_count + 1) || ' times (last: ' || v_why
+                                        || '); never attempted; parked - re-run only after a human review', 500)
+                              ELSE left('RPA_CLAIM_RELEASED_NOT_ATTEMPTED:' || v_why, 500) END,
          updated_at       = now()
    WHERE q.id = p_queue_id
      AND q.claim_token = p_claim_token
-  RETURNING q.id INTO v_id;
-  RETURN v_id IS NOT NULL;
+  RETURNING q.release_count INTO v_count;
+  IF v_count IS NULL THEN
+    RETURN 'not_held';
+  END IF;
+  RETURN CASE WHEN v_count >= c_cap THEN 'parked_stuck' ELSE 'released' END;
 END
+$fn$;
+
+-- ── 4d. remaining backlog against each row's own max_attempts (review N-c) ───
+CREATE OR REPLACE FUNCTION public.count_rpa_retry_queue_remaining()
+RETURNS integer
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+SET search_path = pg_catalog, public
+AS $fn$
+  SELECT count(*)::integer
+    FROM public.rpa_retry_queue q
+   WHERE q.claim_token IS NULL
+     AND q.completed_at IS NULL
+     AND q.attempts < q.max_attempts
 $fn$;
 
 -- ── 5. park expired claims: outcome unknown, never re-run ───────────────────
@@ -449,25 +491,35 @@ REVOKE ALL ON FUNCTION public.finalize_rpa_retry_queue_claim(uuid, uuid, text, t
 REVOKE ALL ON FUNCTION public.park_expired_rpa_retry_claims() FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.renew_rpa_retry_queue_claim(uuid, uuid, integer) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.release_rpa_retry_queue_claim(uuid, uuid, text, integer) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.count_rpa_retry_queue_remaining() FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.rpa_retry_queue_accept(uuid, uuid, text, text, text, text, text, integer) TO service_role;
 GRANT EXECUTE ON FUNCTION public.claim_rpa_retry_queue(text, integer, integer, uuid) TO service_role;
 GRANT EXECUTE ON FUNCTION public.finalize_rpa_retry_queue_claim(uuid, uuid, text, text, integer, boolean) TO service_role;
 GRANT EXECUTE ON FUNCTION public.park_expired_rpa_retry_claims() TO service_role;
 GRANT EXECUTE ON FUNCTION public.renew_rpa_retry_queue_claim(uuid, uuid, integer) TO service_role;
 GRANT EXECUTE ON FUNCTION public.release_rpa_retry_queue_claim(uuid, uuid, text, integer) TO service_role;
+GRANT EXECUTE ON FUNCTION public.count_rpa_retry_queue_remaining() TO service_role;
 
 -- ── 7. postconditions ───────────────────────────────────────────────────────
+-- Review N-d: EXACT proconfig and the proacl itself (aclexplode over the stored ACL,
+-- or the owner default when NULL), not `proconfig @>` / has_function_privilege
+-- (the latter is true for the owner and through role membership).
 DO $verify$
 DECLARE
   c text;
   f regprocedure;
+  v_secdef boolean;
+  v_config text[];
+  v_leaked text[];
+  v_n integer;
   fns regprocedure[] := ARRAY[
     'public.rpa_retry_queue_accept(uuid, uuid, text, text, text, text, text, integer)'::regprocedure,
     'public.claim_rpa_retry_queue(text, integer, integer, uuid)'::regprocedure,
     'public.finalize_rpa_retry_queue_claim(uuid, uuid, text, text, integer, boolean)'::regprocedure,
     'public.park_expired_rpa_retry_claims()'::regprocedure,
     'public.renew_rpa_retry_queue_claim(uuid, uuid, integer)'::regprocedure,
-    'public.release_rpa_retry_queue_claim(uuid, uuid, text, integer)'::regprocedure
+    'public.release_rpa_retry_queue_claim(uuid, uuid, text, integer)'::regprocedure,
+    'public.count_rpa_retry_queue_remaining()'::regprocedure
   ];
 BEGIN
   FOREACH c IN ARRAY ARRAY['claim_token', 'claimed_by', 'claimed_at', 'claim_expires_at', 'completed_at'] LOOP
@@ -476,27 +528,36 @@ BEGIN
       RAISE EXCEPTION 'RPA-CLAIM postcondition: nullable column rpa_retry_queue.% missing', c;
     END IF;
   END LOOP;
+  IF NOT EXISTS (SELECT 1 FROM pg_attribute a JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+                  WHERE a.attrelid = 'public.rpa_retry_queue'::regclass AND a.attname = 'release_count'
+                    AND NOT a.attisdropped AND a.attnotnull AND pg_get_expr(d.adbin, d.adrelid) = '0') THEN
+    RAISE EXCEPTION 'RPA-CLAIM postcondition: rpa_retry_queue.release_count must be NOT NULL DEFAULT 0';
+  END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'public.rpa_retry_queue'::regclass
                   AND conname = 'rpa_retry_queue_claim_shape' AND contype = 'c' AND convalidated) THEN
     RAISE EXCEPTION 'RPA-CLAIM postcondition: rpa_retry_queue_claim_shape missing or not validated';
   END IF;
   FOREACH f IN ARRAY fns LOOP
-    IF (SELECT prosecdef FROM pg_proc WHERE oid = f) THEN
+    SELECT p.prosecdef, p.proconfig INTO v_secdef, v_config FROM pg_proc p WHERE p.oid = f;
+    IF v_secdef THEN
       RAISE EXCEPTION 'RPA-CLAIM postcondition: % must be SECURITY INVOKER', f;
     END IF;
-    IF NOT EXISTS (SELECT 1 FROM pg_proc WHERE oid = f
-                    AND proconfig @> ARRAY['search_path=pg_catalog, public']) THEN
-      RAISE EXCEPTION 'RPA-CLAIM postcondition: % search_path is not pinned', f;
+    IF v_config IS DISTINCT FROM ARRAY['search_path=pg_catalog, public'] THEN
+      RAISE EXCEPTION 'RPA-CLAIM postcondition: % proconfig must be exactly {search_path=pg_catalog, public}, found %', f, coalesce(v_config::text, '{}');
     END IF;
-    IF has_function_privilege('anon', f, 'EXECUTE') OR has_function_privilege('authenticated', f, 'EXECUTE') THEN
-      RAISE EXCEPTION 'RPA-CLAIM postcondition: % is executable by anon/authenticated', f;
+    SELECT array_agg(DISTINCT coalesce(r.rolname, 'PUBLIC')) INTO v_leaked
+      FROM pg_proc p CROSS JOIN LATERAL aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
+      LEFT JOIN pg_roles r ON r.oid = a.grantee
+     WHERE p.oid = f AND a.privilege_type = 'EXECUTE'
+       AND (a.grantee = 0 OR r.rolname IN ('anon', 'authenticated', 'authenticator'));
+    IF v_leaked IS NOT NULL THEN
+      RAISE EXCEPTION 'RPA-CLAIM postcondition: EXECUTE on % must not be held by %', f, v_leaked;
     END IF;
-    IF EXISTS (SELECT 1 FROM pg_proc p, aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
-                WHERE p.oid = f AND a.grantee = 0) THEN
-      RAISE EXCEPTION 'RPA-CLAIM postcondition: % still grants EXECUTE to PUBLIC', f;
-    END IF;
-    IF NOT has_function_privilege('service_role', f, 'EXECUTE') THEN
-      RAISE EXCEPTION 'RPA-CLAIM postcondition: service_role cannot EXECUTE %', f;
+    SELECT count(*) INTO v_n
+      FROM pg_proc p CROSS JOIN LATERAL aclexplode(p.proacl) a JOIN pg_roles r ON r.oid = a.grantee
+     WHERE p.oid = f AND a.privilege_type = 'EXECUTE' AND r.rolname = 'service_role';
+    IF v_n <> 1 THEN
+      RAISE EXCEPTION 'RPA-CLAIM postcondition: service_role must hold EXECUTE on % in its ACL', f;
     END IF;
   END LOOP;
 END
