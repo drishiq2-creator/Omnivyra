@@ -92,9 +92,21 @@ describe('tenant rows cannot pull server secrets into their request', () => {
     expect(leaks(details, ['NEWS_API_KEY'])).toEqual([]);
   });
 
-  it('LEGITIMATE: a company-installed preset at its own provider origin still resolves its key', () => {
+  // Round 26 / S-12 (credential policy P2): this used to assert the platform key DID resolve for
+  // an unapproved tenant row at the preset's origin — the tenant-spends-platform-key path. It now
+  // requires Super Admin approval; the approved case is the positive control below.
+  it('S-12: an UNAPPROVED company-installed preset at its own provider origin no longer spends the platform key', () => {
     const { details, missingEnv } = buildExternalApiRequest(tenantRow({
       base_url: 'https://www.googleapis.com/youtube/v3/search', category: 'YouTube trends', is_whitelisted: null,
+      auth_type: 'api_key', api_key_env_name: 'YOUTUBE_API_KEY', query_params: { key: '{{YOUTUBE_API_KEY}}' },
+    }));
+    expect(leaks(details, ['YOUTUBE_API_KEY'])).toEqual([]);
+    expect(missingEnv).toContain('YOUTUBE_API_KEY');
+  });
+
+  it('LEGITIMATE: an APPROVED (whitelisted) company-installed preset resolves its key', () => {
+    const { details, missingEnv } = buildExternalApiRequest(tenantRow({
+      base_url: 'https://www.googleapis.com/youtube/v3/search', category: 'YouTube trends', is_whitelisted: true,
       auth_type: 'api_key', api_key_env_name: 'YOUTUBE_API_KEY', query_params: { key: '{{YOUTUBE_API_KEY}}' },
     }));
     expect(String(details.url)).toContain(SECRET_VALUES.YOUTUBE_API_KEY);

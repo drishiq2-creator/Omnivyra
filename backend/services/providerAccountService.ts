@@ -26,8 +26,10 @@ import { ownedDbTable } from '../db/writeOwner';
 import { supabase } from '../db/supabaseClient';
 import { decryptCredential, encryptCredential } from '../auth/credentialEncryption';
 // Remediation: one shared definition of secret / env-var-name / ciphertext shapes.
-import { classifyStoredKey, isEncryptedCredential } from '../security/credentialSafety';
+import { classifyStoredKey, isEncryptedCredential, isEnvVarName } from '../security/credentialSafety';
 import { isPlatformInfrastructureSecretName } from './externalApi/infrastructureSecretNames';
+import { explainEnvNameResolution, type EnvPolicySource } from './externalApi/envResolutionPolicy';
+import type { CredentialFailureCode } from './providerCredentialResolver';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -66,6 +68,11 @@ export type ResolvedAccountCredentials = {
    * remaining plaintext without reading it.
    */
   legacy_plaintext_key?: boolean;
+  /**
+   * Round 26 (P6): why a credential the account declares did NOT resolve — a reason code
+   * only, never the value or the offending reference. Absent when nothing was refused.
+   */
+  unresolved_reason?: CredentialFailureCode;
 };
 
 // ── Centralized resolution ────────────────────────────────────────────────────
@@ -216,7 +223,44 @@ function reportLegacyPlaintextKey(accountId: string): void {
   });
 }
 
-export function resolveAccountCredentials(account: ProviderAccount): ResolvedAccountCredentials {
+/**
+ * Round 26 / S-3 — resolve an account's credential under the ONE credential policy
+ * (providerCredentialResolver.ts, rules P1–P6):
+ *
+ *  - an `api_key_env_name` that is not a well-formed env-var NAME (e.g. a pasted secret)
+ *    is NEVER used as a `process.env` key and NEVER returned: both the name and the
+ *    value resolve to null with `unresolved_reason: 'credential_reference_invalid'`;
+ *  - an infrastructure-secret name resolves to null (`credential_refused`);
+ *  - when the caller passes the `destination` source row, the account obeys the SAME
+ *    destination allow-list as platform env keys (envResolutionPolicy): the env reference
+ *    goes through `explainEnvNameResolution`, and a stored key / OAuth secret (a platform
+ *    credential entered by Super Admin) is withheld from a tenant-owned row that Super Admin
+ *    has not approved (`credential_refused`).
+ *
+ * Callers that execute against a source row (externalApi/execution.ts) must pass it.
+ */
+const reportedInvalidEnvReferenceAccounts = new Set<string>();
+
+/**
+ * Round 26 (S-3 / Agent C P-E1): one structured warning per account per process for an
+ * `api_key_env_name` that is not an env-var NAME (usually a pasted secret). Account id and
+ * reason only — never the value, a fragment or its length.
+ */
+function reportInvalidEnvReference(accountId: string): void {
+  const key = String(accountId ?? 'unknown');
+  if (reportedInvalidEnvReferenceAccounts.has(key)) return;
+  reportedInvalidEnvReferenceAccounts.add(key);
+  console.warn('PROVIDER_ACCOUNT_ENV_REFERENCE_INVALID', {
+    accountId: key,
+    reason: 'credential_reference_invalid',
+    action: 'Replace the env reference with an environment-variable NAME, or store the secret on the Credentials form.',
+  });
+}
+
+export function resolveAccountCredentials(
+  account: ProviderAccount,
+  destination?: EnvPolicySource | null,
+): ResolvedAccountCredentials {
   const base: ResolvedAccountCredentials = {
     source: 'account',
     accountId: account.id,
@@ -239,16 +283,43 @@ export function resolveAccountCredentials(account: ProviderAccount): ResolvedAcc
     return base;
   }
 
+  // Destination approval for PLATFORM credentials held by this account (P2): a platform row,
+  // or a tenant row Super Admin approved. Unknown destination (legacy caller) = name checks only.
+  const destinationRefused = Boolean(
+    destination &&
+    typeof destination.company_id === 'string' && destination.company_id.trim() !== '' &&
+    destination.is_whitelisted !== true,
+  );
+  const refuse = (reason: CredentialFailureCode) => {
+    if (!base.unresolved_reason) base.unresolved_reason = reason;
+  };
+
   // api_key_env_name path
   if (typeof creds.api_key_env_name === 'string' && creds.api_key_env_name.trim()) {
-    base.api_key_env_name = creds.api_key_env_name.trim();
-    // SEC91-B2: an account env reference can never name a platform infrastructure secret
-    // (Supabase, DB, Redis, payment, signing keys) — the value would be sent to the
-    // provider source's base_url.
-    const val = isPlatformInfrastructureSecretName(base.api_key_env_name)
-      ? undefined
-      : process.env[base.api_key_env_name];
-    if (val) base.api_key_value = val;
+    const ref = creds.api_key_env_name.trim();
+    if (!isEnvVarName(ref)) {
+      // S-3 / 23BC C7: a secret-shaped reference. It is not a name, so it is never looked up
+      // in process.env, never echoed (it would land in missingEnv / diagnostics), never logged.
+      refuse('credential_reference_invalid');
+      reportInvalidEnvReference(account.id); // P-E1: once per account per process; id only
+    } else if (isPlatformInfrastructureSecretName(ref)) {
+      // SEC91-B2: an account env reference can never name a platform infrastructure secret
+      // (Supabase, DB, Redis, payment, signing keys) — the value would be sent to the
+      // provider source's base_url.
+      base.api_key_env_name = ref;
+      refuse('credential_refused');
+    } else {
+      base.api_key_env_name = ref;
+      const allowed = destination
+        ? explainEnvNameResolution(ref, destination, { accountEnvName: ref }).allowed
+        : true;
+      if (!allowed) {
+        refuse('credential_refused');
+      } else {
+        const val = process.env[ref];
+        if (val) base.api_key_value = val;
+      }
+    }
   }
 
   // Literal key value path (admin-entered raw key).
@@ -262,7 +333,10 @@ export function resolveAccountCredentials(account: ProviderAccount): ResolvedAcc
   // Legacy plaintext is still accepted so a pre-migration row keeps working, but it is
   // flagged so the migration and the health surface can report it. Silently accepting it
   // forever is how the original defect persisted.
-  if (typeof creds.api_key_value === 'string' && creds.api_key_value.trim()) {
+  if (typeof creds.api_key_value === 'string' && creds.api_key_value.trim() && destinationRefused) {
+    base.api_key_value = null;
+    refuse('credential_refused');
+  } else if (typeof creds.api_key_value === 'string' && creds.api_key_value.trim()) {
     const stored = creds.api_key_value.trim();
     if (isEncryptedCredential(stored)) {
       try {
@@ -310,12 +384,22 @@ export function resolveAccountCredentials(account: ProviderAccount): ResolvedAcc
     }
   }
 
-  // Direct (already-decrypted) OAuth stored by SuperAdmin
-  if (typeof creds.oauth_client_id === 'string' && creds.oauth_client_id.trim()) {
+  // Direct (legacy plaintext) OAuth stored by SuperAdmin — used ONLY when no encrypted `_ref`
+  // decrypted (Agent C P-E3 / S-11.4). Before, a legacy direct field silently overrode a
+  // rotated `_ref` written by the UI, so a rotation had no effect.
+  if (!base.oauth_client_id && typeof creds.oauth_client_id === 'string' && creds.oauth_client_id.trim()) {
     base.oauth_client_id = creds.oauth_client_id.trim();
   }
-  if (typeof creds.oauth_client_secret === 'string' && creds.oauth_client_secret.trim()) {
+  if (!base.oauth_client_secret && typeof creds.oauth_client_secret === 'string' && creds.oauth_client_secret.trim()) {
     base.oauth_client_secret = creds.oauth_client_secret.trim();
+  }
+
+  // P2: OAuth client secrets are platform credentials too — withheld from an unapproved
+  // tenant destination exactly like the API key.
+  if (destinationRefused && (base.oauth_client_id || base.oauth_client_secret)) {
+    base.oauth_client_id = null;
+    base.oauth_client_secret = null;
+    refuse('credential_refused');
   }
 
   return base;
@@ -390,8 +474,9 @@ export async function deactivateProviderAccount(id: string): Promise<void> {
  *     `api_key_env_name` silently destroyed the stored secret. Only fields the caller
  *     actually supplied are changed now; everything else is carried forward.
  *
- * Never logs, returns or echoes a secret. Throws only on encryption failure, so a caller can
- * fail closed rather than storing plaintext.
+ * Never logs, returns or echoes a secret. Throws on encryption failure, or when a supplied
+ * `oauth_client_*_ref` is not ciphertext (round 26), so a caller fails closed rather than
+ * storing plaintext.
  */
 export function buildCredentialEnvelope(params: {
   /** The account's existing `credentials_encrypted` JSON string, or null when creating. */
@@ -440,6 +525,29 @@ export function buildCredentialEnvelope(params: {
   const clientSecretRef = provided('oauth_client_secret_ref');
   if (clientSecretRef) next.oauth_client_secret_ref = clientSecretRef;
   else if (clientSecret) next.oauth_client_secret_ref = encryptCredential(clientSecret);
+
+  // ── Round 26 (Agent C P-E2): converge every write on the safe shape ────────────────
+  // Applies to EVERY caller (provider-accounts routes, pageSpeedProviderConfigService, …),
+  // including fields carried forward from a legacy envelope.
+  //  - a `_ref` must be ciphertext: a plaintext ref is refused (S-11.3), never stored;
+  if (clientIdRef && !isEncryptedCredential(clientIdRef)) throw new Error('oauth_client_id_ref must be ciphertext');
+  if (clientSecretRef && !isEncryptedCredential(clientSecretRef)) throw new Error('oauth_client_secret_ref must be ciphertext');
+  //  - a non-env-name reference (a pasted key) is dropped, never carried forward (S-11.2);
+  if (next.api_key_env_name && !isEnvVarName(next.api_key_env_name)) delete next.api_key_env_name;
+  //  - an explicit null clears the reference (S-14);
+  if (supplied.api_key_env_name === null) delete next.api_key_env_name;
+  //  - a legacy plaintext key is encrypted (the effective key is unchanged) (S-11.2);
+  if (next.api_key_value && !isEncryptedCredential(next.api_key_value)) {
+    next.api_key_value = encryptCredential(next.api_key_value);
+  }
+  //  - a legacy direct OAuth field moves into its encrypted `_ref` (or is dropped when a ref
+  //    already exists, e.g. one this request just wrote) (S-11.4).
+  for (const f of ['oauth_client_id', 'oauth_client_secret'] as const) {
+    if (next[f]) {
+      if (!next[`${f}_ref`]) next[`${f}_ref`] = encryptCredential(next[f]);
+      delete next[f];
+    }
+  }
 
   return JSON.stringify(next);
 }

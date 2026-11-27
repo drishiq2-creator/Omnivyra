@@ -23,15 +23,18 @@
  *          assertTestableEnvVarName);
  *   3. the DESTINATION is approved for platform credentials:
  *        - platform rows (company_id IS NULL) are Super-Admin-authored → approved;
- *        - tenant rows only when Super Admin whitelisted THIS configuration
+ *        - tenant rows ONLY when Super Admin whitelisted THIS configuration
  *          (is_whitelisted === true; any tenant edit of base_url / auth / env names /
- *          headers / query templates resets it — pages/api/external-apis/[id].ts), or when
- *          the name is declared by a code preset whose base_url has the SAME ORIGIN as the
- *          row (company-installed presets keep working; the key only ever goes to the
- *          provider it belongs to).
+ *          headers / query templates resets it — pages/api/external-apis/[id].ts).
+ *          Round 26 / S-12: the former "preset key towards the preset's own origin"
+ *          allowance is REMOVED — an env value is a platform credential, and a tenant row
+ *          must not spend it without explicit approval (credential policy rule P2 in
+ *          providerCredentialResolver.ts). A company-installed preset row now needs Super
+ *          Admin approval to use the platform key.
  *
  * A refused name resolves to `undefined`: it is reported in `missingEnv` and its
- * `{{TEMPLATE}}` stays literal in the request, so no value is ever substituted.
+ * `{{TEMPLATE}}` stays literal in the request, so no value is ever substituted. The
+ * refusal carries a reason code (`explainEnvNameResolution`, `onRefused`).
  */
 import { PROVIDER_CREDENTIALS } from '../providerCredentialResolver';
 import { externalApiPresets } from '../externalApiPresets';
@@ -110,42 +113,87 @@ function isTenantOwned(source: EnvPolicySource): boolean {
   return typeof source.company_id === 'string' && source.company_id.trim() !== '';
 }
 
+/**
+ * Why a name did (not) resolve. Reason codes only — never a value, and never the name when
+ * the name itself failed `isEnvVarName` (a secret-shaped "name" IS the secret).
+ */
+export type EnvResolutionReason =
+  | 'allowed_platform_row'
+  | 'allowed_tenant_row_whitelisted'
+  | 'allowed_caller_approved'
+  | 'refused_not_an_env_var_name'
+  | 'refused_infrastructure_secret'
+  | 'refused_not_declared'
+  | 'refused_tenant_row_not_approved';
+
+export type EnvResolutionDecision = { allowed: boolean; reason: EnvResolutionReason };
+
+/**
+ * The decision with its reason. Never looks at a value.
+ *
+ * Round 26 / S-12 (policy rule P2): an env value is a PLATFORM credential, so a tenant-owned
+ * row (company_id set) may spend one only when Super Admin approved THIS configuration
+ * (`is_whitelisted === true`). The former allowance — "a preset-declared key towards the
+ * preset's own origin" — is removed: it let any tenant-installed preset spend the
+ * platform's key with no approval and no per-tenant metering. A caller-approved name
+ * (the ad-hoc test route) is likewise refused for an unapproved tenant row.
+ */
+export function explainEnvNameResolution(
+  name: unknown,
+  source: EnvPolicySource,
+  ctx: EnvPolicyContext = {},
+): EnvResolutionDecision {
+  if (typeof name !== 'string' || !isEnvVarName(name)) {
+    return { allowed: false, reason: 'refused_not_an_env_var_name' };
+  }
+  const n = name.trim();
+  if (isPlatformInfrastructureSecretName(n)) return { allowed: false, reason: 'refused_infrastructure_secret' };
+
+  const tenantOwned = isTenantOwned(source);
+  const approvedDestination = !tenantOwned || source.is_whitelisted === true;
+  if (!approvedDestination) return { allowed: false, reason: 'refused_tenant_row_not_approved' };
+
+  if (ctx.approvedEnvNames?.includes(n)) return { allowed: true, reason: 'allowed_caller_approved' };
+
+  const own = [source.api_key_env_name, source.api_key_name, ctx.accountEnvName]
+    .filter((v): v is string => typeof v === 'string' && v.trim() !== '')
+    .map((v) => v.trim());
+  const declared = declaredProviderEnvNames().has(n) || own.includes(n);
+  if (!declared) return { allowed: false, reason: 'refused_not_declared' };
+  return { allowed: true, reason: tenantOwned ? 'allowed_tenant_row_whitelisted' : 'allowed_platform_row' };
+}
+
 /** The decision, exported for tests and diagnostics. Never looks at a value. */
 export function isEnvNameResolvableForSource(
   name: unknown,
   source: EnvPolicySource,
   ctx: EnvPolicyContext = {},
 ): boolean {
-  if (typeof name !== 'string' || !isEnvVarName(name)) return false;
-  const n = name.trim();
-  if (isPlatformInfrastructureSecretName(n)) return false;
-  if (ctx.approvedEnvNames?.includes(n)) return true;
-
-  const own = [source.api_key_env_name, source.api_key_name, ctx.accountEnvName]
-    .filter((v): v is string => typeof v === 'string' && v.trim() !== '')
-    .map((v) => v.trim());
-  const declared = declaredProviderEnvNames().has(n) || own.includes(n);
-
-  if (!isTenantOwned(source)) return declared;
-  if (source.is_whitelisted === true) return declared;
-  // Unapproved tenant configuration: only a preset-declared key, and only towards that
-  // preset's own origin.
-  const origins = presetEnvNameOrigins().get(n);
-  const origin = originOf(source.base_url);
-  return Boolean(origins && origin && origins.has(origin));
+  return explainEnvNameResolution(name, source, ctx).allowed;
 }
+
+/** A refusal reported to the caller: the NAME only when it is a well-formed env-var name. */
+export type EnvRefusal = { name: string | null; reason: EnvResolutionReason };
 
 /**
  * The resolver `buildExternalApiRequest` uses for this source. Returns the env value only
- * when the policy allows the name; otherwise `undefined` (reported as missing).
+ * when the policy allows the name; otherwise `undefined` (reported as missing). An optional
+ * `onRefused` receives the reason code (and the name only if it is a valid env-var name),
+ * so callers can tell "refused by policy" from "not set" without seeing a value.
  */
 export function createSourceEnvResolver(
   source: EnvPolicySource,
-  ctx: EnvPolicyContext = {},
+  ctx: EnvPolicyContext & { onRefused?: (refusal: EnvRefusal) => void } = {},
 ): (name?: string | null) => string | undefined {
   return (name?: string | null) => {
     if (!name) return undefined;
-    if (!isEnvNameResolvableForSource(name, source, ctx)) return undefined;
+    const decision = explainEnvNameResolution(name, source, ctx);
+    if (!decision.allowed) {
+      try {
+        ctx.onRefused?.({ name: isEnvVarName(name) ? name.trim() : null, reason: decision.reason });
+      } catch { /* a diagnostics callback never changes the decision */ }
+      return undefined;
+    }
     const value = process.env[name.trim()];
     return value ? value : undefined;
   };

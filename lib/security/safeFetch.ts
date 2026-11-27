@@ -19,6 +19,25 @@
  *      bombs), max redirects.
  *   6. Observability: allowed / blocked / dns-failure / redirect / timeout /
  *      size counters + latency, via the HARDEN-001 registry (fail-safe).
+ *   7. Credential containment (round 26, S-8 / T-14; credential policy rule P5 in
+ *      backend/services/providerCredentialResolver.ts):
+ *        - on a CROSS-ORIGIN redirect hop, credential headers (Authorization,
+ *          Proxy-Authorization, Cookie, X-Api-Key, X-Webhook-*, any *signature* /
+ *          *secret* / *token* / *api-key* / *password* / *auth* header, plus any
+ *          caller-declared `credentialHeaders`) are dropped (Fetch-spec behaviour);
+ *        - a 301/302/303 answer to a non-GET/HEAD request is followed as a body-less GET
+ *          (request-body headers dropped); 307/308 keep method and body;
+ *        - a request that CARRIES a credential header — or (M-1) a credential-named query
+ *          parameter (`api_key`, `key`, `access_token`, `token`, `signature`, …, or a
+ *          caller-declared `credentialQueryParams` name) — is refused over plain `http:`
+ *          (`credential_over_plain_http`), on every hop, except to a loopback host
+ *          (localhost / 127.0.0.0/8 / ::1) — the explicit local-dev allowance, which
+ *          still needs `allowHttp` and `allowPrivateNetwork`;
+ *        - owner decision (round 26 final): plain-http LOOPBACK is allowed ONLY in an
+ *          explicit development/test environment — NODE_ENV development|test, or the opt-in
+ *          SAFE_FETCH_ALLOW_LOOPBACK_HTTP=1, which is REFUSED when NODE_ENV=production.
+ *          Elsewhere any http://loopback request is refused (`loopback_http_not_allowed`).
+ *          Private / link-local / metadata addresses stay refused by ssrfGuard as before.
  *
  * Fail-CLOSED: any validation failure throws SsrfBlockedError; the request is
  * never issued.
@@ -40,6 +59,17 @@ export interface SafeFetchOptions extends SsrfPolicy {
   timeoutMs?: number;
   /** Label for observability metrics (defaults to the resolved host). */
   metricLabel?: string;
+  /**
+   * Extra header names (case-insensitive) that carry a credential for this call, beyond the
+   * built-in list. They are stripped on a cross-origin redirect and refused over plain http.
+   */
+  credentialHeaders?: readonly string[];
+  /**
+   * Round 26 (M-1): extra query-parameter names (case-insensitive) that carry a credential
+   * for this call — e.g. the parameter the external-API executor substituted a key into.
+   * A request whose URL carries one is refused over plain http, like a credential header.
+   */
+  credentialQueryParams?: readonly string[];
 }
 
 const DEFAULT_MAX_REDIRECTS = 3;
@@ -163,6 +193,116 @@ function isRedirectStatus(status: number): boolean {
   return status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
 }
 
+// ── Round 26 (S-8 / T-14): credential containment helpers ──────────────────────
+const CREDENTIAL_HEADER_EXACT = new Set(['authorization', 'proxy-authorization', 'cookie', 'cookie2']);
+const CREDENTIAL_HEADER_PATTERN = /^x-webhook-|signature|secret|token|api[-_]?key|password|passwd|auth/i;
+/** Fetch spec "request-body-header names", plus the length. */
+const REQUEST_BODY_HEADERS = new Set(['content-type', 'content-length', 'content-encoding', 'content-language', 'content-location']);
+
+/** True when a header name carries a credential (built-in list or caller-declared). */
+export function isCredentialHeaderName(name: string, extra: readonly string[] = []): boolean {
+  const n = String(name).trim().toLowerCase();
+  if (!n) return false;
+  if (CREDENTIAL_HEADER_EXACT.has(n) || CREDENTIAL_HEADER_PATTERN.test(n)) return true;
+  return extra.some((e) => String(e).trim().toLowerCase() === n);
+}
+
+/** Normalise any HeadersInit to a plain lower-cased record (values untouched). */
+function headersToRecord(headers: unknown): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!headers) return out;
+  const put = (k: unknown, v: unknown) => { if (v !== undefined && v !== null) out[String(k).toLowerCase()] = String(v); };
+  if (Array.isArray(headers)) {
+    for (const pair of headers as unknown[]) if (Array.isArray(pair) && pair.length >= 2) put(pair[0], pair[1]);
+  } else if (typeof (headers as { forEach?: unknown }).forEach === 'function') {
+    (headers as { forEach: (fn: (v: string, k: string) => void) => void }).forEach((v, k) => put(k, v));
+  } else if (typeof headers === 'object') {
+    for (const [k, v] of Object.entries(headers as Record<string, unknown>)) put(k, v);
+  }
+  return out;
+}
+
+/**
+ * Round 26 (M-1): credential-NAMED query parameters. Mirrors, character for character, the
+ * credential key-name rule of the external-API layer (`CREDENTIAL_KEY_NAME` in Agent B's
+ * backend/services/externalApi/credentialReference.ts, round-26 branch — not on main and not
+ * in this worktree, so it cannot be imported here yet). Anchored, so ordinary parameters such
+ * as `author`, `pageToken` or `q` never match. After B lands, replace this constant with an
+ * import of B's exported rule (one detector).
+ */
+const CREDENTIAL_QUERY_PARAM_NAME =
+  /^(?:authorization|proxy-authorization|x-api-key|x-auth-token|x-access-token|api[_-]?key|apikey|api[_-]?token|key|access[_-]?key|secret[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|token|client[_-]?secret|client[_-]?id|secret|password|passwd|signature|_client_id_env|_client_secret_env)$/i;
+
+/** True when a query-parameter name carries a credential (shared rule, or caller-declared). */
+export function isCredentialQueryParamName(name: string, extra: readonly string[] = []): boolean {
+  const n = String(name).trim();
+  if (!n) return false;
+  if (CREDENTIAL_QUERY_PARAM_NAME.test(n)) return true;
+  return extra.some((e) => String(e).trim().toLowerCase() === n.toLowerCase());
+}
+
+/** True when the URL carries a non-empty credential-named query parameter. Never reads it out. */
+function carriesCredentialQueryParam(url: URL, extra: readonly string[]): boolean {
+  for (const [name, value] of url.searchParams) {
+    if (value !== '' && isCredentialQueryParamName(name, extra)) return true;
+  }
+  return false;
+}
+
+function carriesCredentialHeader(headers: unknown, extra: readonly string[]): boolean {
+  return Object.keys(headersToRecord(headers)).some((k) => isCredentialHeaderName(k, extra));
+}
+
+/**
+ * Round 26 final (owner decision): is the plain-http loopback dev allowance available in
+ * this process? Only in development/test (NODE_ENV), or with the explicit opt-in
+ * SAFE_FETCH_ALLOW_LOOPBACK_HTTP, which is refused when NODE_ENV=production.
+ */
+export function isDevLoopbackHttpAllowed(env: NodeJS.ProcessEnv = process.env): boolean {
+  const nodeEnv = String(env.NODE_ENV ?? '').trim().toLowerCase();
+  if (nodeEnv === 'production') return false;
+  if (nodeEnv === 'development' || nodeEnv === 'test') return true;
+  return /^(1|true|yes|on)$/i.test(String(env.SAFE_FETCH_ALLOW_LOOPBACK_HTTP ?? '').trim());
+}
+
+/** localhost, 127.0.0.0/8, ::1 — the only hosts a credential may reach over plain http (dev only). */
+export function isLoopbackHost(hostname: string): boolean {
+  const h = String(hostname).trim().toLowerCase().replace(/^\[|\]$/g, '');
+  return h === 'localhost' || h.endsWith('.localhost') || h === '::1' || /^127(?:\.\d{1,3}){3}$/.test(h);
+}
+
+/**
+ * The request init for the NEXT hop of a redirect (Fetch spec "HTTP-redirect fetch"):
+ * 301/302/303 on a non-GET/HEAD request become a body-less GET; a cross-origin hop loses
+ * every credential header. Never mutates the caller's init.
+ */
+export function nextHopInit(
+  init: RequestInit,
+  status: number,
+  fromUrl: URL,
+  toUrl: URL,
+  extraCredentialHeaders: readonly string[] = [],
+): { init: RequestInit; strippedCredentials: boolean; downgradedToGet: boolean } {
+  const method = String(init.method ?? 'GET').toUpperCase();
+  const toGet = (status === 301 || status === 302 || status === 303) && method !== 'GET' && method !== 'HEAD';
+  const crossOrigin = fromUrl.origin !== toUrl.origin;
+  if (!toGet && !crossOrigin) return { init, strippedCredentials: false, downgradedToGet: false };
+
+  const headers = headersToRecord(init.headers);
+  let stripped = false;
+  for (const k of Object.keys(headers)) {
+    if (toGet && REQUEST_BODY_HEADERS.has(k)) delete headers[k];
+    if (crossOrigin && isCredentialHeaderName(k, extraCredentialHeaders)) { delete headers[k]; stripped = true; }
+  }
+  const next: RequestInit = { ...init, headers };
+  if (toGet) {
+    next.method = 'GET';
+    delete (next as { body?: unknown }).body;
+    delete (next as { duplex?: unknown }).duplex;
+  }
+  return { init: next, strippedCredentials: stripped, downgradedToGet: toGet };
+}
+
 // ── W2-5 (audit B-18): pooled keep-alive agents ───────────────────────────────
 //
 // With the flag OFF (default) every call builds a fresh single-use Agent —
@@ -231,6 +371,9 @@ export async function safeFetch(rawUrl: string, init: RequestInit = {}, options:
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
   let currentUrl = rawUrl;
+  let currentInit: RequestInit = init;
+  const extraCredentialHeaders = options.credentialHeaders ?? [];
+  const extraCredentialQueryParams = options.credentialQueryParams ?? [];
   let redirects = 0;
   const t0 = Date.now();
 
@@ -242,6 +385,25 @@ export async function safeFetch(rawUrl: string, init: RequestInit = {}, options:
     }
     const url = check.url;
     const host = url.hostname;
+
+    // Round 26 (S-8/T-14 + owner decision): a credential never travels over plain http.
+    // The only exception is loopback in an explicit dev/test environment; outside one, ANY
+    // http://loopback request is refused. Checked on EVERY hop, before DNS and before any
+    // byte is sent. Private/link-local targets remain refused by ssrfGuard / DNS pinning.
+    if (url.protocol === 'http:') {
+      if (isLoopbackHost(host)) {
+        if (!isDevLoopbackHttpAllowed()) {
+          countBlocked('loopback_http_not_allowed', String(currentUrl));
+          throw new SsrfBlockedError('loopback_http_not_allowed', String(currentUrl));
+        }
+      } else if (
+        carriesCredentialHeader(currentInit.headers, extraCredentialHeaders) ||
+        carriesCredentialQueryParam(url, extraCredentialQueryParams)
+      ) {
+        countBlocked('credential_over_plain_http', String(currentUrl));
+        throw new SsrfBlockedError('credential_over_plain_http', String(currentUrl));
+      }
+    }
 
     const addresses = await resolveAndValidate(host, policy);
 
@@ -267,7 +429,7 @@ export async function safeFetch(rawUrl: string, init: RequestInit = {}, options:
       // safeFetch the single outbound seam that HARDEN-005 established.
       res = (await outboundBreakerFor(host).call(async () =>
         (await undiciFetch(url, {
-          ...(init as Record<string, unknown>),
+          ...(currentInit as Record<string, unknown>),
           redirect: 'manual',
           dispatcher: agent,
         } as never)) as unknown as Response,
@@ -290,7 +452,18 @@ export async function safeFetch(rawUrl: string, init: RequestInit = {}, options:
         redirects += 1;
         countEvent('redirect', host);
         try { await res.body?.cancel(); } catch { /* ignore */ }
-        currentUrl = new URL(location, url).href; // re-validated at loop top
+        let nextUrl: URL;
+        try {
+          nextUrl = new URL(location, url);
+        } catch {
+          countBlocked('invalid_redirect_location', host);
+          throw new SsrfBlockedError('invalid_url', currentUrl);
+        }
+        // Round 26 (S-8/T-14): strip credentials cross-origin; 301/302/303 → body-less GET.
+        const hop = nextHopInit(currentInit, res.status, url, nextUrl, extraCredentialHeaders);
+        if (hop.strippedCredentials) countEvent('redirect_credentials_stripped', host);
+        currentInit = hop.init;
+        currentUrl = nextUrl.href; // re-validated at loop top
         continue;
       }
     }

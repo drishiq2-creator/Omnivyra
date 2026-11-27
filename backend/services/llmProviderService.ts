@@ -158,6 +158,14 @@ export interface CompanyLlmConfig {
   provider_id: string;
   model_id: string;
   has_custom_api_key: boolean;
+  /**
+   * Round 26 / T-12 (credential policy P4/P6): whether the stored BYOK key can actually be
+   * used. 'unusable' means AI calls are NOT running on the company's key (they run on the
+   * platform key under the platform plan/cost gates) and the key must be re-entered.
+   * A state and a reason code only — never the key, a fragment or a length.
+   */
+  byok_status: ByokKeyStatus;
+  byok_status_reason: ByokKeyStatusReason | null;
   is_active: boolean;
   updated_by: string | null;
   created_at: string;
@@ -168,6 +176,24 @@ export interface CompanyLlmConfig {
   model_key: string;
   model_display_name: string;
   model_metadata: Record<string, unknown>;
+}
+
+export type ByokKeyStatus = 'not_configured' | 'active' | 'unusable';
+export type ByokKeyStatusReason = 'decrypt_failed' | 'empty_plaintext';
+
+/**
+ * Round 26 / T-12 — is a stored BYOK ciphertext usable? Decrypts to check and discards the
+ * plaintext immediately; returns a state + reason code only. Shared by the tenant-facing
+ * config read and the gateway's key resolution so both always agree.
+ */
+export function classifyStoredByokKey(apiKeyEncrypted: unknown): { status: ByokKeyStatus; reason: ByokKeyStatusReason | null } {
+  if (typeof apiKeyEncrypted !== 'string' || !apiKeyEncrypted) return { status: 'not_configured', reason: null };
+  try {
+    const key = decryptCredential(apiKeyEncrypted);
+    return key ? { status: 'active', reason: null } : { status: 'unusable', reason: 'empty_plaintext' };
+  } catch {
+    return { status: 'unusable', reason: 'decrypt_failed' };
+  }
 }
 
 /**
@@ -192,6 +218,10 @@ export async function getCompanyLlmConfig(companyId: string): Promise<CompanyLlm
     provider_id:          data.provider_id,
     model_id:             data.model_id,
     has_custom_api_key:   !!data.api_key_encrypted,
+    ...(() => {
+      const byok = classifyStoredByokKey(data.api_key_encrypted);
+      return { byok_status: byok.status, byok_status_reason: byok.reason };
+    })(),
     is_active:            data.is_active,
     updated_by:           data.updated_by ?? null,
     created_at:           data.created_at,

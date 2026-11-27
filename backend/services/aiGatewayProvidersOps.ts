@@ -129,16 +129,19 @@ const executeGatewayCompletion = async (
   // key, or one that failed to decrypt) the chosen model must pass the same
   // plan-tier + cost gates as the request model; otherwise the platform
   // default provider serves the already-gated request model.
+  // The plan-tier router + cost estimator for a candidate model on the PLATFORM key. Used
+  // for the company-chosen model (SEC91-D4) AND, round 26, for any cross-provider fallback.
+  const gatePlatformModel = async (candidate: string): Promise<string | null> => {
+    const planModel = await resolveEffectiveModel(candidate, request.operation, request.companyId);
+    const decision = await evaluateJobCost(planModel, request.operation, request.companyId, request.messages);
+    if (decision.action === 'block') return null;
+    return decision.action === 'downgrade' ? decision.effectiveModel : planModel;
+  };
   const credentialSelection = await selectCredentialBoundModel({
     llmConfig,
     resolvedModel,
     platformDefault: platformDefaultLlmConfig,
-    gatePlatformModel: async (candidate) => {
-      const planModel = await resolveEffectiveModel(candidate, request.operation, request.companyId);
-      const decision = await evaluateJobCost(planModel, request.operation, request.companyId, request.messages);
-      if (decision.action === 'block') return null;
-      return decision.action === 'downgrade' ? decision.effectiveModel : planModel;
-    },
+    gatePlatformModel,
   });
   let activeProvider = credentialSelection.provider;
   let activeModel = credentialSelection.model;
@@ -394,7 +397,12 @@ const executeGatewayCompletion = async (
       stream:          request.stream,
       onChunk:         request.onChunk,
       seed:            request.seed,
-    }, true, trackingCtx);
+    }, true, trackingCtx, {
+      // Round 26 / T-1 (credential policy P3): a BYOK call never falls back to the platform
+      // key; a platform-key fallback passes the same plan/cost gate as the primary call.
+      credential:        credentialSelection.credential,
+      gateFallbackModel: gatePlatformModel,
+    });
   } catch (error: any) {
     const latency = Date.now() - start;
     recordGptLatency(latency);
@@ -416,7 +424,7 @@ const executeGatewayCompletion = async (
       metadata: request.parentActivityId ? { parent_activity_id: request.parentActivityId } : undefined,
       latency_ms: latency,
       error_flag: true,
-      error_type: error?.status?.toString() ?? error?.response?.status?.toString() ?? error?.message ?? 'unknown',
+      error_type: (error?.name === 'CredentialFailureError' ? error.code : undefined) ?? error?.status?.toString() ?? error?.response?.status?.toString() ?? error?.message ?? 'unknown',
       pricing_snapshot: null,
       retry_attempt: finalAttempt,
       final_attempt: true,
