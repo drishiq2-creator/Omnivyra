@@ -1,0 +1,58 @@
+name: Linux Chromium lifecycle (synthetic)
+
+# Owner-approved 2026-11-27: Linux verification of Chromium launch/shutdown,
+# child-process cleanup, orphan detection, restart recovery, memory and
+# forced-crash cleanup, in a container that mirrors the production worker image
+# (same base digest, Playwright 1.59.1, node as PID 1). Synthetic 127.0.0.1 pages
+# only. No secrets, no production access, no social platforms. Runs only on
+# pushes to this branch or manually; not a merge gate.
+on:
+  push:
+    branches: [ci/linux-chromium-lifecycle-20261127]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  lifecycle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build worker-like test image
+        run: docker build -t gi-chromium-lifecycle scripts/ci/linux-chromium-lifecycle
+
+      - name: Run as the worker does (node is PID 1, no init)
+        run: docker run --rm --memory=2g gi-chromium-lifecycle 2>&1 | tee noinit.log
+
+      - name: Comparison run with an init process (--init)
+        run: docker run --rm --init --memory=2g gi-chromium-lifecycle 2>&1 | tee withinit.log
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Linux Chromium lifecycle (synthetic)"
+            echo "### node as PID 1 (worker-like)"
+            echo '```'
+            grep -E "^(pid=|RESULT|SUMMARY|SCRIPT_ERROR|::warning::)" noinit.log || true
+            echo '```'
+            echo "### with --init"
+            echo '```'
+            grep -E "^(pid=|RESULT|SUMMARY|SCRIPT_ERROR|::warning::)" withinit.log || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if grep -q SCRIPT_ERROR noinit.log withinit.log; then echo "script error"; exit 1; fi
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-chromium-lifecycle-logs
+          path: |
+            noinit.log
+            withinit.log
+          retention-days: 14
