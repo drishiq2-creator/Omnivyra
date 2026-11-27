@@ -85,6 +85,7 @@ export function createSyntheticPageCheckHandler(deps?: {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
     try {
+      // ssrf-ok: target.url passed classifySyntheticTarget (loopback 127.0.0.1/localhost only, no userinfo, redirects refused); handler is off unless RPA_SYNTHETIC_HANDLER_ENABLED=true and refuses under NODE_ENV=production
       const res = await fetchImpl(target.url, { method: 'GET', redirect: 'error', signal: controller.signal });
       if (res.status >= 200 && res.status < 300) {
         return { success: true, platform_id: `synthetic:http:${res.status}` };
