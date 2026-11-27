@@ -3,10 +3,10 @@ import test from 'node:test';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
-import { createHash } from 'node:crypto';
 
 /**
- * Static lock on .github/workflows/auth-integrity-local.yml (C3, advisory). Hermetic: reads files and
+ * Static lock on .github/workflows/auth-integrity-local.yml (C3; the auth E2E gate on every pull request
+ * since the hosted E2E retirement, docs/supabase-e2e-retirement/15-*). Hermetic: reads files and
  * parses YAML; no network. checkWorkflow() returns every violated rule; the controls at the end mutate the
  * workflow text and prove each key rule is detected.
  */
@@ -27,6 +27,12 @@ function load(text: string): Workflow {
   if (wf.on === undefined && (parsed as Record<string, unknown>)['true'] !== undefined) wf.on = (parsed as Record<string, unknown>)['true'] as Record<string, unknown>;
   return wf;
 }
+
+/** Pinned status-context names (candidates for required checks once the hosted job is retired). */
+const EXPECTED_JOB_NAMES: Record<string, string> = {
+  'local-stack-validation': 'Local Supabase stack validation',
+  'auth-integrity-local': 'Auth integrity regression suite (local Supabase)',
+};
 
 function otherJobNamesAndIds(): Set<string> {
   const out = new Set<string>();
@@ -64,7 +70,10 @@ function checkWorkflow(text: string): string[] {
   for (const marker of ['klkiseupptzbecbxwrky', 'lomndxmrpyudaegddpef', '.supabase.co', '.supabase.in']) if (text.includes(marker)) add(`contains hosted marker ${marker}`);
   const on = wf.on ?? {};
   const triggers = Object.keys(on).sort();
-  if (triggers.join(',') !== 'push,workflow_dispatch') add(`triggers must be exactly push + workflow_dispatch, got ${triggers.join(',')}`);
+  if (triggers.join(',') !== 'pull_request,push,workflow_dispatch') add(`triggers must be exactly pull_request + push + workflow_dispatch, got ${triggers.join(',')}`);
+  // No filter on pull_request: a path- or branch-filtered required check leaves PRs pending forever, and
+  // the hosted job this replaces ran on every PR.
+  if (on.pull_request !== null && on.pull_request !== undefined && Object.keys(on.pull_request as object).length !== 0) add('pull_request must run on every PR (no paths/branches/types filter)');
   const push = on.push as { branches?: string[]; tags?: unknown; paths?: unknown } | null | undefined;
   if (!push || JSON.stringify(push.branches) !== JSON.stringify(['ci-only/c3-auth-local/**']) || Object.keys(push).length !== 1) add('push must be limited to branches ci-only/c3-auth-local/** only');
   if (JSON.stringify(wf.permissions) !== JSON.stringify({ contents: 'read' })) add('permissions must be exactly contents: read');
@@ -79,7 +88,8 @@ function checkWorkflow(text: string): string[] {
   const others = otherJobNamesAndIds();
   for (const [id, job] of Object.entries(jobs)) {
     if (others.has(id) || (job.name && others.has(job.name))) add(`job ${id} reuses an existing job id or name (could satisfy a required context)`);
-    if (!job.name || !/\badvisory\)$/.test(job.name)) add(`job ${id} name must end with "advisory)"`);
+    // The status-context names are pinned: the owner makes them required checks after cutover.
+    if (job.name !== EXPECTED_JOB_NAMES[id]) add(`job ${id} name must be exactly "${EXPECTED_JOB_NAMES[id]}"`);
     if (!/^ubuntu-\d/.test(String(job['runs-on']))) add(`job ${id} must run on a GitHub-hosted ubuntu runner`);
     if (job['continue-on-error'] !== undefined) add(`job ${id} must not use continue-on-error`);
     if (job.env && 'ALLOW_PROD_DB_WITH_LOCAL_REDIS' in job.env) add(`job ${id} sets ALLOW_PROD_DB_WITH_LOCAL_REDIS`);
@@ -159,72 +169,9 @@ test('C3 workflow: the expected counts come from the real runner (5 spec files, 
   assert.deepEqual(expectedAuthCounts(), { specs: 5, tests: 5 });
 });
 
-/**
- * Round 26 / C3 review C2 + re-review B-1: the hosted auth-integrity.yml is the reviewed f237b92f0 file plus
- * EXACTLY one step (seed the Redis identity marker), at the reviewed position. The base is PINNED by hash
- * (not compared with HEAD), so the check stays green once this change is committed and red on any other edit.
- */
-const HOSTED_WORKFLOW_BASE_SHA256 = 'ce876600fc3c512ed07c2d75c76f6cec79d8b59731c46a87027bf14a476026ca'; // f237b92f0, LF-normalised
-const HOSTED_SEED_STEP = [
-  '      # Round 26 / C3 (review C2): the reset below writes only after reading the identity marker',
-  '      # omnivyra:e2e:identity and finding it equal to a per-run token, on loopback too (a loopback',
-  '      # port can be a tunnel to Production). This seeds the marker into the FRESH service container:',
-  '      # the shared rule refuses production first, and only an EMPTY Redis (DBSIZE 0) is ever seeded.',
-  '      # The random per-run token is masked and exported through GITHUB_ENV; it is never printed.',
-  '      - name: Seed the disposable Redis identity marker (per-run token)',
-  '        run: npm run seed:auth-e2e-redis-identity -- --env-out "$GITHUB_ENV"',
-  '',
-  '',
-].join('\n');
-
-function checkHostedWorkflow(raw: string): string[] {
-  const problems: string[] = [];
-  const text = raw.replace(/\r\n/g, '\n');
-  const blocks = text.split(HOSTED_SEED_STEP).length - 1;
-  const commands = text.split('seed:auth-e2e-redis-identity').length - 1;
-  if (blocks !== 1 || commands !== 1) problems.push(`the seed step must appear exactly once (blocks ${blocks}, commands ${commands})`);
-  const at = text.indexOf(HOSTED_SEED_STEP);
-  const guard = text.indexOf('run: npm run check:auth-e2e-target');
-  const health = text.indexOf('- name: Verify ephemeral Redis is healthy');
-  const reset = text.indexOf('run: npm run reset:auth-e2e-rate-limits');
-  const app = text.indexOf('run: |\n          npm run dev');
-  if (!(at > guard && guard >= 0 && at > health && health >= 0 && reset > at && app > reset)) problems.push('the seed step must come after the target guard and the Redis health check, and before the reset and the app server');
-  if (blocks === 1) {
-    const base = text.replace(HOSTED_SEED_STEP, '');
-    const digest = createHash('sha256').update(base).digest('hex');
-    if (digest !== HOSTED_WORKFLOW_BASE_SHA256) problems.push('with the seed step removed the workflow is not the pinned reviewed base (another edit was made)');
-  }
-  return problems;
-}
-
-const HOSTED_WF = fs.readFileSync(path.join(WF_DIR, 'auth-integrity.yml'), 'utf8');
-
-test('C3 workflow: the hosted auth-integrity.yml is the pinned reviewed base plus exactly the seed step, at the reviewed position', () => {
-  assert.deepEqual(checkHostedWorkflow(HOSTED_WF), []);
-  // The pin was computed from `git show f237b92f0:.github/workflows/auth-integrity.yml` (LF-normalised); it is not
-  // recomputed here because CI checkouts are shallow (f237b92f0 is not available there).
-  // CRLF checkouts are accepted (normalised).
-  assert.deepEqual(checkHostedWorkflow(HOSTED_WF.replace(/\r?\n/g, '\r\n')), []);
-});
-
-test('C3 CONTROL hosted workflow: any other edit is detected', () => {
-  const edited = HOSTED_WF.replace('run: npm run test:auth-integrity', 'run: npm run test:auth-integrity || true');
-  assert.notEqual(edited, HOSTED_WF);
-  assert.ok(checkHostedWorkflow(edited).some((p) => /pinned reviewed base/.test(p)));
-  assert.ok(checkHostedWorkflow(HOSTED_WF + '# trailing edit\n').some((p) => /pinned reviewed base/.test(p)));
-});
-
-test('C3 CONTROL hosted workflow: a duplicated, removed or moved seed step is detected', () => {
-  const lf = HOSTED_WF.replace(/\r\n/g, '\n');
-  const dup = lf.replace(HOSTED_SEED_STEP, HOSTED_SEED_STEP + HOSTED_SEED_STEP);
-  assert.ok(checkHostedWorkflow(dup).some((p) => /exactly once/.test(p)));
-  const removed = lf.replace(HOSTED_SEED_STEP, '');
-  assert.ok(checkHostedWorkflow(removed).some((p) => /exactly once/.test(p)));
-  // Moved after the reset step.
-  const resetStep = '      - name: Reset auth rate-limit counters\n        run: npm run reset:auth-e2e-rate-limits\n';
-  assert.equal(removed.split(resetStep).length - 1, 1);
-  const moved = removed.replace(resetStep, resetStep + '\n' + HOSTED_SEED_STEP.replace(/\n\n$/, '\n'));
-  assert.ok(checkHostedWorkflow(moved).some((p) => /must come after the target guard/.test(p)), JSON.stringify(checkHostedWorkflow(moved)));
+test('C3 workflow: the hosted E2E job is retired from auth-integrity.yml (only the static job remains)', () => {
+  const hosted = load(fs.readFileSync(path.join(WF_DIR, 'auth-integrity.yml'), 'utf8'));
+  assert.deepEqual(Object.keys(hosted.jobs ?? {}), ['auth-invariants-static']);
 });
 
 // ---------------- failing controls: each mutation must be detected ----------------
@@ -238,8 +185,16 @@ test('C3 CONTROL a hosted-E2E secret reference is detected', () => {
   expectDetected('secret', "OPENAI_API_KEY: e2e-placeholder-not-a-real-key", 'OPENAI_API_KEY: e2e-placeholder-not-a-real-key\n      E2E_SUPABASE_URL: ${{ secrets.E2E_SUPABASE_URL }}', /repository secret/);
 });
 
-test('C3 CONTROL a pull_request trigger is detected', () => {
-  expectDetected('pull_request', 'on:\n  workflow_dispatch:', 'on:\n  pull_request:\n  workflow_dispatch:', /triggers must be exactly/);
+test('C3 CONTROL dropping the pull_request trigger is detected', () => {
+  expectDetected('pull_request', 'on:\n  pull_request:\n  workflow_dispatch:', 'on:\n  workflow_dispatch:', /triggers must be exactly/);
+});
+
+test('C3 CONTROL a path-filtered pull_request trigger is detected', () => {
+  expectDetected('pr paths', 'on:\n  pull_request:\n', "on:\n  pull_request:\n    paths:\n      - 'tests/auth/**'\n", /must run on every PR/);
+});
+
+test('C3 CONTROL renaming a pinned status-context job is detected', () => {
+  expectDetected('rename', 'name: Local Supabase stack validation\n', 'name: Local Supabase stack validation (advisory)\n', /name must be exactly/);
 });
 
 test('C3 CONTROL teardown that does not always run is detected', () => {
@@ -259,7 +214,7 @@ test('C3 CONTROL the prod-DB/local-Redis bypass flag is detected', () => {
 });
 
 test('C3 CONTROL a job name that reuses an existing (possibly required) context is detected', () => {
-  expectDetected('name', 'name: Auth integrity regression suite (local Supabase, advisory)', 'name: Auth integrity regression lock', /reuses an existing job id or name/);
+  expectDetected('name', 'name: Auth integrity regression suite (local Supabase)\n', 'name: Static auth invariants (hermetic, no secrets)\n', /reuses an existing job id or name/);
 });
 
 test('C3 CONTROL skipping the migration replay is detected', () => {
