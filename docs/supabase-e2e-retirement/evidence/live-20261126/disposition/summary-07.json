@@ -1,0 +1,112 @@
+{
+ "totals": {
+  "UNKNOWN": 798,
+  "UNUSED": 14,
+  "HISTORICAL": 19,
+  "DEPENDENCY": 63,
+  "ACTIVE": 16
+ },
+ "dispositions": {
+  "RETAIN schema; EXCLUDE data": 842,
+  "DELETED": 14,
+  "ARCHIVE then EXCLUDE": 2,
+  "RETAIN (canonical; baseline gap)": 4,
+  "RECREATE IN REPOSITORY": 2,
+  "RETAIN (platform)": 46
+ },
+ "unknownGroups": {
+  "byCanonical": {
+   "yes": 796,
+   "no (stranded line only)": 2
+  },
+  "byRuntime": {
+   "named by production runtime code": 768,
+   "named only by tests/scripts": 13,
+   "not named in code (config/other only)": 17
+  },
+  "byDbDependency": {
+   "none": 679,
+   "view+function": 11,
+   "view": 19,
+   "function": 89
+  },
+  "byOrigin": {
+   "baseline.sql": 758,
+   "post-baseline migration": 30,
+   "repo migration 20260922000000_content_knowledge_graph_foundation.sql": 2,
+   "pre-ledgerMax migration (absent from baseline)": 4,
+   "repo migration 20260919000000_platform_content_fingerprint.sql": 1,
+   "repo migration 20260930120000_platform_usage_events.sql": 1,
+   "stranded line only": 2
+  },
+  "byFamily": {
+   "other": 267,
+   "company": 45,
+   "campaign": 44,
+   "marketpulse": 38,
+   "content": 32,
+   "creator": 31,
+   "platform": 26,
+   "intelligence": 25,
+   "engagement": 20,
+   "ai": 16,
+   "community": 15,
+   "analytics": 14,
+   "credit": 14,
+   "prospect": 14,
+   "canonical": 11,
+   "lead": 11,
+   "opportunity": 11,
+   "blog": 9,
+   "outreach": 9,
+   "recommendation": 9,
+   "external": 8,
+   "market": 8,
+   "report": 8,
+   "billing": 7,
+   "response": 7,
+   "signal": 7,
+   "thread": 7,
+   "website": 7,
+   "execution": 6,
+   "governance": 6,
+   "monetization": 6,
+   "operational": 6,
+   "wordpress": 6,
+   "activity": 5,
+   "bolt": 5,
+   "collaboration": 5,
+   "cost": 5,
+   "customer": 5,
+   "decision": 5,
+   "integration": 5,
+   "production": 5,
+   "usage": 5,
+   "free": 3
+  }
+ },
+ "unknownNoRuntimeNoDb": [
+  "active_lead_runs(4)",
+  "ai_model_families(0)",
+  "campaign_strategic_insights(1)",
+  "content_templates_enhanced(0)",
+  "direct_messages(0)",
+  "engagement_insights(2)",
+  "engagement_rules(0)",
+  "expected_event_instances(3)",
+  "free_credit_events(1)",
+  "lead_outreach_plans(0)",
+  "message_replies(0)",
+  "omnivyra_hook_scores(0)",
+  "omnivyra_learning_events(0)",
+  "omnivyra_platform_scores(0)",
+  "omnivyra_trend_rankings(0)",
+  "opportunity_reports(1)",
+  "platform_cost_categories(0)",
+  "prospect_archive_recommendations(2)",
+  "prospect_list_members(1)",
+  "prospect_lists(0)",
+  "seven_days_plan(0)",
+  "whatsapp_media_cache(0)"
+ ]
+}
