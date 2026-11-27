@@ -27,7 +27,13 @@ export const PRODUCTION_HOSTNAMES: readonly string[] = [
  * scripts/reset-auth-e2e-rate-limits.js). Refused in every mode, in every connection variable
  * (v3 of C2; review finding F4).
  */
-export const PRODUCTION_REDIS_HOSTNAMES: readonly string[] = ['noble-dane-77325.upstash.io'];
+export const PRODUCTION_REDIS_HOSTNAMES: readonly string[] = [
+  // The live production Upstash Redis (Railway worker and Vercel web; the "Railway production worker"
+  // fixture in backend/tests/unit/sec91CQueueNamespaceIsolation.test.ts uses this same host).
+  'right-treefrog-90757.upstash.io',
+  // Earlier production host still named by the repo's cert/env-safety markers; kept (no evidence it was retired).
+  'noble-dane-77325.upstash.io',
+];
 
 /** The dedicated E2E project this suite is allowed to target. */
 export const DEFAULT_EXPECTED_E2E_PROJECT_REF = 'lomndxmrpyudaegddpef';

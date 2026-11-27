@@ -1388,3 +1388,112 @@ test('C2v3.1 R9 settings the app reads as limits or switches are not mistaken fo
   // connection-shaped test-only names stay refused
   expectTargetRejected(localEnv({ QUEUE_TOPOLOGY_INTEGRATION_REDIS_URL: 'redis://127.0.0.1:6379' }), 'an integration Redis URL', /unrecognised connection variable/);
 });
+
+// =============================================================================
+// C3 security correction: the live production Redis host (right-treefrog-90757.upstash.io).
+// No test here makes a network request: fetch, socket connect and DNS lookup are trapped and counted.
+// =============================================================================
+import netForRedisHost from 'node:net';
+import dnsForRedisHost from 'node:dns';
+
+const LIVE_PROD_REDIS_HOST = 'right-treefrog-90757.upstash.io';
+const LIVE_PROD_REDIS = `rediss://default:fixture-pw@${LIVE_PROD_REDIS_HOST}:6379`;
+
+/** Runs fn with fetch, net connect and DNS lookup trapped; returns how many network attempts were made. */
+function withNetworkTrapped(fn: () => void): number {
+  let attempts = 0;
+  const savedFetch = globalThis.fetch;
+  const savedConnect = netForRedisHost.Socket.prototype.connect;
+  const savedLookup = dnsForRedisHost.lookup;
+  globalThis.fetch = (async () => { attempts += 1; throw new Error('network trapped'); }) as typeof fetch;
+  netForRedisHost.Socket.prototype.connect = function trapped(this: unknown) { attempts += 1; throw new Error('network trapped'); } as never;
+  (dnsForRedisHost as { lookup: unknown }).lookup = (() => { attempts += 1; throw new Error('network trapped'); }) as never;
+  try {
+    fn();
+  } finally {
+    globalThis.fetch = savedFetch;
+    netForRedisHost.Socket.prototype.connect = savedConnect;
+    (dnsForRedisHost as { lookup: unknown }).lookup = savedLookup;
+  }
+  return attempts;
+}
+
+test('C3 prod-redis: the live production host is on the denial list; the earlier host is kept', () => {
+  assert.ok(PRODUCTION_REDIS_HOSTNAMES.includes(LIVE_PROD_REDIS_HOST));
+  assert.ok(PRODUCTION_REDIS_HOSTNAMES.includes('noble-dane-77325.upstash.io'));
+});
+
+test('C3 prod-redis 1-6: rejected in hosted mode across port, case, trailing dot, user-info and the earlier host', () => {
+  const attempts = withNetworkTrapped(() => {
+    const cases: Array<[string, string]> = [
+      ['1 hosted REDIS_URL', LIVE_PROD_REDIS],
+      ['2 non-default port', `rediss://default:fixture-pw@${LIVE_PROD_REDIS_HOST}:6380`],
+      ['2 no port', `rediss://${LIVE_PROD_REDIS_HOST}`],
+      ['3 upper case', `rediss://default:fixture-pw@${LIVE_PROD_REDIS_HOST.toUpperCase()}:6379`],
+      ['3 mixed case', 'rediss://default:fixture-pw@Right-TreeFrog-90757.Upstash.IO:6379'],
+      ['4 trailing dot', `rediss://default:fixture-pw@${LIVE_PROD_REDIS_HOST}.:6379`],
+      ['5 user-info, prod host after @', `rediss://someone:other@${LIVE_PROD_REDIS_HOST}:6379`],
+      ['5 user-info smuggling the prod host', `rediss://${LIVE_PROD_REDIS_HOST}:x@cache.example.net:6379`],
+      ['6 earlier production host', 'rediss://default:fixture-pw@noble-dane-77325.upstash.io:6379'],
+    ];
+    for (const [why, url] of cases) {
+      expectRejectedWithout(hostedEnv({ REDIS_URL: url }), `${why}: ${url}`, 'fixture-pw', /PRODUCTION Redis/);
+    }
+    // the same host through any other connection variable, hosted mode
+    for (const name of ['CREATOR_RENDER_REDIS_URL', 'REDIS_PRIVATE_URL', 'UPSTASH_REDIS_URL', 'E2E_REDIS_URL', 'REDIS_HOST', 'SOME_OTHER_REDIS_URL']) {
+      expectRejectedWithout(hostedEnv({ [name]: name === 'REDIS_HOST' ? LIVE_PROD_REDIS_HOST : LIVE_PROD_REDIS }), `${name} (hosted)`, 'fixture-pw', /PRODUCTION Redis/);
+    }
+  });
+  assert.equal(attempts, 0, 'no network attempt');
+});
+
+test('C3 prod-redis 7: an unrelated hosted endpoint and the loopback service are still accepted in hosted mode', () => {
+  const attempts = withNetworkTrapped(() => {
+    assert.equal(resolveAuthE2ETarget(hostedEnv({ REDIS_URL: 'rediss://default:fixture-pw@e2e-cache-00001.upstash.io:6379' })).mode, 'hosted');
+    assert.equal(resolveAuthE2ETarget(hostedEnv({ REDIS_URL: 'redis://127.0.0.1:6379' })).mode, 'hosted', 'the hosted workflow shape');
+    assert.equal(resolveAuthE2ETarget(hostedEnv({ REDIS_URL: 'redis://127.0.0.1:6379', ALLOW_PROD_DB_WITH_LOCAL_REDIS: '1' })).mode, 'hosted');
+  });
+  assert.equal(attempts, 0);
+});
+
+test('C3 prod-redis 8: local mode still rejects every non-loopback Redis, production or not', () => {
+  const attempts = withNetworkTrapped(() => {
+    expectRejectedWithout(localEnv({ REDIS_URL: LIVE_PROD_REDIS }), 'live prod Redis (local)', 'fixture-pw', /PRODUCTION Redis/);
+    for (const url of ['rediss://default:fixture-pw@e2e-cache-00001.upstash.io:6379', 'redis://10.0.0.5:6379', 'redis://cache.example.net:6379', 'redis://127.0.0.2:6379']) {
+      expectRejectedWithout(localEnv({ REDIS_URL: url }), `non-loopback ${url} (local)`, 'fixture-pw', /REDIS_URL/);
+    }
+    assert.equal(resolveAuthE2ETarget(localEnv({ REDIS_URL: 'redis://127.0.0.1:6379' })).mode, 'local');
+  });
+  assert.equal(attempts, 0);
+});
+
+test('C3 prod-redis 9: invalid or alternate representations fail closed', () => {
+  const attempts = withNetworkTrapped(() => {
+    for (const [why, value] of [
+      ['unparseable port', `rediss://default:fixture-pw@${LIVE_PROD_REDIS_HOST}:notaport`],
+      ['percent-encoded hyphen', 'rediss://default:fixture-pw@right%2Dtreefrog-90757.upstash.io:6379'],
+      ['percent-encoded dot', 'rediss://default:fixture-pw@right-treefrog-90757%2Eupstash%2Eio:6379'],
+      ['soft hyphen inside the host', 'rediss://default:fixture-pw@right-tree­frog-90757.upstash.io:6379'],
+      ['zero-width space inside the host', 'rediss://default:fixture-pw@right-treefrog​-90757.upstash.io:6379'],
+      ['full-width letters', 'rediss://default:fixture-pw@ｒｉｇｈｔ-treefrog-90757.upstash.io:6379'],
+      ['redis-cli form', `redis-cli --tls -u rediss://default:fixture-pw@${LIVE_PROD_REDIS_HOST}:6379`],
+      ['no scheme', `${LIVE_PROD_REDIS_HOST}:6379`],
+    ] as const) {
+      expectRejectedWithout(hostedEnv({ REDIS_URL: value }), `${why} (hosted)`, 'fixture-pw');
+      expectRejectedWithout(localEnv({ REDIS_URL: value }), `${why} (local)`, 'fixture-pw');
+    }
+  });
+  assert.equal(attempts, 0);
+});
+
+test('C3 prod-redis 10: the network trap itself works (a real attempt is counted)', () => {
+  const attempts = withNetworkTrapped(() => {
+    try { new netForRedisHost.Socket().connect(9, '127.0.0.1'); } catch { /* trapped */ }
+    void globalThis.fetch('http://127.0.0.1:9/').catch(() => undefined);
+  });
+  assert.equal(attempts, 2, 'the trap must observe attempts, otherwise the 0-attempt assertions above prove nothing');
+});
+
+test('C3 prod-redis CONTROL without the new entry, the live production Redis is ACCEPTED in hosted mode', async () => {
+  await controlV2('live prod redis', [["  'right-treefrog-90757.upstash.io',\n", '']], hostedEnv({ REDIS_URL: LIVE_PROD_REDIS }));
+});
