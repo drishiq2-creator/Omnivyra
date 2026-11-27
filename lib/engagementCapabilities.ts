@@ -27,6 +27,16 @@
  *
  * Bump whenever ENGAGEMENT_CAPABILITY_MATRIX changes. The extension copy
  * MUST be bumped in the same PR.
+ *
+ * DELIBERATELY NOT BUMPED by FIX-3 (owner 2026-11-27), which narrowed four
+ * entries to unsupported (instagram.like; facebook/instagram/twitter dm).
+ * The extension copy lives in a separate repository outside that fix's
+ * scope, and a server-only bump would make /api/extension/commands answer
+ * 409 CAPABILITY_VERSION_MISMATCH to every installed extension (stopping
+ * LinkedIn DM too). Hand-out is decided server-side from the live matrix, so
+ * the narrowing takes effect without the bump. FOLLOW-UP: bump this and the
+ * extension's capabilityMap.js together in one coordinated change
+ * (coordination record SOCIAL-ENGAGEMENT-SALESNAV-COORDINATION.md §6).
  */
 export const CAPABILITY_MAP_VERSION = '2026-04-29.1';
 
@@ -42,7 +52,10 @@ export type EngagementCapability = {
    *   'browser' — dispatched to the Chrome extension's browser runtime.
    *               Used for actions that do not have a first-party API
    *               path yet but have a verified extension handler
-   *               (currently: Messenger / Instagram Direct / LinkedIn DM).
+   *               (currently: LinkedIn DM only — FIX-3, owner 2026-11-27:
+   *               Messenger / Instagram Direct / X DM are unsupported because
+   *               extension 1.5.1 refuses every non-LinkedIn platform and no
+   *               official-API DM path is implemented).
    */
   mode?: 'api' | 'browser';
   /** For platforms where an action is only supported on certain account tiers
@@ -99,19 +112,42 @@ export const ENGAGEMENT_CAPABILITY_MATRIX: Record<
   facebook: {
     reply: { status: 'api_verified', mode: 'api', account_type: 'business' },
     like: { status: 'api_verified', mode: 'api', account_type: 'business' },
-    dm: { status: 'api_verified', mode: 'browser', account_type: 'any' },
+    // FIX-3 (owner 2026-11-27): was api_verified/browser, but the extension
+    // refuses non-LinkedIn platforms and there is no Messenger Platform API
+    // path (no pages_messaging scope). No browser/RPA fallback.
+    dm: {
+      status: 'unsupported',
+      reason: 'Facebook Messenger DM send is not supported: there is no verified Messenger API path and the browser extension does not support Facebook.',
+    },
     post_create: { status: 'api_verified', mode: 'api', account_type: 'business' },
   },
   instagram: {
     reply: { status: 'api_verified', mode: 'api', account_type: 'business' },
-    like: { status: 'api_verified', mode: 'api', account_type: 'business' },
-    dm: { status: 'api_verified', mode: 'browser', account_type: 'business' },
+    // FIX-3 (owner 2026-11-27): the Instagram Graph API has no like endpoint
+    // (IG Media exposes only like_count), so a like can never succeed.
+    like: {
+      status: 'unsupported',
+      reason: 'Instagram like is not supported: the Instagram Graph API does not provide a like endpoint.',
+    },
+    // FIX-3 (owner 2026-11-27): was api_verified/browser, but the extension
+    // refuses non-LinkedIn platforms and there is no Instagram Messaging API
+    // path (no instagram_manage_messages scope). No browser/RPA fallback.
+    dm: {
+      status: 'unsupported',
+      reason: 'Instagram Direct DM send is not supported: there is no verified Instagram Messaging API path and the browser extension does not support Instagram.',
+    },
     post_create: { status: 'api_verified', mode: 'api', account_type: 'business' },
   },
   twitter: {
     reply: { status: 'api_verified', mode: 'api', account_type: 'any' },
     like: { status: 'api_verified', mode: 'api', account_type: 'any' },
-    dm: { status: 'api_verified', mode: 'browser', account_type: 'any' },
+    // FIX-3 (owner 2026-11-27): was api_verified/browser, but the extension
+    // refuses non-LinkedIn platforms and there is no X DM API path (no dm.*
+    // scopes). No browser/RPA fallback.
+    dm: {
+      status: 'unsupported',
+      reason: 'X (Twitter) DM send is not supported: there is no verified X DM API path and the browser extension does not support X.',
+    },
     post_create: { status: 'api_verified', mode: 'api', account_type: 'any' },
   },
   youtube: {

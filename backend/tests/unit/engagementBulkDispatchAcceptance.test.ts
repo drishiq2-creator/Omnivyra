@@ -147,8 +147,16 @@ describe('§3 per-platform dispatch mode is server-resolved', () => {
   });
 
   it('DM dispatch is browser-mode where supported, never silent API', () => {
-    for (const p of ['linkedin', 'facebook', 'instagram', 'twitter']) {
+    // UPDATED (FIX-3, owner 2026-11-27): only LinkedIn has a verified extension DM
+    // handler; facebook/instagram/twitter dm were pinned browser here, defending
+    // the defect (extension 1.5.1 refuses non-LinkedIn; no API DM path). They are
+    // now unsupported, with no mode at all.
+    for (const p of ['linkedin']) {
       expect((resolveEngagementCapability(p, 'dm') as { mode?: string }).mode).toBe('browser');
+    }
+    for (const p of ['facebook', 'instagram', 'twitter']) {
+      expect(resolveEngagementCapability(p, 'dm').status).toBe('unsupported');
+      expect((resolveEngagementCapability(p, 'dm') as { mode?: string }).mode).toBeUndefined();
     }
     for (const p of ['youtube', 'reddit']) {
       expect(resolveEngagementCapability(p, 'dm').status).toBe('unsupported');
