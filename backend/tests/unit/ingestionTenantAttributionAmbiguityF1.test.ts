@@ -365,3 +365,49 @@ describe('7 — observable at the cycle level', () => {
     expect((done![1] as any).attribution_skipped).toEqual({ multiple_author_companies: 2 });
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// N-1 (Track D, 2026-11-28): evaluatePostEngagement derives its company from
+// the campaign ALONE and writes AI actions / runs auto-rules under it. When
+// attribution was refused, unowned or unreadable, running it anyway acts on the
+// engagement under a company the ingestion just declined to name.
+describe('8 — N-1: AI evaluation only runs for an attributed post', () => {
+  const evaluate = () =>
+    (jest.requireMock('../../services/engagementEvaluationService') as { evaluatePostEngagement: jest.Mock })
+      .evaluatePostEngagement;
+
+  it('CONTROL: resolved (campaign == account company) -> evaluated once', async () => {
+    mockResolveCampaignCompanyId.mockResolvedValue(CO_A);
+    accountRow = { company_id: CO_A };
+    await svc.ingestComments('p1');
+    expect(syncedOrgIds()).toEqual([CO_A]);
+    expect(evaluate()).toHaveBeenCalledTimes(1);
+    expect(evaluate()).toHaveBeenCalledWith('p1');
+  });
+
+  it('CRITICAL: campaign company != account company (refused) -> NOT evaluated', async () => {
+    mockResolveCampaignCompanyId.mockResolvedValue(CO_B);
+    accountRow = { company_id: CO_A };
+    await svc.ingestComments('p1');
+    expect(mockSyncFromPostComments).not.toHaveBeenCalled();
+    expect(evaluate()).not.toHaveBeenCalled();
+  });
+
+  it('CRITICAL: author active in 2 companies (refused) -> NOT evaluated', async () => {
+    activeRoleRows = [{ company_id: CO_A }, { company_id: CO_B }];
+    await svc.ingestComments('p1');
+    expect(evaluate()).not.toHaveBeenCalled();
+  });
+
+  it('unowned -> NOT evaluated', async () => {
+    await svc.ingestComments('p1');
+    expect(evaluate()).not.toHaveBeenCalled();
+  });
+
+  it('lookup_failed -> NOT evaluated', async () => {
+    mockResolveCampaignCompanyId.mockResolvedValue(CO_A);
+    accountLookupError = { message: 'connection reset' };
+    await svc.ingestComments('p1');
+    expect(evaluate()).not.toHaveBeenCalled();
+  });
+});

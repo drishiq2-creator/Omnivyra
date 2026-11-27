@@ -1026,11 +1026,17 @@ export async function ingestComments(
           );
         });
       }
-      try {
-        const { evaluatePostEngagement } = await import('./engagementEvaluationService');
-        await evaluatePostEngagement(scheduled_post_id);
-      } catch (evalErr: any) {
-        console.warn('[engagementIngestion] evaluation trigger failed', evalErr?.message);
+      // N-1: AI evaluation resolves its company from the campaign alone and then
+      // writes actions and runs auto-rules under it. Only an attributed post may
+      // be evaluated; a refused, unowned or unreadable attribution is skipped
+      // above and is not acted on here either. post_comments keeps the rows.
+      if (tenant.state === 'resolved') {
+        try {
+          const { evaluatePostEngagement } = await import('./engagementEvaluationService');
+          await evaluatePostEngagement(scheduled_post_id);
+        } catch (evalErr: any) {
+          console.warn('[engagementIngestion] evaluation trigger failed', evalErr?.message);
+        }
       }
     }
     return attributionSkipped
