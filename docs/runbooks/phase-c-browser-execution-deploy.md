@@ -38,3 +38,58 @@ Rollback: stop the new worker first (again with no overlap), deploy the old code
 
 - The web app accepts RPA work into `rpa_retry_queue` through `rpa_retry_queue_accept`, so 20270314000001 must also be in place before a web deploy that queues RPA. Applying both migrations before either deploy satisfies every rule above.
 - An RPA execute without an approval of record gets an approval-required answer. It is never queued, because the worker gate would refuse it.
+
+## 4. Existing playbooks after deploy (browser default, item D)
+
+New playbooks are created with `execution_modes.browser_allowed = false`
+("Not allowed": no requested browser execution and no API -> browser
+fallback). Both the editor default and the server create path
+(`playbookService.createPlaybook`) write it; a create payload with the flag
+absent or null is stored as `false`. Only a company admin (or platform super
+admin) can save playbooks (`/api/community-ai/playbooks`, MANAGE_PLAYBOOKS), so
+only that role can switch a playbook to "Allowed".
+
+Existing playbooks are NOT migrated. A playbook saved before this release has
+the key absent ("Not set"); after deploy it behaves exactly as before:
+requested browser refused, system API -> browser fallback allowed. Editing such
+a playbook and leaving the select on "Not set" keeps the key absent. Nothing is
+silently disabled; an admin who wants it off picks "Not allowed".
+
+Before deploy, count what is out there (read-only, prod via the Mgmt API query
+path):
+
+```sql
+SELECT CASE
+         WHEN execution_modes IS NULL                         THEN 'no_block'
+         WHEN NOT (execution_modes ? 'browser_allowed')       THEN 'key_absent'
+         WHEN execution_modes->'browser_allowed' = 'null'::jsonb THEN 'null'
+         ELSE execution_modes->>'browser_allowed'
+       END                                   AS browser_allowed,
+       status,
+       count(*)                              AS playbooks
+FROM public.community_ai_playbooks
+GROUP BY 1, 2
+ORDER BY 1, 2;
+
+-- actions in the last 90 days that took the API -> browser fallback,
+-- split by the playbook's flag (no_playbook = playbook-less manual dispatch)
+SELECT CASE
+         WHEN a.playbook_id IS NULL                              THEN 'no_playbook'
+         WHEN p.id IS NULL                                       THEN 'playbook_missing'
+         WHEN p.execution_modes IS NULL                          THEN 'no_block'
+         WHEN NOT (p.execution_modes ? 'browser_allowed')        THEN 'key_absent'
+         ELSE p.execution_modes->>'browser_allowed'
+       END                                   AS browser_allowed,
+       count(DISTINCT m.action_id)           AS actions,
+       count(DISTINCT m.organization_id)     AS companies
+FROM public.community_ai_execution_metric_events m
+LEFT JOIN public.community_ai_actions   a ON a.id = m.action_id
+LEFT JOIN public.community_ai_playbooks p ON p.id = a.playbook_id
+WHERE m.event_type = 'fallback_triggered'
+  AND m.created_at >= now() - interval '90 days'
+GROUP BY 1
+ORDER BY 1;
+```
+
+`key_absent` / `no_block` rows in the second query are the workflows that keep
+working only because existing playbooks were not migrated.

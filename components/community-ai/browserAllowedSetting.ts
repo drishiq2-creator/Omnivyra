@@ -9,7 +9,10 @@
  *   true          -> "Allowed": explicit browser requests and the fallback;
  *   false         -> "Not allowed": neither.
  * A checkbox cannot show "Not set", so the editor uses a select bound to these
- * helpers. Saving never converts "Not set" into true/false: the key stays absent.
+ * helpers. Saving an EXISTING playbook never converts "Not set" into true/false:
+ * the key stays absent. A NEW playbook (item D) starts as "Not allowed", and
+ * the server create path stores an absent/null flag as false
+ * (applyNewPlaybookExecutionModeDefaults).
  */
 export type BrowserAllowedChoice = 'unset' | 'allowed' | 'not_allowed';
 

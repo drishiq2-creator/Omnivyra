@@ -6,6 +6,7 @@ import {
   browserAllowedToChoice,
   isBrowserAllowedChoice,
 } from './browserAllowedSetting';
+import { NEW_PLAYBOOK_BROWSER_ALLOWED } from '../../backend/services/communityAiExecutionModes';
 
 type PlaybookEditorProps = {
   playbook?: EngagementPlaybook | null;
@@ -54,10 +55,11 @@ const defaultPlaybook = (tenantId: string, organizationId: string): EngagementPl
   execution_modes: {
     api_allowed: true,
     rpa_allowed: false,
-    // New playbooks keep browser (extension) execution on, matching what every
-    // playbook had before the flag existed; untick to refuse explicit browser
-    // requests AND the executor's API -> browser fallback.
-    browser_allowed: true,
+    // Owner decision (item D): new playbooks start with browser (extension)
+    // execution OFF ("Not allowed": no explicit browser, no API -> browser
+    // fallback). A company admin (the only role that may save playbooks)
+    // enables it explicitly. The server applies the same default on create.
+    browser_allowed: NEW_PLAYBOOK_BROWSER_ALLOWED,
     manual_only: false,
   },
   conflict_policy: {

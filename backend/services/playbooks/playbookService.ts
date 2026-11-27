@@ -1,11 +1,14 @@
 import { supabase } from '../../db/supabaseClient';
 import type { EngagementPlaybook } from './playbookTypes';
 import { ownedDbTable } from '../../db/writeOwner';
+import { applyNewPlaybookExecutionModeDefaults } from '../communityAiExecutionModes';
 
 export const createPlaybook = async (playbook: EngagementPlaybook) => {
   const { data, error } = await ownedDbTable('community_ai_playbooks')
     .insert({
       ...playbook,
+      // Item D: a new playbook stores browser_allowed explicitly; absent/null -> false.
+      execution_modes: applyNewPlaybookExecutionModeDefaults(playbook.execution_modes) as EngagementPlaybook['execution_modes'],
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     })

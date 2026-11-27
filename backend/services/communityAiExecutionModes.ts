@@ -51,6 +51,30 @@ export type ExecutionModesConfig = {
 } | null | undefined;
 
 /**
+ * Owner decision (item D): a NEW playbook starts with browser execution OFF.
+ * Create writes an explicit `browser_allowed: false` ("Not allowed": no
+ * requested browser, no API -> browser fallback) unless the creating
+ * administrator chose true/false explicitly; an absent / null flag on create is
+ * NOT stored as "Not set". Playbooks saved before this rule keep the absent
+ * key and its meaning (fallback allowed) - see playbookExecutionModeDecision.
+ *
+ * A create payload with no execution_modes block at all gets the block whose
+ * meaning equals "no block" for every other mode (api allowed, rpa refused,
+ * not manual-only) plus browser_allowed false: `{ browser_allowed: false }`
+ * alone would have refused api (a present block with api_allowed falsy).
+ */
+export const NEW_PLAYBOOK_BROWSER_ALLOWED = false as const;
+
+export function applyNewPlaybookExecutionModeDefaults(modes: unknown): Exclude<ExecutionModesConfig, null | undefined> {
+  if (!modes || typeof modes !== 'object' || Array.isArray(modes)) {
+    return { api_allowed: true, rpa_allowed: false, manual_only: false, browser_allowed: NEW_PLAYBOOK_BROWSER_ALLOWED };
+  }
+  const block = modes as Exclude<ExecutionModesConfig, null | undefined>;
+  if (typeof block.browser_allowed === 'boolean') return block;
+  return { ...block, browser_allowed: NEW_PLAYBOOK_BROWSER_ALLOWED };
+}
+
+/**
  * Who chose the mode being checked:
  *   'requested'       - the caller / planner asked for this mode explicitly
  *                       (execute body, the action row's execution_mode);
