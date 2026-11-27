@@ -211,11 +211,14 @@ export async function observeAllActiveOrgs(options?: { windowSeconds?: number })
   ready: number;
   errors: number;
 }> {
+  // 24C: enumerate first — with no recently active org there is nothing to
+  // observe, so the Chromium readiness probe is not run at all.
+  const orgs = await listRecentlyActiveOrgs(options?.windowSeconds ?? WINDOW_SECONDS);
+  if (orgs.length === 0) return { observed: 0, blocked: 0, degraded: 0, ready: 0, errors: 0 };
   const env = await rpaEnvReady();
   if (isProbeFailure(env)) {
     // When the env is down, mark every recent org BLOCKED en masse so
     // the admission gate reads fresh state.
-    const orgs = await listRecentlyActiveOrgs(options?.windowSeconds ?? WINDOW_SECONDS);
     let blocked = 0, errors = 0;
     for (const orgId of orgs) {
       try {
@@ -229,7 +232,6 @@ export async function observeAllActiveOrgs(options?: { windowSeconds?: number })
     return { observed: orgs.length, blocked, degraded: 0, ready: 0, errors };
   }
 
-  const orgs = await listRecentlyActiveOrgs(options?.windowSeconds ?? WINDOW_SECONDS);
   let blocked = 0, degraded = 0, ready = 0, errors = 0;
   for (const orgId of orgs) {
     try {

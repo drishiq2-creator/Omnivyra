@@ -867,7 +867,12 @@ async function startCron(opts: { hostOwnsShutdown?: boolean } = {}) {
   // ── RPA retry queue flush (every 90s) ────────────────────────────────────
   // Fair round-robin: visits each org with a due retry, drains up to
   // `limit_per_org` rows per tick. Successes delete the row; failures
-  // bump attempts with exponential backoff (capped 2h).
+  // bump attempts with exponential backoff (capped 2h); unknown outcomes
+  // are parked, never retried. Order inside flushRetries (24C): due-count
+  // pre-check -> kill switch -> Chromium probe (failures back off, one log
+  // line per real probe) -> per-row approval gate. An empty queue never
+  // launches a browser. The skip/probe counters are returned for
+  // diagnostics but are NOT log fields, so idle ticks stay silent.
   scheduleWorker(
     async () => {
       const { rpaSchedulerHooks } =
@@ -878,12 +883,19 @@ async function startCron(opts: { hostOwnsShutdown?: boolean } = {}) {
           max_orgs: 100,
         });
         return {
-          orgs_visited: result.orgs_visited,
-          claimed:      result.claimed,
-          succeeded:    result.succeeded,
-          failed:       result.failed,
-          remaining:    result.remaining,
-          errors:       result.errors,
+          orgs_visited:        result.orgs_visited,
+          claimed:             result.claimed,
+          succeeded:           result.succeeded,
+          failed:              result.failed,
+          unknown:             result.unknown,
+          remaining:           result.remaining,
+          errors:              result.errors,
+          due:                 result.due,
+          skipped_empty:       result.skipped_empty,
+          skipped_policy:      result.skipped_policy,
+          skipped_env:         result.skipped_env,
+          env_failure_streak:  result.env_failure_streak,
+          env_next_probe_in_s: result.env_next_probe_in_s,
         };
       } catch (err: unknown) {
         console.warn('[rpaRetryQueueFlush] exception:', formatCaughtError(err));
@@ -891,7 +903,7 @@ async function startCron(opts: { hostOwnsShutdown?: boolean } = {}) {
       }
     },
     RPA_RETRY_FLUSH_INTERVAL_MS, 'rpaRetryQueueFlush',
-    ['orgs_visited', 'claimed', 'succeeded', 'failed', 'remaining', 'errors']
+    ['orgs_visited', 'claimed', 'succeeded', 'failed', 'unknown', 'remaining', 'errors']
   );
 
   // ── Intelligence pattern learner (every ~12m) ────────────────────────────
