@@ -1,0 +1,117 @@
+# Browser runtime lifecycle soak - SYNTHETIC ONLY.
+#
+# Builds the production worker image (Dockerfile.worker, unchanged inputs, no build args) and runs
+# scripts/browser-runtime/lifecycle-soak.js INSIDE it against pages served on 127.0.0.1 by the
+# harness itself. No real site is ever contacted:
+#   - every container runs with --network none (loopback only);
+#   - Chromium is launched with a dead proxy (127.0.0.1:9, bypass 127.0.0.1 only);
+#   - every browser context aborts any request whose host is not 127.0.0.1;
+#   - the harness's `network` scenario is the red control proving the last two block a request.
+#
+# Uses NO repository secret. The image build needs none: Dockerfile.worker has no ARG, installs
+# from the public npm registry and the Playwright CDN, and its runtime env (Redis, Supabase, ...)
+# is never read because the worker entrypoint is not started - only the harness runs.
+#
+# Variants (constrained: --memory, --pids-limit, --cpus, --shm-size):
+#   no-init           node is PID 1 (the configuration before tini)       - experiment
+#   tini              image ENTRYPOINT, tini is PID 1 (shipped config)    - REQUIRED
+#   docker-init       docker --init, docker-init is PID 1                 - REQUIRED
+#   shm-small         --shm-size=16m, heavy page, launcher default args   - REQUIRED
+#   shm-small-noflag  same, WITHOUT --disable-dev-shm-usage               - experiment
+# compare-variants.js fails the job only when a REQUIRED variant fails, and writes the verdicts
+# of the PID-1 (zombie) and /dev/shm hypotheses to out/ab-verdict.json.
+#
+# Triggers: manual dispatch, and pushes to ci-only/browser-runtime/** only. Never on pull
+# requests or main pushes.
+
+name: Browser runtime lifecycle (synthetic)
+
+on:
+  workflow_dispatch:
+    inputs:
+      cycles:
+        description: 'Sequential launch/close cycles per main variant'
+        required: false
+        default: '200'
+  push:
+    branches:
+      - 'ci-only/browser-runtime/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: browser-runtime-lifecycle-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  lifecycle:
+    name: Chromium lifecycle soak in the worker image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      IMAGE: omnivyra-worker-lifecycle:${{ github.sha }}
+      CYCLES: ${{ github.event.inputs.cycles || '200' }}
+      # Shared resource limits for every variant.
+      LIMITS: --network none --memory=3g --memory-swap=3g --pids-limit=1024 --cpus=2
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Harness selftest (parsers and loopback guard; no browser)
+        run: node scripts/browser-runtime/lifecycle-soak.js --selftest
+
+      - name: Build Dockerfile.worker
+        run: docker build --file Dockerfile.worker --tag "$IMAGE" .
+
+      - name: Image facts
+        run: |
+          docker image inspect "$IMAGE" --format 'entrypoint={{json .Config.Entrypoint}} cmd={{json .Config.Cmd}}'
+          docker run --rm $LIMITS --entrypoint sh "$IMAGE" -c '
+            set -e
+            ls -l /usr/bin/tini
+            echo "OMNIVYRA_BROWSER_RUNTIME=$OMNIVYRA_BROWSER_RUNTIME"
+            node -e "console.log(\"playwright\", require(\"playwright/package.json\").version)"
+            ls dist/backend/services/browserRuntime/'
+
+      - name: Soak variants
+        run: |
+          mkdir -p out
+          HARNESS=(-v "$PWD/scripts/browser-runtime:/harness:ro" -v "$PWD/out:/out" -w /app)
+          MAIN_ARGS="--cycles=$CYCLES --concurrency=3,8 --rounds=3 --contexts=30 --crashes=5 --shutdowns=3"
+          SHM_ARGS="--scenarios=network,sequential --cycles=30 --heavy"
+          run_variant() {
+            local name="$1"; shift
+            set +e
+            docker run --rm $LIMITS "${HARNESS[@]}" "$@" > "out/$name.log" 2> "out/$name.stderr"
+            local rc=$?
+            set -e
+            echo "$name exit=$rc" | tee -a out/exits.txt
+          }
+          # node is PID 1 (no init)
+          run_variant no-init --entrypoint node "$IMAGE" /harness/lifecycle-soak.js --variant=no-init --out=/out/no-init.json $MAIN_ARGS
+          # image ENTRYPOINT: tini is PID 1
+          run_variant tini "$IMAGE" node /harness/lifecycle-soak.js --variant=tini --out=/out/tini.json $MAIN_ARGS
+          # docker --init: docker-init is PID 1
+          run_variant docker-init --init --entrypoint node "$IMAGE" /harness/lifecycle-soak.js --variant=docker-init --out=/out/docker-init.json $MAIN_ARGS
+          # small /dev/shm, with and without --disable-dev-shm-usage
+          run_variant shm-small --shm-size=16m "$IMAGE" node /harness/lifecycle-soak.js --variant=shm-small --out=/out/shm-small.json $SHM_ARGS
+          run_variant shm-small-noflag --shm-size=16m "$IMAGE" node /harness/lifecycle-soak.js --variant=shm-small-noflag --out=/out/shm-small-noflag.json $SHM_ARGS --drop-arg=--disable-dev-shm-usage
+
+      - name: Verdicts (fails only if a required variant failed)
+        run: node scripts/browser-runtime/compare-variants.js out
+
+      - name: Upload summaries
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-runtime-lifecycle-${{ github.run_id }}
+          path: out/
+          retention-days: 14
+          if-no-files-found: warn
