@@ -1,8 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import type { EngagementPlaybook } from '../../lib/shared/playbookTypes';
 import {
-  BROWSER_ALLOWED_OPTIONS,
   applyBrowserAllowedChoice,
+  browserAllowedOptionsFor,
   browserAllowedToChoice,
   isBrowserAllowedChoice,
 } from './browserAllowedSetting';
@@ -307,7 +307,7 @@ export default function PlaybookEditor({ playbook, onSave, onCancel }: PlaybookE
                 });
               }}
             >
-              {BROWSER_ALLOWED_OPTIONS.map((o) => (
+              {browserAllowedOptionsFor(!draft.id).map((o) => (
                 <option key={o.value} value={o.value}>{o.label}</option>
               ))}
             </select>

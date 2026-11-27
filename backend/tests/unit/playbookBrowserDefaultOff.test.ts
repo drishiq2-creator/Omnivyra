@@ -144,3 +144,22 @@ describe('D: only the playbook-managing role can enable browser', () => {
     expect(res.body.playbook.execution_modes.browser_allowed).toBe(true);
   });
 });
+
+describe('N-4: a NEW playbook offers only Allowed / Not allowed; an existing one keeps the tri-state', () => {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { browserAllowedOptionsFor, browserAllowedToChoice } = require('../../../components/community-ai/browserAllowedSetting');
+  it('new: two options, and the default value is one of them (Not allowed)', () => {
+    const opts = browserAllowedOptionsFor(true).map((o: { value: string }) => o.value);
+    expect(opts).toEqual(['allowed', 'not_allowed']);
+    expect(browserAllowedToChoice(defaultPlaybook('org-1', 'org-1').execution_modes.browser_allowed)).toBe('not_allowed');
+  });
+  it('CONTROL: existing: all three, so a legacy "Not set" playbook stays representable', () => {
+    expect(browserAllowedOptionsFor(false).map((o: { value: string }) => o.value)).toEqual(['unset', 'allowed', 'not_allowed']);
+  });
+  it('the editor picks the option list by whether the draft has an id', () => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../../../components/community-ai/PlaybookEditor.tsx'), 'utf8');
+    expect(src).toMatch(/browserAllowedOptionsFor\(!draft\.id\)\.map/);
+    expect(src).not.toMatch(/BROWSER_ALLOWED_OPTIONS\.map/);
+  });
+});

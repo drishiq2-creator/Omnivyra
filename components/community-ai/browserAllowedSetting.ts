@@ -22,6 +22,15 @@ export const BROWSER_ALLOWED_OPTIONS: ReadonlyArray<{ value: BrowserAllowedChoic
   { value: 'not_allowed', label: 'Not allowed (no browser, no fallback)' },
 ];
 
+/**
+ * Review N-4: the options the editor offers. A NEW playbook (no id yet) offers only Allowed / Not allowed - the create
+ * path stores an absent flag as false anyway, so "Not set" would be a choice that silently becomes "Not allowed".
+ * An EXISTING playbook keeps all three (a legacy playbook must be able to stay "Not set").
+ */
+export function browserAllowedOptionsFor(isNewPlaybook: boolean): ReadonlyArray<{ value: BrowserAllowedChoice; label: string }> {
+  return isNewPlaybook ? BROWSER_ALLOWED_OPTIONS.filter((o) => o.value !== 'unset') : BROWSER_ALLOWED_OPTIONS;
+}
+
 export const browserAllowedToChoice = (value: boolean | null | undefined): BrowserAllowedChoice =>
   value === true ? 'allowed' : value === false ? 'not_allowed' : 'unset';
 
