@@ -29,6 +29,46 @@ const CONNECTION_VARS = [
 ];
 
 /**
+ * E2E consolidation (doc 15) — the hosted, long-lived E2E Supabase project. It is NOT production,
+ * but it is not disposable either: it is shared, persistent and being retired. Automated tests and
+ * certification must use a disposable / loopback stack instead, so this ref is refused alongside
+ * PROD_MARKERS by scanHostedTargets() (jest setup) and scanCertEnv() (CERT_ENV=1).
+ * Kept SEPARATE from PROD_MARKERS on purpose: PROD_MARKERS means "production" and is mirrored by
+ * the cert fake publisher (closure014CertFakePublisher.test.ts).
+ */
+const HOSTED_E2E_MARKERS = [
+  'lomndxmrpyudaegddpef',                  // hosted E2E Supabase project ref (omnivyra-e2e)
+];
+
+/**
+ * Variables a test process could use to reach a Supabase project or database. CONNECTION_VARS plus
+ * the canonical Supabase names the app and harnesses read today (lib/env/namespace.ts reads
+ * SUPABASE_DB_URL; tests/auth/* read the E2E_-prefixed names).
+ */
+const TEST_TARGET_VARS = [...new Set([
+  ...CONNECTION_VARS,
+  'SUPABASE_DB_URL',
+  'E2E_SUPABASE_URL', 'E2E_NEXT_PUBLIC_SUPABASE_URL', 'E2E_DATABASE_URL', 'E2E_REDIS_URL',
+])];
+
+/**
+ * Pure scan for the jest setup (backend/tests/setupEnv.ts): every target-bearing variable is checked
+ * for a PRODUCTION marker and for the hosted E2E marker. Case-insensitive. Violations name the
+ * variable, the marker and its class — never the value.
+ */
+function scanHostedTargets(env = process.env) {
+  const violations = [];
+  for (const key of TEST_TARGET_VARS) {
+    const val = env[key];
+    if (typeof val !== 'string') continue;
+    const lowered = val.toLowerCase();
+    for (const marker of PROD_MARKERS) if (lowered.includes(marker)) violations.push(`${key} contains "${marker}" (production)`);
+    for (const marker of HOSTED_E2E_MARKERS) if (lowered.includes(marker)) violations.push(`${key} contains "${marker}" (hosted E2E project)`);
+  }
+  return violations;
+}
+
+/**
  * Closure-014 (F): certification is an ALLOW-list, not only a deny-list. Under
  * CERT_ENV=1 every one of these connection targets, when set, must resolve to a
  * loopback host — so a new production host (not yet in PROD_MARKERS) or a
@@ -56,6 +96,7 @@ function scanCertEnv(env = process.env) {
     const val = env[key];
     if (typeof val !== 'string') continue;
     for (const marker of PROD_MARKERS) if (val.includes(marker)) violations.push(`${key} → "${marker}"`);
+    for (const marker of HOSTED_E2E_MARKERS) if (val.toLowerCase().includes(marker)) violations.push(`${key} → "${marker}" (hosted E2E project)`);
   }
   for (const key of LOOPBACK_REQUIRED_VARS) {
     const val = env[key];
@@ -101,4 +142,7 @@ function loadCertAwareEnv(cwd = process.cwd()) {
   return file;
 }
 
-module.exports = { resolveEnvFile, loadCertAwareEnv, assertCertIsolationInProcess, scanCertEnv, PROD_MARKERS, CONNECTION_VARS, LOOPBACK_REQUIRED_VARS };
+module.exports = {
+  resolveEnvFile, loadCertAwareEnv, assertCertIsolationInProcess, scanCertEnv, scanHostedTargets,
+  PROD_MARKERS, HOSTED_E2E_MARKERS, CONNECTION_VARS, TEST_TARGET_VARS, LOOPBACK_REQUIRED_VARS,
+};
