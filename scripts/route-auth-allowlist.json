@@ -902,6 +902,12 @@
     "Adding an entry requires security review."
   ],
   "orderingVerifiers": {
+    "pages/api/extension/redeem.ts": [
+      {
+        "verifier": "peekClaimCode",
+        "reason": "S-4 (Phase E review): the single-use claim code is this route's credential. peekClaimCode reads its (user, org) binding WITHOUT consuming it (extension_claim_code_peek, read-only) so membership and the signing secret are checked before the atomic redeem; an unknown, expired, malformed or used code answers 401 INVALID_OR_EXPIRED_CLAIM_CODE before any other read or write. The redeem itself (redeemClaimCode, the machine-token verifier) answers 401 too."
+      }
+    ],
     "pages/api/leads/index.ts": [
       {
         "verifier": "validateWebhookAuth",

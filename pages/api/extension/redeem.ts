@@ -49,7 +49,11 @@ import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeF
  *      so the retry is honest);
  *   5. the atomic redeem. Only after this point can a failure have consumed the code: those answers are
  *      non-retryable (retryable:false, repair_required:true): the user must start pairing again (a new code).
- * A store outage at 2-4 is 503 retryable:true - nothing was consumed. The extension worker (serviceWorker.js
+ * A store outage at 2-4 is 503 retryable:true - nothing was consumed. Any OTHER error thrown at 2-4 (the catch-all
+ * 500 'redeem failed') is also retryable:true for the same reason: the code is consumed only at step 5 (review N-f).
+ * An unknown, expired, malformed or already-used code answers 401 INVALID_OR_EXPIRED_CLAIM_CODE at step 2 and at
+ * step 5 (the claim code is this route's credential; route-auth orderingVerifiers: peekClaimCode).
+ * The extension worker (serviceWorker.js
  * redeemClaimCode) treats any non-2xx as REDEEM_FAILED and shows data.error; it never auto-retries, so the extra
  * fields are additive and compatible.
  */
@@ -100,7 +104,8 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   try {
     bound = await peekClaimCode(claimCode);
     if (!bound) {
-      return res.status(400).json({ success: false, error: 'INVALID_OR_EXPIRED_CLAIM_CODE' });
+      // 401: the claim code IS this route's credential (route-auth ordering verifier).
+      return res.status(401).json({ success: false, error: 'INVALID_OR_EXPIRED_CLAIM_CODE' });
     }
 
     // Membership may have changed in the (<= 60 s) since bootstrap: no token for a principal validate would refuse.
@@ -159,8 +164,8 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     });
   }
   if (!claim) {
-    // Redeemed or expired between the lookup and the redeem (a concurrent redeem won).
-    return res.status(400).json({ success: false, error: 'INVALID_OR_EXPIRED_CLAIM_CODE' });
+    // Redeemed or expired between the lookup and the redeem (a concurrent redeem won). 401: credential refused.
+    return res.status(401).json({ success: false, error: 'INVALID_OR_EXPIRED_CLAIM_CODE' });
   }
   if (claim.userId !== bound.userId || claim.orgId !== bound.orgId) {
     // Cannot happen (a code's binding is immutable); refuse rather than hand out a token minted for someone else.

@@ -264,7 +264,7 @@ describe('cross-instance handshake: bootstrap (A) -> redeem (B) -> validate -> a
     const wipedHash = require('crypto').createHash('sha256').update(wiped.body.data.claim_code).digest('hex');
     mockDb.claims.delete(wipedHash);
     expect((await redeem(B, kept.body.data.claim_code)).statusCode).toBe(200); // control
-    expect((await redeem(A, wiped.body.data.claim_code)).statusCode).toBe(400); // even on the minting instance
+    expect((await redeem(A, wiped.body.data.claim_code)).statusCode).toBe(401); // even on the minting instance
     expect((globalThis as Record<string, unknown>).__omnivyra_claim_code_store__).toBeUndefined();
   });
 
@@ -283,14 +283,35 @@ describe('single use, expiry, concurrency', () => {
     const first = await redeem(B, b.body.data.claim_code);
     expect(first.statusCode).toBe(200);
     const again = await redeem(A, b.body.data.claim_code);
-    expect(again.statusCode).toBe(400);
+    expect(again.statusCode).toBe(401);
     expect(again.body.error).toBe('INVALID_OR_EXPIRED_CLAIM_CODE');
   });
 
   it('two concurrent redeems on two instances yield exactly one session', async () => {
     const b = await bootstrap(A, MEMBER);
     const [x, y] = await Promise.all([redeem(A, b.body.data.claim_code), redeem(B, b.body.data.claim_code)]);
-    expect([x.statusCode, y.statusCode].sort()).toEqual([200, 400]);
+    expect([x.statusCode, y.statusCode].sort()).toEqual([200, 401]);
+  });
+
+  it('G-2: a code consumed between the lookup and the redeem is refused 401 at the REDEEM step (control: unconsumed -> 200)', async () => {
+    const b = await bootstrap(A, MEMBER);
+    const hash = require('crypto').createHash('sha256').update(b.body.data.claim_code).digest('hex');
+    const realRpc = mockRpc;
+    let raced = false;
+    const spy = jest.spyOn(mockDb.rpcCalls, 'push').mockImplementation(function (this: string[], ...fns: string[]) {
+      // the moment the route calls the consuming redeem, another redeemer has already won
+      if (fns[0] === 'extension_claim_code_redeem' && !raced) { raced = true; mockDb.claims.get(hash)!.redeemedAt = Date.now(); }
+      return Array.prototype.push.apply(this, fns);
+    });
+    const r = await redeem(B, b.body.data.claim_code);
+    spy.mockRestore();
+    expect(raced).toBe(true);
+    expect(mockDb.rpcCalls).toContain('extension_claim_code_peek');
+    expect(r.statusCode).toBe(401);
+    expect(r.body.error).toBe('INVALID_OR_EXPIRED_CLAIM_CODE');
+    void realRpc;
+    const c = await bootstrap(A, MEMBER);
+    expect((await redeem(B, c.body.data.claim_code)).statusCode).toBe(200);
   });
 
   it('a code older than 60 s (store clock) is refused; control: at 59 s it redeems', async () => {
@@ -300,13 +321,13 @@ describe('single use, expiry, concurrency', () => {
     expect((await redeem(B, b1.body.data.claim_code)).statusCode).toBe(200);
     mockDb.skewMs = 61_000;
     const late = await redeem(B, b2.body.data.claim_code);
-    expect(late.statusCode).toBe(400);
+    expect(late.statusCode).toBe(401);
     expect(late.body.error).toBe('INVALID_OR_EXPIRED_CLAIM_CODE');
   });
 
   it('a malformed code never reaches the store', async () => {
     const r = await redeem(B, 'cc_not-a-code');
-    expect(r.statusCode).toBe(400);
+    expect(r.statusCode).toBe(401);
     expect(mockDb.rpcCalls).not.toContain('extension_claim_code_redeem');
     expect(mockDb.rpcCalls).not.toContain('extension_claim_code_peek');
   });
