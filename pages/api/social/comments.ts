@@ -8,22 +8,24 @@ import {
 import { bearerAuthorization } from '../../../lib/httpAuthHeaders';
 import { getSupabaseUserFromRequest } from '../../../backend/services/supabaseAuthService';
 import { enforceCompanyAccess } from '../../../backend/services/userContextService';
+import { checkCommunityActionContactGovernance, linkedInCommentIdCandidates } from '../../../backend/services/communityAiContactGovernanceGate';
 
 /**
  * ROUTE-AUTH-001: comment ingestion spends the social account's platform token,
  * so the caller must own that account (social_accounts.user_id) or be an active
  * member of the company it belongs to. Writes the denial and returns false.
  * An unknown account and an unowned one get the same 404.
+ * Returns the authorised account (its company is the tenant for contact governance), or null after a denial.
  */
 async function authorizeSocialAccount(
   req: NextApiRequest,
   res: NextApiResponse,
   callerUserId: string,
   socialAccountId: unknown,
-): Promise<boolean> {
+): Promise<{ company_id: string | null } | null> {
   if (typeof socialAccountId !== 'string' || !socialAccountId) {
     res.status(404).json({ error: 'Social account not found' });
-    return false;
+    return null;
   }
   const { data: account, error } = await supabase
     .from('social_accounts')
@@ -32,19 +34,20 @@ async function authorizeSocialAccount(
     .maybeSingle();
   if (error) {
     res.status(503).json({ error: 'Social account lookup failed. Please try again.' });
-    return false;
+    return null;
   }
   if (!account) {
     res.status(404).json({ error: 'Social account not found' });
-    return false;
+    return null;
   }
-  if (account.user_id && account.user_id === callerUserId) return true;
-  if (account.company_id) {
-    const ctx = await enforceCompanyAccess({ req, res, companyId: String(account.company_id) });
-    return Boolean(ctx);
+  const companyId = account.company_id ? String(account.company_id) : null;
+  if (account.user_id && account.user_id === callerUserId) return { company_id: companyId };
+  if (companyId) {
+    const ctx = await enforceCompanyAccess({ req, res, companyId });
+    return ctx ? { company_id: companyId } : null;
   }
   res.status(404).json({ error: 'Social account not found' });
-  return false;
+  return null;
 }
 
 // Reply helpers left unchanged for now (deprecated later per canonical design).
@@ -144,7 +147,34 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       if (!platform || !postId || !accountId || !replyText) {
         return res.status(400).json({ error: 'Reply requires platform, postId, accountId, replyText' });
       }
-      if (!(await authorizeSocialAccount(req, res, user.id, accountId))) return;
+      const account = await authorizeSocialAccount(req, res, user.id, accountId);
+      if (!account) return;
+      if (platform === 'linkedin' && !commentId) return res.status(400).json({ error: 'Comment ID is required for LinkedIn replies' });
+      // Round 26 (review S-4 / GD-3): a direct reply reaches the AUTHOR of the comment (or post) replied to, so the
+      // one contact-governance gate is asked BEFORE any platform call. Tenant = the social account's company (never
+      // the body). The gate resolves the author from the engagement store; suppressed or unidentifiable → 403 with a
+      // reason code; governance unreadable or no tenant → 503. Nothing is sent on any refusal.
+      // A user-owned account with no company has no tenant to ask governance for: refuse as unavailable (503).
+      if (!account.company_id) {
+        return res.status(503).json({ error: 'CONTACT_GOVERNANCE_UNAVAILABLE', code: 'CONTACT_GOVERNANCE_UNAVAILABLE', reason: 'no_tenant_failclosed' });
+      }
+      // Integration review M-5: a LinkedIn comment id is stored as `123`, `(urn:li:activity:1,123)` or
+      // `urn:li:comment:(urn:li:activity:1,123)` depending on the ingester; every form is tried.
+      const commentCandidates = platform === 'linkedin'
+        ? linkedInCommentIdCandidates(commentId, postId)
+        : [String(commentId || postId)];
+      const contactGate = await checkCommunityActionContactGovernance({
+        organization_id: account.company_id,
+        platform,
+        action_type: 'reply',
+        target_id: commentCandidates[0],
+        platform_message_ids: commentCandidates,
+        parent_comment_urn: null,
+      });
+      if (contactGate.allowed === false) {
+        const status = contactGate.code === 'CONTACT_GOVERNANCE_UNAVAILABLE' ? 503 : 403;
+        return res.status(status).json({ error: contactGate.code, code: contactGate.code, reason: contactGate.reason });
+      }
       const mockAccessToken = `mock_token_${accountId}`;
       let result: any;
       if (platform === 'linkedin') {

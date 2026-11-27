@@ -7,6 +7,13 @@
  * callers still need a playbook when mode !== 'manual'.
  */
 
+// Round 24D / G-7: contact governance (suppression) is its own boundary, pinned in
+// suppressionCommunity*.test.ts. This suite tests a different gate, so the
+// governance check is held at "allowed" here.
+jest.mock('../../services/communityAiContactGovernanceGate', () => ({
+  checkCommunityActionContactGovernance: jest.fn(async () => ({ allowed: true, reason: 'not_suppressed', checked: 1 })),
+  contactGateAuditPayload: jest.fn(() => ({})),
+}));
 jest.mock('../../db/supabaseClient', () => ({
   supabase: {
     from: jest.fn(() => ({

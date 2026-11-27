@@ -149,8 +149,9 @@ export async function flushRpaRetryQueueForOrg(input: {
           await ownedDbTable('rpa_retry_queue').delete().eq('id', row.id);
         } else {
           failed += 1;
-          const attempts = Number(row.attempts ?? 0) + 1;
           const maxAttempts = Number(row.max_attempts ?? MAX_ATTEMPTS);
+          // Round 26: a terminal refusal (e.g. RPA_RETRY_CONTACT_SUPPRESSED) is retired at once, not retried 5x.
+          const attempts = result.terminal ? Math.max(maxAttempts, Number(row.attempts ?? 0) + 1) : Number(row.attempts ?? 0) + 1;
           await recordTerminalFailure(row.id as string, result, attempts, maxAttempts);
         }
       } catch (err: any) {

@@ -6,6 +6,10 @@ import { enforceActionRole, requireTenantScope } from '../utils';
 import { COMMUNITY_AI_CAPABILITIES } from '../../../../backend/services/rbac/communityAiCapabilities';
 import { logCommunityAiActionEvent } from '../../../../backend/services/communityAiActionLogService';
 import { trackEvent } from '../../../../backend/services/telemetry/telemetryDispatcher';
+import {
+  checkCommunityActionContactGovernance,
+  contactGateAuditPayload,
+} from '../../../../backend/services/communityAiContactGovernanceGate';
 
 type ApproveRequest = {
   tenant_id?: string;
@@ -67,6 +71,41 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
 
   if (action.requires_human_approval !== true) {
     return res.status(400).json({ error: 'APPROVAL_NOT_REQUIRED' });
+  }
+
+  // Round 24D / G-7 — an approval is a decision to contact the recipient, so
+  // contact governance is consulted BEFORE the row can become 'approved'. The
+  // row of record is checked (its own tenant, platform, target and DM thread
+  // metadata). A suppressed recipient is refused (403); an unreadable
+  // governance store refuses too (503, nothing was written, so a retry is
+  // honest). The row stays 'pending' — no suppression is lifted or recorded.
+  const contactGate = await checkCommunityActionContactGovernance({
+    id: actionId,
+    organization_id: action.organization_id,
+    platform: action.platform,
+    action_type: action.action_type,
+    target_id: action.target_id,
+    metadata: (action as any).metadata ?? null,
+  });
+  if (contactGate.allowed === false) {
+    try {
+      await logCommunityAiActionEvent({
+        action_id: actionId,
+        tenant_id: scope.tenantId,
+        organization_id: scope.organizationId,
+        event_type: 'skipped',
+        event_payload: contactGateAuditPayload(contactGate, { boundary: 'approve', user_id: roleGate.userId }),
+      });
+    } catch (logErr: any) {
+      console.warn('[community-ai/approve] contact-governance audit log failed:', logErr?.message || logErr);
+    }
+    // Round 26: an unidentifiable recipient/author is refused like a suppressed one (403, not retryable).
+    if (contactGate.code === 'CONTACT_IDENTITY_UNRESOLVED') {
+      return res.status(403).json({ error: 'CONTACT_IDENTITY_UNRESOLVED', reason: contactGate.reason });
+    }
+    return contactGate.code === 'CONTACT_SUPPRESSED'
+      ? res.status(403).json({ error: 'CONTACT_SUPPRESSED', reason: contactGate.reason })
+      : res.status(503).json({ error: 'CONTACT_GOVERNANCE_UNAVAILABLE', reason: contactGate.reason });
   }
 
   const approvedAt = new Date().toISOString();
