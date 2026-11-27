@@ -84,7 +84,9 @@ describe('route inventory', () => {
   it.each(TOKEN_ROUTES)('%s calls requireExtensionAuth and returns on failure before any DB access', (rel) => {
     const src = fs.readFileSync(path.join(ROUTE_DIR, rel), 'utf8');
     const handlerAt = src.indexOf('async function handler');
-    const authAt = src.indexOf('await requireExtensionAuth(req, res)', handlerAt);
+    // review S-1: action-result passes { membership: 'report-outcome' } (allowlisted in the middleware)
+    const authMatch = /await requireExtensionAuth\(req, res(?:, \{ membership: '(?:required|report-outcome)' \})?\)/.exec(src.slice(handlerAt));
+    const authAt = authMatch ? handlerAt + authMatch.index : -1;
     const bailAt = src.indexOf('if (!auth) return', authAt);
     const firstDb = (() => {
       const hits = ['.from(', 'supabase.', '.rpc('].map((n) => src.indexOf(n, handlerAt)).filter((i) => i >= 0);
