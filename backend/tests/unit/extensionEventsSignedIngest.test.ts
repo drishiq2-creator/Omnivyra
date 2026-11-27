@@ -43,6 +43,14 @@ const mockRpc = async (fn: string, a: any) => {
 jest.mock('../../db/supabaseClient', () => ({ supabase: { from: () => rolesBuilder(), rpc: (f: string, a: any) => mockRpc(f, a) } }));
 jest.mock('@/backend/db/supabaseClient', () => ({ supabase: { from: () => rolesBuilder(), rpc: (f: string, a: any) => mockRpc(f, a) } }));
 jest.mock('../../../lib/platform/routeFactory', () => ({ createApiRoute: (h: unknown) => h }));
+// Item F: the middleware re-applies the extension membership rule (active role row) before the route's own check;
+// answered here from the same `roles` fixture (proven against TenantGuard in extensionMembershipEverySignedRoute).
+jest.mock('../../services/extensionMembershipService', () => ({
+  checkExtensionMembership: async (userId: string, orgId: string) =>
+    roles.some((r) => r.user_id === userId && r.company_id === orgId && r.status === 'active')
+      ? { ok: true }
+      : { ok: false, outcome: 'denied', reason: 'NOT_A_MEMBER' },
+}));
 // R-3 suspends ingestion on these routes; this suite proves the signature
 // layer underneath, which still guards them if ingestion is ever re-enabled.
 jest.mock('../../services/extensionIngestionSuspension', () => ({

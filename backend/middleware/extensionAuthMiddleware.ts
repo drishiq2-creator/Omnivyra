@@ -21,6 +21,10 @@ import {
 } from '@/backend/services/extensionSessionService';
 import { supabase } from '@/backend/db/supabaseClient';
 import { capturedRawBody } from './extensionRawBody';
+import { checkExtensionMembership } from '@/backend/services/extensionMembershipService';
+
+/** validate's 403 body text; core/authBridge.js VALIDATE_DEAD_403 maps exactly this string to ORG_ACCESS_REVOKED. */
+export const EXTENSION_ACCESS_DENIED_ERROR = 'Access denied to organization';
 
 function take(h: string | string[] | undefined) { return (Array.isArray(h) ? h[0] : h) || ''; }
 
@@ -150,6 +154,40 @@ export async function requireExtensionAuth(req: NextApiRequest, res: NextApiResp
       return null;
     }
     res.status(401).json({ success: false, error: 'SIGNATURE_INVALID', reason: (verify as { reason?: string }).reason });
+    return null;
+  }
+
+  // Item F: the token proves who paired and for which company AT REDEEM; it does not prove the membership still
+  // holds. Every signed route therefore re-applies the ONE extension membership rule (active role row AND active
+  // company - backend/services/extensionMembershipService.ts) for the session's pinned (user, org), after the
+  // signature (so an unsigned caller learns nothing about membership). Before this, only /validate re-checked:
+  // a suspended company's or a removed member's live session kept receiving commands, renewing leases, posting
+  // results, ingesting and driving Sales Navigator runs until the 12 h token expired.
+  // No cache: one membership + company read per signed request (the extension polls ~1/min).
+  let membership: Awaited<ReturnType<typeof checkExtensionMembership>>;
+  try {
+    membership = await checkExtensionMembership(session.userId, session.orgId);
+  } catch (error) {
+    console.error('[extensionAuth] membership check threw', (error as Error)?.message);
+    membership = { ok: false, outcome: 'unavailable', reason: 'TENANT_LOOKUP_ERROR' };
+  }
+  if (membership.ok === false) {
+    if ((membership as { outcome: string }).outcome === 'unavailable') {
+      // Fail CLOSED (no access) but transient: a 503 keeps the extension's session (core/authBridge.js
+      // sessionInvalidationReason signs out only on 401 INVALID_SESSION / SIGNATURE_INVALID+definite reasons and
+      // on validate's 403 'Access denied to organization' / 'Extension session organization mismatch').
+      res.status(503).json({ success: false, error: 'TENANT_LOOKUP_ERROR', retryable: true });
+      return null;
+    }
+    // Definite. The error text is validate's load-bearing body: on /validate the extension maps it to
+    // ORG_ACCESS_REVOKED and signs out; on any other route a 403 is not a sign-out signal, the request is simply
+    // refused and the next validate (<= 60 s) signs the extension out. `code` / `reason` are for logs and support.
+    res.status(403).json({
+      success: false,
+      error: EXTENSION_ACCESS_DENIED_ERROR,
+      code: 'EXTENSION_MEMBERSHIP_INACTIVE',
+      reason: (membership as { reason: string }).reason,
+    });
     return null;
   }
 

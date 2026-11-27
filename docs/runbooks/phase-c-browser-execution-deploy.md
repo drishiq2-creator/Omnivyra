@@ -93,3 +93,45 @@ ORDER BY 1;
 
 `key_absent` / `no_block` rows in the second query are the workflows that keep
 working only because existing playbooks were not migrated.
+
+## 5. Extension sessions after a company is suspended or a member removed (items E/F)
+
+Every signed extension route (`requireExtensionAuth`: validate, commands,
+action-result, dispatch/renew, events ingest, health, capabilities and the
+Sales Navigator extension routes) now re-applies the extension membership rule
+on each request: an active `user_company_roles` row for the session's user in
+the session's pinned company AND `companies.status = 'active'`. No platform
+super-admin bypass. One membership + one company read per signed request, no
+cache.
+
+- Suspended company / removed or deactivated member: `403 { error: 'Access
+  denied to organization', code: 'EXTENSION_MEMBERSHIP_INACTIVE', reason }`.
+  On /validate the extension maps that body to ORG_ACCESS_REVOKED and signs
+  out; on other routes it keeps the session until its next validate (about
+  60 s), which then signs it out.
+- Lookup outage: `503 TENANT_LOOKUP_ERROR` (no access; the extension keeps the
+  session and retries).
+- Pairing while suspended: bootstrap and redeem refuse
+  (`EXTENSION_MEMBERSHIP_REQUIRED`); a platform super admin with no active role
+  in the company gets `EXTENSION_PLATFORM_ADMIN_NOT_MEMBER` (a Company Admin of
+  that company must pair, or the admin needs a real role there).
+- Reactivation: new pairings work. An unexpired old token (12 h TTL) is
+  accepted again: there is no per-session revocation list. In practice the
+  extension already signed itself out at its first validate during the
+  suspension and must be paired again.
+- A lease handed out BEFORE the suspension: the extension's action-result and
+  dispatch/renew are refused, so the outcome is not recorded. The row stays
+  `pending` with a claimed, then lapsed, lease: delivery state unknown. Clients
+  that send `X-Omnivyra-Dispatch-Renewal: 1` are never re-offered a claimed row;
+  it shows in `listClaimedUnknownDispatches` for an operator decision. Legacy
+  (v1.3.9) clients are re-offered lapsed leases by /api/extension/commands
+  after reactivation, which can resend (pre-existing path, see
+  engagementDispatchRecoveryService.ts). Check before reactivating a company:
+
+```sql
+SELECT id, platform, action_type, dispatch_lease_expires_at, dispatch_acknowledged_at
+FROM public.community_ai_actions
+WHERE organization_id = '<company id>'
+  AND status = 'pending' AND execution_mode = 'browser'
+  AND dispatch_lease_id IS NOT NULL;
+```

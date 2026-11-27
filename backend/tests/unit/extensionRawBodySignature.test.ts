@@ -32,6 +32,10 @@ jest.mock('../../db/supabaseClient', () => ({
   },
 }));
 
+// Item F: the middleware re-applies the extension membership rule after the signature. This suite is about the
+// signature layer only; membership is admitted here and proven in extensionMembershipEverySignedRoute.test.ts.
+jest.mock('../../services/extensionMembershipService', () => ({ checkExtensionMembership: async () => ({ ok: true }) }));
+
 import { requireExtensionAuth } from '../../middleware/extensionAuthMiddleware';
 import { withExtensionRawBody } from '../../middleware/extensionRawBody';
 import { issueExtensionSessionToken, deriveExtensionHmacSecret } from '../../services/extensionSessionService';

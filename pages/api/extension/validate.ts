@@ -55,6 +55,8 @@ async function handler(
   const isBypassSession = session.userId === '00000000-0000-4000-8000-000000000001';
 
   if (!isBypassSession) {
+    // Item F: requireExtensionAuth already applied this rule for (session user, session org) and answered the same
+    // 403 body; effectiveOrgId equals session.orgId here (a mismatch was refused above), so this is a backstop.
     // Phase E: the ONE extension membership rule (also applied at bootstrap and redeem): an active
     // user_company_roles row AND an active company. The 403 body text is load-bearing: the extension's
     // core/authBridge.js VALIDATE_DEAD_403 maps exactly 'Access denied to organization' to ORG_ACCESS_REVOKED.
