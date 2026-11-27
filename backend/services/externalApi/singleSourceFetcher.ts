@@ -19,9 +19,27 @@ import { getExternalApiSourceById } from './userAccess';
 import { getHealthForSource } from './dbHelpers';
 import { executeWithAccountLoop, buildExternalApiRequest } from './execution';
 import { lastSignalConfidenceSummary, resetSignalConfidenceSummary } from './responseMapping';
+import { createSourceEnvResolver } from './envResolutionPolicy';
 
 /** User id used for usage/health when intelligence polling worker runs (no real user). */
 export const INTELLIGENCE_POLLER_USER_ID = 'intelligence-polling';
+
+/**
+ * Round 26 (S-12, Agent E's request B-3): the platform env key used when no provider account
+ * supplied one. It used to be `process.env.<NAME>` for ANY source whose name contained
+ * "youtube" / "news" — including a tenant-owned, unapproved row. It now goes through the same
+ * source env policy as every other execution path, judged for the ORIGINAL row's ownership
+ * and approval (company_id / is_whitelisted) and the provider destination the override
+ * targets. A refused name resolves to undefined, so the source is skipped as "missing key".
+ */
+function platformEnvKeyFor(source: ExternalApiSource, envName: string, destination: string): string | undefined {
+  return createSourceEnvResolver({
+    base_url: destination,
+    company_id: (source as { company_id?: string | null }).company_id ?? null,
+    is_whitelisted: (source as { is_whitelisted?: boolean | null }).is_whitelisted ?? null,
+    api_key_env_name: envName,
+  })(envName);
+}
 
 /**
  * Build intelligence-specific source/param overrides for YouTube and NewsAPI.
@@ -36,7 +54,7 @@ function getIntelligenceApiOverrides(
   const q = expanded.queryParams?.q || expanded.runtimeValues?.topic || 'AI';
 
   if (name.includes('youtube')) {
-    const key = apiKeyValue ?? process.env.YOUTUBE_API_KEY ?? '';
+    const key = apiKeyValue ?? platformEnvKeyFor(source, 'YOUTUBE_API_KEY', 'https://www.googleapis.com/youtube/v3/search') ?? '';
     if (!key.trim()) {
       console.log('[intelligence] API skipped — missing key', { source: source.name, key: 'YOUTUBE_API_KEY' });
       return null;
@@ -59,7 +77,7 @@ function getIntelligenceApiOverrides(
   }
 
   if (name.includes('news')) {
-    const key = apiKeyValue ?? process.env.NEWS_API_KEY ?? '';
+    const key = apiKeyValue ?? platformEnvKeyFor(source, 'NEWS_API_KEY', 'https://newsapi.org/v2/everything') ?? '';
     if (!key.trim()) {
       console.log('[intelligence] API skipped — missing key', { source: source.name, key: 'NEWS_API_KEY' });
       return null;

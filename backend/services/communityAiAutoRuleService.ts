@@ -5,7 +5,7 @@ import { logCommunityAiActionEvent } from './communityAiActionLogService';
 import { getPlaybookById, listPlaybooks } from './playbooks/playbookService';
 import { evaluatePlaybookForEvent } from './playbooks/playbookEvaluator';
 import { validateActionAgainstPlaybook } from './playbooks/playbookValidator';
-import { getCommunityAiPlatformPolicy } from './communityAiPlatformPolicyService';
+import { resolveCommunityAiPlatformPolicy, decideCommunityAiAutomatedTick } from './communityAiPlatformPolicyService';
 import { canExecuteAction } from './executionGuardrailService';
 import { ownedDbTable } from '../db/writeOwner';
 
@@ -224,17 +224,23 @@ export const evaluateAutoRules = async (input: AutoRuleInput) => {
     return { actions: input.suggested_actions || [], autoExecuted: 0 };
   }
 
-  const policy = await getCommunityAiPlatformPolicy();
-  if (!policy.auto_rules_enabled) {
+  // Round 28 (review P-5): fail-closed tick gate for auto rules. Missing or
+  // unreadable policy, execution_enabled=false or auto_rules_enabled!==true
+  // all refuse before any playbook is read.
+  const tick = decideCommunityAiAutomatedTick(await resolveCommunityAiPlatformPolicy(), 'auto');
+  if (tick.allowed === false) {
     console.debug('COMMUNITY_AI_PLATFORM_POLICY_BLOCK', {
-      reason: 'auto_rules_enabled=false',
+      reason: tick.reason_code,
       source: 'auto_rules',
     });
     await ownedDbTable('audit_logs').insert({
       actor_user_id: null,
       action: 'COMMUNITY_AI_PLATFORM_POLICY_BLOCK',
       metadata: {
+        // Legacy flag name kept for dashboards/tests; reason_code carries the cause.
         policy_flag: 'auto_rules_enabled',
+        reason_code: tick.reason_code,
+        policy_state: tick.policy_state,
         source: 'auto_rules',
       },
       created_at: new Date().toISOString(),

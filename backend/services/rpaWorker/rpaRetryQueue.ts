@@ -83,6 +83,55 @@ export async function enqueueRpaRetry(task: RpaTask, opts?: {
   }
 }
 
+/**
+ * Cheap pre-check for the scheduler: how many retry rows are due now
+ * (next_retry_at <= now, attempts < MAX_ATTEMPTS). A head-only count, no
+ * rows returned. The flush calls this BEFORE the platform policy read and
+ * BEFORE the Chromium readiness probe, so an empty queue never launches a
+ * browser. A read error is returned as `error`, never as "0 due".
+ */
+export async function countDueRpaRetries(): Promise<{ due: number; error: string | null }> {
+  try {
+    const { count, error } = await ownedDbTable('rpa_retry_queue')
+      .select('id', { count: 'exact', head: true })
+      .lte('next_retry_at', new Date().toISOString())
+      .lt('attempts', MAX_ATTEMPTS);
+    if (error) return { due: 0, error: (error as any)?.message || 'RPA_RETRY_COUNT_FAILED' };
+    if (typeof count !== 'number') return { due: 0, error: 'RPA_RETRY_COUNT_MISSING' };
+    return { due: count, error: null };
+  } catch (err: any) {
+    return { due: 0, error: err?.message || 'RPA_RETRY_COUNT_FAILED' };
+  }
+}
+
+/** Prefix carried by every outcome-unknown result / parked row. */
+export const RPA_OUTCOME_UNKNOWN_PREFIX = 'RPA_OUTCOME_UNKNOWN';
+
+/**
+ * Park a row whose executed action has an UNKNOWN outcome (the browser may
+ * already have posted / liked). It is NOT recorded as a definite failure and
+ * it is NOT re-executed automatically: attempts is set to max_attempts (the
+ * row leaves the due set and enqueueRpaRetry refuses to re-arm the same
+ * action), next_retry_at is left as-is, last_error carries the
+ * RPA_OUTCOME_UNKNOWN prefix for operator reconciliation.
+ */
+async function parkOutcomeUnknown(rowId: string, error: string, maxAttempts: number): Promise<'parked' | 'park_failed'> {
+  const msg = error.startsWith(RPA_OUTCOME_UNKNOWN_PREFIX) ? error : `${RPA_OUTCOME_UNKNOWN_PREFIX}:${error}`;
+  try {
+    const { error: upErr } = await ownedDbTable('rpa_retry_queue')
+      .update({
+        attempts: maxAttempts,
+        last_error: msg.slice(0, 500),
+        last_attempt_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', rowId);
+    return upErr ? 'park_failed' : 'parked';
+  } catch {
+    return 'park_failed';
+  }
+}
+
 type HandlerResult = Awaited<ReturnType<(task: RpaTask) => Promise<RpaResult>>>;
 
 type PerOrgFlushOutcome = {
@@ -90,6 +139,8 @@ type PerOrgFlushOutcome = {
   claimed: number;
   succeeded: number;
   failed: number;
+  /** Executed with an unknown outcome — parked, not failed, not retried. */
+  unknown: number;
   errors: number;
 };
 
@@ -121,18 +172,25 @@ export async function flushRpaRetryQueueForOrg(input: {
 }): Promise<PerOrgFlushOutcome> {
   const { organization_id: orgId, handler } = input;
   const limit = input.limit ?? DEFAULT_PER_ORG_LIMIT;
-  let claimed = 0, succeeded = 0, failed = 0, errors = 0;
+  let claimed = 0, succeeded = 0, failed = 0, unknown = 0, errors = 0;
 
   try {
     const { data: rows } = await ownedDbTable('rpa_retry_queue')
       .select('id, action_id, organization_id, platform, action_type, target_url, text, attempts, max_attempts')
       .eq('organization_id', orgId)
       .lte('next_retry_at', new Date().toISOString())
+      // Terminal / parked rows stay "due" forever; without this filter they
+      // would fill the per-org limit and starve live retries.
+      .lt('attempts', MAX_ATTEMPTS)
       .order('next_retry_at', { ascending: true })
       .limit(limit);
 
     for (const row of rows || []) {
+      const maxAttempts = Number(row.max_attempts ?? MAX_ATTEMPTS);
+      // Terminal / parked rows keep a due next_retry_at; never re-execute them.
+      if (Number(row.attempts ?? 0) >= maxAttempts) continue;
       claimed += 1;
+      let result: RpaResult;
       try {
         const task: RpaTask = {
           tenant_id: row.organization_id as string,
@@ -143,19 +201,39 @@ export async function flushRpaRetryQueueForOrg(input: {
           text: (row.text as string | null) ?? null,
           action_id: row.action_id as string,
         };
-        const result = await handler(task);
+        result = await handler(task);
+      } catch (err: any) {
+        // The handler may have thrown mid-action (after a click/submit): the
+        // outcome is unknown. Previously the row was left untouched and due,
+        // so it was re-executed on the next tick with no attempt bump.
+        unknown += 1;
+        const msg = String(err?.message || err || 'HANDLER_THREW').split(/\r?\n/)[0];
+        console.warn(`[rpaRetryQueue] handler threw; outcome unknown, row parked org=${orgId} row=${row.id}: ${msg.slice(0, 200)}`);
+        if ((await parkOutcomeUnknown(row.id as string, `HANDLER_THREW:${msg}`, maxAttempts)) !== 'parked') errors += 1;
+        continue;
+      }
+      try {
         if (result.success) {
           succeeded += 1;
-          await ownedDbTable('rpa_retry_queue').delete().eq('id', row.id);
+          const { error: delErr } = await ownedDbTable('rpa_retry_queue').delete().eq('id', row.id);
+          if (delErr) {
+            // The action ran; a row left due would re-execute it next tick.
+            errors += 1;
+            await parkOutcomeUnknown(row.id as string, 'SUCCEEDED_ROW_DELETE_FAILED', maxAttempts);
+          }
+        } else if (result.outcome_unknown) {
+          unknown += 1;
+          if ((await parkOutcomeUnknown(row.id as string, result.error ?? 'UNKNOWN', maxAttempts)) !== 'parked') errors += 1;
         } else {
           failed += 1;
-          const attempts = Number(row.attempts ?? 0) + 1;
-          const maxAttempts = Number(row.max_attempts ?? MAX_ATTEMPTS);
+          // Round 26 (suppression): a terminal refusal (e.g. RPA_RETRY_CONTACT_SUPPRESSED) is retired at once, not retried.
+          // Round 28 merge: uses the loop-scoped maxAttempts declared above (rpa-retry-backoff).
+          const attempts = result.terminal ? Math.max(maxAttempts, Number(row.attempts ?? 0) + 1) : Number(row.attempts ?? 0) + 1;
           await recordTerminalFailure(row.id as string, result, attempts, maxAttempts);
         }
       } catch (err: any) {
         errors += 1;
-        console.warn('[rpaRetryQueue] handler threw:', err?.message || err, 'org=', orgId);
+        console.warn('[rpaRetryQueue] result bookkeeping failed:', err?.message || err, 'org=', orgId);
       }
     }
   } catch (err: any) {
@@ -163,7 +241,7 @@ export async function flushRpaRetryQueueForOrg(input: {
     console.warn('[rpaRetryQueue] per-org sweep failed:', err?.message || err, 'org=', orgId);
   }
 
-  return { organization_id: orgId, claimed, succeeded, failed, errors };
+  return { organization_id: orgId, claimed, succeeded, failed, unknown, errors };
 }
 
 /**
@@ -184,6 +262,7 @@ export async function flushRpaRetryQueueRoundRobin(input: {
   claimed: number;
   succeeded: number;
   failed: number;
+  unknown: number;
   errors: number;
   remaining: number;
   per_org?: PerOrgFlushOutcome[];
@@ -212,11 +291,11 @@ export async function flushRpaRetryQueueRoundRobin(input: {
     orgIds = Array.from(seen);
   } catch (err: any) {
     console.warn('[rpaRetryQueue] org enumeration failed:', err?.message || err);
-    return { orgs_visited: 0, claimed: 0, succeeded: 0, failed: 0, errors: 1, remaining: 0 };
+    return { orgs_visited: 0, claimed: 0, succeeded: 0, failed: 0, unknown: 0, errors: 1, remaining: 0 };
   }
 
   const perOrg: PerOrgFlushOutcome[] = [];
-  let claimed = 0, succeeded = 0, failed = 0, errors = 0;
+  let claimed = 0, succeeded = 0, failed = 0, unknown = 0, errors = 0;
   let budget = MAX_TASKS_PER_TICK;
   for (const orgId of orgIds) {
     if (budget <= 0) break; // per-tick cap reached — remaining orgs drain next tick
@@ -231,6 +310,7 @@ export async function flushRpaRetryQueueRoundRobin(input: {
     claimed += outcome.claimed;
     succeeded += outcome.succeeded;
     failed += outcome.failed;
+    unknown += outcome.unknown;
     errors += outcome.errors;
     budget -= outcome.claimed;
   }
@@ -245,6 +325,7 @@ export async function flushRpaRetryQueueRoundRobin(input: {
     claimed,
     succeeded,
     failed,
+    unknown,
     errors,
     remaining: remaining ?? 0,
     per_org: perOrg,

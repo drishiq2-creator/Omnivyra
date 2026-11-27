@@ -22,7 +22,11 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   }
 
   if (await handleExternalApisGet(req, res)) return;
+  if (res.headersSent) return;
   if (await handleExternalApisPost(req, res)) return;
+  // Round 26: a handler that already answered (an auth refusal returns `undefined` after
+  // sending 401/403) must not be followed by a second, conflicting 405.
+  if (res.headersSent) return;
 
   return res.status(405).json({ error: 'Method not allowed' });
 }

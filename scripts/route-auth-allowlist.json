@@ -987,7 +987,7 @@
         "rule": "R6-ORDER",
         "pattern": "identity-owned-resource",
         "reason": "authorizeSocialAccount binds the post's social account to the caller before ingestion or a platform call: the account's own user (account.user_id === session user id) or enforceCompanyAccess on the account's company; anything else answers 404.",
-        "evidence": "if \\(account\\.user_id && account\\.user_id === callerUserId\\) return true;",
+        "evidence": "if \\(account\\.user_id && account\\.user_id === callerUserId\\) return \\{ company_id: companyId \\};",
         "effects": [
           "db-write .update() backend/auth/tokenStore.ts",
           "db-write .upsert() backend/services/engagementIngestionService.ts",

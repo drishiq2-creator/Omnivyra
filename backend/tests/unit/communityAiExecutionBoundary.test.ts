@@ -12,9 +12,16 @@
 
 let policy: Record<string, unknown>;
 
-jest.mock('../../services/communityAiPlatformPolicyService', () => ({
-  getCommunityAiPlatformPolicy: jest.fn(async () => policy),
+// Round 24D / G-7: contact governance (suppression) is its own boundary, pinned in
+// suppressionCommunity*.test.ts. This suite tests a different gate, so the
+// governance check is held at "allowed" here.
+jest.mock('../../services/communityAiContactGovernanceGate', () => ({
+  checkCommunityActionContactGovernance: jest.fn(async () => ({ allowed: true, reason: 'not_suppressed', checked: 1 })),
+  contactGateAuditPayload: jest.fn(() => ({})),
 }));
+// Round 28: the real fail-closed evaluator decides over this value (configured row unless stated).
+jest.mock('../../services/communityAiPlatformPolicyService', () =>
+  jest.requireActual('../helpers/communityAiPolicyMock').policyServiceMock(() => policy, () => ((policy as any).__state ?? 'configured')));
 jest.mock('../../services/communityAiActionExecutorContracts', () => {
   const actual = jest.requireActual('../../services/communityAiActionExecutorContracts');
   return {
@@ -60,8 +67,10 @@ import { executeAction } from '../../services/communityAiActionExecutorRuntime';
 import { runApiExecution, runRpaExecution, prepareBrowserDispatch } from '../../services/communityAiActionExecutorContracts';
 
 const ALLOW_AUTO = { execution_enabled: true, auto_rules_enabled: true, require_human_approval: false };
-const MISSING_ROW = { execution_enabled: true, auto_rules_enabled: false, require_human_approval: false };
-const UNREADABLE = { execution_enabled: false, auto_rules_enabled: false, require_human_approval: true };
+// __state tells the policy mock which resolution state the value stands for (round 28: the
+// evaluator distinguishes a missing row and an unreadable store from a configured row).
+const MISSING_ROW = { execution_enabled: true, auto_rules_enabled: false, require_human_approval: false, __state: 'missing_row' };
+const UNREADABLE = { execution_enabled: false, auto_rules_enabled: false, require_human_approval: true, __state: 'unreadable' };
 
 const action = (overrides: Record<string, unknown> = {}) =>
   ({
@@ -137,8 +146,14 @@ describe('community AI final execution boundary', () => {
       expect(sideEffects()).toBe(0);
     });
 
-    it('positive control: runs a row approved through the approve route (approved_at set), with or without a policy row', async () => {
+    it('round 28 kill switch: with NO policy row even an approved row is not dispatched by the scheduler', async () => {
       policy = { ...MISSING_ROW };
+      const result = await executeAction(action({ approved_at: '2026-11-03T00:00:00Z' }), true, { source: 'scheduler' });
+      expect(result).toMatchObject({ ok: false, status: 'skipped', reason: 'PLATFORM_POLICY', policy_reason_code: 'policy_missing_fail_closed' });
+      expect(sideEffects()).toBe(0);
+    });
+
+    it('positive control: runs a row approved through the approve route (approved_at set) under a configured row', async () => {
       const result = await executeAction(action({ approved_at: '2026-11-03T00:00:00Z' }), true, { source: 'scheduler' });
       expect(result).toMatchObject({ ok: true, status: 'executed' });
       expect(runApiExecution).toHaveBeenCalledTimes(1);

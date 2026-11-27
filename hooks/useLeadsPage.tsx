@@ -32,6 +32,10 @@ interface Lead {
 }
 interface WebhookIntegration {
   id: string; name: string; status: string; config: Record<string, string>; created_at: string;
+  /** R26 final: signing state + the admin deprecation warning while the raw secret is still sent. */
+  webhook_signing?: { effective_mode?: string; deprecation_warning?: string | null };
+  /** Integration review M-3: an http:// destination pauses deliveries; the reason is shown, never hidden. */
+  webhook_destination?: { ok: boolean; code?: string; reason?: string };
 }
 type Tab = 'leads' | 'forms' | 'connections';
 
@@ -297,8 +301,13 @@ export function useLeadsPage() {
   const [webhookIntegrations, setWebhookIntegrations] = useState<WebhookIntegration[]>([]);
   // The webhook list could not be READ: the Connections tab says so instead of "no webhooks" (Rule 1).
   const [webhookIntegrationsUnavailable, setWebhookIntegrationsUnavailable] = useState(false);
-  // The server says whether this viewer may see webhook secrets (company admins only). Absent = not visible.
+  // The server says whether this viewer may see webhook secrets. Since R26 T-2 it is always false: secrets are
+  // write-only for every role, so the page never holds a stored secret. Absent = not visible.
   const [webhookSecretsVisible, setWebhookSecretsVisible] = useState(false);
+  // R26 T-2/T-3: "Send Test Lead" uses the inbound secret the admin TYPES here (they set it); it is never read back.
+  const [testSecrets, setTestSecrets] = useState<Record<string, string>>({});
+  const setTestSecret = (integrationId: string, value: string) =>
+    setTestSecrets((prev) => ({ ...prev, [integrationId]: value }));
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [activeTab, setActiveTab] = useState<Tab>('leads');
@@ -475,7 +484,7 @@ export function useLeadsPage() {
       const r = await fetch('/api/leads', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          integration_id: integration.id, webhook_secret: integration.config.secret,
+          integration_id: integration.id, webhook_secret: testSecrets[integration.id] ?? '',
           name: 'Test Lead', email: 'test@example.com', phone: '+1 555-0100',
           source: 'connection_test', is_test: true,
         }),
@@ -491,7 +500,7 @@ export function useLeadsPage() {
 
   function samplePayload(i: WebhookIntegration) {
     return JSON.stringify({
-      integration_id: i.id, webhook_secret: (webhookSecretsVisible && i.config.secret) || 'YOUR_SECRET',
+      integration_id: i.id, webhook_secret: 'YOUR_INBOUND_SECRET',
       name: 'Jane Doe', email: 'jane@example.com', phone: '+1 555-0101', source: 'contact-form',
     }, null, 2);
   }
@@ -529,6 +538,8 @@ export function useLeadsPage() {
     fromWebhooks,
     isAdmin,
     webhookSecretsVisible,
+    testSecrets,
+    setTestSecret,
     formsAccess,
     retryFormsAccess,
     deleteError,

@@ -117,6 +117,16 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       return res.status(400).json({
         error: 'Missing environment variables',
         missing: request.missingEnv,
+        // Round 26 (S-12, Agent E's request B-4): for a tenant-owned source a platform
+        // credential is refused by policy (not merely unset) until a Super Admin approves
+        // (whitelists) that configuration; caller-approved names no longer unlock it.
+        ...(source.company_id
+          ? {
+              detail: 'This source is tenant-owned (companyId set). Platform credentials are not available to '
+                + 'a tenant-owned source until a Super Admin approves (whitelists) its configuration, so the key is '
+                + 'reported as missing. Test it at platform scope, or use the tenant\'s own credential.',
+            }
+          : {}),
         request: {
           method: request.details.method,
           url: request.details.maskedUrl,

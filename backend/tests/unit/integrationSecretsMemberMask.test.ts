@@ -45,7 +45,11 @@ const hydrated = () => ({
 });
 const mockGetIntegrations = jest.fn(async () => [hydrated()]);
 const mockGetIntegration = jest.fn(async () => hydrated());
+jest.mock('../../db/writeOwner', () => ({ ownedDbTable: jest.fn(() => { throw new Error('no DB in this test'); }) }));
 jest.mock('../../services/integrationService', () => ({
+  // R26 T-2: the routes shape every response with the REAL toPublicIntegration.
+  toPublicIntegration: jest.requireActual('../../services/integrationService').toPublicIntegration,
+  IntegrationValidationError: jest.requireActual('../../services/integrationService').IntegrationValidationError,
   getIntegrations: (...a: unknown[]) => (mockGetIntegrations as any)(...a),
   getIntegration: (...a: unknown[]) => (mockGetIntegration as any)(...a),
   createIntegration: jest.fn(),
@@ -108,11 +112,15 @@ describe.each([
     expect(res.body.secrets_visible).toBe(false);
   });
 
-  it.each(['COMPANY_ADMIN', 'SUPER_ADMIN'])('CONTROL: a %s still gets the real values (the admin edit forms need them)', async (role) => {
+  // R26 T-2 (supersedes the 11-20 admin exception): secrets are write-only for EVERY role. This case used to assert
+  // that admins received all four plaintext values, i.e. it defended the T-2 finding.
+  it.each(['COMPANY_ADMIN', 'SUPER_ADMIN'])('R26 T-2: a %s ALSO gets no secret value (write-only), with the stored indicator', async (role) => {
     mockRole = role;
     const res = await call();
-    expect(leaks(res.body).sort()).toEqual([...SECRET_VALUES].sort());
-    expect(res.body.secrets_visible).toBe(true);
+    expect(res.statusCode).toBe(200);
+    expect(leaks(res.body)).toEqual([]);
+    expect(res.body.secrets_visible).toBe(false);
+    expect(pick(res.body).secret_fields_set).toEqual(expect.arrayContaining(['secret', 'admin_api_key', 'consumer_secret', 'app_password']));
   });
 
   it('cross-tenant: a non-member is refused before any integration is read', async () => {

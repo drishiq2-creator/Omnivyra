@@ -68,6 +68,8 @@ export type ExecutionResult = {
   status: ResultStatus;
   error?: string | Record<string, unknown>;
   reason?: string;
+  /** Round 28: the platform-policy evaluator's reason code when the policy refused. */
+  policy_reason_code?: string;
   platform_id?: string | null;
   response?: any;
   execution_mode?: ExecutionMode;
@@ -555,6 +557,25 @@ export const runApiExecution = async (action: CommunityAiAction): Promise<Execut
   }
 };
 
+/**
+ * Round 28 (lost-response class): an RPA run whose outcome is unknown. In
+ * memory it is status 'skipped' with reason OUTCOME_UNKNOWN — not ok, not
+ * failed — and it persists as status 'skipped' + skip_reason 'OUTCOME_UNKNOWN'
+ * with the evidence in execution_result. 'skipped' is terminal everywhere
+ * (hand-out only offers 'pending', the scheduler only 'approved', the RPA retry
+ * only 'approved'/'failed'), so nothing re-sends it automatically; the
+ * idempotency key is stamped as on any other terminal write.
+ */
+export const OUTCOME_UNKNOWN_REASON = 'OUTCOME_UNKNOWN';
+const rpaOutcomeUnknown = (cause: string, evidence: Record<string, unknown>): ExecutionResult => ({
+  ok: false,
+  status: 'skipped',
+  reason: OUTCOME_UNKNOWN_REASON,
+  error: { code: OUTCOME_UNKNOWN_REASON, cause: String(cause).split(/\r?\n/)[0].slice(0, 300) },
+  response: { ...evidence, outcome_unknown: true },
+  execution_mode: 'rpa',
+});
+
 export const runRpaExecution = async (action: CommunityAiAction): Promise<ExecutionResult> => {
   // RPA has no DM implementation. DMs flow exclusively via the
   // extension's browser runtime; a DM that reached RPA is a routing
@@ -577,6 +598,11 @@ export const runRpaExecution = async (action: CommunityAiAction): Promise<Execut
       EXECUTION_TIMEOUTS_MS.rpa,
       'RPA_EXECUTION',
     );
+    if (!rpaResult?.success && rpaResult?.outcome_unknown === true) {
+      // The browser already interacted (click/submit) and success could not
+      // be confirmed: the reply may be live. Neither success nor failure.
+      return rpaOutcomeUnknown(rpaResult?.error || 'RPA_OUTCOME_UNKNOWN', { ...rpaResult, execution_mode: 'rpa' });
+    }
     if (!rpaResult?.success) {
       return {
         ok: false,
@@ -594,12 +620,17 @@ export const runRpaExecution = async (action: CommunityAiAction): Promise<Execut
       execution_mode: 'rpa',
     };
   } catch (error: any) {
-    return {
-      ok: false,
-      status: 'failed',
-      error: error?.message || 'RPA_EXECUTION_FAILED',
+    // A throw here is the executor's own RPA_EXECUTION timeout (or the task
+    // promise rejecting): the in-process task may still be posting, so the
+    // outcome is UNKNOWN, never a retryable 'failed' (round 28, review M-6).
+    // executeRpaTask returns its definite, pre-side-effect refusals (validation,
+    // env not ready, admission deferral, unsupported platform) instead of
+    // throwing, so those stay 'failed'.
+    return rpaOutcomeUnknown(String(error?.code || error?.message || 'RPA_EXECUTION_THREW'), {
+      source: 'rpa_executor',
       execution_mode: 'rpa',
-    };
+      timeout: error?.code === 'RPA_EXECUTION_TIMEOUT',
+    });
   }
 };
 

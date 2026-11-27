@@ -31,6 +31,7 @@ import { recordSuggestionAccepted } from '../../../backend/services/aiSuggestion
 import { isDmMessageType } from '../../../lib/engagement/messageRoles';
 import { recordThreadEvent } from '../../../backend/services/engagementThreadEventService';
 import { isThreadActionable } from '../../../backend/services/engagementThreadService';
+import { resolveEngagementAuthorIdentity, personIdentityMetadata, type PersonIdentity } from '../../../backend/services/communityAiContactGovernanceGate';
 
 type ReplyBody = {
   organization_id?: string;
@@ -199,7 +200,7 @@ async function resolveSignal(
   signalId: string,
   organizationId: string,
 ): Promise<
-  | { ok: true; platform: string; targetId: string; threadId: string | null; signalId: string; campaignId: string | null }
+  | { ok: true; platform: string; targetId: string; threadId: string | null; signalId: string; campaignId: string | null; sourceMessageId: string | null }
   | { ok: false; code: string; message: string }
 > {
   // campaign_activity_engagement_signals.source_id is a UUID pointing at
@@ -285,6 +286,7 @@ async function resolveSignal(
     threadId,
     signalId: signal.id,
     campaignId: signal.campaign_id ?? null,
+    sourceMessageId: sourceId,
   };
 }
 
@@ -333,6 +335,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     let resolvedSignalId: string | null = null;
     let resolvedFromSignal = false;
     let resolvedSignalThreadId: string | null = null;
+    let resolvedSignalSourceMessageId: string | null = null;
     if (signalId && !messageId) {
       const resolved = await resolveSignal(signalId, organizationId);
       if (resolved.ok === false) {
@@ -346,6 +349,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       resolvedTargetId = resolved.targetId;
       resolvedSignalId = resolved.signalId;
       resolvedSignalThreadId = resolved.threadId;
+      resolvedSignalSourceMessageId = resolved.sourceMessageId;
       resolvedFromSignal = true;
     }
 
@@ -382,6 +386,9 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     // instead of trying to open a non-existent thread by synthetic id.
     let recipientProfileUrl: string | null = null;
     let recipientDisplayName: string | null = null;
+    // Round 26 (S-1/S-2): the PERSON this DM reaches / whose comment this replies to, stamped on the action so every
+    // contact-governance boundary checks the person rather than a thread URL or a comment URN.
+    let contactPerson: PersonIdentity | null = null;
     if (!resolvedFromSignal) {
       const { data: msg, error: msgError } = await supabase
         .from('engagement_messages')
@@ -447,6 +454,19 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       if (!recipientDisplayName && typeof msgRawPayload.sender_name === 'string') {
         recipientDisplayName = msgRawPayload.sender_name;
       }
+      // The same author lookup, kept as an identity (profile URL and/or platform handle; never the display name).
+      const authorLookup = await resolveEngagementAuthorIdentity(organizationId, { messageId: String(msg.id) });
+      if (authorLookup.ok === false) {
+        return res.status(503).json({ error: 'CONTACT_GOVERNANCE_UNAVAILABLE', reason: 'person_identity_lookup_failed_failclosed', retryable: true });
+      }
+      contactPerson = authorLookup.value;
+    } else if (resolvedSignalSourceMessageId) {
+      // A signal reply answers the person behind the signal's source message.
+      const authorLookup = await resolveEngagementAuthorIdentity(organizationId, { messageId: resolvedSignalSourceMessageId });
+      if (authorLookup.ok === false) {
+        return res.status(503).json({ error: 'CONTACT_GOVERNANCE_UNAVAILABLE', reason: 'person_identity_lookup_failed_failclosed', retryable: true });
+      }
+      contactPerson = authorLookup.value;
     }
 
     // ── AI safety hard guard ─────────────────────────────────────────────
@@ -760,15 +780,21 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
         // connector or persists a community_ai_actions row with
         // execution_mode='browser' for the extension to claim.
         execution_mode: capability.mode ?? (isDm ? 'browser' : 'api'),
-        metadata: isDm && isLinkedIn
-          ? {
-              dm_thread_ready: true,
-              dm_thread_id: linkedInDmDispatchTarget.threadId,
-              dm_thread_url: linkedInDmDispatchTarget.threadUrl,
-              dm_participant_name: linkedInDmParticipantName,
-              dm_last_message_preview: linkedInDmLastMessagePreview,
-            }
-          : null,
+        metadata: (() => {
+          const base: Record<string, unknown> | null = isDm && isLinkedIn
+            ? {
+                dm_thread_ready: true,
+                dm_thread_id: linkedInDmDispatchTarget.threadId,
+                dm_thread_url: linkedInDmDispatchTarget.threadUrl,
+                dm_participant_name: linkedInDmParticipantName,
+                dm_last_message_preview: linkedInDmLastMessagePreview,
+              }
+            : null;
+          // Round 26: the recipient (dm) / the author replied to (reply). Absent identity is NOT papered over here:
+          // the gate then resolves it or refuses (CONTACT_IDENTITY_UNRESOLVED).
+          const person = personIdentityMetadata(isDm ? 'dm' : 'reply', contactPerson);
+          return Object.keys(person).length ? { ...(base ?? {}), ...person } : base;
+        })(),
         parent_comment_urn: parentCommentUrn,
       },
       true,
@@ -825,6 +851,14 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       && resultStatusStr === 'pending'
       && (isDm || result.execution_mode === 'browser');
     const isQueuedForExtension = isFreshDispatch || isDedupOfPendingBrowser;
+    // Round 26: a contact-governance refusal is a decision, not a platform failure — say so with its reason code.
+    const refusalReason = String((result as { reason?: unknown }).reason ?? '');
+    if (!result.ok && (refusalReason === 'CONTACT_SUPPRESSED' || refusalReason === 'CONTACT_IDENTITY_UNRESOLVED')) {
+      return res.status(403).json({ error: refusalReason, code: refusalReason, status: result.status });
+    }
+    if (!result.ok && refusalReason === 'CONTACT_GOVERNANCE_UNAVAILABLE') {
+      return res.status(503).json({ error: refusalReason, code: refusalReason, status: result.status, retryable: true });
+    }
     if (!isQueuedForExtension && (!result.ok || result.status !== 'executed')) {
       return res.status(502).json({
         error: typeof result.error === 'string' ? result.error : (result.error as any)?.code ?? 'Execution failed',

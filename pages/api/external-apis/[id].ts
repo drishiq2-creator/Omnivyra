@@ -14,6 +14,43 @@ import {
   isPlatformSuperAdmin,
   isSuperAdmin,
 } from '../../../backend/services/rbacService';
+import {
+  isEnvVarName,
+  describeRejectedEnvVarName,
+} from '../../../backend/security/credentialSafety';
+import {
+  findNewSecretShapedEntries,
+  isRedactionMarker,
+  looksLikeSecretValue,
+  redactSourceCredentialFields,
+  restoreRedactedMapValues,
+  secretInMapError,
+} from '../../../backend/services/externalApi/credentialReference';
+import { requireCapability } from '../../../backend/security/requireCapability';
+import { enforcePlatformWriteAuthority } from '../../../backend/security/platformWriteAuthority';
+import { INTEGRATION_PLATFORM_OAUTH_MANAGE } from '../../../shared/contracts/security';
+
+/**
+ * Round 26 (H-4): a write that changes WHERE a platform credential is sent (or which
+ * credential / template is attached) is as sensitive as writing the credential itself, so it
+ * needs the same gate as /api/provider-accounts writes: INTEGRATION_PLATFORM_OAUTH_MANAGE
+ * (step-up) plus platform write authority. Bridge (legacy cookie) principals are refused.
+ * Answers the refusal itself; returns true when the caller may proceed.
+ */
+async function requireCredentialDestinationAuthority(
+  req: NextApiRequest,
+  res: NextApiResponse,
+  id: string,
+  operation: string,
+): Promise<boolean> {
+  const guard = await requireCapability(req, res, {
+    capability: INTEGRATION_PLATFORM_OAUTH_MANAGE,
+    reason: `external-api ${operation} for ${id}`,
+    resourceId: id,
+  });
+  if (guard.ok !== true) return false;
+  return enforcePlatformWriteAuthority(req, res, guard.principal, INTEGRATION_PLATFORM_OAUTH_MANAGE, operation);
+}
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
   const { id } = req.query;
@@ -122,7 +159,9 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       .select('*')
       .eq('api_source_id', id)
       .single();
-    return res.status(200).json({ api: { ...data, health: healthData || null } });
+    // Round 23 B/C: read-path redaction (same rule as GET /api/external-apis). A secret
+    // pasted into api_key_env_name / api_key_name is never served back.
+    return res.status(200).json({ api: { ...redactSourceCredentialFields(data), health: healthData || null } });
   }
 
   if (req.method === 'PUT') {
@@ -155,11 +194,36 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       requires_admin,
     } = req.body || {};
 
+    // Round 23 B/C: write-path validation, mirroring POST (indexMutations). The redaction
+    // marker served by GET means "unchanged" (so a UI round-trip never stores the marker);
+    // any other value supplied for these fields must be an env-var NAME, never a secret.
+    // The 400 describes the shape of the problem and never echoes the value.
+    const suppliedApiKeyEnvName = isRedactionMarker(api_key_env_name) ? undefined : api_key_env_name;
+    const suppliedApiKeyName = isRedactionMarker(api_key_name) ? undefined : api_key_name;
+    if (
+      suppliedApiKeyEnvName !== undefined && suppliedApiKeyEnvName !== null && suppliedApiKeyEnvName !== ''
+      && !isEnvVarName(suppliedApiKeyEnvName)
+    ) {
+      return res.status(400).json({
+        error: 'INVALID_ENV_VAR_NAME',
+        field: 'api_key_env_name',
+        detail: describeRejectedEnvVarName(suppliedApiKeyEnvName),
+      });
+    }
+    if (looksLikeSecretValue(suppliedApiKeyName)) {
+      return res.status(400).json({
+        error: 'INVALID_ENV_VAR_NAME',
+        field: 'api_key_name',
+        detail: describeRejectedEnvVarName(suppliedApiKeyName),
+      });
+    }
+
     let existingRecord: any = null;
     let resolvedPlatformType = platform_type;
     // SEC91-B2: a tenant PUT is always compared with the stored row (see the whitelist
-    // reset below), so the row is loaded whenever the caller lacks platform scope.
-    if (!hasPlatformScope || !resolvedPlatformType || !auth_type || !api_key_name || !api_key_env_name || !method) {
+    // reset below). Round 26: the row is now loaded for EVERY PUT, because the H-2 marker
+    // round-trip and the H-4 destination-change check compare against it.
+    {
       let existingQuery = supabase.from('external_api_sources').select('*').eq('id', id);
       if (!platformScopeGranted && companyId) existingQuery = existingQuery.eq('company_id', companyId);
       const { data: existing } = await existingQuery.single();
@@ -170,13 +234,37 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       resolvedPlatformType = resolvedPlatformType ?? existing?.platform_type ?? 'social';
     }
 
+    // Round 26 (H-2): headers / query_params must not carry a literal credential. The marker a
+    // read serves for a redacted value means "unchanged" (the stored value is kept); a new or
+    // changed secret-shaped value is refused, naming the keys only, never the values.
+    const suppliedHeaders = headers === undefined || headers === null
+      ? headers
+      : restoreRedactedMapValues(headers, existingRecord?.headers);
+    const suppliedQueryParams = query_params === undefined || query_params === null
+      ? query_params
+      : restoreRedactedMapValues(query_params, existingRecord?.query_params);
+    const mapChecks: Array<[string, unknown, unknown]> = [
+      ['headers', suppliedHeaders, existingRecord?.headers],
+      ['query_params', suppliedQueryParams, existingRecord?.query_params],
+    ];
+    for (const [field, value, stored] of mapChecks) {
+      const badKeys = findNewSecretShapedEntries(value, stored);
+      if (badKeys.length > 0) return res.status(400).json(secretInMapError(field, badKeys));
+    }
+
+    // Round 26 (H-5): is_preset rows are listed in every tenant's preset picker, so only the
+    // Super Admin may mark a row as a preset. An unchanged value still round-trips.
+    if (!hasPlatformScope && is_preset !== undefined && Boolean(is_preset) && existingRecord?.is_preset !== true) {
+      return res.status(403).json({ error: 'Only a Super Admin can mark an API source as a preset.' });
+    }
+
     const validation = validatePlatformConfig({
       name,
       base_url,
       platform_type: resolvedPlatformType,
       method,
-      headers,
-      query_params,
+      headers: suppliedHeaders,
+      query_params: suppliedQueryParams,
       supported_content_types,
       promotion_modes,
       required_metadata,
@@ -225,17 +313,32 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     }
 
     const resolvedAuthType = auth_type ?? existingRecord?.auth_type ?? 'none';
-    const resolvedApiKeyName = api_key_name ?? existingRecord?.api_key_name ?? null;
-    const resolvedApiKeyEnv = api_key_env_name ?? existingRecord?.api_key_env_name ?? null;
+    const resolvedApiKeyName = suppliedApiKeyName ?? existingRecord?.api_key_name ?? null;
+    const resolvedApiKeyEnv = suppliedApiKeyEnvName ?? existingRecord?.api_key_env_name ?? null;
     const resolvedMethod = method ?? existingRecord?.method ?? 'GET';
-    const resolvedHeaders = headers ?? existingRecord?.headers ?? {};
-    const resolvedQueryParams = query_params ?? existingRecord?.query_params ?? {};
+    const resolvedHeaders = suppliedHeaders ?? existingRecord?.headers ?? {};
+    const resolvedQueryParams = suppliedQueryParams ?? existingRecord?.query_params ?? {};
     const resolvedIsPreset = is_preset ?? existingRecord?.is_preset ?? false;
     const resolvedRetryCount = retry_count ?? existingRecord?.retry_count ?? 2;
     const resolvedTimeoutMs = timeout_ms ?? existingRecord?.timeout_ms ?? 8000;
     const resolvedRateLimit = rate_limit_per_min ?? existingRecord?.rate_limit_per_min ?? 60;
 
     const resolvedKeyEnv = resolvedApiKeyEnv || resolvedApiKeyName || null;
+    // The effective env reference (which may fall back to api_key_name, as in POST) must be
+    // a valid name when this request CHANGES it. An unchanged legacy value is left as stored
+    // (no DB rewrite of existing rows here); it is redacted on every read and reported as an
+    // invalid credential reference at execution time.
+    if (
+      resolvedKeyEnv
+      && !isEnvVarName(resolvedKeyEnv)
+      && resolvedKeyEnv !== (existingRecord?.api_key_env_name || existingRecord?.api_key_name || null)
+    ) {
+      return res.status(400).json({
+        error: 'INVALID_ENV_VAR_NAME',
+        field: 'api_key_env_name',
+        detail: describeRejectedEnvVarName(resolvedKeyEnv),
+      });
+    }
 
     // SEC91-B2: Super Admin approval (is_whitelisted) covers the configuration that was
     // approved. When a TENANT changes where the request goes (base_url, method) or which
@@ -266,6 +369,28 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       );
     if (whitelistReset) {
       console.warn('EXTERNAL_API_WHITELIST_RESET', { apiSourceId: id, companyId, userId: user.id });
+    }
+
+    // Round 26 (H-4): a platform-privileged edit of a PLATFORM row (or of a row that could not
+    // be loaded) that changes where its credential goes, or which credential / template it
+    // carries, needs the provider-account write gate (step-up + platform authority). Edits of
+    // name, purpose, activity, limits etc. are unaffected.
+    if (hasPlatformScope && (!existingRecord || existingRecord.company_id == null)) {
+      const changed = (supplied: unknown, stored: unknown) => supplied !== undefined && stable(supplied) !== stable(stored);
+      const destinationChanged = !existingRecord
+        ? [base_url, method, auth_type, suppliedApiKeyEnvName, suppliedApiKeyName, suppliedHeaders, suppliedQueryParams]
+          .some((v) => v !== undefined)
+        : changed(base_url, existingRecord.base_url)
+          || (method !== undefined && String(method).toUpperCase() !== String(existingRecord.method ?? 'GET').toUpperCase())
+          || changed(auth_type, existingRecord.auth_type ?? 'none')
+          || stable(resolvedKeyEnv) !== stable(existingRecord.api_key_env_name || existingRecord.api_key_name || null)
+          || changed(suppliedApiKeyName, existingRecord.api_key_name ?? null)
+          || changed(suppliedHeaders, existingRecord.headers ?? {})
+          || changed(suppliedQueryParams, existingRecord.query_params ?? {});
+      if (destinationChanged
+        && !(await requireCredentialDestinationAuthority(req, res, id, 'external_api_sources.destination_update'))) {
+        return;
+      }
     }
 
     let updateQuery = supabase
@@ -309,12 +434,18 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       });
     }
     await invalidateCompanyConfigCacheForApiSource(id);
-    return res.status(200).json({ api: data, ...(whitelistReset ? { whitelist_reset: true } : {}) });
+    return res.status(200).json({ api: redactSourceCredentialFields(data), ...(whitelistReset ? { whitelist_reset: true } : {}) });
   }
 
   if (req.method === 'DELETE') {
     if (!canManageExternalApis) {
       return res.status(403).json({ error: 'FORBIDDEN_ROLE' });
+    }
+    // Round 26 (H-4): a platform-privileged delete cascades away every provider account of
+    // the source (api_provider_accounts ON DELETE CASCADE): same gate as deleting an account.
+    if (hasPlatformScope
+      && !(await requireCredentialDestinationAuthority(req, res, id, 'external_api_sources.delete'))) {
+      return;
     }
     const deleteQuery = supabase.from('external_api_sources').delete().eq('id', id);
     if (!hasPlatformScope) {

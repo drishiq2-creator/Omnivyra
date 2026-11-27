@@ -123,3 +123,39 @@ describe('WORKER_PROVENANCE chains', () => {
     expect(sha).not.toBe('');
   });
 });
+
+// ROUND 12 (additive). The legacy `deploymentId` above is unchanged and still
+// resolves VERCEL_GIT_COMMIT_SHA -> RAILWAY_DEPLOYMENT_ID -> GIT_COMMIT_SHA, i.e.
+// a COMMIT on Vercel but a DEPLOYMENT id on Railway. The new fields keep the
+// two apart, and an empty commit variable never becomes a commit.
+describe('bootFingerprint commit vs deployment id (round 12)', () => {
+  const load = () => {
+    jest.resetModules();
+    jest.doMock('../../../generated/build-provenance/result.json', () => {
+      const e: any = new Error('Cannot find module'); e.code = 'MODULE_NOT_FOUND'; throw e;
+    }, { virtual: true });
+    return require('../../security/startup/bootFingerprint');
+  };
+
+  it('an empty VERCEL_GIT_COMMIT_SHA + a Railway deployment id: no commit, deployment id kept separately', () => {
+    env.VERCEL_GIT_COMMIT_SHA = '';
+    env.RAILWAY_DEPLOYMENT_ID = 'railway-deploy-1';
+    const m = load();
+    m.resetBootFingerprint();
+    const fp = m.emitBootFingerprint();
+    expect(fp.commitSha).toBeNull();
+    expect(fp.claimedCommitSha).toBeNull();
+    expect(fp.buildProvenance).toBe('missing');
+    expect(fp.platformDeploymentId).toBe('railway-deploy-1');
+  });
+
+  it('a declared commit without a build stamp is a CLAIM (unverified), never an empty string', () => {
+    env.VERCEL_GIT_COMMIT_SHA = SHA;
+    const m = load();
+    m.resetBootFingerprint();
+    const fp = m.emitBootFingerprint();
+    expect(fp.claimedCommitSha).toBe(SHA);
+    expect(fp.commitSha).toBeNull();
+    expect(fp.buildProvenance).toBe('unverified');
+  });
+});

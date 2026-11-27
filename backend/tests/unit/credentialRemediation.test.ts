@@ -208,6 +208,59 @@ describe('remediation — PUT merge preserves credentials', () => {
     const merged = JSON.parse(buildCredentialEnvelope({ existing: 'not json', supplied: { api_key_value: PLACEHOLDER_KEY } }));
     expect(isEncryptedCredential(merged.api_key_value)).toBe(true);
   });
+
+  // Round 26 (Agent C P-E2/P-E5): the five PRODUCTION envelope shapes (fake values, shapes
+  // copied from r26SuperAdminCredentialSecurity.test.ts `seedProductionShapes`). Any save —
+  // even one that supplies nothing — converges them: env reference is a NAME or absent,
+  // the key is ciphertext, and the effective key is unchanged.
+  // FAILING CONTROL: at origin/main 2bc52db7a the pasted-token env references and the
+  // plaintext 64-hex value are carried forward verbatim.
+  describe('five production shapes converge on any save (P-E2)', () => {
+    const FAKE_SERP_64 = 'f'.repeat(28) + '0123456789abcdef0123456789abcdef01aa';
+    const FAKE_SEARCHAPI_24 = 'Zq8xR2vT9kLm3NpW7sYb4Hc1';
+    const FAKE_YT_39 = 'AIzaSyFAKE0000000000000000000000000000x'.slice(0, 39);
+    const FAKE_SERP_65 = 'e'.repeat(33) + '0123456789abcdef0123456789abcdef';
+    const FAKE_OPENAI_164 = 'sk-proj-' + 'A1b2C3d4'.repeat(19) + 'Zz11';
+    const enc = (v: string) => encryptCredential(v);
+    const shapes: Array<[string, Record<string, string>, string | null, string | null]> = [
+      // [label, stored envelope, expected env name after save, expected effective key]
+      ['SERPAPI_PRODUCTION (valid name + PLAINTEXT 64-hex key)', { api_key_env_name: 'SERPAPI_KEY', api_key_value: FAKE_SERP_64 }, 'SERPAPI_KEY', FAKE_SERP_64],
+      ['searchapi default (24-char token as env name)', { api_key_env_name: FAKE_SEARCHAPI_24, api_key_value: enc('searchapi-real-encrypted') }, null, 'searchapi-real-encrypted'],
+      ['youtube default (Google key as env name)', { api_key_env_name: FAKE_YT_39, api_key_value: enc('youtube-real-encrypted') }, null, 'youtube-real-encrypted'],
+      ['serp default (65-char token as env name, no value)', { api_key_env_name: FAKE_SERP_65 }, null, null],
+      ['openai default (164-char sk-proj key as env name)', { api_key_env_name: FAKE_OPENAI_164, api_key_value: enc('openai-real-encrypted') }, null, 'openai-real-encrypted'],
+    ];
+    const tokens = [FAKE_SERP_64, FAKE_SEARCHAPI_24, FAKE_YT_39, FAKE_SERP_65, FAKE_OPENAI_164];
+
+    it.each(shapes)('%s', (_label, stored, expectedEnv, expectedKey) => {
+      const merged = buildCredentialEnvelope({ existing: JSON.stringify(stored), supplied: {} });
+      const parsed = JSON.parse(merged);
+      for (const t of tokens) expect(merged).not.toContain(t); // no plaintext token survives
+      expect(parsed.api_key_env_name ?? null).toBe(expectedEnv);
+      if (parsed.api_key_value !== undefined) expect(isEncryptedCredential(parsed.api_key_value)).toBe(true);
+      const resolved = resolveAccountCredentials(account(parsed));
+      expect(resolved.api_key_value).toBe(expectedKey);
+      expect(JSON.stringify(resolved)).not.toContain(FAKE_OPENAI_164);
+    });
+
+    it('an explicit null clears the env reference (S-14)', () => {
+      const merged = JSON.parse(buildCredentialEnvelope({ existing: JSON.stringify({ api_key_env_name: 'SERPAPI_KEY' }), supplied: { api_key_env_name: null } }));
+      expect(merged.api_key_env_name).toBeUndefined();
+    });
+
+    it('a plaintext *_ref is refused, never stored (S-11.3)', () => {
+      expect(() => buildCredentialEnvelope({ existing: null, supplied: { oauth_client_secret_ref: 'plaintext-not-a-ref' } })).toThrow(/ciphertext/);
+    });
+
+    it('a legacy direct OAuth field moves into its encrypted _ref; a rotated _ref wins on read (P-E3)', () => {
+      const merged = JSON.parse(buildCredentialEnvelope({ existing: JSON.stringify({ oauth_client_secret: 'legacy-direct-secret' }), supplied: {} }));
+      expect(merged.oauth_client_secret).toBeUndefined();
+      expect(isEncryptedCredential(merged.oauth_client_secret_ref)).toBe(true);
+      // Read precedence: rotated ref beats a stale direct field still present in an old row.
+      const resolved = resolveAccountCredentials(account({ oauth_client_secret: 'stale-direct', oauth_client_secret_ref: enc('rotated-ref') }));
+      expect(resolved.oauth_client_secret).toBe('rotated-ref');
+    });
+  });
 });
 
 // ── Credential resolution + precedence ────────────────────────────────────────

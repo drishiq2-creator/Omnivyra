@@ -84,7 +84,7 @@ async function call(handler: any, req: Record<string, unknown>) {
   await handler({ headers: {}, query: {}, ...req }, res);
   return res;
 }
-const reset = () => { db.calls.length = 0; db.claimed.length = 0; db.inserted.length = 0; ingested.length = 0; db.rows.community_ai_actions = []; };
+const reset = () => { db.calls.length = 0; db.claimed.length = 0; db.inserted.length = 0; ingested.length = 0; db.rows.community_ai_actions = []; delete db.rows.engagement_messages; };
 
 beforeEach(() => { suspended = true; reset(); });
 
@@ -130,11 +130,17 @@ describe('server-queued collection', () => {
     id, organization_id: 'org-r3', platform: 'linkedin', action_type: action, target_id: 'urn:li:activity:1',
     suggested_text: action === 'reply' ? 'thanks' : null, execution_mode: 'browser', status: 'pending',
     created_at: new Date().toISOString(), dispatch_lease_expires_at: null, command_chain: null, command_chain_index: 0,
+    // Round 28 kill switch: this suite has no policy row, so the hand-out only offers a row carrying an
+    // approval of record (a human send stamps approved_at on insert).
+    approved_at: '2026-11-27T00:00:00.000Z',
   });
   const poll = () => call(commandsHandler, { method: 'GET', url: '/api/extension/commands', headers: { 'x-omnivyra-capability-version': 'cap-test', 'x-omnivyra-dispatch-renewal': '1' } });
 
   it('an already-queued sync_*_inbox row is never offered or claimed; other commands are', async () => {
     db.rows.community_ai_actions = [queued('sync_comments_inbox', 'sync-1'), queued('sync_dm_inbox', 'sync-2'), queued('reply', 'reply-1')];
+    // Round 26 (S-2): a reply is handed out only when the AUTHOR it reaches is identifiable (contact governance);
+    // the replied-to comment is in the engagement store with its author's profile.
+    db.rows.engagement_messages = [{ id: 'm-1', organization_id: 'org-r3', platform_message_id: 'urn:li:activity:1', author_id: null, raw_payload: { sender_profile_url: 'https://www.linkedin.com/in/commenter' } }];
     const res = await poll();
     expect(res.statusCode).toBe(200);
     const ids = (res.body.commands as Array<{ id: string }>).map((c) => c.id);

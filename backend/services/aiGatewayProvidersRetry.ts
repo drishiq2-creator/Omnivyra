@@ -43,6 +43,7 @@ import { recordGptCall, recordGptLatency, recordGptFailure } from './metricsColl
 import { evaluateJobCost } from './jobCostEstimator';
 import { trackLlmTokens } from '../../lib/redis/usageProtection';
 import { ownedDbTable } from '../db/writeOwner';
+import { CredentialFailureError, type CredentialFailureCode } from './providerCredentialResolver';
 
 import { UNKNOWN_ORG, FEATURE_AREA_MAP, type GatewayMetadata, type GatewayResponse, type GatewayRequest, GatewayAbortError, isAbortError, _inFlight, sleep, resolveProviderTimeoutMs, _pools, acquireSlot, releaseSlot, resolveLlmConfig, type NormalizedCompletion, callOpenAi, callAnthropic } from './aiGatewayCore';
 
@@ -76,11 +77,54 @@ function isFallbackEligible(err: unknown): boolean {
   return isRateLimitError(err) || isNetworkError(err);
 }
 
-/** Returns the fallback provider name + a safe model for that provider. */
+/**
+ * Round 26 — which credential the PRIMARY call used, and the plan/cost gate a platform-key
+ * fallback must pass (credential policy rules P2/P3, providerCredentialResolver.ts).
+ *
+ *  - `credential: 'company'` (tenant BYOK): NO cross-provider fallback, ever. The platform
+ *    key is never substituted after a 429/529/network/auth failure (T-1). The failure is
+ *    surfaced as a CredentialFailureError (tenant_key_rate_limited / tenant_key_invalid /
+ *    provider_unavailable) whose message never quotes the provider error.
+ *  - `credential: 'platform'`: a fallback to the other provider is allowed only when
+ *    `gateFallbackModel` (the SAME plan-tier + cost gate as the primary call) admits the
+ *    fallback model. No gate supplied = no fallback (fail closed).
+ */
+export type RetryCredentialPolicy = {
+  credential: 'company' | 'platform';
+  /** Returns the model the plan/cost gates allow for `model` on the platform key, or null to block. */
+  gateFallbackModel?: (model: string) => Promise<string | null>;
+};
+
+/**
+ * Classify a failed TENANT-key (BYOK) call. Pure. Codes are value-free (P6):
+ *   429                         → tenant_key_rate_limited (the tenant's quota / limit)
+ *   401 / 403                   → tenant_key_invalid
+ *   529 / 5xx / timeout / network → provider_unavailable
+ * Anything else (validation, unknown, abort) is not a credential question → null.
+ */
+export function classifyTenantKeyFailure(err: unknown): CredentialFailureCode | null {
+  // Deliberately does not call classifyProviderError: that runs exactly once per attempt at
+  // the metrics point (WS1-E6-T005). Same status mapping.
+  if (isAbortError(err)) return null;
+  const record = asGatewayError(err);
+  const status = record.status ?? record.response?.status ?? record.statusCode;
+  if (status === 429) return 'tenant_key_rate_limited';
+  if (status === 401 || status === 403) return 'tenant_key_invalid';
+  if (status === 529 || (typeof status === 'number' && status >= 500)) return 'provider_unavailable';
+  const message = err instanceof Error ? err.message : '';
+  if (record.code === 'ETIMEDOUT' || /timed out|timeout/i.test(message) || isNetworkError(err)) return 'provider_unavailable';
+  return null;
+}
+
+/** Returns the fallback provider name + a gated model for that provider, or null (no fallback). */
 async function getFallbackConfig(
   currentProvider: 'openai' | 'anthropic',
   currentModel: string,
+  gateFallbackModel?: (model: string) => Promise<string | null>,
 ): Promise<{ provider: 'openai' | 'anthropic'; model: string; apiKey: string } | null> {
+  // Round 26 (P2/P3): a fallback spends the platform key, so it must pass the same plan/cost
+  // gate as the primary call. Without a gate there is no fallback.
+  if (!gateFallbackModel) return null;
   try {
     const providers = await getActiveProviders();
     const fallbackProvider = providers.find((p) => p.name !== currentProvider);
@@ -96,18 +140,33 @@ async function getFallbackConfig(
     //   2. First model registered for the fallback provider in DB.
     //   3. Hardcoded default — MUST exist in llm_model_pricing, otherwise the
     //      fallback trips assertModelPricingExists and errors instead of helping.
-    const model = sameModel
+    const candidate = sameModel
       ? currentModel
       : fallbackModels[0]?.model_key ?? (name === 'anthropic' ? 'claude-3-5-sonnet' : 'gpt-4o-mini');
 
-    // Platform key for fallback provider (BYOK not applied to fallback)
+    // Round 26: the plan-tier + cost gate decides the fallback model. A blocked candidate,
+    // or a gated model the fallback provider does not serve, means no fallback.
+    let gated: string | null = null;
+    try {
+      gated = await gateFallbackModel(candidate);
+    } catch {
+      gated = null; // a gate failure never widens platform spend
+    }
+    const servable = new Set<string>([candidate, ...fallbackModels.map((m) => m.model_key)]);
+    if (!gated || !servable.has(gated)) {
+      console.warn('[ai-gateway] fallback refused by plan/cost gate', { fallbackProvider: name, candidate, gated });
+      return null;
+    }
+
+    // Platform key for fallback provider (BYOK is never applied to — or replaced by — a fallback)
     const envMap: Record<string, string | undefined> = {
       openai:    appConfig.OPENAI_API_KEY,
       anthropic: appConfig.ANTHROPIC_API_KEY,
     };
     const apiKey = envMap[name] ?? '';
+    if (!apiKey) return null;
 
-    return { provider: name, model, apiKey };
+    return { provider: name, model: gated, apiKey };
   } catch (err) {
     console.warn('[ai-gateway] getFallbackConfig failed:', (err as Error)?.message);
     return null;
@@ -187,14 +246,16 @@ export async function callProviderWithRetry(
 export async function callProviderWithRetry(
   provider: 'openai' | 'anthropic',
   params: Parameters<typeof callOpenAi>[0],
-  allowFallback: true,
+  allowFallback: boolean,
   tracking?: RetryTrackingContext,
+  credentialPolicy?: RetryCredentialPolicy,
 ): Promise<NormalizedCompletion & { usedFallback: boolean; fallbackProvider?: string; fallbackModel?: string; retry_attempt: number; queueWaitMs: number; executionMs: number; totalMs: number; concurrencySlot: number }>;
 export async function callProviderWithRetry(
   provider: 'openai' | 'anthropic',
   params: Parameters<typeof callOpenAi>[0],
   allowFallback = false,
   tracking?: RetryTrackingContext,
+  credentialPolicy?: RetryCredentialPolicy,
 ): Promise<NormalizedCompletion & { usedFallback: boolean; fallbackProvider?: string; fallbackModel?: string; retry_attempt: number; queueWaitMs: number; executionMs: number; totalMs: number; concurrencySlot: number }> {
   // WS1-E6-T004: per-PROVIDER circuit breaker. Wrapped here, at the single
   // dispatch arrow, so it covers every attempt path — primary, retry, and
@@ -317,6 +378,11 @@ export async function callProviderWithRetry(
   // and queue-wait attached. The span propagates the active trace context
   // so a planner request → gateway call chain stays connected end-to-end.
   const dispatchWithSpan = async (p: 'openai' | 'anthropic', ps: typeof params) => {
+    // Round 26: the raw-dispatch fallback below is for a TRACING failure only. It used to
+    // catch the provider's own error too and dispatch the same request a second time —
+    // every failed attempt (auth, validation, timeout, 429) reached the provider twice,
+    // a double spend whenever the provider had already done the work.
+    let dispatched = false;
     try {
       const { withSpan } = require('./plannerTracing') as typeof import('./plannerTracing');
       return await withSpan(`provider/${p}/${ps.operation ?? 'unknown'}`, async (span) => {
@@ -326,12 +392,15 @@ export async function callProviderWithRetry(
         span.setAttribute('llm.pool', acquiredPool);
         span.setAttribute('llm.attempt', attempt);
         span.setAttribute('llm.stream', !!ps.stream);
+        dispatched = true;
         const r = await dispatch(p, ps);
         if (r.usage?.total_tokens) span.setAttribute('llm.tokens', r.usage.total_tokens);
         return r;
       }, { kind: 'client' });
-    } catch {
-      // Tracing failure must not affect the call — fall through to raw dispatch.
+    } catch (err) {
+      // A provider error (or anything after the request was sent) is the call's outcome.
+      if (dispatched) throw err;
+      // Tracing failure before dispatch must not affect the call — raw dispatch.
       return dispatch(p, ps);
     }
   };
@@ -429,9 +498,31 @@ export async function callProviderWithRetry(
     }
   }
 
+  // ── Round 26 / T-1: a TENANT-key (BYOK) call never falls back ───────────────
+  // The platform key is never substituted for the tenant's after a rate limit, overload,
+  // network or auth failure (policy rule P3). The tenant gets a classified, value-free
+  // failure instead (P6). Same-provider retry above used the tenant's own key.
+  if (credentialPolicy?.credential === 'company') {
+    const code = classifyTenantKeyFailure(primaryErr);
+    finalizeTiming({ success: false, attempts: attempt, credential: 'company', failure_code: code ?? undefined });
+    if (code) {
+      const classified = new CredentialFailureError(code, {
+        owner: 'company',
+        provider,
+        status: asGatewayError(primaryErr).status ?? asGatewayError(primaryErr).response?.status ?? asGatewayError(primaryErr).statusCode,
+      });
+      classified.__retry_attempt = attempt;
+      console.warn('[ai-gateway] byok call failed — no platform fallback', { provider, code, status: classified.status ?? null });
+      throw classified;
+    }
+    asGatewayError(primaryErr).__retry_attempt = attempt;
+    throw primaryErr;
+  }
+
   // ── Step 3: fallback provider (only for rate-limit / overload / network) ──
+  // Platform key only, and only through the plan/cost gate (getFallbackConfig).
   if (allowFallback && isFallbackEligible(primaryErr)) {
-    const fallback = await getFallbackConfig(provider, params.model);
+    const fallback = await getFallbackConfig(provider, params.model, credentialPolicy?.gateFallbackModel);
     if (fallback) {
       logIntermediateAttempt(tracking, attempt, provider, params.model, primaryErr);
       attempt += 1;

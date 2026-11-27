@@ -7,6 +7,13 @@
  * callers still need a playbook when mode !== 'manual'.
  */
 
+// Round 24D / G-7: contact governance (suppression) is its own boundary, pinned in
+// suppressionCommunity*.test.ts. This suite tests a different gate, so the
+// governance check is held at "allowed" here.
+jest.mock('../../services/communityAiContactGovernanceGate', () => ({
+  checkCommunityActionContactGovernance: jest.fn(async () => ({ allowed: true, reason: 'not_suppressed', checked: 1 })),
+  contactGateAuditPayload: jest.fn(() => ({})),
+}));
 jest.mock('../../db/supabaseClient', () => ({
   supabase: {
     from: jest.fn(() => ({
@@ -26,13 +33,9 @@ jest.mock('../../db/supabaseClient', () => ({
   },
 }));
 
-jest.mock('../../services/communityAiPlatformPolicyService', () => ({
-  getCommunityAiPlatformPolicy: jest.fn(async () => ({
-    execution_enabled: true,
-    auto_rules_enabled: true,
-    require_human_approval: false,
-  })),
-}));
+// Round 28: the real fail-closed evaluator decides over this value (configured row unless stated).
+jest.mock('../../services/communityAiPlatformPolicyService', () =>
+  jest.requireActual('../helpers/communityAiPolicyMock').policyServiceMock(() => ({ execution_enabled: true, auto_rules_enabled: true, require_human_approval: false })));
 
 jest.mock('../../services/usageEnforcementService', () => ({
   checkUsageBeforeExecution: jest.fn(async () => ({ allowed: true })),

@@ -6,6 +6,15 @@ import React, { useState, useEffect } from 'react';
 import { getAuthToken } from '@/utils/getAuthToken';
 import { parseJsonResponse } from '@/lib/utils/safeFetchJson';
 import { KNOWN_APIS } from '@/pages/super-admin.types';
+// Round 26: the same credential-input rules the Super Admin write routes enforce, applied
+// before a request is sent so the operator gets the correction immediately. The server
+// remains the security boundary.
+import {
+  checkConfigRecord,
+  checkCredentialReference,
+  isEnvVarName,
+  LEGACY_CLIENT_KEY_HEADERS,
+} from '@/lib/security/credentialInputValidation';
 import {
   RefreshCw,
   CheckCircle,
@@ -20,6 +29,8 @@ type ProviderAccount = {
   current_usage_min: number; current_usage_day: number;
   last_reset_at: string; created_at: string;
   last_used_at?: string | null; last_outcome?: string | null; health_score?: number | null;
+  /** Shape-only state from the list route (round 26). Never a credential value. */
+  credential_state?: { key: 'absent' | 'encrypted' | 'plaintext'; env_reference: 'absent' | 'valid' | 'invalid'; oauth: 'absent' | 'encrypted' | 'plaintext'; needs_resave: boolean };
 };
 
 interface ApiCatalogSectionProps {
@@ -38,7 +49,7 @@ export default function ApiCatalogSection({ categoryKey }: ApiCatalogSectionProp
   const [accountsByApiId, setAccountsByApiId] = useState<Record<string, ProviderAccount[]>>({});
   const [accountsLoadingId, setAccountsLoadingId] = useState<string | null>(null);
   const [accountModal, setAccountModal] = useState<{ apiId: string; apiName: string; authType: string; mode: 'add' | 'edit'; account?: ProviderAccount } | null>(null);
-  const [accountForm, setAccountForm] = useState({ account_name: '', api_key_env_name: '', api_key_value: '', oauth_client_id: '', oauth_client_secret: '', rate_limit_per_min: '', rate_limit_per_day: '', priority: '1', is_active: true });
+  const [accountForm, setAccountForm] = useState({ account_name: '', api_key_env_name: '', clear_env_name: false, api_key_value: '', oauth_client_id: '', oauth_client_secret: '', rate_limit_per_min: '', rate_limit_per_day: '', priority: '1', is_active: true });
   const [isSavingAccount, setIsSavingAccount] = useState(false);
   const [accountError, setAccountError] = useState<string | null>(null);
   /** Progress text shown while the WebAuthn passkey challenge is on screen. Never a credential. */
@@ -121,7 +132,7 @@ export default function ApiCatalogSection({ categoryKey }: ApiCatalogSectionProp
         const newEntry = d.api || d;
         setCatalogApis((prev) => [...prev, newEntry]);
         setExpandedApiId(known.key);
-        setApiEnvForm({ api_key_env_name: known.env_var || '', is_active: true, base_url: known.base_url, daily_quota: '', _client_id_env: '', _client_secret_env: '', _config: {} });
+        setApiEnvForm({ api_key_env_name: known.env_var || '', is_active: true, base_url: known.base_url, daily_quota: '', _config: {} });
       } else {
         const body = await r.json().catch(() => ({}));
         setApiEnvSaveError(body?.error || body?.detail || `Failed to add API (${r.status}) — are you logged in as super admin?`);
@@ -147,10 +158,22 @@ export default function ApiCatalogSection({ categoryKey }: ApiCatalogSectionProp
       // Canonical headers from KNOWN_APIS (fixes Pexels auth — no "Bearer " prefix)
       const canonicalHeaders = known?.default_headers || {};
       const mergedHeaders: Record<string, any> = { ...(catalogEntry.headers || {}), ...canonicalHeaders };
-      if (apiEnvForm._client_id_env != null)     mergedHeaders._client_id_env     = apiEnvForm._client_id_env;
-      if (apiEnvForm._client_secret_env != null)  mergedHeaders._client_secret_env  = apiEnvForm._client_secret_env;
+      // Round 26: the old form wrote Unsplash keys into these header slots. Nothing reads them
+      // server-side (the executor only forwarded them to the provider as HTTP headers) and
+      // presets' headers are served to tenant roles, so they are removed on every save.
+      for (const legacyKey of LEGACY_CLIENT_KEY_HEADERS) delete mergedHeaders[legacyKey];
 
       const resolvedApiKeyEnvName = apiEnvForm.api_key_env_name?.trim() || null;
+      // Client-side validation (the server validates too): a reference field takes an
+      // environment-variable NAME, never a key; headers / query params take {{NAME}} templates.
+      const inputProblem =
+        checkCredentialReference('Environment variable name', resolvedApiKeyEnvName) ??
+        checkConfigRecord('headers', mergedHeaders) ??
+        checkConfigRecord('query_params', mergedQP);
+      if (inputProblem) {
+        setApiEnvSaveError(inputProblem.message);
+        return;
+      }
       // For optional-token APIs (e.g. GitHub): if no token provided, use auth_type 'none' so Check doesn't fail
       const canonicalAuthType = known?.auth_type ?? catalogEntry.auth_type ?? 'none';
       const effectiveAuthType = (known?.optional_token && !resolvedApiKeyEnvName) ? 'none' : canonicalAuthType;
@@ -200,13 +223,13 @@ export default function ApiCatalogSection({ categoryKey }: ApiCatalogSectionProp
 
   const openAddAccountModal = (apiId: string, apiName: string, authType: string) => {
     setAccountError(null);
-    setAccountForm({ account_name: '', api_key_env_name: '', api_key_value: '', oauth_client_id: '', oauth_client_secret: '', rate_limit_per_min: '', rate_limit_per_day: '', priority: String((accountsByApiId[apiId]?.length ?? 0) + 1), is_active: true });
+    setAccountForm({ account_name: '', api_key_env_name: '', clear_env_name: false, api_key_value: '', oauth_client_id: '', oauth_client_secret: '', rate_limit_per_min: '', rate_limit_per_day: '', priority: String((accountsByApiId[apiId]?.length ?? 0) + 1), is_active: true });
     setAccountModal({ apiId, apiName, authType, mode: 'add' });
   };
 
   const openEditAccountModal = (acct: any, apiId: string, apiName: string, authType: string) => {
     setAccountError(null);
-    setAccountForm({ account_name: acct.account_name, api_key_env_name: '', api_key_value: '', oauth_client_id: '', oauth_client_secret: '', rate_limit_per_min: acct.rate_limit_per_min != null ? String(acct.rate_limit_per_min) : '', rate_limit_per_day: acct.rate_limit_per_day != null ? String(acct.rate_limit_per_day) : '', priority: String(acct.priority), is_active: acct.is_active });
+    setAccountForm({ account_name: acct.account_name, api_key_env_name: '', clear_env_name: false, api_key_value: '', oauth_client_id: '', oauth_client_secret: '', rate_limit_per_min: acct.rate_limit_per_min != null ? String(acct.rate_limit_per_min) : '', rate_limit_per_day: acct.rate_limit_per_day != null ? String(acct.rate_limit_per_day) : '', priority: String(acct.priority), is_active: acct.is_active });
     setAccountModal({ apiId, apiName, authType, mode: 'edit', account: acct });
   };
 
@@ -228,8 +251,18 @@ export default function ApiCatalogSection({ categoryKey }: ApiCatalogSectionProp
     if (!accountForm.account_name.trim()) { setAccountError('Account name is required.'); return; }
     setIsSavingAccount(true); setAccountError(null);
     try {
-      const credentials: Record<string, string> = {};
-      if (accountForm.api_key_env_name.trim()) credentials.api_key_env_name = accountForm.api_key_env_name.trim();
+      // Client-side validation (the server validates too). A key typed into the env-var NAME
+      // field is refused before it leaves the browser; it belongs in "API Key Value", which is
+      // encrypted at rest. The message never repeats the value.
+      const envNameInput = accountForm.api_key_env_name.trim();
+      if (envNameInput && !isEnvVarName(envNameInput)) {
+        setAccountError('"API Key Env Var Name" takes the NAME of an environment variable (for example SERPAPI_KEY), never the key itself. Put the key in "API Key Value", which is encrypted at rest.');
+        return;
+      }
+      const credentials: Record<string, string | null> = {};
+      if (envNameInput) credentials.api_key_env_name = envNameInput;
+      // Edit only: remove a stored env-var reference (e.g. one that holds a pasted key).
+      else if (accountModal.mode === 'edit' && accountForm.clear_env_name) credentials.api_key_env_name = null;
       if (accountForm.api_key_value.trim()) credentials.api_key_value = accountForm.api_key_value.trim();
       if (accountForm.oauth_client_id.trim()) credentials.oauth_client_id = accountForm.oauth_client_id.trim();
       if (accountForm.oauth_client_secret.trim()) credentials.oauth_client_secret = accountForm.oauth_client_secret.trim();
@@ -442,12 +475,12 @@ export default function ApiCatalogSection({ categoryKey }: ApiCatalogSectionProp
                           if (!isExpanded) {
                             const existingConfig = catalogEntry?.query_params?._config || {};
                             setApiEnvForm({
-                              api_key_env_name:    configuredEnvVar || '',
+                              // A stored value that is not an env-var NAME (a redacted or pasted
+                              // key) is never shown or re-submitted; the field starts empty.
+                              api_key_env_name:    configuredEnvVar && isEnvVarName(configuredEnvVar) ? configuredEnvVar : '',
                               is_active:           isEnabled,
                               base_url:            catalogEntry?.base_url || known.base_url,
                               daily_quota:         catalogEntry?.rate_limit_per_min ?? '',
-                              _client_id_env:      catalogEntry?.headers?._client_id_env || '',
-                              _client_secret_env:  catalogEntry?.headers?._client_secret_env || '',
                               _config:             existingConfig,
                             });
                             if (catalogEntry?.id && accountsByApiId[catalogEntry.id] === undefined) {
@@ -517,6 +550,7 @@ export default function ApiCatalogSection({ categoryKey }: ApiCatalogSectionProp
                                         <div className="flex items-center gap-1.5 min-w-[100px] flex-shrink-0">
                                           <span className="font-medium text-gray-800 truncate">{acct.account_name}</span>
                                           {isCurrentlyActive && <span className="inline-flex items-center px-1.5 py-0.5 rounded-full text-[9px] font-semibold bg-emerald-100 text-emerald-700 border border-emerald-200 flex-shrink-0">● Active</span>}
+                                          {acct.credential_state?.needs_resave && <span className="inline-flex items-center px-1.5 py-0.5 rounded-full text-[9px] font-semibold bg-amber-100 text-amber-800 border border-amber-200 flex-shrink-0" title="This account stores a credential unsafely (a plaintext key, or a key in the env var name field). Open Edit and Save to re-store it encrypted.">Needs re-save</span>}
                                         </div>
                                         <button type="button" onClick={() => toggleAccountActive(acct, catalogEntry.id)} className={`flex-shrink-0 px-2 py-0.5 rounded-full text-[10px] font-semibold border transition-colors ${acct.is_active ? 'bg-green-50 border-green-200 text-green-700 hover:bg-green-100' : 'bg-gray-100 border-gray-200 text-gray-500 hover:bg-gray-200'}`}>{acct.is_active ? 'Active' : 'Inactive'}</button>
                                         <span className="text-gray-400 flex-shrink-0">
@@ -641,21 +675,16 @@ export default function ApiCatalogSection({ categoryKey }: ApiCatalogSectionProp
                       const IMAGE_SIZES = ['1024x1024', '1792x1024', '1024x1792', '512x512', '256x256'];
                       const models = IMAGE_MODELS[known.key] || [];
                       return (<>
-                        {known.key === 'unsplash' ? (<>
-                          <div>
-                            <label className="block text-xs font-medium text-gray-700 mb-1">Access Key <span className="font-normal text-gray-400">— paste the key directly or enter env var name</span></label>
-                            <input className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="Paste key or UNSPLASH_ACCESS_KEY" value={apiEnvForm.api_key_env_name || ''} onChange={(e) => setApiEnvForm((p) => ({ ...p, api_key_env_name: e.target.value, _client_id_env: e.target.value }))} />
-                          </div>
-                          <div>
-                            <label className="block text-xs font-medium text-gray-700 mb-1">Secret Key <span className="font-normal text-gray-400">— paste the key directly or enter env var name</span></label>
-                            <input className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="Paste key or UNSPLASH_SECRET_KEY" value={apiEnvForm._client_secret_env || ''} onChange={(e) => setApiEnvForm((p) => ({ ...p, _client_secret_env: e.target.value }))} />
-                          </div>
-                        </>) : (
-                          <div>
-                            <label className="block text-xs font-medium text-gray-700 mb-1">API Key <span className="font-normal text-gray-400">— paste the key directly or enter env var name</span></label>
-                            <input className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder={`Paste key or ${known.env_var || 'API_KEY'}`} value={apiEnvForm.api_key_env_name || ''} onChange={(e) => setApiEnvForm((p) => ({ ...p, api_key_env_name: e.target.value }))} />
-                          </div>
-                        )}
+                        {/* Round 26: these fields take an environment-variable NAME only. The
+                            old copy ("paste the key directly") stored keys in plaintext fields
+                            that are served to tenant roles. Keys go on an Account's Credentials
+                            form, where they are encrypted at rest. The Unsplash "Secret Key"
+                            field was removed: nothing server-side reads it. */}
+                        <div>
+                          <label className="block text-xs font-medium text-gray-700 mb-1">{known.key === 'unsplash' ? 'Access Key' : 'API Key'} Environment Variable Name <span className="font-normal text-gray-400">— the variable NAME, never the key itself</span></label>
+                          <input className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder={known.env_var || 'API_KEY'} value={apiEnvForm.api_key_env_name || ''} onChange={(e) => setApiEnvForm((p) => ({ ...p, api_key_env_name: e.target.value }))} />
+                          <p className="mt-1 text-[10px] leading-relaxed text-gray-500">To store the key itself, add an Account above and use its Credentials form (encrypted at rest).</p>
+                        </div>
                         {/* Model / size — not applicable to stock photo APIs */}
                         {!['unsplash', 'pixabay', 'pexels'].includes(known.key) && (<>
                           {models.length > 0 ? (
@@ -764,6 +793,13 @@ export default function ApiCatalogSection({ categoryKey }: ApiCatalogSectionProp
                 <div>
                   <label className="block text-xs font-medium text-gray-700 mb-1">API Key Env Var Name <span className="font-normal text-gray-400">— name of .env variable</span></label>
                   <input className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono" placeholder="e.g. YOUTUBE_API_KEY_2" value={accountForm.api_key_env_name} onChange={(e) => setAccountForm((p) => ({ ...p, api_key_env_name: e.target.value }))} />
+                  <p className="mt-1 text-[10px] leading-relaxed text-gray-500">The NAME of a server environment variable (uppercase, e.g. SERPAPI_KEY). Never paste a key here — use "API Key Value".</p>
+                  {accountModal.mode === 'edit' && (
+                    <label className="mt-1 flex items-center gap-1.5 text-[11px] text-gray-600">
+                      <input type="checkbox" checked={accountForm.clear_env_name} disabled={Boolean(accountForm.api_key_env_name.trim())} onChange={(e) => setAccountForm((p) => ({ ...p, clear_env_name: e.target.checked }))} />
+                      Remove the stored env var reference
+                    </label>
+                  )}
                 </div>
                 <div>
                   <label className="block text-xs font-medium text-gray-700 mb-1">API Key Value <span className="font-normal text-gray-400">— the secret itself; encrypted at rest</span></label>

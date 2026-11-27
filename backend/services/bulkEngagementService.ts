@@ -35,6 +35,7 @@ import { logAuditEvent } from './auditLoggingService';
 import { isThreadActionable } from './engagementThreadService';
 import { isDmMessageType } from '../../lib/engagement/messageRoles';
 import { createHash } from 'crypto';
+import { resolveEngagementAuthorIdentity, personIdentityMetadata } from './communityAiContactGovernanceGate';
 
 const MAX_BULK_BATCH = 20;
 
@@ -234,6 +235,15 @@ export async function sendReply(
     }
   }
 
+  // Round 26 (S-2): bulk replies reach the AUTHOR of the message replied to (the DM recipient for a DM thread).
+  // Stamp that person so every governance boundary checks them, not the comment URN. A read error refuses the
+  // send (fail closed); an unknown author is left to the gate, which refuses with CONTACT_IDENTITY_UNRESOLVED.
+  const authorLookup = await resolveEngagementAuthorIdentity(organizationId, { messageId: String(message.id) });
+  if (authorLookup.ok === false) {
+    return { ok: false, error: 'Contact governance is temporarily unavailable', outcome: 'failed_dispatch' };
+  }
+  const personMetadata = personIdentityMetadata(capabilityAction, authorLookup.value);
+
   const result = await executeAction(
     {
       // Browser dispatch converges on one row per (target, bucket); API replies
@@ -256,6 +266,7 @@ export async function sendReply(
       playbook_id: playbookId,
       acting_user_id: userId ?? null,
       execution_mode: executionMode,
+      metadata: Object.keys(personMetadata).length ? personMetadata : null,
     },
     true,
     { source: 'bulk', persist: true, auto_insert: true, final_text: replyText }

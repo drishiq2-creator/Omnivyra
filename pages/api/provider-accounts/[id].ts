@@ -12,8 +12,13 @@ import {
   updateProviderAccount,
   deactivateProviderAccount,
 } from '../../../backend/services/providerAccountService';
-// Remediation: shared env-var-name validation; encryption lives in the envelope builder.
-import { describeRejectedEnvVarName, isEnvVarName } from '../../../backend/security/credentialSafety';
+// Round 26: credential input validation, envelope hardening and safe serialisation.
+import {
+  checkPlatformOwnedSource,
+  checkProviderAccountCredentialsInput,
+  hardenCredentialEnvelope,
+  toSafeProviderAccount,
+} from '../../../backend/security/superAdminCredentialWriteGuards';
 import { supabase } from '../../../backend/db/supabaseClient';
 import { requireCapability } from '../../../backend/security/requireCapability';
 import { requireAdminRateLimit } from '../../../backend/services/requestAccessService';
@@ -91,6 +96,14 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       is_active,
     } = req.body ?? {};
 
+    // Platform credentials belong to platform rows only (S-3). An account on a TENANT-owned
+    // source (e.g. a seeded "default") may still be renamed, re-prioritised or deactivated,
+    // but it can never receive credentials or be (re)activated.
+    if ((credentials !== undefined && credentials !== null) || is_active === true) {
+      const owner = await checkPlatformOwnedSource(String((existing as { api_source_id?: unknown }).api_source_id ?? ''));
+      if (owner.ok !== true) return res.status(owner.status).json(owner.body);
+    }
+
     const patch: Record<string, unknown> = {};
 
     if (typeof account_name === 'string' && account_name.trim()) {
@@ -114,28 +127,35 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     //     existing envelope, so only fields the caller actually supplied change.
     //  2. PLAINTEXT. `api_key_value` was stored verbatim; it is now encrypted by the same
     //     shared builder used on create.
-    if (credentials && typeof credentials === 'object') {
-      // Server-side env-var-name validation — the client is not the security boundary.
-      if (credentials.api_key_env_name && !isEnvVarName(credentials.api_key_env_name)) {
-        return res.status(400).json({
-          error: 'INVALID_ENV_VAR_NAME',
-          detail: describeRejectedEnvVarName(credentials.api_key_env_name),
-        });
-      }
+    //  3. LEGACY CARRY-FORWARD (round 26). The builder carries every stored field forward, so
+    //     a re-save kept a raw key sitting in `api_key_env_name` and a legacy PLAINTEXT
+    //     `api_key_value`. `hardenCredentialEnvelope` drops a non-env-name reference and
+    //     encrypts a plaintext value on EVERY credential save. `api_key_env_name: null`
+    //     clears the reference explicitly (empty strings still mean "unchanged").
+    if (credentials !== undefined && credentials !== null) {
+      // Server-side validation — the client is not the security boundary. Never echoes a value.
+      const checked = checkProviderAccountCredentialsInput(credentials, { allowClearEnvName: true });
+      if (checked.ok !== true) return res.status(checked.status).json(checked.body);
 
       // Read the CURRENT envelope so unsupplied fields survive the update.
-      const { data: current } = await supabase
+      const { data: current, error: currentError } = await supabase
         .from('api_provider_accounts')
         .select('credentials_encrypted')
         .eq('id', id)
         .maybeSingle();
+      if (currentError) {
+        // Fail closed: merging onto an unread envelope would silently drop the stored key.
+        return res.status(500).json({ error: 'Failed to read the current credentials' });
+      }
+      const existing = (current as { credentials_encrypted?: string } | null)?.credentials_encrypted ?? null;
 
       try {
-        const merged = buildCredentialEnvelope({
-          existing: (current as { credentials_encrypted?: string } | null)?.credentials_encrypted ?? null,
-          supplied: credentials,
-        });
-        if (merged && merged !== '{}') patch.credentials_encrypted = merged;
+        const merged = hardenCredentialEnvelope(
+          buildCredentialEnvelope({ existing, supplied: checked.supplied }),
+          { clearEnvName: checked.clearEnvName, suppliedKeys: checked.suppliedKeys },
+        );
+        // Write whenever the stored envelope changes — including a clear down to '{}'.
+        if (merged !== (existing ?? '{}')) patch.credentials_encrypted = merged;
       } catch {
         // Fail CLOSED — never downgrade to storing plaintext.
         return res.status(500).json({ error: 'Failed to encrypt credentials' });
@@ -151,10 +171,10 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
         id,
         patch as Parameters<typeof updateProviderAccount>[1],
       );
-      const { credentials_encrypted: _creds, ...safe } = updated;
-      return res.status(200).json({ account: safe });
-    } catch (err: any) {
-      return res.status(500).json({ error: err?.message || 'Failed to update account' });
+      return res.status(200).json({ account: toSafeProviderAccount(updated as unknown as Record<string, unknown>) });
+    } catch {
+      // A fixed message: a database error can quote the row being written.
+      return res.status(500).json({ error: 'Failed to update account' });
     }
   }
 

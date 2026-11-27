@@ -10,11 +10,18 @@ import { validateActionAgainstPlaybook } from './playbooks/playbookValidator';
 import { getToken } from './platformTokenService';
 import { executeRpaTask } from './rpaWorker/rpaWorkerService';
 import { logCommunityAiActionEvent } from './communityAiActionLogService';
-import { getCommunityAiPlatformPolicy } from './communityAiPlatformPolicyService';
+import {
+  resolveCommunityAiPlatformPolicy,
+  decideCommunityAiExecutionPolicy,
+  type CommunityAiExecutionInitiator,
+  type CommunityAiPolicyFlag,
+} from './communityAiPlatformPolicyService';
 import { logUsageEvent } from './usageLedgerService';
 import { incrementUsageMeter } from './usageMeterService';
 import { checkUsageBeforeExecution } from './usageEnforcementService';
 import { ownedDbTable } from '../db/writeOwner';
+import { toPersistedCommunityActionStatus, presentCommunityActionStatus, LOST_RESPONSE_SKIP_REASONS } from './communityAiPersistedStatus';
+import { checkCommunityActionContactGovernance, contactGateAuditPayload } from './communityAiContactGovernanceGate';
 
 import { type CommunityAiAction, type ExecutionMode, type ResultStatus, type ExecutionResult, type MetricEventType, deriveAutoIdempotencyKey, recordExecutionMetric, TERMINAL_ROW_STATUSES, validateAction, requiresApproval, loadHistoryMetrics, resolveExecutionMode, recordManualSimulation, runApiExecution, runRpaExecution, prepareBrowserDispatch, buildDmCommandChain } from './communityAiActionExecutorContracts';
 
@@ -166,11 +173,23 @@ export async function persistExecutionResult(input: {
   command_chain?: CommandChainStep[];
 }): Promise<{ ok: boolean; current_status?: string; error?: string; deduplicated?: boolean; prior_action_id?: string | null }> {
   const result = input.result;
-  const finalStatus = result.status === 'dispatched' ? 'pending' : result.status;
+  // Round 26 (integration review H-2): Production's community_ai_actions_status_check admits only
+  // pending | approved | executed | failed | skipped — there is NO 'blocked'. A 'blocked' write is rejected, the row
+  // stays 'pending' and is re-offered / re-gated forever. A terminal refusal is therefore stored as 'skipped' with its
+  // reason in skip_reason (a column Production has). The in-memory result handed back to the caller is unchanged.
+  // Round 28: every write goes through the one CHECK-faithful mapping
+  // (communityAiPersistedStatus): sent_unverified -> skipped/SENT_UNVERIFIED,
+  // an unknown RPA outcome -> skipped/OUTCOME_UNKNOWN, blocked -> skipped.
+  const persisted = toPersistedCommunityActionStatus(result);
+  const finalStatus: string = persisted.status;
+  const skipReason = persisted.skip_reason;
+  /** The send happened or may have happened (confirmed or not): stamp executed_at, count a send. */
+  const sendIssued = result.status === 'executed' || result.status === 'sent_unverified';
   const effectiveMode = result.execution_mode || null;
 
   const update: Record<string, any> = {
     status: finalStatus,
+    ...(skipReason ? { skip_reason: skipReason } : {}),
     execution_correlation_id: input.correlationId,
     execution_result: {
       ...result,
@@ -192,7 +211,7 @@ export async function persistExecutionResult(input: {
     update.dispatch_lease_expires_at = null;
     update.dispatch_lease_holder_id = null;
     update.dispatch_acknowledged_at = null;
-    if (finalStatus === 'executed' || finalStatus === 'sent_unverified') {
+    if (sendIssued) {
       update.executed_at = new Date().toISOString();
     }
   }
@@ -225,14 +244,14 @@ export async function persistExecutionResult(input: {
     // returning the prior terminal row so the caller can reply idempotently.
     if (update.idempotency_key) {
       const { data: prior } = await ownedDbTable('community_ai_actions')
-        .select('id, status')
+        .select('id, status, skip_reason')
         .eq('organization_id', input.organizationId)
         .eq('idempotency_key', update.idempotency_key)
         .maybeSingle();
       if (prior?.id) {
         return {
           ok: true,
-          current_status: prior.status || finalStatus,
+          current_status: presentCommunityActionStatus(prior) || finalStatus,
           deduplicated: true,
           prior_action_id: prior.id,
         };
@@ -251,7 +270,7 @@ export async function persistExecutionResult(input: {
   // Emit terminal-state metrics. 'dispatched' (stored as 'pending') is
   // in-flight, so no success/failure metric yet — /action-result will emit
   // on terminal transition.
-  if (finalStatus === 'executed' || finalStatus === 'sent_unverified') {
+  if (sendIssued) {
     await recordExecutionMetric({
       organization_id: input.organizationId,
       action_id: input.actionId,
@@ -261,11 +280,12 @@ export async function persistExecutionResult(input: {
       action_type: input.rowHint?.action_type ?? null,
       execution_mode: effectiveMode,
       metadata: {
-        status: finalStatus,
+        status: result.status,
         platform_id: result.platform_id ?? null,
       },
     });
-  } else if (finalStatus === 'failed' || finalStatus === 'blocked' || finalStatus === 'skipped') {
+  } else if (finalStatus === 'failed' || (finalStatus === 'skipped' && !LOST_RESPONSE_SKIP_REASONS.has(String(skipReason ?? '')))) {
+    // A lost/unknown outcome is neither a success nor a failure: no metric claims either.
     await recordExecutionMetric({
       organization_id: input.organizationId,
       action_id: input.actionId,
@@ -366,7 +386,11 @@ export const executeAction = async (
           acting_user_id: action.acting_user_id ?? null,
           status: 'pending',
           execution_correlation_id: correlationId,
-          approved_at: new Date().toISOString(),
+          // Round 28 (review K-1): approved_at is the approval of record the
+          // scheduler, RPA retry and extension hand-out rely on. Only a human
+          // initiated send (manual / bulk click in this request) may stamp it;
+          // an automated insert (auto rules, automation) carries none.
+          approved_at: HUMAN_INITIATED_SOURCES.has(resolveExecutionInitiator(options)) ? new Date().toISOString() : null,
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
         });
@@ -445,6 +469,26 @@ export const executeAction = async (
 };
 
 /**
+ * Round 28: the policy initiator of an executeAction call. `auto: true` is
+ * always automation. Otherwise only an explicit, known source counts; anything
+ * else (missing, misspelt, a future source nobody mapped) is 'unknown' and the
+ * evaluator refuses it. Never defaults to 'manual'.
+ */
+const EXECUTOR_SOURCES: ReadonlySet<string> = new Set(['manual', 'bulk', 'auto', 'scheduler']);
+const HUMAN_INITIATED_SOURCES: ReadonlySet<string> = new Set(['manual', 'bulk']);
+export const resolveExecutionInitiator = (
+  options?: { source?: string; auto?: boolean }
+): CommunityAiExecutionInitiator => {
+  if (options?.auto === true) return 'auto';
+  const source = typeof options?.source === 'string' ? options.source : '';
+  return (EXECUTOR_SOURCES.has(source) ? source : 'unknown') as CommunityAiExecutionInitiator;
+};
+
+/** Keep the audit/event flag names existing dashboards and tests read. */
+const legacyPolicyFlag = (flag: CommunityAiPolicyFlag): string =>
+  flag === 'policy_unreadable' ? 'execution_enabled' : flag;
+
+/**
  * Core execution flow, free of row-write responsibility. Returns the
  * result; persistence is the caller's responsibility via persist:true or a
  * direct call to persistExecutionResult.
@@ -454,74 +498,57 @@ const runExecution = async (
   approved: boolean,
   options?: { notify?: boolean; webhook?: boolean; source?: 'manual' | 'auto' | 'scheduler' | 'bulk'; auto?: boolean }
 ): Promise<ExecutionResult> => {
-  const policy = await getCommunityAiPlatformPolicy();
-  if (!policy.execution_enabled) {
-    await ownedDbTable('audit_logs').insert({
-      actor_user_id: null,
-      action: 'COMMUNITY_AI_PLATFORM_POLICY_BLOCK',
-      metadata: {
-        policy_flag: 'execution_enabled',
-        action_id: action.id,
-        source: options?.source || 'unknown',
-      },
-      created_at: new Date().toISOString(),
-    });
+  // Round 28 (kill-switch caller integration, review P-2): ONE policy decision
+  // for every executeAction caller, from the fail-closed evaluator. The
+  // initiator is the caller's declared source; a missing or unrecognised
+  // source is NOT treated as manual (it is refused initiator_unknown).
+  //   - missing policy row: automated initiators (auto, scheduler) refused;
+  //     human-initiated manual / bulk sends keep the documented defaults;
+  //   - unreadable policy: everything refused;
+  //   - configured row: execution_enabled, auto_rules_enabled (auto only),
+  //     approval of record (scheduler) and require_human_approval as before.
+  // Reason strings are unchanged (PLATFORM_POLICY / HUMAN_APPROVAL_REQUIRED);
+  // the evaluator's code is added as policy_reason_code.
+  const policyResolution = await resolveCommunityAiPlatformPolicy();
+  const initiator = resolveExecutionInitiator(options);
+  const policyDecision = decideCommunityAiExecutionPolicy(policyResolution, {
+    initiator,
+    approved_at: action.approved_at ?? null,
+  });
+  if (policyDecision.allowed === false) {
+    const sourceLabel = options?.source || 'unknown';
+    if (policyDecision.reason_code !== 'approval_required' && policyDecision.reason_code !== 'auto_rules_disabled') {
+      await ownedDbTable('audit_logs').insert({
+        actor_user_id: null,
+        action: 'COMMUNITY_AI_PLATFORM_POLICY_BLOCK',
+        metadata: {
+          policy_flag: legacyPolicyFlag(policyDecision.policy_flag),
+          reason_code: policyDecision.reason_code,
+          policy_state: policyDecision.policy_state,
+          action_id: action.id,
+          source: sourceLabel,
+        },
+        created_at: new Date().toISOString(),
+      });
+    }
     await logCommunityAiActionEvent({
       action_id: action.id,
       tenant_id: action.tenant_id,
       organization_id: action.organization_id,
       event_type: 'skipped_due_to_platform_policy',
       event_payload: {
-        policy_flag: 'execution_enabled',
-        source: options?.source || 'unknown',
+        policy_flag: legacyPolicyFlag(policyDecision.policy_flag),
+        reason_code: policyDecision.reason_code,
+        policy_state: policyDecision.policy_state,
+        source: sourceLabel,
       },
     });
-    return { ok: false, status: 'skipped', reason: 'PLATFORM_POLICY' };
-  }
-
-  // Final boundary for automation: callers check auto_rules_enabled too, but
-  // the platform call happens here, so an automated invocation is refused
-  // here whenever the policy does not explicitly allow auto rules.
-  if ((options?.source === 'auto' || options?.auto === true) && policy.auto_rules_enabled !== true) {
-    await logCommunityAiActionEvent({
-      action_id: action.id,
-      tenant_id: action.tenant_id,
-      organization_id: action.organization_id,
-      event_type: 'skipped_due_to_platform_policy',
-      event_payload: {
-        policy_flag: 'auto_rules_enabled',
-        source: options?.source || 'unknown',
-      },
-    });
-    return { ok: false, status: 'skipped', reason: 'PLATFORM_POLICY' };
-  }
-
-  // Scheduled dispatch runs with no human present, so it needs an approval of
-  // record. Rows approved by an auto rule carry status 'approved' but no
-  // approved_at; only the approve route stamps it.
-  if (options?.source === 'scheduler' && !action.approved_at) {
-    await logCommunityAiActionEvent({
-      action_id: action.id,
-      tenant_id: action.tenant_id,
-      organization_id: action.organization_id,
-      event_type: 'skipped_due_to_platform_policy',
-      event_payload: { policy_flag: 'approval_of_record', source: 'scheduler' },
-    });
-    return { ok: false, status: 'skipped', reason: 'HUMAN_APPROVAL_REQUIRED' };
-  }
-
-  if (policy.require_human_approval && !action.approved_at) {
-    await logCommunityAiActionEvent({
-      action_id: action.id,
-      tenant_id: action.tenant_id,
-      organization_id: action.organization_id,
-      event_type: 'skipped_due_to_platform_policy',
-      event_payload: {
-        policy_flag: 'require_human_approval',
-        source: options?.source || 'unknown',
-      },
-    });
-    return { ok: false, status: 'skipped', reason: 'HUMAN_APPROVAL_REQUIRED' };
+    return {
+      ok: false,
+      status: 'skipped',
+      reason: policyDecision.reason_code === 'approval_required' ? 'HUMAN_APPROVAL_REQUIRED' : 'PLATFORM_POLICY',
+      policy_reason_code: policyDecision.reason_code,
+    };
   }
 
   const validation = validateAction(action);
@@ -531,6 +558,48 @@ const runExecution = async (
 
   if (requiresApproval(action, approved)) {
     return { ok: false, status: 'failed', error: 'APPROVAL_REQUIRED' };
+  }
+
+  // Round 24D / G-7 — contact governance. Every mode (api, rpa, browser
+  // command chain, manual) passes here before any side effect, so a
+  // suppressed recipient is refused for every caller (execute route,
+  // scheduler, auto rules, bulk, engagement reply, response orchestrator).
+  // A real suppression is a terminal 'skipped' (skip_reason CONTACT_SUPPRESSED; Production has no 'blocked'); an unreadable governance
+  // store is fail-closed as 'skipped' (no false suppression is recorded).
+  const contactGate = await checkCommunityActionContactGovernance(action);
+  if (contactGate.allowed === false) {
+    await logCommunityAiActionEvent({
+      action_id: action.id,
+      tenant_id: action.tenant_id,
+      organization_id: action.organization_id,
+      event_type: 'skipped',
+      event_payload: contactGateAuditPayload(contactGate, { source: options?.source || 'unknown', boundary: 'executor' }),
+    });
+    if (contactGate.code === 'CONTACT_SUPPRESSED') {
+      return {
+        ok: false,
+        status: 'skipped',
+        reason: 'CONTACT_SUPPRESSED',
+        error: { code: 'CONTACT_SUPPRESSED', reason: contactGate.reason, store: contactGate.store },
+      };
+    }
+    // Round 26 (S-1/S-2): the recipient/author could not be identified, so it
+    // cannot be proven unsuppressed. Terminal for every caller (automated sends
+    // fail closed and are not retried; a manual caller gets the reason code).
+    if (contactGate.code === 'CONTACT_IDENTITY_UNRESOLVED') {
+      return {
+        ok: false,
+        status: 'skipped',
+        reason: 'CONTACT_IDENTITY_UNRESOLVED',
+        error: { code: 'CONTACT_IDENTITY_UNRESOLVED', reason: contactGate.reason },
+      };
+    }
+    return {
+      ok: false,
+      status: 'skipped',
+      reason: 'CONTACT_GOVERNANCE_UNAVAILABLE',
+      error: { code: 'CONTACT_GOVERNANCE_UNAVAILABLE', reason: contactGate.reason },
+    };
   }
 
   const executionMode = await resolveExecutionMode(action);

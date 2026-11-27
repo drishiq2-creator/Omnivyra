@@ -25,8 +25,40 @@
  *
  * This module never logs, returns or echoes a credential value in any diagnostic. The
  * resolved secret is returned to the caller for immediate use and nothing else.
+ *
+ * ── THE credential-selection policy (round 26; one policy, one resolver) ────────────
+ * Every runtime path that picks a credential — this resolver, provider accounts
+ * (providerAccountService.resolveAccountCredentials), the external-API env policy
+ * (externalApi/envResolutionPolicy), the AI gateway BYOK path
+ * (aiGatewayCredentialPolicy + aiGatewayProvidersRetry) and the outbound transport
+ * (lib/security/safeFetch) — obeys these six rules. There is no second resolver and no
+ * new table; each module enforces the rules at its own seam.
+ *
+ *   P1  RESPECT THE OWNER/PROVIDER POLICY. A provider's declared mode (above), a source's
+ *       owner (platform row vs tenant row) and its Super Admin approval decide which
+ *       credential MAY be used. A name or value the policy refuses resolves to nothing.
+ *   P2  USE THE CORRECT OWNER'S CREDENTIAL. A tenant-owned call uses the tenant's
+ *       credential; a platform-owned call uses the platform's. Platform keys are spent on
+ *       tenant-owned external-API rows only when Super Admin approved that exact
+ *       configuration (is_whitelisted) — never by name or origin match alone (S-12).
+ *       Account keys obey the same destination allow-list as platform env keys (S-3).
+ *   P3  NEVER SILENTLY SUBSTITUTE ANOTHER OWNER'S CREDENTIAL after an auth failure, a
+ *       rate limit or a provider error. A tenant BYOK call that fails is reported as a
+ *       classified failure (CredentialFailureCode) — it is not retried on the platform's
+ *       key or on another provider (T-1). A platform-key fallback to another provider
+ *       is allowed only through the same plan/cost gate as the primary call.
+ *   P4  NEVER EXPOSE VALUES TO CLIENTS. Responses carry states and reason codes
+ *       (`byok_status`, `source`, `reason`), never a value, fragment or length.
+ *   P5  NEVER LOG SECRETS. Logs carry ids, provider names, env-var NAMES that passed
+ *       `isEnvVarName`, statuses and reason codes. A secret-shaped reference is logged as
+ *       a reason code only. Credential headers are never re-sent to another origin
+ *       (safeFetch, S-8/T-14).
+ *   P6  MISSING / INVALID IS DISTINGUISHABLE FROM AN OUTAGE. A failure is classified as
+ *       one of CredentialFailureCode below, so "your key is wrong" and "the provider is
+ *       down" are different answers — without revealing the secret.
  */
 import { supabase } from '../db/supabaseClient';
+import { redactEnvVarName } from '../security/credentialSafety';
 import {
   getActiveAccountForApi,
   resolveAccountCredentials,
@@ -148,6 +180,56 @@ export const PROVIDER_CREDENTIALS: Record<string, ProviderCredentialDescriptor> 
   },
 };
 
+/**
+ * P6 — the shared, value-free failure vocabulary. Every module that refuses or loses a
+ * credential reports one of these codes (never the value):
+ *   credential_missing        nothing configured for the owner that must pay
+ *   credential_refused        a name/value exists but the owner/destination policy refuses it
+ *   credential_reference_invalid  a stored reference is not a well-formed env-var NAME
+ *                             (e.g. a pasted secret) — resolved to nothing
+ *   tenant_key_invalid        the tenant's own key was rejected (401/403) or cannot be used
+ *   tenant_key_rate_limited   the tenant's own key hit the provider's rate limit / quota
+ *   provider_unavailable      the provider is overloaded, erroring or unreachable
+ */
+export type CredentialFailureCode =
+  | 'credential_missing'
+  | 'credential_refused'
+  | 'credential_reference_invalid'
+  | 'tenant_key_invalid'
+  | 'tenant_key_rate_limited'
+  | 'provider_unavailable';
+
+const CREDENTIAL_FAILURE_MESSAGES: Record<CredentialFailureCode, string> = {
+  credential_missing: 'No credential is configured for this provider.',
+  credential_refused: 'The configured credential is not permitted for this destination.',
+  credential_reference_invalid: 'The stored credential reference is not a valid environment-variable name.',
+  tenant_key_invalid: "Your organisation's API key for this AI provider was rejected or cannot be used. Update the key in AI settings. The platform key was not used.",
+  tenant_key_rate_limited: "Your organisation's API key for this AI provider is rate-limited or out of quota. Try again later or raise the limit with the provider. The platform key was not used.",
+  provider_unavailable: 'The AI provider is temporarily unavailable. Please try again shortly.',
+};
+
+/**
+ * A classified credential failure. Its message is fixed text chosen by `code` — it never
+ * includes the provider's own error message (which can quote a key fragment, e.g. OpenAI's
+ * "Incorrect API key provided: sk-ab***yz"), a header, or a value.
+ */
+export class CredentialFailureError extends Error {
+  readonly code: CredentialFailureCode;
+  readonly credentialOwner: 'company' | 'platform';
+  readonly provider: string | null;
+  /** Upstream HTTP status (a number only), kept for usage logging. */
+  readonly status: number | undefined;
+  __retry_attempt?: number;
+  constructor(code: CredentialFailureCode, opts: { owner: 'company' | 'platform'; provider?: string | null; status?: number } ) {
+    super(CREDENTIAL_FAILURE_MESSAGES[code]);
+    this.name = 'CredentialFailureError';
+    this.code = code;
+    this.credentialOwner = opts.owner;
+    this.provider = opts.provider ?? null;
+    this.status = typeof opts.status === 'number' ? opts.status : undefined;
+  }
+}
+
 export interface ResolvedProviderCredential {
   providerKey: string;
   mode: CredentialMode;
@@ -232,7 +314,8 @@ export async function resolveProviderCredential(providerKey: string): Promise<Re
             return {
               providerKey, mode: descriptor.mode, value: credentials.api_key_value,
               source: 'managed', accountId: account.id,
-              envName: credentials.api_key_env_name ?? null,
+              // P-E4: a non-name reference can never surface in a diagnostic.
+              envName: redactEnvVarName(credentials.api_key_env_name),
               reason: credentials.legacy_plaintext_key
                 ? 'Resolved from the active Super Admin account (LEGACY PLAINTEXT — re-enter to encrypt).'
                 : 'Resolved from the active Super Admin account.',
@@ -289,7 +372,7 @@ export async function describeProviderCredential(providerKey: string): Promise<{
     source: resolved.source,
     configured: resolved.value !== null,
     accountId: resolved.accountId,
-    envName: resolved.envName,
+    envName: redactEnvVarName(resolved.envName),
     reason: resolved.reason,
     rationale: descriptor?.rationale ?? 'Unregistered provider.',
   };

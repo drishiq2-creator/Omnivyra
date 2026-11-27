@@ -29,7 +29,8 @@ import { isCurrentlyDisabled } from '@/backend/services/extensionReliabilityServ
 import { validateCommandPayload, COMMAND_SCHEMA_VERSION } from '@/backend/services/extensionCommandSchema';
 import { recordExecutionMetric } from '@/backend/services/communityAiExecutionResultService';
 import { resolveAccountTier } from '@/backend/services/rpaWorker/rpaAccountTier';
-import { getCommunityAiPlatformPolicy } from '@/backend/services/communityAiPlatformPolicyService';
+import { resolveCommunityAiPlatformPolicy, decideCommunityAiExecutionPolicy } from '@/backend/services/communityAiPlatformPolicyService';
+import { checkCommunityActionContactGovernance } from '@/backend/services/communityAiContactGovernanceGate';
 import { EXTENSION_BROWSER_INGESTION_SUSPENDED, SUSPENDED_COLLECTION_COMMANDS } from '@/backend/services/extensionIngestionSuspension';
 
 const LEASE_TTL_SECONDS = 90; // longer than the extension's 30s handler timeout + retries
@@ -173,7 +174,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
 
     let query = supabase
       .from('community_ai_actions')
-      .select('id, platform, action_type, target_id, suggested_text, execution_mode, created_at, dispatch_lease_expires_at, execution_correlation_id, command_chain, command_chain_index, approved_at')
+      .select('id, organization_id, platform, action_type, target_id, suggested_text, execution_mode, created_at, dispatch_lease_expires_at, execution_correlation_id, command_chain, command_chain_index, approved_at')
       .eq('organization_id', session.orgId)
       .eq('status', 'pending')
       .eq('execution_mode', 'browser');
@@ -210,7 +211,11 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     // approval became required, must not go out. An unreadable policy is
     // fail-closed (execution off, approval required). A gated row is left
     // unclaimed, which is provably unsent; dispatch recovery releases it later.
-    const policy = await getCommunityAiPlatformPolicy();
+    // Round 28 (review P-4): the fail-closed evaluator decides per row, from
+    // one policy read per poll. With NO policy row only a row carrying an
+    // approval of record (approved_at: stamped by a human send or the approve
+    // route) is handed out; unreadable or execution off hands out nothing.
+    const policyResolution = await resolveCommunityAiPlatformPolicy();
 
     for (const row of data || []) {
       // ── Chain-aware step selection ────────────────────────────────────────
@@ -239,8 +244,69 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       if (isCurrentlyDisabled(row.platform, topAction)) continue;
 
       if (!READ_ONLY_EXTENSION_ACTIONS.has(capabilityAction)) {
-        if (!policy.execution_enabled) continue;
-        if (policy.require_human_approval && !(row as any).approved_at) continue;
+        const policyDecision = decideCommunityAiExecutionPolicy(policyResolution, {
+          initiator: 'extension_handout',
+          approved_at: ((row as any).approved_at as string | null) ?? null,
+        });
+        if (policyDecision.allowed === false) continue;
+
+        // Round 24D / G-7 — contact governance is re-checked at hand-out,
+        // the last point before the browser sends: a recipient suppressed
+        // after the row was prepared (or between chain steps) must not be
+        // contacted. Tenant = the session's org (the query is scoped to it).
+        // A real suppression terminalizes the row as 'skipped' + skip_reason (auditable,
+        // never re-offered); an unreadable governance store leaves the row
+        // unclaimed, which is provably unsent.
+        // Round 26: `community_ai_actions` has NO `metadata` column (repo schema: baseline + every ALTER), so the
+        // round-24 select of it would fail the whole hand-out (500 COMMANDS_QUERY_FAILED). The person is resolved
+        // by the gate from the engagement store (the DM thread's author / the comment's author); unresolvable is
+        // a terminal CONTACT_IDENTITY_UNRESOLVED below.
+        const contactGate = await checkCommunityActionContactGovernance({
+          id: row.id,
+          organization_id: session.orgId,
+          platform: row.platform,
+          action_type: row.action_type,
+          target_id: row.target_id,
+          metadata: null,
+        });
+        if (contactGate.allowed === false) {
+          // Round 26: an unidentifiable recipient is terminal exactly like a suppressed one (never re-offered).
+          if (contactGate.code === 'CONTACT_SUPPRESSED' || contactGate.code === 'CONTACT_IDENTITY_UNRESOLVED') {
+            const blockCode = contactGate.code;
+            try {
+              const { persistExecutionResult } = await import('@/backend/services/communityAiExecutionResultService');
+              await persistExecutionResult({
+                actionId: row.id,
+                organizationId: session.orgId,
+                correlationId: (row as any).execution_correlation_id ?? randomUUID(),
+                expectedFromStatuses: ['pending'],
+                result: {
+                  ok: false,
+                  // Production has no 'blocked' status (CHECK): terminal 'skipped' + skip_reason.
+                  status: 'skipped',
+                  reason: blockCode,
+                  error: {
+                    code: blockCode,
+                    reason: contactGate.reason,
+                    store: contactGate.code === 'CONTACT_SUPPRESSED' ? contactGate.store : null,
+                  },
+                  response: {
+                    source: 'extension_commands',
+                    gate: 'contact_governance',
+                    identifier_kind: contactGate.identifierKind,
+                  },
+                  execution_mode: 'browser',
+                },
+                // No rowHint: the row's own idempotency_key is left untouched.
+              });
+            } catch (persistErr: any) {
+              console.warn('[extension/commands] contact-governance block persist failed:', persistErr?.message || persistErr);
+            }
+          } else {
+            console.warn('[extension/commands] contact governance unavailable; row left unclaimed:', row.id, contactGate.reason);
+          }
+          continue;
+        }
       }
 
       // Instagram DM business-tier enforcement. Instagram Direct is only
