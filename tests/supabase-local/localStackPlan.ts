@@ -114,10 +114,42 @@ export function selectMigrations(fileNames: readonly string[], ledgerMax: string
     .sort();
 }
 
-/** Same tolerance as real-schema-ci: only "already exists" errors are expected when restoring a pg_dump. */
+/**
+ * Lines that mean the restore did not run to completion, whatever psql's exit status: server-side
+ * FATAL/PANIC, and every libpq / psql connection-loss message. (Review B2: these are not "ERROR:"
+ * lines, so v3 ignored them.)
+ */
+const RESTORE_FAILURE_PATTERNS: readonly RegExp[] = [
+  /\bFATAL:/,
+  /\bPANIC:/,
+  /server closed the connection unexpectedly/i,
+  /terminating connection/i,
+  /connection to server .*(failed|lost)/i,
+  /no connection to the server/i,
+  /could not (connect|receive data|send data)/i,
+  /lost synchronization with server/i,
+  /SSL SYSCALL error/i,
+  /connection (lost|terminated|reset)/i,
+  /the connection to the server was lost/i,
+];
+
+/**
+ * Same tolerance as real-schema-ci, and nothing more: when restoring a pg_dump onto a stack that
+ * already has some objects, a plain `ERROR: ... already exists` is expected. Every other ERROR line,
+ * and every FATAL / PANIC / connection-loss line, is unexpected. A line never counts as tolerated
+ * if it also carries a failure pattern.
+ */
 export function classifyRestoreErrors(stderrText: string): { total: number; unexpected: string[] } {
-  const errors = stderrText.split(/\r?\n/).filter((l) => l.includes('ERROR:'));
-  return { total: errors.length, unexpected: errors.filter((l) => !/already exists/.test(l)) };
+  const lines = stderrText.split(/\r?\n/);
+  const isFailure = (l: string): boolean => RESTORE_FAILURE_PATTERNS.some((p) => p.test(l));
+  const relevant = lines.filter((l) => /\bERROR:/.test(l) || isFailure(l));
+  const tolerated = (l: string): boolean => /\bERROR:/.test(l) && /already exists/.test(l) && !isFailure(l);
+  return { total: relevant.length, unexpected: relevant.filter((l) => !tolerated(l)) };
+}
+
+/** Diagnostics are shown with any URL user-info removed (a libpq message can quote a URL). */
+export function redactConnectionText(line: string): string {
+  return line.replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s'"<>]*@/gi, '$1[REDACTED]@');
 }
 
 /**
@@ -236,7 +268,7 @@ function main(argv: string[]): number {
     case 'classify-restore': {
       const r = classifyRestoreErrors(fs.readFileSync(args[0], 'utf8'));
       console.log(JSON.stringify({ restoreErrors: r.total, unexpected: r.unexpected.length }));
-      for (const l of r.unexpected.slice(0, 20)) console.error(l);
+      for (const l of r.unexpected.slice(0, 20)) console.error(redactConnectionText(l));
       return r.unexpected.length ? 1 : 0;
     }
     case 'export-env': {
