@@ -90,7 +90,12 @@ function fakeTable(table: string) {
   return b;
 }
 
-jest.mock('../../db/writeOwner', () => ({ ownedDbTable: (t: string) => fakeTable(t) }));
+// Phase C: the RPA queue claims/finalises through RPCs (helpers/rpaClaimQueueDouble mirrors the SQL).
+const queueRpc = jest.requireActual('../helpers/rpaClaimQueueDouble').createRpaClaimRpc(() => db.tables.rpa_retry_queue);
+jest.mock('../../db/writeOwner', () => ({
+  ownedDbTable: (t: string) => fakeTable(t),
+  ownedDbRpc: (fn: string, args: Record<string, unknown>) => queueRpc.rpc(fn, args),
+}));
 jest.mock('../../db/supabaseClient', () => ({ supabase: { from: (t: string) => fakeTable(t) } }));
 
 // Round 28: the real fail-closed evaluator decides over this value (configured row unless stated).
@@ -328,18 +333,17 @@ describe('S-3: RPA retry flush re-checks contact governance', () => {
   });
 
   it('a terminal refusal retires the retry row at once (attempts = max, no next_retry_at); CONTROL: a non-terminal one backs off', async () => {
-    db.tables.rpa_retry_queue = [{ id: 'q1', action_id: 'act-r', organization_id: ORG_A, platform: 'linkedin', action_type: 'reply', target_url: 'u', text: 't', attempts: 1, max_attempts: 5 }];
+    // Phase C: rows are claimed and finalised through the claim RPCs; the
+    // outcome is asserted on the row itself.
+    const due = new Date(Date.now() - 60_000).toISOString();
+    db.tables.rpa_retry_queue = [{ id: 'q1', action_id: 'act-r', organization_id: ORG_A, platform: 'linkedin', action_type: 'reply', target_url: 'u', text: 't', attempts: 1, max_attempts: 5, next_retry_at: due }];
     await flushRpaRetryQueueForOrg({ organization_id: ORG_A, handler: async () => ({ success: false, error: 'RPA_RETRY_CONTACT_SUPPRESSED', terminal: true }) });
-    const terminalUpdate = db.queries.filter((q) => q.table === 'rpa_retry_queue' && q.op === 'update').pop();
-    expect(terminalUpdate?.payload).toMatchObject({ attempts: 5 });
-    expect(terminalUpdate?.payload).not.toHaveProperty('next_retry_at');
+    expect(db.tables.rpa_retry_queue[0]).toMatchObject({ attempts: 5, next_retry_at: due, last_error: 'RPA_RETRY_CONTACT_SUPPRESSED', claim_token: null });
 
-    db.queries = [];
-    db.tables.rpa_retry_queue = [{ id: 'q2', action_id: 'act-r', organization_id: ORG_A, platform: 'linkedin', action_type: 'reply', target_url: 'u', text: 't', attempts: 1, max_attempts: 5 }];
+    db.tables.rpa_retry_queue = [{ id: 'q2', action_id: 'act-r', organization_id: ORG_A, platform: 'linkedin', action_type: 'reply', target_url: 'u', text: 't', attempts: 1, max_attempts: 5, next_retry_at: due }];
     await flushRpaRetryQueueForOrg({ organization_id: ORG_A, handler: async () => ({ success: false, error: 'RPA_TIMEOUT' }) });
-    const backoff = db.queries.filter((q) => q.table === 'rpa_retry_queue' && q.op === 'update').pop();
-    expect(backoff?.payload).toMatchObject({ attempts: 2 });
-    expect(backoff?.payload).toHaveProperty('next_retry_at');
+    expect(db.tables.rpa_retry_queue[0]).toMatchObject({ attempts: 2, last_error: 'RPA_TIMEOUT' });
+    expect(Date.parse(db.tables.rpa_retry_queue[0].next_retry_at)).toBeGreaterThan(Date.now());
   });
 });
 

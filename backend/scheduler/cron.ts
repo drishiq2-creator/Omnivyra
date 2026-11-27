@@ -868,8 +868,11 @@ async function startCron(opts: { hostOwnsShutdown?: boolean } = {}) {
   // Fair round-robin: visits each org with a due retry, drains up to
   // `limit_per_org` rows per tick. Successes delete the row; failures
   // bump attempts with exponential backoff (capped 2h); unknown outcomes
-  // are parked, never retried. Order inside flushRetries (24C): due-count
-  // pre-check -> kill switch -> Chromium probe (failures back off, one log
+  // are parked, never retried. Phase C: rows are executed only after an atomic
+  // claim (claim_rpa_retry_queue); an expired claim is parked as outcome-unknown;
+  // only the browser worker (isBrowserWorkerRuntime) claims anything.
+  // Order inside flushRetries (24C): due-count pre-check -> browser-worker
+  // runtime gate -> kill switch -> Chromium probe (failures back off, one log
   // line per real probe) -> per-row approval gate. An empty queue never
   // launches a browser. The skip/probe counters are returned for
   // diagnostics but are NOT log fields, so idle ticks stay silent.
@@ -892,6 +895,8 @@ async function startCron(opts: { hostOwnsShutdown?: boolean } = {}) {
           errors:              result.errors,
           due:                 result.due,
           skipped_empty:       result.skipped_empty,
+          skipped_runtime:     result.skipped_runtime,
+          parked_expired:      result.parked_expired,
           skipped_policy:      result.skipped_policy,
           skipped_env:         result.skipped_env,
           env_failure_streak:  result.env_failure_streak,

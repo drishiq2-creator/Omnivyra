@@ -1,26 +1,33 @@
-import { supabase } from '../../db/supabaseClient';
+import { hostname } from 'os';
 import type { RpaTask, RpaResult } from './rpaWorkerService';
-import { ownedDbTable } from '../../db/writeOwner';
+import { ownedDbTable, ownedDbRpc } from '../../db/writeOwner';
 
 /**
- * Durable RPA retry buffer with per-organization fairness.
+ * Durable RPA work queue (rpa_retry_queue) with an atomic claim and
+ * per-organization fairness.
  *
- * Phase 9 contract:
- *   - enqueue is unchanged but the unique index is now
- *     (organization_id, action_id) so the same action can not be re-queued
- *     under a different org via any path.
- *   - flush is split into a per-org sweep (`flushRpaRetryQueueForOrg`) and
- *     a round-robin driver (`flushRpaRetryQueueRoundRobin`) that visits
- *     every org with a backlog, drains up to `limit_per_org` rows each,
- *     and stops when every org has been seen or no org has more work.
- *   - a single tenant with 10,000 failing tasks can never monopolise
- *     the worker's sweep budget; every other org gets its own slice.
+ * Phase C (20270314000001_rpa_retry_queue_claim):
+ *   - every accepted RPA task has a durable row BEFORE anything executes
+ *     (`acceptRpaTask`, idempotent per action: a duplicate accept is a no-op);
+ *   - a row is executed only by the worker that CLAIMED it
+ *     (`claim_rpa_retry_queue`, FOR UPDATE SKIP LOCKED, one token per row), so
+ *     overlapping flushes get disjoint rows;
+ *   - the outcome is written only when the claim token still matches
+ *     (`finalize_rpa_retry_queue_claim`); a late finaliser is refused;
+ *   - LOST-RESPONSE RULE: a claim whose lease expired may already have posted.
+ *     It is never re-claimed: `park_expired_rpa_retry_claims` parks it as
+ *     RPA_OUTCOME_UNKNOWN (attempts = max_attempts), exactly like an outcome the
+ *     handler itself reported as unknown.
+ *   - success keeps the row as a tombstone (completed_at, attempts =
+ *     max_attempts) so the same action can never be accepted and run again.
+ *
+ * Phase 9 fairness is unchanged: `flushRpaRetryQueueRoundRobin` visits every
+ * org with due work, at most `limit_per_org` claims each, bounded per tick.
  *
  * Backoff: `2^attempts` minutes, capped at 120 minutes. Max attempts is 5.
  */
 
 const MAX_ATTEMPTS = 5;
-const BACKOFF_CAP_MINUTES = 120;
 const DEFAULT_PER_ORG_LIMIT = 10;
 
 // Conservative per-tick global execution cap. A large post-outage backlog
@@ -33,69 +40,176 @@ const MAX_TASKS_PER_TICK = (() => {
   return Number.isInteger(o) && o >= 1 && o <= 1000 ? o : 50;
 })();
 
-export async function enqueueRpaRetry(task: RpaTask, opts?: {
-  error?: string | null;
-  delaySeconds?: number;
-}): Promise<{ queued: boolean; attempts: number; next_retry_at: string; error?: string }> {
-  const delay = Math.max(1, opts?.delaySeconds ?? 30);
-  const nextRetryAt = new Date(Date.now() + delay * 1000).toISOString();
+/**
+ * Claim lease. Longer than the executor's RPA hard timeout (5 min) plus the
+ * heavy-job slot wait, so a healthy run finalises well inside it. A lease that
+ * does expire is parked as outcome-unknown, never re-run.
+ */
+export const RPA_CLAIM_LEASE_SECONDS = (() => {
+  const o = Number(process.env.RPA_CLAIM_LEASE_SECONDS);
+  return Number.isInteger(o) && o >= 60 && o <= 3600 ? o : 900;
+})();
+
+/** Identity recorded in claimed_by (evidence on a parked expired claim). */
+export const rpaWorkerIdentity = (): string => {
+  let host = 'unknown-host';
+  try { host = hostname() || host; } catch { /* keep default */ }
+  return `${host}:${process.pid}`.slice(0, 200);
+};
+
+/** Prefix carried by every outcome-unknown result / parked row. */
+export const RPA_OUTCOME_UNKNOWN_PREFIX = 'RPA_OUTCOME_UNKNOWN';
+
+const firstLine = (v: unknown, max = 300): string =>
+  String((v as any)?.message ?? v ?? '').split(/\r?\n/)[0].slice(0, max);
+
+export type RpaQueueClaim = { queue_id: string; claim_token: string };
+
+export type RpaAcceptResult =
+  | { ok: true; accepted: true; queue_id: string; claim: RpaQueueClaim | null }
+  | { ok: true; accepted: false; queue_id: string | null; claim: null }
+  | { ok: false; error: string };
+
+/**
+ * Durable, idempotent enqueue. With `claimFor` the row is born claimed by that
+ * worker (the caller executes it now and must finalise it); without it the row
+ * is due now and unclaimed (a later worker flush claims it).
+ *
+ * Idempotency: INSERT ... ON CONFLICT DO NOTHING on the unique action index. A
+ * second accept of the same action (queued, running, finished, parked) returns
+ * accepted=false and changes nothing.
+ */
+export async function acceptRpaTask(
+  task: RpaTask,
+  opts?: { claimFor?: string | null; leaseSeconds?: number },
+): Promise<RpaAcceptResult> {
   try {
-    const { data: existing } = await ownedDbTable('rpa_retry_queue')
-      .select('id, attempts, max_attempts')
-      .eq('organization_id', task.organization_id)
-      .eq('action_id', task.action_id)
-      .maybeSingle();
-    if (existing) {
-      const attempts = Number((existing as any).attempts ?? 0) + 1;
-      const maxAttempts = Number((existing as any).max_attempts ?? MAX_ATTEMPTS);
-      if (attempts >= maxAttempts) {
-        return { queued: false, attempts, next_retry_at: nextRetryAt, error: 'MAX_ATTEMPTS_EXCEEDED' };
-      }
-      const { error } = await ownedDbTable('rpa_retry_queue')
-        .update({
-          attempts,
-          last_error: (opts?.error ?? null)?.toString().slice(0, 500) ?? null,
-          last_attempt_at: new Date().toISOString(),
-          next_retry_at: nextRetryAt,
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', (existing as any).id);
-      if (error) return { queued: false, attempts, next_retry_at: nextRetryAt, error: error.message };
-      return { queued: true, attempts, next_retry_at: nextRetryAt };
-    }
-    const { error } = await ownedDbTable('rpa_retry_queue').insert({
-      action_id: task.action_id,
-      organization_id: task.organization_id,
-      platform: task.platform,
-      action_type: task.action_type,
-      target_url: task.target_url,
-      text: task.text ?? null,
-      attempts: 1,
-      last_error: (opts?.error ?? null)?.toString().slice(0, 500) ?? null,
-      last_attempt_at: new Date().toISOString(),
-      next_retry_at: nextRetryAt,
-      max_attempts: MAX_ATTEMPTS,
+    const { data, error } = await ownedDbRpc('rpa_retry_queue_accept', {
+      p_organization_id: task.organization_id,
+      p_action_id: task.action_id,
+      p_platform: task.platform,
+      p_action_type: task.action_type,
+      p_target_url: task.target_url,
+      p_text: task.text ?? null,
+      p_claimed_by: opts?.claimFor ?? null,
+      p_lease_seconds: opts?.claimFor ? (opts.leaseSeconds ?? RPA_CLAIM_LEASE_SECONDS) : null,
     });
-    if (error) return { queued: false, attempts: 1, next_retry_at: nextRetryAt, error: error.message };
-    return { queued: true, attempts: 1, next_retry_at: nextRetryAt };
+    if (error) return { ok: false, error: firstLine((error as any)?.message || 'RPA_ACCEPT_FAILED') };
+    const row = (Array.isArray(data) ? data[0] : data) as
+      | { accepted?: boolean; queue_id?: string | null; claim_token?: string | null }
+      | null
+      | undefined;
+    // A null error is not an answer: no row back means we do not know.
+    if (!row || typeof row.accepted !== 'boolean') return { ok: false, error: 'RPA_ACCEPT_NO_RESULT' };
+    if (row.accepted !== true) {
+      return { ok: true, accepted: false, queue_id: row.queue_id ?? null, claim: null };
+    }
+    if (!row.queue_id) return { ok: false, error: 'RPA_ACCEPT_NO_RESULT' };
+    if (opts?.claimFor && !row.claim_token) return { ok: false, error: 'RPA_ACCEPT_CLAIM_MISSING' };
+    return {
+      ok: true,
+      accepted: true,
+      queue_id: row.queue_id,
+      claim: row.claim_token ? { queue_id: row.queue_id, claim_token: row.claim_token } : null,
+    };
   } catch (err: any) {
-    return { queued: false, attempts: 0, next_retry_at: nextRetryAt, error: err?.message || 'RETRY_ENQUEUE_FAILED' };
+    return { ok: false, error: firstLine(err || 'RPA_ACCEPT_FAILED') };
+  }
+}
+
+export type ClaimedRpaRow = {
+  id: string;
+  action_id: string;
+  organization_id: string;
+  platform: string;
+  action_type: string;
+  target_url: string;
+  text: string | null;
+  attempts: number;
+  max_attempts: number;
+  claim_token: string;
+};
+
+/** Claim up to `limit` due rows (optionally for one org). Disjoint across concurrent callers. */
+export async function claimRpaRetryRows(input: {
+  worker: string;
+  limit: number;
+  organization_id?: string | null;
+  leaseSeconds?: number;
+}): Promise<{ rows: ClaimedRpaRow[]; error: string | null }> {
+  try {
+    const { data, error } = await ownedDbRpc('claim_rpa_retry_queue', {
+      p_claimed_by: input.worker,
+      p_lease_seconds: input.leaseSeconds ?? RPA_CLAIM_LEASE_SECONDS,
+      p_limit: input.limit,
+      p_organization_id: input.organization_id ?? null,
+    });
+    if (error) return { rows: [], error: firstLine((error as any)?.message || 'RPA_CLAIM_FAILED') };
+    if (!Array.isArray(data)) return { rows: [], error: 'RPA_CLAIM_NO_RESULT' };
+    return { rows: data as ClaimedRpaRow[], error: null };
+  } catch (err: any) {
+    return { rows: [], error: firstLine(err || 'RPA_CLAIM_FAILED') };
+  }
+}
+
+export type RpaFinalizeOutcome = 'succeeded' | 'failed' | 'unknown';
+
+/**
+ * Record a claimed row's outcome. 'finalized' only when the token matched;
+ * 'token_mismatch' means the claim was lost (parked after expiry, or never
+ * ours) and NOTHING was written.
+ */
+export async function finalizeRpaClaim(
+  claim: RpaQueueClaim,
+  outcome: RpaFinalizeOutcome,
+  opts?: { error?: string | null; retryDelaySeconds?: number | null; terminal?: boolean },
+): Promise<'finalized' | 'token_mismatch' | 'finalize_failed'> {
+  try {
+    const delay = opts?.retryDelaySeconds;
+    const { data, error } = await ownedDbRpc('finalize_rpa_retry_queue_claim', {
+      p_queue_id: claim.queue_id,
+      p_claim_token: claim.claim_token,
+      p_outcome: outcome,
+      p_error: opts?.error ? firstLine(opts.error, 480) : null,
+      p_retry_delay_seconds: typeof delay === 'number' && delay >= 1 ? Math.min(86400, Math.floor(delay)) : null,
+      p_terminal: opts?.terminal === true,
+    });
+    if (error) return 'finalize_failed';
+    if (data === true) return 'finalized';
+    if (data === false) return 'token_mismatch';
+    return 'finalize_failed';
+  } catch {
+    return 'finalize_failed';
+  }
+}
+
+/** Park every expired claim as outcome-unknown (never re-run). Returns the count or an error. */
+export async function parkExpiredRpaClaims(): Promise<{ parked: number; error: string | null }> {
+  try {
+    const { data, error } = await ownedDbRpc('park_expired_rpa_retry_claims', {});
+    if (error) return { parked: 0, error: firstLine((error as any)?.message || 'RPA_PARK_FAILED') };
+    if (typeof data !== 'number') return { parked: 0, error: 'RPA_PARK_NO_RESULT' };
+    return { parked: data, error: null };
+  } catch (err: any) {
+    return { parked: 0, error: firstLine(err || 'RPA_PARK_FAILED') };
   }
 }
 
 /**
- * Cheap pre-check for the scheduler: how many retry rows are due now
- * (next_retry_at <= now, attempts < MAX_ATTEMPTS). A head-only count, no
- * rows returned. The flush calls this BEFORE the platform policy read and
- * BEFORE the Chromium readiness probe, so an empty queue never launches a
+ * Cheap pre-check for the scheduler: how many rows need the flush now — due,
+ * unclaimed, live rows, plus expired claims waiting to be parked. A head-only
+ * count, no rows returned. The flush calls this BEFORE the platform policy read
+ * and BEFORE the Chromium readiness probe, so an empty queue never launches a
  * browser. A read error is returned as `error`, never as "0 due".
  */
 export async function countDueRpaRetries(): Promise<{ due: number; error: string | null }> {
   try {
+    const nowIso = new Date().toISOString();
     const { count, error } = await ownedDbTable('rpa_retry_queue')
       .select('id', { count: 'exact', head: true })
-      .lte('next_retry_at', new Date().toISOString())
-      .lt('attempts', MAX_ATTEMPTS);
+      .lte('next_retry_at', nowIso)
+      .lt('attempts', MAX_ATTEMPTS)
+      .or(`claim_token.is.null,claim_expires_at.lte.${nowIso}`);
     if (error) return { due: 0, error: (error as any)?.message || 'RPA_RETRY_COUNT_FAILED' };
     if (typeof count !== 'number') return { due: 0, error: 'RPA_RETRY_COUNT_MISSING' };
     return { due: count, error: null };
@@ -103,36 +217,6 @@ export async function countDueRpaRetries(): Promise<{ due: number; error: string
     return { due: 0, error: err?.message || 'RPA_RETRY_COUNT_FAILED' };
   }
 }
-
-/** Prefix carried by every outcome-unknown result / parked row. */
-export const RPA_OUTCOME_UNKNOWN_PREFIX = 'RPA_OUTCOME_UNKNOWN';
-
-/**
- * Park a row whose executed action has an UNKNOWN outcome (the browser may
- * already have posted / liked). It is NOT recorded as a definite failure and
- * it is NOT re-executed automatically: attempts is set to max_attempts (the
- * row leaves the due set and enqueueRpaRetry refuses to re-arm the same
- * action), next_retry_at is left as-is, last_error carries the
- * RPA_OUTCOME_UNKNOWN prefix for operator reconciliation.
- */
-async function parkOutcomeUnknown(rowId: string, error: string, maxAttempts: number): Promise<'parked' | 'park_failed'> {
-  const msg = error.startsWith(RPA_OUTCOME_UNKNOWN_PREFIX) ? error : `${RPA_OUTCOME_UNKNOWN_PREFIX}:${error}`;
-  try {
-    const { error: upErr } = await ownedDbTable('rpa_retry_queue')
-      .update({
-        attempts: maxAttempts,
-        last_error: msg.slice(0, 500),
-        last_attempt_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', rowId);
-    return upErr ? 'park_failed' : 'parked';
-  } catch {
-    return 'park_failed';
-  }
-}
-
-type HandlerResult = Awaited<ReturnType<(task: RpaTask) => Promise<RpaResult>>>;
 
 type PerOrgFlushOutcome = {
   organization_id: string;
@@ -144,114 +228,83 @@ type PerOrgFlushOutcome = {
   errors: number;
 };
 
-async function recordTerminalFailure(rowId: string, result: HandlerResult, attempts: number, maxAttempts: number) {
-  const capMinutes = BACKOFF_CAP_MINUTES;
-  const backoffMinutes = Math.min(capMinutes, Math.pow(2, attempts));
-  const nextRetryAt = new Date(Date.now() + backoffMinutes * 60_000).toISOString();
-  const terminal = attempts >= maxAttempts;
-  await ownedDbTable('rpa_retry_queue')
-    .update({
-      attempts,
-      last_error: (result.error ?? 'unknown').toString().slice(0, 500),
-      last_attempt_at: new Date().toISOString(),
-      ...(terminal ? {} : { next_retry_at: nextRetryAt }),
-      updated_at: new Date().toISOString(),
-    })
-    .eq('id', rowId);
-}
-
 /**
- * Flush up to `limit` rows from the retry queue for ONE organization.
- * Successes delete the row; failures bump attempts with exponential
- * backoff (2^n minutes, capped). Returns a counter record.
+ * Claim and run up to `limit` rows for ONE organization. Only claimed rows are
+ * executed; every outcome is written through the token-matched finaliser.
+ * Success = tombstone; definite failure = attempts + 1 with exponential backoff
+ * (or retired when terminal); unknown / handler throw = parked, never re-run.
+ * A finaliser that cannot write leaves the claim in place: it expires and is
+ * parked as unknown, so the row is never executed twice.
  */
 export async function flushRpaRetryQueueForOrg(input: {
   organization_id: string;
   handler: (task: RpaTask) => Promise<RpaResult>;
   limit?: number;
+  worker?: string;
 }): Promise<PerOrgFlushOutcome> {
   const { organization_id: orgId, handler } = input;
   const limit = input.limit ?? DEFAULT_PER_ORG_LIMIT;
+  const worker = input.worker ?? rpaWorkerIdentity();
   let claimed = 0, succeeded = 0, failed = 0, unknown = 0, errors = 0;
 
-  try {
-    const { data: rows } = await ownedDbTable('rpa_retry_queue')
-      .select('id, action_id, organization_id, platform, action_type, target_url, text, attempts, max_attempts')
-      .eq('organization_id', orgId)
-      .lte('next_retry_at', new Date().toISOString())
-      // Terminal / parked rows stay "due" forever; without this filter they
-      // would fill the per-org limit and starve live retries.
-      .lt('attempts', MAX_ATTEMPTS)
-      .order('next_retry_at', { ascending: true })
-      .limit(limit);
+  const claim = await claimRpaRetryRows({ worker, limit, organization_id: orgId });
+  if (claim.error) {
+    console.warn('[rpaRetryQueue] claim failed:', claim.error, 'org=', orgId);
+    return { organization_id: orgId, claimed, succeeded, failed, unknown, errors: 1 };
+  }
 
-    for (const row of rows || []) {
-      const maxAttempts = Number(row.max_attempts ?? MAX_ATTEMPTS);
-      // Terminal / parked rows keep a due next_retry_at; never re-execute them.
-      if (Number(row.attempts ?? 0) >= maxAttempts) continue;
-      claimed += 1;
-      let result: RpaResult;
-      try {
-        const task: RpaTask = {
-          tenant_id: row.organization_id as string,
-          organization_id: row.organization_id as string,
-          platform: row.platform as string,
-          action_type: row.action_type as RpaTask['action_type'],
-          target_url: row.target_url as string,
-          text: (row.text as string | null) ?? null,
-          action_id: row.action_id as string,
-        };
-        result = await handler(task);
-      } catch (err: any) {
-        // The handler may have thrown mid-action (after a click/submit): the
-        // outcome is unknown. Previously the row was left untouched and due,
-        // so it was re-executed on the next tick with no attempt bump.
-        unknown += 1;
-        const msg = String(err?.message || err || 'HANDLER_THREW').split(/\r?\n/)[0];
-        console.warn(`[rpaRetryQueue] handler threw; outcome unknown, row parked org=${orgId} row=${row.id}: ${msg.slice(0, 200)}`);
-        if ((await parkOutcomeUnknown(row.id as string, `HANDLER_THREW:${msg}`, maxAttempts)) !== 'parked') errors += 1;
-        continue;
-      }
-      try {
-        if (result.success) {
-          succeeded += 1;
-          const { error: delErr } = await ownedDbTable('rpa_retry_queue').delete().eq('id', row.id);
-          if (delErr) {
-            // The action ran; a row left due would re-execute it next tick.
-            errors += 1;
-            await parkOutcomeUnknown(row.id as string, 'SUCCEEDED_ROW_DELETE_FAILED', maxAttempts);
-          }
-        } else if (result.outcome_unknown) {
-          unknown += 1;
-          if ((await parkOutcomeUnknown(row.id as string, result.error ?? 'UNKNOWN', maxAttempts)) !== 'parked') errors += 1;
-        } else {
-          failed += 1;
-          // Round 26 (suppression): a terminal refusal (e.g. RPA_RETRY_CONTACT_SUPPRESSED) is retired at once, not retried.
-          // Round 28 merge: uses the loop-scoped maxAttempts declared above (rpa-retry-backoff).
-          const attempts = result.terminal ? Math.max(maxAttempts, Number(row.attempts ?? 0) + 1) : Number(row.attempts ?? 0) + 1;
-          await recordTerminalFailure(row.id as string, result, attempts, maxAttempts);
-        }
-      } catch (err: any) {
-        errors += 1;
-        console.warn('[rpaRetryQueue] result bookkeeping failed:', err?.message || err, 'org=', orgId);
-      }
+  for (const row of claim.rows) {
+    claimed += 1;
+    const token: RpaQueueClaim = { queue_id: String(row.id), claim_token: String(row.claim_token) };
+    const note = (r: 'finalized' | 'token_mismatch' | 'finalize_failed') => {
+      if (r === 'finalized') return;
+      errors += 1;
+      console.warn(`[rpaRetryQueue] finalise ${r} org=${orgId} row=${row.id}`);
+    };
+    let result: RpaResult;
+    try {
+      const task: RpaTask = {
+        tenant_id: row.organization_id,
+        organization_id: row.organization_id,
+        platform: row.platform,
+        action_type: row.action_type as RpaTask['action_type'],
+        target_url: row.target_url,
+        text: row.text ?? null,
+        action_id: row.action_id,
+      };
+      result = await handler(task);
+    } catch (err: any) {
+      // The handler may have thrown mid-action (after a click/submit): unknown.
+      unknown += 1;
+      const msg = firstLine(err || 'HANDLER_THREW', 200);
+      console.warn(`[rpaRetryQueue] handler threw; outcome unknown, row parked org=${orgId} row=${row.id}: ${msg}`);
+      note(await finalizeRpaClaim(token, 'unknown', { error: `HANDLER_THREW:${msg}` }));
+      continue;
     }
-  } catch (err: any) {
-    errors += 1;
-    console.warn('[rpaRetryQueue] per-org sweep failed:', err?.message || err, 'org=', orgId);
+    if (result?.success) {
+      succeeded += 1;
+      note(await finalizeRpaClaim(token, 'succeeded'));
+    } else if (result?.outcome_unknown) {
+      unknown += 1;
+      note(await finalizeRpaClaim(token, 'unknown', { error: result.error ?? 'UNKNOWN' }));
+    } else {
+      failed += 1;
+      // Round 26: a terminal refusal (e.g. RPA_RETRY_CONTACT_SUPPRESSED) is retired at once, not retried.
+      note(await finalizeRpaClaim(token, 'failed', {
+        error: (result?.error ?? 'unknown').toString(),
+        terminal: result?.terminal === true,
+      }));
+    }
   }
 
   return { organization_id: orgId, claimed, succeeded, failed, unknown, errors };
 }
 
 /**
- * Fair round-robin retry flush. Enumerates organization_ids with at
- * least one due retry row (attempts < max_attempts, next_retry_at <=
- * now()), visits each one with a bounded per-org limit. No org can
+ * Fair round-robin retry flush. Parks expired claims first (lost-response
+ * rule), then enumerates organization_ids with at least one due, unclaimed
+ * row and visits each one with a bounded per-org claim limit. No org can
  * monopolise the sweep.
- *
- * Returns aggregate counters + remaining backlog so the scheduler's
- * activity log surfaces the state.
  */
 export async function flushRpaRetryQueueRoundRobin(input: {
   handler: (task: RpaTask) => Promise<RpaResult>;
@@ -265,22 +318,35 @@ export async function flushRpaRetryQueueRoundRobin(input: {
   unknown: number;
   errors: number;
   remaining: number;
+  /** Expired claims parked as outcome-unknown this tick. */
+  parked_expired: number;
   per_org?: PerOrgFlushOutcome[];
 }> {
   const limitPerOrg = input.limitPerOrg ?? DEFAULT_PER_ORG_LIMIT;
   const maxOrgs = input.maxOrgs ?? 100;
+  const worker = rpaWorkerIdentity();
+  let errors = 0;
 
-  // Distinct org enumeration from the retry queue itself — orgs with no
-  // due retries are skipped. We pull up to 10× maxOrgs candidate rows so
-  // we can dedupe without querying per-org separately.
+  const park = await parkExpiredRpaClaims();
+  if (park.error) {
+    errors += 1;
+    console.warn('[rpaRetryQueue] expired-claim park failed:', park.error);
+  } else if (park.parked > 0) {
+    console.warn(`[rpaRetryQueue] parked ${park.parked} expired claim(s) as ${RPA_OUTCOME_UNKNOWN_PREFIX} (never re-run)`);
+  }
+
+  // Distinct org enumeration from the queue itself — orgs with no due,
+  // unclaimed rows are skipped. Up to 10× maxOrgs candidate rows, deduped.
   let orgIds: string[] = [];
   try {
-    const { data } = await ownedDbTable('rpa_retry_queue')
+    const { data, error } = await ownedDbTable('rpa_retry_queue')
       .select('organization_id')
       .lte('next_retry_at', new Date().toISOString())
       .lt('attempts', MAX_ATTEMPTS)
+      .is('claim_token', null)
       .order('next_retry_at', { ascending: true })
       .limit(maxOrgs * 10);
+    if (error) throw error;
     const seen = new Set<string>();
     for (const r of (data || []) as Array<{ organization_id: string }>) {
       if (r.organization_id && !seen.has(r.organization_id)) {
@@ -291,20 +357,19 @@ export async function flushRpaRetryQueueRoundRobin(input: {
     orgIds = Array.from(seen);
   } catch (err: any) {
     console.warn('[rpaRetryQueue] org enumeration failed:', err?.message || err);
-    return { orgs_visited: 0, claimed: 0, succeeded: 0, failed: 0, unknown: 0, errors: 1, remaining: 0 };
+    return { orgs_visited: 0, claimed: 0, succeeded: 0, failed: 0, unknown: 0, errors: errors + 1, remaining: 0, parked_expired: park.parked };
   }
 
   const perOrg: PerOrgFlushOutcome[] = [];
-  let claimed = 0, succeeded = 0, failed = 0, unknown = 0, errors = 0;
+  let claimed = 0, succeeded = 0, failed = 0, unknown = 0;
   let budget = MAX_TASKS_PER_TICK;
   for (const orgId of orgIds) {
     if (budget <= 0) break; // per-tick cap reached — remaining orgs drain next tick
     const outcome = await flushRpaRetryQueueForOrg({
       organization_id: orgId,
       handler: input.handler,
-      // Round-robin fairness preserved: still ≤ limitPerOrg per org, just
-      // additionally bounded by the remaining global per-tick budget.
       limit: Math.min(limitPerOrg, budget),
+      worker,
     });
     perOrg.push(outcome);
     claimed += outcome.claimed;
@@ -328,6 +393,7 @@ export async function flushRpaRetryQueueRoundRobin(input: {
     unknown,
     errors,
     remaining: remaining ?? 0,
+    parked_expired: park.parked,
     per_org: perOrg,
   };
 }

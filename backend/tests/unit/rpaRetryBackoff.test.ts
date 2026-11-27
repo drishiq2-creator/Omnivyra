@@ -16,6 +16,8 @@
  * exists (the same harness DOES probe / execute when it should).
  */
 
+import { createRpaClaimRpc, orFilter } from '../helpers/rpaClaimQueueDouble';
+
 type Row = Record<string, any>;
 const tables: Record<string, Row[]> = { rpa_retry_queue: [], community_ai_actions: [] };
 
@@ -51,6 +53,9 @@ function makeQuery(table: string) {
     eq: (k: string, v: unknown) => { filters.push((r) => r[k] === v); return q; },
     lte: (k: string, v: string) => { filters.push((r) => String(r[k]) <= v); return q; },
     lt: (k: string, v: number) => { filters.push((r) => Number(r[k]) < v); return q; },
+    // Phase C: the flush reads claim state (is / or) and claims through RPCs.
+    is: (k: string, v: unknown) => { filters.push((r) => (r[k] ?? null) === v); return q; },
+    or: (expr: string) => { filters.push(orFilter(expr)); return q; },
     order: () => q,
     limit: () => q,
     maybeSingle: () => { single = true; return Promise.resolve(run()); },
@@ -59,9 +64,18 @@ function makeQuery(table: string) {
   return q;
 }
 
+const queueRpc = createRpaClaimRpc(() => tables.rpa_retry_queue);
 jest.mock('../../db/supabaseClient', () => ({
-  supabase: { from: jest.fn((t: string) => makeQuery(t)), rpc: jest.fn() },
+  supabase: { from: jest.fn((t: string) => makeQuery(t)), rpc: jest.fn((fn: string, args: any) => queueRpc.rpc(fn, args)) },
 }));
+// Phase C: only the browser worker claims and executes queue rows.
+const savedRuntime = process.env.OMNIVYRA_BROWSER_RUNTIME;
+const savedVercel = process.env.VERCEL;
+beforeAll(() => { process.env.OMNIVYRA_BROWSER_RUNTIME = 'worker'; delete process.env.VERCEL; });
+afterAll(() => {
+  if (savedRuntime === undefined) delete process.env.OMNIVYRA_BROWSER_RUNTIME; else process.env.OMNIVYRA_BROWSER_RUNTIME = savedRuntime;
+  if (savedVercel !== undefined) process.env.VERCEL = savedVercel;
+});
 
 const policy = { execution_enabled: true, auto_rules_enabled: true, require_human_approval: false };
 const policyRead = jest.fn(async () => ({ ...policy, updated_at: null, updated_by: null }));
@@ -313,7 +327,9 @@ describe('24C (c) kill switch and approval stay before any execution', () => {
     const out = await rpaSchedulerHooks.flushRetries();
     expect(runRpaScript).toHaveBeenCalledTimes(1);
     expect(out.succeeded).toBe(1);
-    expect(tables.rpa_retry_queue).toHaveLength(0);
+    // Phase C: success tombstones the row (never deleted, never re-run).
+    expect(tables.rpa_retry_queue).toHaveLength(1);
+    expect(tables.rpa_retry_queue[0].completed_at).toEqual(expect.any(String));
   });
 });
 
@@ -357,7 +373,11 @@ describe('24C (d) an unknown outcome is never a definite failure', () => {
     const out = await rpaSchedulerHooks.flushRetries();
     expect(runRpaScript).toHaveBeenCalledTimes(1);
     expect((runRpaScript as jest.Mock).mock.calls[0][0].action_id).toBe('act-1');
-    expect(tables.rpa_retry_queue.map((r) => r.id)).toEqual(['rq-x']);
+    // Phase C: rq-y succeeded and is tombstoned; rq-x (terminal) is untouched.
+    const byId = (id: string) => tables.rpa_retry_queue.find((r) => r.id === id)!;
+    expect(byId('rq-y').completed_at).toEqual(expect.any(String));
+    expect(byId('rq-x').completed_at ?? null).toBeNull();
+    expect(byId('rq-x').attempts).toBe(5);
     expect(out.claimed).toBe(1);
   });
 

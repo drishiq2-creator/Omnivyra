@@ -5,6 +5,8 @@
  * over an in-memory table double; only the Playwright runner is stubbed.
  */
 
+import { createRpaClaimRpc, orFilter } from '../helpers/rpaClaimQueueDouble';
+
 type Row = Record<string, any>;
 const tables: Record<string, Row[]> = { rpa_retry_queue: [], community_ai_actions: [] };
 let actionReadFails = false;
@@ -60,6 +62,15 @@ function makeQuery(table: string) {
       filters.push((r) => Number(r[k]) < v);
       return q;
     },
+    // Phase C: the flush reads claim state (is / or) and claims through RPCs.
+    is: (k: string, v: unknown) => {
+      filters.push((r) => (r[k] ?? null) === v);
+      return q;
+    },
+    or: (expr: string) => {
+      filters.push(orFilter(expr));
+      return q;
+    },
     order: () => q,
     limit: () => q,
     maybeSingle: () => {
@@ -71,9 +82,18 @@ function makeQuery(table: string) {
   return q;
 }
 
+const queueRpc = createRpaClaimRpc(() => tables.rpa_retry_queue);
 jest.mock('../../db/supabaseClient', () => ({
-  supabase: { from: jest.fn((t: string) => makeQuery(t)), rpc: jest.fn() },
+  supabase: { from: jest.fn((t: string) => makeQuery(t)), rpc: jest.fn((fn: string, args: any) => queueRpc.rpc(fn, args)) },
 }));
+// Phase C: only the browser worker claims and executes queue rows.
+const savedRuntime = process.env.OMNIVYRA_BROWSER_RUNTIME;
+const savedVercel = process.env.VERCEL;
+beforeAll(() => { process.env.OMNIVYRA_BROWSER_RUNTIME = 'worker'; delete process.env.VERCEL; });
+afterAll(() => {
+  if (savedRuntime === undefined) delete process.env.OMNIVYRA_BROWSER_RUNTIME; else process.env.OMNIVYRA_BROWSER_RUNTIME = savedRuntime;
+  if (savedVercel !== undefined) process.env.VERCEL = savedVercel;
+});
 
 const policy = { execution_enabled: true, auto_rules_enabled: true, require_human_approval: false };
 // Round 28: the real fail-closed evaluator decides over this value (configured row unless stated).
@@ -183,12 +203,16 @@ describe('RPA retry flush gates (H-2)', () => {
     expect(tables.rpa_retry_queue[0].last_error).toBe('RPA_RETRY_ACTION_UNREADABLE');
   });
 
-  it('approved action: executed exactly once, retry row removed, a second flush runs nothing', async () => {
+  it('approved action: executed exactly once, retry row tombstoned (Phase C), a second flush runs nothing', async () => {
     seed({ status: 'failed', approved_at: '2026-11-01T00:00:00Z' });
     const first = await rpaSchedulerHooks.flushRetries();
     expect(first.succeeded).toBe(1);
     expect(runRpaScript).toHaveBeenCalledTimes(1);
-    expect(tables.rpa_retry_queue).toHaveLength(0);
+    // Phase C: success keeps the row as a tombstone (completed_at, attempts =
+    // max) so the same action can never be accepted and executed again.
+    expect(tables.rpa_retry_queue).toHaveLength(1);
+    expect(tables.rpa_retry_queue[0]).toMatchObject({ attempts: 5, claim_token: null, last_error: null });
+    expect(tables.rpa_retry_queue[0].completed_at).toEqual(expect.any(String));
     await rpaSchedulerHooks.flushRetries();
     expect(runRpaScript).toHaveBeenCalledTimes(1);
   });

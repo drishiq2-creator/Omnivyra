@@ -1,5 +1,18 @@
 import type { RpaTask, RpaResult } from './rpaWorkerService';
 
+/**
+ * In-process serialiser for RPA execution on the browser worker.
+ *
+ * Phase C: this queue is NOT the record of an accepted task. executeRpaTask
+ * writes a durable rpa_retry_queue row, born claimed by this process, BEFORE a
+ * task is pushed here, and finalises it (token-matched) with the result. If the
+ * process dies with tasks in this array, their claims expire and are parked as
+ * outcome-unknown: never silently lost, never re-run.
+ *
+ * A definite failure (nothing happened) is re-run once in-process; an unknown
+ * outcome or a throw is never re-run.
+ */
+
 type QueueItem = {
   task: RpaTask;
   attempts: number;

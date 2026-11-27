@@ -3,7 +3,15 @@ import { buildScript } from './rpaPlatformScripts';
 import { runRpaScript } from './rpaPlaywrightRunner';
 import { rpaEnvReady, assertRpaEnvReady, isProbeFailure, getRpaEnvProbeDiagnostics } from './rpaEnv';
 import { admitRpaTask, observeAllActiveOrgs } from './rpaQueueState';
-import { enqueueRpaRetry, flushRpaRetryQueueRoundRobin, countDueRpaRetries } from './rpaRetryQueue';
+import {
+  acceptRpaTask,
+  finalizeRpaClaim,
+  flushRpaRetryQueueRoundRobin,
+  countDueRpaRetries,
+  rpaWorkerIdentity,
+} from './rpaRetryQueue';
+import { isBrowserWorkerRuntime, BROWSER_RUNTIME_REFUSED } from '../browserRuntime/browserRuntimeEnv';
+import { SYNTHETIC_PAGE_CHECK_PLATFORM, syntheticPageCheckHandler } from './syntheticPageCheckHandler';
 import { withHeavyJobSlot } from '../../queue/bullmqClient';
 import {
   resolveCommunityAiPlatformPolicy,
@@ -42,6 +50,15 @@ export type RpaResult = {
    * never auto-retried (a retry could double-post or un-like).
    */
   outcome_unknown?: boolean;
+  /**
+   * Phase C: nothing was executed (no browser touched the platform). Safe to
+   * queue or retry. Set on every pre-side-effect refusal of executeRpaTask.
+   */
+  not_attempted?: boolean;
+  /** Phase C: a web process durably queued the task for the browser worker. */
+  queued_for_worker?: boolean;
+  /** Phase C: the action already has a queue row (queued, running, done or parked): not run again. */
+  duplicate?: boolean;
 };
 
 type RpaHandler = (task: RpaTask) => Promise<RpaResult>;
@@ -80,7 +97,8 @@ export const rpaSchedulerHooks = {
     //   4. per-row gate (kill switch + approval of record) before any handler.
     const idle = (extra: Partial<RpaFlushTickResult>): RpaFlushTickResult => ({
       orgs_visited: 0, claimed: 0, succeeded: 0, failed: 0, unknown: 0, errors: 0, remaining: 0,
-      due: 0, skipped_empty: 0, skipped_policy: 0, skipped_env: 0, env_failure_streak: 0, env_next_probe_in_s: 0,
+      due: 0, skipped_empty: 0, skipped_runtime: 0, skipped_policy: 0, skipped_env: 0, env_failure_streak: 0, env_next_probe_in_s: 0,
+      parked_expired: 0,
       ...extra,
     });
     const dueCheck = await countDueRpaRetries();
@@ -89,6 +107,11 @@ export const rpaSchedulerHooks = {
       return idle({ errors: 1 });
     }
     if (dueCheck.due === 0) return idle({ skipped_empty: 1 });
+
+    // Phase C: only the designated browser worker claims and executes queue
+    // rows. Anywhere else (Vercel, web, dev) the tick stops here: no policy
+    // read, no Chromium probe, no row claimed.
+    if (!isBrowserWorkerRuntime()) return idle({ due: dueCheck.due, skipped_runtime: 1 });
 
     // Platform kill switch (round 28, review P-3): fail-closed tick gate. A
     // missing policy row, an unreadable policy or execution_enabled=false
@@ -142,6 +165,7 @@ export const rpaSchedulerHooks = {
       unknown: flushed.unknown ?? 0,
       errors: flushed.errors,
       remaining: flushed.remaining,
+      parked_expired: flushed.parked_expired ?? 0,
     };
   },
 };
@@ -160,6 +184,10 @@ export type RpaFlushTickResult = {
   due: number;
   /** 1 when the tick stopped at the empty-queue pre-check (no probe, no policy read). */
   skipped_empty: number;
+  /** 1 when this process is not the browser worker (no policy read, no probe, no claim). */
+  skipped_runtime: number;
+  /** Expired claims parked as outcome-unknown this tick (never re-run). */
+  parked_expired: number;
   /** 1 when the kill switch stopped the tick (no probe). */
   skipped_policy: number;
   /** 1 when the env probe (cached / backed off) stopped the tick. */
@@ -288,7 +316,13 @@ const handlers: Record<string, RpaHandler> = {
   twitter:   playwrightHandler,
   reddit:    playwrightHandler,
   linkedin:  playwrightHandler,
+  // Phase C: synthetic pipeline check (loopback / data: targets only, off
+  // unless RPA_SYNTHETIC_HANDLER_ENABLED=true). Not a platform.
+  [SYNTHETIC_PAGE_CHECK_PLATFORM]: syntheticPageCheckHandler,
 };
+
+/** Registered handler platforms (read-only view for tests and diagnostics). */
+export const registeredRpaPlatforms = (): string[] => Object.keys(handlers).sort();
 
 const validateTask = (task: RpaTask) => {
   if (!task?.tenant_id) return { ok: false, error: 'TENANT_ID_REQUIRED' };
@@ -303,36 +337,77 @@ const validateTask = (task: RpaTask) => {
   return { ok: true };
 };
 
+/**
+ * Accept and (on the browser worker only) execute one RPA task.
+ *
+ * Phase C:
+ *   - every accepted task gets a durable rpa_retry_queue row BEFORE anything
+ *     runs; one row per action (a duplicate accept is a no-op and nothing runs);
+ *   - NOT the browser worker (Vercel / web / dev): no probe, no launch. The task
+ *     is queued durably for the worker and reported as not attempted;
+ *   - on the worker the row is born CLAIMED by this process; the outcome is
+ *     written through the token-matched finaliser. A crash or a lease that
+ *     expires leaves the claim to be parked as outcome-unknown (never re-run).
+ *     The in-process task queue only serialises execution; it is no longer the
+ *     only record of the task.
+ */
 export const executeRpaTask = async (task: RpaTask): Promise<RpaResult> => {
   const validation = validateTask(task);
   if (!validation.ok) {
-    return { success: false, error: validation.error };
+    return { success: false, not_attempted: true, error: validation.error };
   }
 
-  // Environment gate: fail fast when Playwright isn't ready rather than
-  // draining the queue with identical failures.
+  const handler = handlers[normalizePlatform(task.platform)];
+  if (!handler) {
+    return { success: false, not_attempted: true, error: 'RPA_PLATFORM_NOT_SUPPORTED' };
+  }
+
+  if (!isBrowserWorkerRuntime()) {
+    const queued = await acceptRpaTask(task);
+    if (queued.ok === false) {
+      return { success: false, not_attempted: true, error: `RPA_QUEUE_FAILED:${queued.error}` };
+    }
+    if (!queued.accepted) {
+      return { success: false, not_attempted: true, duplicate: true, error: 'RPA_TASK_ALREADY_QUEUED' };
+    }
+    return {
+      success: false,
+      not_attempted: true,
+      queued_for_worker: true,
+      error: `${BROWSER_RUNTIME_REFUSED}:QUEUED_FOR_WORKER`,
+    };
+  }
+
+  // Browser worker: durable record first, born claimed by this process.
+  const accepted = await acceptRpaTask(task, { claimFor: rpaWorkerIdentity() });
+  if (accepted.ok === false) {
+    return { success: false, not_attempted: true, error: `RPA_QUEUE_FAILED:${accepted.error}` };
+  }
+  if (!accepted.accepted || !accepted.claim) {
+    return { success: false, not_attempted: true, duplicate: true, error: 'RPA_TASK_ALREADY_QUEUED' };
+  }
+  const claim = accepted.claim;
+  const release = async (outcome: 'succeeded' | 'failed' | 'unknown', opts?: Parameters<typeof finalizeRpaClaim>[2]) => {
+    const r = await finalizeRpaClaim(claim, outcome, opts);
+    if (r !== 'finalized') {
+      console.warn(`[rpaWorker] finalise ${r} action=${task.action_id} outcome=${outcome} (claim left to expire -> parked unknown)`);
+    }
+  };
+
+  // Environment gate: fail fast when Playwright isn't ready. Nothing ran, so
+  // the claimed row is released for a later retry (not attempted).
   const ready = await rpaEnvReady();
   if (isProbeFailure(ready)) {
-    // Defer to the retry buffer so the scheduler's backpressure worker
-    // can drain once the env is fixed, rather than losing the task.
-    await enqueueRpaRetry(task, {
-      error: `RPA_ENV_NOT_READY:${ready.reason}`,
-      delaySeconds: 120,
-    });
-    return { success: false, error: `RPA_ENV_NOT_READY:${ready.reason}` };
+    await release('failed', { error: `RPA_ENV_NOT_READY:${ready.reason}`, retryDelaySeconds: 120 });
+    return { success: false, not_attempted: true, error: `RPA_ENV_NOT_READY:${ready.reason}` };
   }
 
   // Per-org backpressure gate. Each tenant gets its own READY / DEGRADED
   // / BLOCKED state; a noisy org cannot push others into BLOCKED.
   const admission = await admitRpaTask({ organization_id: task.organization_id });
   if (!admission.admit) {
-    await enqueueRpaRetry(task, { error: `RPA_DEFERRED:${admission.reason || admission.status}`, delaySeconds: 60 });
-    return { success: false, error: `RPA_DEFERRED:${admission.status}` };
-  }
-
-  const handler = handlers[normalizePlatform(task.platform)];
-  if (!handler) {
-    return { success: false, error: 'RPA_PLATFORM_NOT_SUPPORTED' };
+    await release('failed', { error: `RPA_DEFERRED:${admission.reason || admission.status}`, retryDelaySeconds: 60 });
+    return { success: false, not_attempted: true, error: `RPA_DEFERRED:${admission.status}` };
   }
 
   startRpaWorker(async (queuedTask) => {
@@ -343,9 +418,23 @@ export const executeRpaTask = async (task: RpaTask): Promise<RpaResult> => {
     return taskHandler(queuedTask);
   });
 
+  let result: RpaResult;
   try {
-    return await enqueueRpaTask(task);
+    result = await enqueueRpaTask(task);
   } catch (error: any) {
-    return { success: false, error: error?.message || 'RPA_QUEUE_FAILED' };
+    // enqueueRpaTask rejects only before the handler runs (worker not started).
+    result = { success: false, not_attempted: true, error: error?.message || 'RPA_QUEUE_FAILED' };
   }
+
+  if (result.success) {
+    await release('succeeded');
+  } else if (result.outcome_unknown) {
+    await release('unknown', { error: result.error ?? 'UNKNOWN' });
+  } else {
+    // A definite in-process failure is final for this direct path (it was
+    // already re-run once in-process, as before); the row is retired, not
+    // re-queued, so the caller's 'failed' is the whole story.
+    await release('failed', { error: result.error ?? 'RPA_EXECUTION_FAILED', terminal: true });
+  }
+  return result;
 };

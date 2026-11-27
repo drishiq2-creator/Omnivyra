@@ -1,6 +1,7 @@
 import { supabase } from '../../db/supabaseClient';
 import { rpaEnvReady, isProbeFailure } from './rpaEnv';
 import { ownedDbTable } from '../../db/writeOwner';
+import { isBrowserWorkerRuntime } from '../browserRuntime/browserRuntimeEnv';
 
 /**
  * Per-organization RPA backpressure state machine.
@@ -213,6 +214,9 @@ export async function observeAllActiveOrgs(options?: { windowSeconds?: number })
 }> {
   // 24C: enumerate first — with no recently active org there is nothing to
   // observe, so the Chromium readiness probe is not run at all.
+  // Phase C: the Chromium readiness probe runs only on the browser worker. Any
+  // other process (Vercel, web, dev) observes nothing and probes nothing.
+  if (!isBrowserWorkerRuntime()) return { observed: 0, blocked: 0, degraded: 0, ready: 0, errors: 0 };
   const orgs = await listRecentlyActiveOrgs(options?.windowSeconds ?? WINDOW_SECONDS);
   if (orgs.length === 0) return { observed: 0, blocked: 0, degraded: 0, ready: 0, errors: 0 };
   const env = await rpaEnvReady();

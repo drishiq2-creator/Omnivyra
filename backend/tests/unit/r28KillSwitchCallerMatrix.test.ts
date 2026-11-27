@@ -260,6 +260,14 @@ describe('auto-rule evaluation tick', () => {
 
 // ── RPA retry flush (P-3 + D2 suppression, one gate) ─────────────────────────
 describe('RPA retry flush', () => {
+  // Phase C: only the browser worker runs the flush past the runtime gate.
+  const savedRuntime = process.env.OMNIVYRA_BROWSER_RUNTIME;
+  const savedVercel = process.env.VERCEL;
+  beforeAll(() => { process.env.OMNIVYRA_BROWSER_RUNTIME = 'worker'; delete process.env.VERCEL; });
+  afterAll(() => {
+    if (savedRuntime === undefined) delete process.env.OMNIVYRA_BROWSER_RUNTIME; else process.env.OMNIVYRA_BROWSER_RUNTIME = savedRuntime;
+    if (savedVercel !== undefined) process.env.VERCEL = savedVercel;
+  });
   const approvedFailedRow = (over: Row = {}): Row => ({
     id: 'act-rpa', organization_id: 'org-1', status: 'failed', approved_at: APPROVED_AT,
     platform: 'linkedin', action_type: 'reply', target_id: RPA_TASK.target_url, ...over,
