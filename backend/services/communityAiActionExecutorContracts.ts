@@ -7,6 +7,7 @@ import { supabase } from '../db/supabaseClient';
 
 import { getPlaybookById } from './playbooks/playbookService';
 import { validateActionAgainstPlaybook } from './playbooks/playbookValidator';
+import { isKnownExecutionMode, normalizeExecutionModeInput, RPA_QUEUED_FOR_WORKER } from './communityAiExecutionModes';
 import { getToken } from './platformTokenService';
 import { executeRpaTask } from './rpaWorker/rpaWorkerService';
 import { logCommunityAiActionEvent } from './communityAiActionLogService';
@@ -47,7 +48,11 @@ export type CommunityAiAction = {
   parent_comment_urn?: string | null;
 };
 
+/** Closed set; the runtime list lives in communityAiExecutionModes.EXECUTION_MODES (client-safe). */
 export type ExecutionMode = 'api' | 'rpa' | 'browser' | 'manual';
+
+/** Thrown by resolveExecutionMode for a declared mode outside the closed enum (fail closed: never probed or defaulted). */
+export const EXECUTION_MODE_INVALID = 'EXECUTION_MODE_INVALID';
 
 /**
  * Canonical result status. 'executed' is reserved for PLATFORM-CONFIRMED
@@ -395,9 +400,12 @@ export const loadHistoryMetrics = async (
 export const resolveExecutionMode = async (
   action: CommunityAiAction
 ): Promise<ExecutionMode> => {
-  const declared = (action.execution_mode || '').toString().toLowerCase();
-  if (declared === 'api' || declared === 'rpa' || declared === 'browser' || declared === 'manual') {
-    return declared;
+  const declared = normalizeExecutionModeInput(action.execution_mode);
+  if (declared !== null) {
+    if (isKnownExecutionMode(declared)) return declared;
+    // Phase C: an explicit but unknown mode is refused, never silently
+    // re-routed to api/browser.
+    throw Object.assign(new Error(EXECUTION_MODE_INVALID), { code: EXECUTION_MODE_INVALID });
   }
   // No explicit mode — probe available mechanisms.
   try {
@@ -576,6 +584,9 @@ const rpaOutcomeUnknown = (cause: string, evidence: Record<string, unknown>): Ex
   execution_mode: 'rpa',
 });
 
+/** Phase C: an RPA run queued for the browser worker (not attempted here). */
+export { RPA_QUEUED_FOR_WORKER };
+
 export const runRpaExecution = async (action: CommunityAiAction): Promise<ExecutionResult> => {
   // RPA has no DM implementation. DMs flow exclusively via the
   // extension's browser runtime; a DM that reached RPA is a routing
@@ -598,6 +609,21 @@ export const runRpaExecution = async (action: CommunityAiAction): Promise<Execut
       EXECUTION_TIMEOUTS_MS.rpa,
       'RPA_EXECUTION',
     );
+    if (!rpaResult?.success && rpaResult?.queued_for_worker === true) {
+      // Phase C: this process is not the browser worker. Nothing was attempted;
+      // the task is durably queued and the worker executes it after its own
+      // gate (kill switch, approval of record, contact governance). Persisted
+      // like any deferred RPA run ('failed' + the reason), which is the status
+      // the worker's retry gate re-executes from.
+      return {
+        ok: false,
+        status: 'failed',
+        error: RPA_QUEUED_FOR_WORKER,
+        reason: 'NOT_ATTEMPTED',
+        response: { ...rpaResult, execution_mode: 'rpa', not_attempted: true, queued_for_worker: true },
+        execution_mode: 'rpa',
+      };
+    }
     if (!rpaResult?.success && rpaResult?.outcome_unknown === true) {
       // The browser already interacted (click/submit) and success could not
       // be confirmed: the reply may be live. Neither success nor failure.

@@ -4,7 +4,7 @@ import { supabase } from '../../../../backend/db/supabaseClient';
 import { getCommunityAiActionById } from '../../../../backend/db/communityAiActionStore';
 import { enforceActionRole, requireTenantScope } from '../utils';
 import { COMMUNITY_AI_CAPABILITIES } from '../../../../backend/services/rbac/communityAiCapabilities';
-import { executeAction } from '../../../../backend/services/communityAiActionExecutor';
+import { executeAction, loadHistoryMetrics } from '../../../../backend/services/communityAiActionExecutor';
 import { logCommunityAiActionEvent } from '../../../../backend/services/communityAiActionLogService';
 import { notifyCommunityAi } from '../../../../backend/services/communityAiNotificationService';
 import { sendCommunityAiWebhooks } from '../../../../backend/services/communityAiWebhookService';
@@ -16,12 +16,19 @@ import {
 import {
   validateActionAgainstPlaybook,
 } from '../../../../backend/services/playbooks/playbookValidator';
+import {
+  parseExecutionMode,
+  EXECUTION_MODES,
+  RPA_QUEUED_FOR_WORKER,
+  type KnownExecutionMode,
+} from '../../../../backend/services/communityAiExecutionModes';
 
 type ExecuteRequest = {
   tenant_id?: string;
   organization_id?: string;
   action_id?: string;
   approved?: boolean;
+  /** Closed enum (communityAiExecutionModes.EXECUTION_MODES); anything else is a 400. */
   execution_mode?: 'manual' | 'api' | 'rpa' | 'browser' | string;
   final_text?: string;
   idempotency_key?: string;
@@ -57,6 +64,11 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   const actionId = body.action_id;
   if (!actionId) {
     return res.status(400).json({ error: 'action_id is required' });
+  }
+  // Phase C: the requested mode is a closed enum, refused before any read.
+  const bodyMode = parseExecutionMode(body.execution_mode);
+  if (bodyMode.kind === 'invalid') {
+    return res.status(400).json({ error: 'EXECUTION_MODE_INVALID', allowed: EXECUTION_MODES });
   }
   if (body.approved !== true) {
     return res.status(403).json({ error: 'APPROVAL_REQUIRED' });
@@ -137,10 +149,14 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       : res.status(503).json({ error: 'CONTACT_GOVERNANCE_UNAVAILABLE', reason: contactGate.reason });
   }
 
-  const requestedMode = (body.execution_mode || action.execution_mode || '').toString();
   // Manual is the human-driven simulation path; everything else is delegated
   // to the central router inside the executor (which itself handles fallback).
-  const executionMode = requestedMode || 'manual';
+  // A stored mode outside the enum is refused like a requested one (fail closed).
+  const requestedMode = bodyMode.kind === 'absent' ? parseExecutionMode(action.execution_mode) : bodyMode;
+  if (requestedMode.kind === 'invalid') {
+    return res.status(400).json({ error: 'EXECUTION_MODE_INVALID', allowed: EXECUTION_MODES });
+  }
+  const executionMode: KnownExecutionMode = requestedMode.kind === 'known' ? requestedMode.mode : 'manual';
 
   const finalText = (body.final_text ?? action.suggested_text ?? '').toString();
   if (action.action_type === 'reply' && finalText.trim().length === 0) {
@@ -159,6 +175,11 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       return res.status(404).json({ error: 'PLAYBOOK_NOT_FOUND' });
     }
   }
+  // Phase C: the playbook's rate limits are checked against real history (was
+  // null, so limits never applied on this route).
+  const historyMetrics = playbook && action.playbook_id
+    ? await loadHistoryMetrics(scope.tenantId, scope.organizationId, action.playbook_id)
+    : null;
   const validation = validateActionAgainstPlaybook(
     {
       action_type: action.action_type as 'like' | 'reply' | 'schedule' | 'follow' | 'share',
@@ -167,12 +188,25 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       risk_level: action.risk_level as 'high' | 'medium' | 'low',
     },
     playbook,
-    null
+    historyMetrics
   );
   if (!validation.allowed) {
     return res.status(400).json({
       error: 'PLAYBOOK_VIOLATION',
       reason: validation.reason || 'Playbook validation failed.',
+    });
+  }
+  // Phase C: the playbook says a human must approve this action. The approval
+  // of record is approved_at (set by /api/community-ai/actions/approve); the
+  // body's approved:true is the caller's click, not that record. Without it
+  // nothing executes and the row stays in its current state.
+  if (validation.requires_approval === true && !action.approved_at) {
+    return res.status(403).json({
+      error: 'APPROVAL_REQUIRED',
+      reason: 'PLAYBOOK_REQUIRES_APPROVAL',
+      approval_required: true,
+      action_id: actionId,
+      status: action.status,
     });
   }
 
@@ -282,6 +316,21 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
 
   if (result.response?.persist_error) {
     return res.status(500).json({ error: 'TERMINAL_WRITE_FAILED', execution: result });
+  }
+
+  // Phase C: an rpa run on a non-worker runtime is durably queued for the
+  // browser worker and NOT attempted here: 202, not a failure. No 'failed' outcome event
+  // and no repeated-failure webhook: nothing failed (the executor persisted
+  // the row with execution_result.error = RPA_QUEUED_FOR_WORKER).
+  if (!result.ok && result.error === RPA_QUEUED_FOR_WORKER) {
+    return res.status(202).json({
+      tenant_id: scope.tenantId,
+      organization_id: scope.organizationId,
+      action_id: actionId,
+      status: 'queued',
+      queued_for_worker: true,
+      execution: result,
+    });
   }
 
   // Skip the outcome event for in-flight browser dispatches — the extension's

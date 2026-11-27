@@ -1,5 +1,25 @@
 import type { EngagementPlaybook } from './playbookTypes';
 
+import {
+  parseExecutionMode,
+  playbookExecutionModeDecision,
+  PLAYBOOK_GATED_MODES,
+  type ExecutionModesConfig,
+} from '../communityAiExecutionModes';
+
+// Phase C: the closed execution-mode enum and the playbook permission rule live
+// in communityAiExecutionModes (pure, client-safe); re-exported for callers of
+// this module.
+export {
+  EXECUTION_MODES,
+  isKnownExecutionMode,
+  normalizeExecutionModeInput,
+  parseExecutionMode,
+  playbookExecutionModeDecision,
+  PLAYBOOK_GATED_MODES,
+} from '../communityAiExecutionModes';
+export type { KnownExecutionMode, ExecutionModesConfig, ParsedExecutionMode } from '../communityAiExecutionModes';
+
 type ValidationAction = {
   action_type?: string | null;
   text?: string | null;
@@ -104,7 +124,19 @@ export const validateActionAgainstPlaybook = (
   playbook?: PlaybookValidationInput | null,
   historyMetrics?: HistoryMetrics | null
 ) => {
+  // Phase C: the mode is a closed enum, checked before anything else.
+  const parsedMode = parseExecutionMode(action.execution_mode);
+  if (parsedMode.kind === 'invalid') {
+    return { allowed: false, requires_approval: false, reason: 'EXECUTION_MODE_INVALID' };
+  }
+  const requestedMode = parsedMode.kind === 'known' ? parsedMode.mode : null;
+
   if (!playbook) {
+    // rpa / browser drive a browser: they need a playbook that explicitly
+    // permits the mode, whoever asks. manual and api keep working without one.
+    if (requestedMode !== null && PLAYBOOK_GATED_MODES.has(requestedMode)) {
+      return { allowed: false, requires_approval: false, reason: 'PLAYBOOK_REQUIRED' };
+    }
     return { allowed: true, requires_approval: false };
   }
 
@@ -219,28 +251,15 @@ export const validateActionAgainstPlaybook = (
     }
   }
 
-  if (playbook.execution_modes && action.execution_mode) {
-    const mode = action.execution_mode.toString().toLowerCase();
-    if (playbook.execution_modes.manual_only && mode !== 'manual') {
-      return {
-        allowed: false,
-        requires_approval: false,
-        reason: 'Execution mode not permitted by playbook.',
-      };
-    }
-    if (mode === 'api' && !playbook.execution_modes.api_allowed) {
-      return {
-        allowed: false,
-        requires_approval: false,
-        reason: 'API execution is not permitted by playbook.',
-      };
-    }
-    if (mode === 'rpa' && !playbook.execution_modes.rpa_allowed) {
-      return {
-        allowed: false,
-        requires_approval: false,
-        reason: 'RPA execution is not permitted by playbook.',
-      };
+  if (requestedMode !== null) {
+    // browser is checked like rpa; rpa/browser need an explicit opt-in even when
+    // the playbook has no execution_modes block (was: unchecked).
+    const modeDecision = playbookExecutionModeDecision(
+      playbook.execution_modes as ExecutionModesConfig,
+      requestedMode,
+    );
+    if (modeDecision.allowed === false) {
+      return { allowed: false, requires_approval: false, reason: modeDecision.reason };
     }
   }
 

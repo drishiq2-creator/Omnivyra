@@ -139,6 +139,9 @@ jest.mock('../../services/platformTokenService', () => ({ getToken: async () => 
 jest.mock('../../services/platformConnectors/linkedinConnector', () => ({
   executeAction: async (action: Row) => { sends.connector.push(action); return { success: true, platform_id: 'li-1' }; },
 }));
+jest.mock('../../services/playbooks/playbookService', () => ({
+  getPlaybookById: async () => ({ execution_modes: { rpa_allowed: true } }),
+}));
 jest.mock('../../services/rpaWorker/rpaWorkerService', () => ({
   executeRpaTask: async (task: Row) => { sends.rpa.push(task); return { success: true }; },
 }));
@@ -239,9 +242,11 @@ async function communityApiReply(): Promise<number> {
   return sends.connector.length;
 }
 
-/** Row 8: executeAction → runExecution → runRpaExecution → executeRpaTask. */
+/** Row 8: executeAction → runExecution → runRpaExecution → executeRpaTask.
+ *  Phase C: rpa needs a playbook that explicitly permits it, for every source,
+ *  so this path carries one (playbookService below). */
 async function communityRpaReply(): Promise<number> {
-  await executeAction(action({ execution_mode: 'rpa', target_id: HANDLE }), true, { source: 'manual' });
+  await executeAction(action({ execution_mode: 'rpa', target_id: HANDLE, playbook_id: 'pb-rpa' }), true, { source: 'manual' });
   return sends.rpa.length;
 }
 

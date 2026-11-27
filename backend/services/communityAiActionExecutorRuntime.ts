@@ -7,6 +7,11 @@ import { supabase } from '../db/supabaseClient';
 
 import { getPlaybookById } from './playbooks/playbookService';
 import { validateActionAgainstPlaybook } from './playbooks/playbookValidator';
+import {
+  isKnownExecutionMode,
+  normalizeExecutionModeInput,
+  playbookExecutionModeDecision,
+} from './communityAiExecutionModes';
 import { getToken } from './platformTokenService';
 import { executeRpaTask } from './rpaWorker/rpaWorkerService';
 import { logCommunityAiActionEvent } from './communityAiActionLogService';
@@ -556,6 +561,13 @@ const runExecution = async (
     return { ok: false, status: 'failed', error: validation.error };
   }
 
+  // Phase C: closed execution-mode enum, fail closed before any gate reads or
+  // side effect. An unknown declared mode is never probed or defaulted.
+  const declaredMode = normalizeExecutionModeInput(action.execution_mode);
+  if (declaredMode !== null && !isKnownExecutionMode(declaredMode)) {
+    return { ok: false, status: 'failed', error: 'EXECUTION_MODE_INVALID' };
+  }
+
   if (requiresApproval(action, approved)) {
     return { ok: false, status: 'failed', error: 'APPROVAL_REQUIRED' };
   }
@@ -604,7 +616,7 @@ const runExecution = async (
 
   const executionMode = await resolveExecutionMode(action);
 
-  let playbook = null;
+  let playbook: Awaited<ReturnType<typeof getPlaybookById>> | null = null;
   if (action.playbook_id) {
     try {
       playbook = await getPlaybookById(action.playbook_id, action.tenant_id, action.organization_id);
@@ -634,9 +646,27 @@ const runExecution = async (
         error: playbookValidation.reason || 'PLAYBOOK_VIOLATION',
       };
     }
+  } else if (executionMode === 'rpa') {
+    // Phase C: server-side browser automation needs a playbook that explicitly
+    // permits rpa, whoever the caller is (the manual route included).
+    return { ok: false, status: 'failed', error: 'PLAYBOOK_REQUIRED' };
   } else if (executionMode !== 'manual' && options?.source !== 'manual') {
+    // api and browser from an automated source need a playbook (which, for
+    // browser, must permit it: checked by the validator above).
+    // DELIBERATE EXCEPTION (Phase C report): a human-initiated, playbook-less
+    // browser dispatch (engagement reply/DM, bulk click: source 'manual',
+    // playbook_id null) keeps working; the extension runs it in the user's
+    // own browser. The community-ai execute route refuses a client-requested
+    // rpa/browser mode without a permitting playbook before it gets here.
     return { ok: false, status: 'failed', error: 'PLAYBOOK_REQUIRED' };
   }
+
+  // The API -> browser fallback is a browser execution: allowed only where a
+  // direct browser request would be (a playbook permitting browser, or the
+  // playbook-less human-initiated exception above).
+  const browserFallbackAllowed = playbook
+    ? playbookExecutionModeDecision((playbook as any)?.execution_modes, 'browser').allowed
+    : options?.source === 'manual';
 
   const enforcement = await checkUsageBeforeExecution({
     organization_id: action.organization_id,
@@ -674,7 +704,12 @@ const runExecution = async (
     case 'api':
     default:
       result = await runApiExecution(action);
-      if (!result.ok) {
+      if (!result.ok && !browserFallbackAllowed) {
+        result = {
+          ...result,
+          response: { ...(result.response || {}), fallback_refused: 'BROWSER_NOT_PERMITTED_BY_PLAYBOOK' },
+        };
+      } else if (!result.ok) {
         // Single fallback: API → Browser. No second retry, no infinite loop.
         await recordExecutionMetric({
           organization_id: action.organization_id,

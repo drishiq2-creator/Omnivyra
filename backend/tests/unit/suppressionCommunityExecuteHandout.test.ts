@@ -104,6 +104,8 @@ jest.mock('../../../pages/api/community-ai/utils', () => ({
 jest.mock('../../../lib/platform/routeFactory', () => ({ createApiRoute: (h: unknown) => h }));
 jest.mock('../../services/communityAiActionExecutor', () => ({
   executeAction: jest.fn(async () => ({ ok: true, status: 'executed' })),
+  // Phase C: the route reads playbook history for the limit checks.
+  loadHistoryMetrics: jest.fn(async () => ({ replies_last_hour: 0, follows_today: 0, actions_today: 0 })),
 }));
 jest.mock('../../services/communityAiActionLogService', () => ({ logCommunityAiActionEvent: jest.fn(async () => undefined) }));
 jest.mock('../../services/communityAiNotificationService', () => ({ notifyCommunityAi: jest.fn(async () => undefined) }));

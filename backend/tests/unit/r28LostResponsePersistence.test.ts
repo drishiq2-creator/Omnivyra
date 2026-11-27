@@ -204,7 +204,8 @@ describe('RPA lost response (runRpaExecution)', () => {
   it('end to end: an unknown outcome persists as skipped/OUTCOME_UNKNOWN with evidence and the idempotency key', async () => {
     mockExecuteRpaTask.mockResolvedValue({ success: false, outcome_unknown: true, error: 'RPA_OUTCOME_UNKNOWN:Target closed' });
     mockStore.rows.push({ id: 'act-rpa', organization_id: ORG, status: 'approved', approved_at: '2026-11-27T00:00:00Z' });
-    const r = await executeAction(rpaAction({ approved_at: '2026-11-27T00:00:00Z' }), true, {
+    // Phase C: rpa needs a playbook for every source (the validator is held at "allowed" here).
+    const r = await executeAction(rpaAction({ approved_at: '2026-11-27T00:00:00Z', playbook_id: 'pb-rpa' }), true, {
       source: 'manual', persist: true, idempotency_key: 'idem-rpa-1',
     });
     expect(r).toMatchObject({ ok: false, status: 'skipped', reason: 'OUTCOME_UNKNOWN' });
