@@ -22,7 +22,7 @@ mkdir -p "$OUT"
 
 pass() { echo "PASS $*"; }
 fail() { echo "FAIL $*"; FAIL=1; }
-expect_eq() { if [ "$2" = "$3" ]; then pass "$1 = $2"; else fail "$1 = $2 (expected $3)"; fi; }
+expect_eq() { if [ -n "$2" ] && [ "$2" = "$3" ]; then pass "$1 = $2"; else fail "$1 = ${2:-<empty>} (expected ${3:-<empty>})"; fi; }
 
 docker network create "$NET" >/dev/null
 docker run -d --name redis --network "$NET" redis:7.4.2-alpine >/dev/null
@@ -31,13 +31,13 @@ declare -A R
 
 wait_ready() { # <n>: wait until the worker has logged its n-th HARNESS_READY
   for _ in $(seq 1 240); do
-    [ "$(docker logs w 2>&1 | grep -c HARNESS_READY)" -ge "$1" ] && return 0
+    [ "$(docker logs gi07w 2>&1 | grep -c HARNESS_READY)" -ge "$1" ] && return 0
     sleep 0.5
   done
-  fail "worker never reached READY #$1"; docker logs w 2>&1 | tail -30; return 1
+  fail "worker never reached READY #$1"; docker logs gi07w 2>&1 | tail -30; docker logs gi07w >"$OUT/worker-not-ready.log" 2>&1; docker rm -f gi07w >/dev/null 2>&1; return 1
 }
 hp() { docker run --rm --network "$NET" -e REDIS_HOST=redis -e HARNESS_QUEUE="$Q" -v "$H:/harness:ro" --entrypoint node "$IMG" /harness/harness.js "$@"; }
-census() { docker exec w node /harness/census.js "$@"; }
+census() { docker exec gi07w node /harness/census.js "$@"; }
 exitcode() { docker inspect -f '{{.State.ExitCode}}' "$1"; }
 jobid() { awk '/^PRODUCED/{print $3}' <<<"$1"; }
 
@@ -46,7 +46,7 @@ scenarios() {
   Q="gi07-$m"
   local entry=()
   [ "$m" = control ] && entry=(--entrypoint docker-entrypoint.sh)
-  docker run -d --name w --network "$NET" -e REDIS_HOST=redis -e HARNESS_QUEUE="$Q" \
+  docker run -d --name gi07w --network "$NET" -e REDIS_HOST=redis -e HARNESS_QUEUE="$Q" \
     -v "$H:/harness:ro" "${entry[@]}" "$IMG" node /harness/harness.js worker >/dev/null
   wait_ready 1 || return
   c=$(census); echo "CENSUS $m boot $c"
@@ -66,32 +66,32 @@ scenarios() {
 
   # S3 normal shutdown: SIGTERM (docker stop) with a job in flight
   out=$(hp produce hold 1 8000 active); echo "$out"; jid=$(jobid "$out")
-  docker stop -t 30 w >/dev/null
-  R[$m.S3exit]=$(exitcode w)
-  R[$m.S3sigterms]=$(docker logs w 2>&1 | grep -c 'HARNESS_SIGNAL SIGTERM')
-  R[$m.S3drained]=$(docker logs w 2>&1 | grep -c HARNESS_DRAINED)
-  R[$m.S3hardExit]=$(docker logs w 2>&1 | grep -c HARNESS_HARD_EXIT)
+  docker stop -t 30 gi07w >/dev/null
+  R[$m.S3exit]=$(exitcode gi07w)
+  R[$m.S3sigterms]=$(docker logs gi07w 2>&1 | grep -c 'HARNESS_SIGNAL SIGTERM')
+  R[$m.S3drained]=$(docker logs gi07w 2>&1 | grep -c HARNESS_DRAINED)
+  R[$m.S3hardExit]=$(docker logs gi07w 2>&1 | grep -c HARNESS_HARD_EXIT)
   R[$m.S3jobState]=$(hp state "$jid" | awk '/^STATE/{print $3}')
 
   # S4 forced termination (SIGKILL) mid-job, then restart recovery
-  docker start w >/dev/null; wait_ready 2 || return
+  docker start gi07w >/dev/null; wait_ready 2 || return
   c=$(census); echo "CENSUS $m restart $c"
   out=$(hp produce hold 1 8000 active); echo "$out"; jid=$(jobid "$out")
-  docker kill -s KILL w >/dev/null; docker wait w >/dev/null
-  R[$m.S4exit]=$(exitcode w)
-  docker start w >/dev/null; wait_ready 3 || return
+  docker kill -s KILL w >/dev/null; docker wait gi07w >/dev/null
+  R[$m.S4exit]=$(exitcode gi07w)
+  docker start gi07w >/dev/null; wait_ready 3 || return
   R[$m.S4jobState]=$(hp wait "$jid" 90000 | awk '/^WAITED/{print $3}')
   if hp produce cycle 3 0 completed >/dev/null; then R[$m.S4newJobs]=ok; else R[$m.S4newJobs]=failed; fi
   c=$(census); echo "CENSUS $m S4 $c"
   R[$m.S4zombies]=$(jq .zombies <<<"$c")
 
   # S5 SIGINT
-  docker kill -s INT w >/dev/null; docker wait w >/dev/null
-  R[$m.S5exit]=$(exitcode w)
-  R[$m.S5sigints]=$(docker logs w 2>&1 | grep -c 'HARNESS_SIGNAL SIGINT')
+  docker kill -s INT w >/dev/null; docker wait gi07w >/dev/null
+  R[$m.S5exit]=$(exitcode gi07w)
+  R[$m.S5sigints]=$(docker logs gi07w 2>&1 | grep -c 'HARNESS_SIGNAL SIGINT')
 
-  docker logs w >"$OUT/worker-$m.log" 2>&1
-  docker rm -f w >/dev/null
+  docker logs gi07w >"$OUT/worker-$m.log" 2>&1
+  docker rm -f gi07w >/dev/null
 }
 
 # S6 the real entrypoint + real dist/backend/workers/main.js, no env, no network:
