@@ -3,7 +3,7 @@ import test from 'node:test';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
-import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 
 /**
  * Static lock on .github/workflows/auth-integrity-local.yml (C3, advisory). Hermetic: reads files and
@@ -142,6 +142,11 @@ function checkWorkflow(text: string): string[] {
     if (!(logScan > suite)) add('the app server log must be scanned for hosted targets after the suite');
     if (!(down > result)) add('teardown must come after the result checks');
     if (!/tee "\$RUNNER_TEMP\/auth-suite\.log"/.test(String(steps[suite]?.run))) add('the suite output must be captured for the result check');
+    // Round 26 / C3 review C2: the rate-limit reset proves the identity marker before writing, on loopback
+    // too; the marker must be seeded (per-run token via GITHUB_ENV) into the service container first.
+    const seed = stepIndex(steps, /npm run seed:auth-e2e-redis-identity -- --env-out "\$GITHUB_ENV"/);
+    const resetStep = stepIndex(steps, /npm run reset:auth-e2e-rate-limits/);
+    if (!(seed >= 0 && resetStep > seed && server > resetStep)) add('the Redis identity marker must be seeded before the rate-limit reset, which must precede the app server');
   }
   return problems;
 }
@@ -154,9 +159,72 @@ test('C3 workflow: the expected counts come from the real runner (5 spec files, 
   assert.deepEqual(expectedAuthCounts(), { specs: 5, tests: 5 });
 });
 
-test('C3 workflow: the hosted auth-integrity.yml is byte-identical to HEAD (untouched)', () => {
-  const head = execFileSync('git', ['-C', ROOT, 'show', 'HEAD:.github/workflows/auth-integrity.yml'], { encoding: 'utf8' });
-  assert.equal(fs.readFileSync(path.join(WF_DIR, 'auth-integrity.yml'), 'utf8'), head);
+/**
+ * Round 26 / C3 review C2 + re-review B-1: the hosted auth-integrity.yml is the reviewed f237b92f0 file plus
+ * EXACTLY one step (seed the Redis identity marker), at the reviewed position. The base is PINNED by hash
+ * (not compared with HEAD), so the check stays green once this change is committed and red on any other edit.
+ */
+const HOSTED_WORKFLOW_BASE_SHA256 = 'ce876600fc3c512ed07c2d75c76f6cec79d8b59731c46a87027bf14a476026ca'; // f237b92f0, LF-normalised
+const HOSTED_SEED_STEP = [
+  '      # Round 26 / C3 (review C2): the reset below writes only after reading the identity marker',
+  '      # omnivyra:e2e:identity and finding it equal to a per-run token, on loopback too (a loopback',
+  '      # port can be a tunnel to Production). This seeds the marker into the FRESH service container:',
+  '      # the shared rule refuses production first, and only an EMPTY Redis (DBSIZE 0) is ever seeded.',
+  '      # The random per-run token is masked and exported through GITHUB_ENV; it is never printed.',
+  '      - name: Seed the disposable Redis identity marker (per-run token)',
+  '        run: npm run seed:auth-e2e-redis-identity -- --env-out "$GITHUB_ENV"',
+  '',
+  '',
+].join('\n');
+
+function checkHostedWorkflow(raw: string): string[] {
+  const problems: string[] = [];
+  const text = raw.replace(/\r\n/g, '\n');
+  const blocks = text.split(HOSTED_SEED_STEP).length - 1;
+  const commands = text.split('seed:auth-e2e-redis-identity').length - 1;
+  if (blocks !== 1 || commands !== 1) problems.push(`the seed step must appear exactly once (blocks ${blocks}, commands ${commands})`);
+  const at = text.indexOf(HOSTED_SEED_STEP);
+  const guard = text.indexOf('run: npm run check:auth-e2e-target');
+  const health = text.indexOf('- name: Verify ephemeral Redis is healthy');
+  const reset = text.indexOf('run: npm run reset:auth-e2e-rate-limits');
+  const app = text.indexOf('run: |\n          npm run dev');
+  if (!(at > guard && guard >= 0 && at > health && health >= 0 && reset > at && app > reset)) problems.push('the seed step must come after the target guard and the Redis health check, and before the reset and the app server');
+  if (blocks === 1) {
+    const base = text.replace(HOSTED_SEED_STEP, '');
+    const digest = createHash('sha256').update(base).digest('hex');
+    if (digest !== HOSTED_WORKFLOW_BASE_SHA256) problems.push('with the seed step removed the workflow is not the pinned reviewed base (another edit was made)');
+  }
+  return problems;
+}
+
+const HOSTED_WF = fs.readFileSync(path.join(WF_DIR, 'auth-integrity.yml'), 'utf8');
+
+test('C3 workflow: the hosted auth-integrity.yml is the pinned reviewed base plus exactly the seed step, at the reviewed position', () => {
+  assert.deepEqual(checkHostedWorkflow(HOSTED_WF), []);
+  // The pin was computed from `git show f237b92f0:.github/workflows/auth-integrity.yml` (LF-normalised); it is not
+  // recomputed here because CI checkouts are shallow (f237b92f0 is not available there).
+  // CRLF checkouts are accepted (normalised).
+  assert.deepEqual(checkHostedWorkflow(HOSTED_WF.replace(/\r?\n/g, '\r\n')), []);
+});
+
+test('C3 CONTROL hosted workflow: any other edit is detected', () => {
+  const edited = HOSTED_WF.replace('run: npm run test:auth-integrity', 'run: npm run test:auth-integrity || true');
+  assert.notEqual(edited, HOSTED_WF);
+  assert.ok(checkHostedWorkflow(edited).some((p) => /pinned reviewed base/.test(p)));
+  assert.ok(checkHostedWorkflow(HOSTED_WF + '# trailing edit\n').some((p) => /pinned reviewed base/.test(p)));
+});
+
+test('C3 CONTROL hosted workflow: a duplicated, removed or moved seed step is detected', () => {
+  const lf = HOSTED_WF.replace(/\r\n/g, '\n');
+  const dup = lf.replace(HOSTED_SEED_STEP, HOSTED_SEED_STEP + HOSTED_SEED_STEP);
+  assert.ok(checkHostedWorkflow(dup).some((p) => /exactly once/.test(p)));
+  const removed = lf.replace(HOSTED_SEED_STEP, '');
+  assert.ok(checkHostedWorkflow(removed).some((p) => /exactly once/.test(p)));
+  // Moved after the reset step.
+  const resetStep = '      - name: Reset auth rate-limit counters\n        run: npm run reset:auth-e2e-rate-limits\n';
+  assert.equal(removed.split(resetStep).length - 1, 1);
+  const moved = removed.replace(resetStep, resetStep + '\n' + HOSTED_SEED_STEP.replace(/\n\n$/, '\n'));
+  assert.ok(checkHostedWorkflow(moved).some((p) => /must come after the target guard/.test(p)), JSON.stringify(checkHostedWorkflow(moved)));
 });
 
 // ---------------- failing controls: each mutation must be detected ----------------
@@ -232,4 +300,8 @@ test('C3 CONTROL v3.1 R2 an upload that ignores the redaction outcome is detecte
   assert.equal(SOURCE.split(first).length - 1, 1);
   const problems = checkWorkflow(SOURCE.replace(first, "        if: always()\n        uses: actions/upload-artifact@v4\n        with:\n          name: local-stack-validation"));
   assert.ok(problems.some((p) => /upload must require a successful redaction/.test(p)), JSON.stringify(problems));
+});
+
+test('C3 CONTROL review C2 a missing identity-marker seed step is detected', () => {
+  expectDetected('no seed', 'run: npm run seed:auth-e2e-redis-identity -- --env-out "$GITHUB_ENV"', 'run: echo skipped-seed', /identity marker must be seeded/);
 });

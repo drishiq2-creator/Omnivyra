@@ -23,17 +23,47 @@ export const PRODUCTION_HOSTNAMES: readonly string[] = [
 ];
 
 /**
- * Production Redis hosts (the hard-coded production markers in scripts/lib/certAwareEnv.cjs and
- * scripts/reset-auth-e2e-rate-limits.js). Refused in every mode, in every connection variable
- * (v3 of C2; review finding F4).
+ * THE Redis target rule (round 26 / C3, FAIL-CLOSED), shared with scripts/reset-auth-e2e-rate-limits.js.
+ * Plain CommonJS so the JS reset script and this guard use one rule, not two divergent copies.
+ * (The relative path is the single mutation point the spec's mutant helpers rewrite.)
  */
-export const PRODUCTION_REDIS_HOSTNAMES: readonly string[] = [
-  // The live production Upstash Redis (Railway worker and Vercel web; the "Railway production worker"
-  // fixture in backend/tests/unit/sec91CQueueNamespaceIsolation.test.ts uses this same host).
-  'right-treefrog-90757.upstash.io',
-  // Earlier production host still named by the repo's cert/env-safety markers; kept (no evidence it was retired).
-  'noble-dane-77325.upstash.io',
-];
+type RedisRuleTarget = { variable: string; url: string; host: string; kind: 'loopback' | 'hosted'; markerToken: string | null };
+type RedisRuleModule = {
+  PRODUCTION_REDIS_HOSTS: readonly string[];
+  PRODUCTION_REDIS_IDENTITIES: readonly string[];
+  PRODUCTION_SUPABASE_REFS: readonly string[];
+  PRODUCTION_REDIS_REFERENCE_VARIABLES: readonly string[];
+  APPROVED_HOST_VARIABLE: string;
+  APPROVED_FINGERPRINT_VARIABLE: string;
+  IDENTITY_TOKEN_VARIABLE: string;
+  IDENTITY_MARKER_KEY: string;
+  RULES: Readonly<Record<string, string>>;
+  RedisRuleError: new (rule: string, variable: string, reason: string) => Error & { rule: string; variable: string };
+  resolveRedisTarget: (env: Readonly<Record<string, string | undefined>>, options?: { required?: boolean }) => RedisRuleTarget | null;
+  assertRedisIdentityMarker: (client: { get: (key: string) => Promise<unknown> }, expectedToken: string) => Promise<void>;
+  redisIdentityFingerprint: (url: string) => string;
+  REDIS_CONFIG_VARIABLES: readonly string[];
+  assertRedisEndpoints: (env: Readonly<Record<string, string | undefined>>, known?: readonly string[]) => void;
+};
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const redisRule = require('../../scripts/lib/e2eRedisIdentityRule.cjs') as RedisRuleModule;
+
+/**
+ * Production Redis hosts, from the shared rule (live right-treefrog-90757, earlier noble-dane-77325).
+ * Refused in every mode, in every connection variable (v3 of C2; review finding F4). The shared rule
+ * additionally refuses the production IDENTITIES under any domain, and positively identifies a hosted
+ * Redis (resolveHostedRedisTarget below).
+ */
+export const PRODUCTION_REDIS_HOSTNAMES: readonly string[] = redisRule.PRODUCTION_REDIS_HOSTS;
+export const PRODUCTION_REDIS_IDENTITIES: readonly string[] = redisRule.PRODUCTION_REDIS_IDENTITIES;
+export const REDIS_RULES = redisRule.RULES;
+export const REDIS_IDENTITY_MARKER_KEY = redisRule.IDENTITY_MARKER_KEY;
+export const REDIS_APPROVAL_VARIABLES = [
+  redisRule.APPROVED_HOST_VARIABLE, redisRule.APPROVED_FINGERPRINT_VARIABLE, redisRule.IDENTITY_TOKEN_VARIABLE,
+] as const;
+/** Runtime identity check (rule R-MARKER): GET the marker before any write; absent/mismatch refuses. */
+export const assertRedisIdentityMarker = redisRule.assertRedisIdentityMarker;
+export const redisIdentityFingerprint = redisRule.redisIdentityFingerprint;
 
 /** The dedicated E2E project this suite is allowed to target. */
 export const DEFAULT_EXPECTED_E2E_PROJECT_REF = 'lomndxmrpyudaegddpef';
@@ -588,7 +618,8 @@ export function resolveAuthE2ETarget(env: EnvLike, options: ResolveOptions = {})
   const baseUrlRaw = present(env, BASE_URL_VARIABLE);
   const baseUrl = baseUrlRaw ?? DEFAULT_BASE_URL;
   const key = SERVICE_KEY_VARIABLES.map((name) => present(env, name)).find((v) => v !== null) ?? null;
-  const known = new Set<string>([...DATABASE_URL_VARIABLES, ...REDIS_URL_VARIABLES, ...APP_OVERRIDE_VARIABLES, ...NON_CONNECTION_SETTINGS]);
+  // The identity token is the shared Redis rule's run setting (review C2: required on loopback too).
+  const known = new Set<string>([...DATABASE_URL_VARIABLES, ...REDIS_URL_VARIABLES, ...APP_OVERRIDE_VARIABLES, ...NON_CONNECTION_SETTINGS, 'E2E_REDIS_IDENTITY_TOKEN']);
   const connectionLike = Object.keys(env)
     .filter((name) => typeof env[name] === 'string' && (CONNECTION_NAME_PATTERN.test(name) || LIBPQ_NAME_PATTERN.test(name)))
     .sort();
@@ -632,6 +663,12 @@ export function resolveAuthE2ETarget(env: EnvLike, options: ResolveOptions = {})
       const value = present(env, name);
       if (value !== null) assertKeyClaims(mode, name, value, guard.projectRef);
     }
+    // Round 26 / C3 (FAIL-CLOSED): a hosted Redis is accepted only when positively identified as the
+    // approved disposable instance; production is refused regardless of hostname (shared rule).
+    resolveHostedRedisTarget(mode, env);
+    // Review C1: EVERY other Redis-bearing variable the app may read goes through the same rule:
+    // loopback, or exactly the approved disposable host; production under any domain is refused.
+    assertHostedRedisEndpoints(mode, env);
     return Object.freeze({
       mode, supabaseUrl: primary.value, supabaseUrlVariable: primary.name, serviceRoleKey: key as string, baseUrl, guard,
       [RESOLVED_TARGET_BRAND]: true as const,
@@ -703,6 +740,36 @@ export function resolveAuthE2ETarget(env: EnvLike, options: ResolveOptions = {})
     guard: { projectRef: 'local', hostname: primaryHost, description: `disposable local Supabase stack (${primaryHost})` },
     [RESOLVED_TARGET_BRAND]: true as const,
   });
+}
+
+/**
+ * Applies THE shared Redis rule (scripts/lib/e2eRedisIdentityRule.cjs). Loopback passes (local mode
+ * keeps its own stricter loopback rule); a hosted Redis passes only with E2E_REDIS_APPROVED_HOST
+ * (exact host), a matching E2E_REDIS_APPROVED_FINGERPRINT when set, and E2E_REDIS_IDENTITY_TOKEN for
+ * the writer's runtime marker check. Errors name the rule and variable, never a value.
+ */
+export function resolveHostedRedisTarget(mode: AuthE2ETargetMode, env: EnvLike): RedisRuleTarget | null {
+  try {
+    return redisRule.resolveRedisTarget(env, { required: false });
+  } catch (error) {
+    if (error instanceof redisRule.RedisRuleError) throw new E2EEnvironmentError(`target mode "${mode}": ${error.message}`);
+    throw error;
+  }
+}
+
+/**
+ * Review C1: every Redis endpoint variable other than the targets (CREATOR_RENDER_REDIS_URL,
+ * UPSTASH_REDIS_URL, UPSTASH_REDIS_REST_URL, REDIS_PRIVATE_URL, REDIS_HOST, REDIS_PORT, and any
+ * unknown Redis-named URL/host variable) through THE shared rule. The denial pass above stays as a
+ * second, independent layer.
+ */
+export function assertHostedRedisEndpoints(mode: AuthE2ETargetMode, env: EnvLike): void {
+  try {
+    redisRule.assertRedisEndpoints(env, [...NON_CONNECTION_SETTINGS, ...APP_OVERRIDE_VARIABLES]);
+  } catch (error) {
+    if (error instanceof redisRule.RedisRuleError) throw new E2EEnvironmentError(`target mode "${mode}": ${error.message}`);
+    throw error;
+  }
 }
 
 /** True only for objects produced by resolveAuthE2ETarget. */

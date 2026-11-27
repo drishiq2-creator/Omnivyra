@@ -12,6 +12,18 @@ import {
   extractProjectRef,
 } from './e2eEnvironmentGuard';
 
+/**
+ * The guard's source for a mutant copy written to os.tmpdir(): the shared Redis rule's relative
+ * require (round 26 / C3) is rewritten to the real module's absolute path, so the copy loads.
+ */
+function portableGuardSource(): string {
+  const source = fs.readFileSync(path.join(__dirname, 'e2eEnvironmentGuard.ts'), 'utf8');
+  const rel = "require('../../scripts/lib/e2eRedisIdentityRule.cjs')";
+  if (!source.includes(rel)) return source; // a guard without the shared rule (e.g. the f237b92f0 control)
+  const abs = path.join(__dirname, '..', '..', 'scripts', 'lib', 'e2eRedisIdentityRule.cjs');
+  return source.replace(rel, `require(${JSON.stringify(abs)})`);
+}
+
 const PRODUCTION_URL = 'https://klkiseupptzbecbxwrky.supabase.co';
 const E2E_URL = 'https://' + DEFAULT_EXPECTED_E2E_PROJECT_REF + '.supabase.co';
 const VALID_KEY = 'sb-service-role-key-for-tests-only-not-a-real-credential';
@@ -163,7 +175,7 @@ test('extractProjectRef derives refs only from well-formed Supabase hosts', () =
 // ------------------------------------------------------------ MUTATION TEST
 // Required by PHASE 147 / step 3: disabling the production rejection MUST be caught.
 test('MUTATION: removing the production rejection is caught by the guard tests', async () => {
-  const source = fs.readFileSync(path.join(__dirname, 'e2eEnvironmentGuard.ts'), 'utf8');
+  const source = portableGuardSource();
   const marker = 'if (isProductionTarget(projectRef, hostname)) {';
   assert.ok(
     source.includes(marker),
@@ -575,7 +587,7 @@ test('C2 the harness refuses to load (no admin client, no request) when the targ
 // test case above then flips from "rejected" to "accepted", i.e. the rule is
 // load-bearing. The real module is never modified.
 async function mutantResolve(marker: string, replacement: string, env: Env): Promise<'accepted' | 'rejected'> {
-  const source = fs.readFileSync(path.join(__dirname, 'e2eEnvironmentGuard.ts'), 'utf8');
+  const source = portableGuardSource();
   const count = source.split(marker).length - 1;
   assert.equal(count, 1, `mutation marker must occur exactly once: ${marker}`);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'auth-e2e-c2-mutant-'));
@@ -654,7 +666,7 @@ test('C2 CONTROL conflicting target inputs are rejected', async () => {
 });
 
 test('C2 CONTROL the probe refuses unvalidated targets (no request to a forged endpoint)', async () => {
-  const source = fs.readFileSync(path.join(__dirname, 'e2eEnvironmentGuard.ts'), 'utf8');
+  const source = portableGuardSource();
   const marker = "if (!isResolvedAuthE2ETarget(target)) throw new E2EEnvironmentError('reachability probe refused";
   assert.equal(source.split(marker).length - 1, 1);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'auth-e2e-c2-mutant-'));
@@ -762,7 +774,7 @@ test('C2v2 F11 a whitespace-only target variable is an error, never a fallback',
 type Mutation = readonly [marker: string, replacement: string];
 
 async function mutantResolveWith(mutations: readonly Mutation[], env: Env, options?: Record<string, unknown>): Promise<'accepted' | 'rejected'> {
-  let source = fs.readFileSync(path.join(__dirname, 'e2eEnvironmentGuard.ts'), 'utf8');
+  let source = portableGuardSource();
   for (const [marker, replacement] of mutations) {
     assert.equal(source.split(marker).length - 1, 1, `mutation marker must occur exactly once: ${marker}`);
     source = source.replace(marker, replacement);
@@ -1046,7 +1058,7 @@ test('C2v3 F10 real HTTP: a 302 from the admin endpoint is refused and the apike
 });
 
 async function importGuardMutant(mutations: ReadonlyArray<readonly [string, string]>) {
-  let source = fs.readFileSync(path.join(__dirname, 'e2eEnvironmentGuard.ts'), 'utf8');
+  let source = portableGuardSource();
   for (const [marker, replacement] of mutations) {
     assert.equal(source.split(marker).length - 1, 1, `mutation marker must occur exactly once: ${marker}`);
     source = source.replace(marker, replacement);
@@ -1268,11 +1280,25 @@ test('C2v3 CONTROL the AUTH_E2E_EXPECTED_PROJECT_REF refusal in local mode is lo
 
 // ---------------- v3 controls for the new rules ----------------
 test('C2v3 CONTROL F4 the production Redis host denial is load-bearing', async () => {
-  await controlV2('prod redis', [['for (const host of PRODUCTION_REDIS_HOSTNAMES) {', 'for (const host of [] as string[]) {']], hostedEnv({ REDIS_URL: PROD_REDIS }));
+  // Round 26 / C3: production Redis is now refused by TWO layers (this guard's host-denial loop and the
+  // shared rule's identity checks) and a hosted Redis must also be positively identified. The control
+  // therefore approves the production host as itself and removes both production layers; with either
+  // still present the input is refused (see C3 CONTROL tests in e2eRedisIdentity.spec.ts).
+  const rule = mutantRedisRule([
+    ['    if (namesProduction(value)) refuse(', '    if (false) refuse('],
+    ['  // (b) The approval itself must not name production (a misconfiguration), in any form.\n  if (namesProduction(approved)) refuse(', '  if (false) refuse('],
+  ]);
+  try {
+    await controlV2('prod redis', [['for (const host of PRODUCTION_REDIS_HOSTNAMES) {', 'for (const host of [] as string[]) {'], rule.requireSwap], approvedAsItself(PROD_REDIS, 'noble-dane-77325.upstash.io'));
+  } finally {
+    rule.done();
+  }
 });
 
 test('C2v3 CONTROL F4 the hosted denial of unknown connection variables is load-bearing', async () => {
-  await controlV2('unknown var denial', [['for (const name of connectionLike) if (!known.has(name)) assertNotDeniedProject(', 'for (const name of [] as string[]) if (!known.has(name)) assertNotDeniedProject(']], hostedEnv({ SOME_OTHER_REDIS_URL: PROD_REDIS }));
+  // Round 26 / C3 review C1: the shared-rule endpoint check is a second layer for this input, so it is removed
+  // too; the single-layer controls at the end of this file prove each layer alone.
+  await controlV2('unknown var denial', [['for (const name of connectionLike) if (!known.has(name)) assertNotDeniedProject(', 'for (const name of [] as string[]) if (!known.has(name)) assertNotDeniedProject('], ['    assertHostedRedisEndpoints(mode, env);\n', '\n']], hostedEnv({ SOME_OTHER_REDIS_URL: PROD_REDIS }));
 });
 
 test('C2v3 CONTROL F4 the unknown-variable refusal in local mode is load-bearing', async () => {
@@ -1447,9 +1473,13 @@ test('C3 prod-redis 1-6: rejected in hosted mode across port, case, trailing dot
   assert.equal(attempts, 0, 'no network attempt');
 });
 
-test('C3 prod-redis 7: an unrelated hosted endpoint and the loopback service are still accepted in hosted mode', () => {
+test('C3 prod-redis 7: an unrelated hosted endpoint is REFUSED unless approved (round 26 FAIL-CLOSED); the loopback service is still accepted in hosted mode', () => {
   const attempts = withNetworkTrapped(() => {
-    assert.equal(resolveAuthE2ETarget(hostedEnv({ REDIS_URL: 'rediss://default:fixture-pw@e2e-cache-00001.upstash.io:6379' })).mode, 'hosted');
+    // Round 26 owner decision: fail closed. Before, this unrelated Upstash host was ACCEPTED (the B1
+    // limitation); now it is refused unless positively identified, and never through REDIS_URL.
+    expectRejectedWithout(hostedEnv({ REDIS_URL: 'rediss://default:fixture-pw@e2e-cache-00001.upstash.io:6379' }), 'unapproved hosted Redis via REDIS_URL', 'fixture-pw', /R-NOT-APPROVED/); // review M1
+    expectRejectedWithout(hostedEnv({ REDIS_URL: undefined, E2E_REDIS_URL: 'rediss://default:fixture-pw@e2e-cache-00001.upstash.io:6379' }), 'unapproved hosted Redis via E2E_REDIS_URL', 'fixture-pw', /R-APPROVAL-MISSING/);
+    assert.equal(resolveAuthE2ETarget(approvedAsItself('rediss://default:fixture-pw@e2e-cache-00001.upstash.io:6379', 'e2e-cache-00001.upstash.io')).mode, 'hosted', 'the same host, positively identified');
     assert.equal(resolveAuthE2ETarget(hostedEnv({ REDIS_URL: 'redis://127.0.0.1:6379' })).mode, 'hosted', 'the hosted workflow shape');
     assert.equal(resolveAuthE2ETarget(hostedEnv({ REDIS_URL: 'redis://127.0.0.1:6379', ALLOW_PROD_DB_WITH_LOCAL_REDIS: '1' })).mode, 'hosted');
   });
@@ -1495,5 +1525,77 @@ test('C3 prod-redis 10: the network trap itself works (a real attempt is counted
 });
 
 test('C3 prod-redis CONTROL without the new entry, the live production Redis is ACCEPTED in hosted mode', async () => {
-  await controlV2('live prod redis', [["  'right-treefrog-90757.upstash.io',\n", '']], hostedEnv({ REDIS_URL: LIVE_PROD_REDIS }));
+  // Round 26 / C3: the entry now lives in the shared rule (hosts AND identities); a hosted Redis must
+  // also be positively identified, so the control approves the live host as itself.
+  const rule = mutantRedisRule([
+    ["const PRODUCTION_REDIS_HOSTS = Object.freeze(['right-treefrog-90757.upstash.io', 'noble-dane-77325.upstash.io']);", "const PRODUCTION_REDIS_HOSTS = Object.freeze(['noble-dane-77325.upstash.io']);"],
+    ["const PRODUCTION_REDIS_IDENTITIES = Object.freeze(['right-treefrog-90757', 'noble-dane-77325']);", "const PRODUCTION_REDIS_IDENTITIES = Object.freeze(['noble-dane-77325']);"],
+  ]);
+  try {
+    await controlV2('live prod redis', [rule.requireSwap], approvedAsItself(LIVE_PROD_REDIS, LIVE_PROD_REDIS_HOST));
+  } finally {
+    rule.done();
+  }
+});
+
+/** Hosted env whose only Redis is E2E_REDIS_URL, approved as itself (positive identification satisfied). */
+function approvedAsItself(url: string, host: string): Env {
+  return hostedEnv({ REDIS_URL: undefined, E2E_REDIS_URL: url, E2E_REDIS_APPROVED_HOST: host, E2E_REDIS_IDENTITY_TOKEN: 'c3-run-token-0123456789abcdef' });
+}
+
+/**
+ * A mutated copy of the shared Redis rule plus the guard mutation that points the mutant guard at it.
+ * (portableGuardSource has already rewritten the guard's require to the real module's absolute path.)
+ */
+function mutantRedisRule(mutations: ReadonlyArray<readonly [string, string]>): { requireSwap: readonly [string, string]; done: () => void } {
+  const real = path.join(__dirname, '..', '..', 'scripts', 'lib', 'e2eRedisIdentityRule.cjs');
+  let source = fs.readFileSync(real, 'utf8');
+  for (const [marker, replacement] of mutations) {
+    assert.equal(source.split(marker).length - 1, 1, `mutation marker must occur exactly once: ${marker}`);
+    source = source.replace(marker, replacement);
+  }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'auth-e2e-c3-rule-mutant-'));
+  const file = path.join(dir, 'e2eRedisIdentityRule.cjs');
+  fs.writeFileSync(file, source);
+  return {
+    requireSwap: [`require(${JSON.stringify(real)})`, `require(${JSON.stringify(file)})`] as const,
+    done: () => fs.rmSync(dir, { recursive: true, force: true }),
+  };
+}
+
+// =============================================================================
+// Round 26 / C3 review C1: single-layer controls. Production Redis in a NON-target variable is refused
+// by TWO independent layers: this guard's host-denial loop and the shared rule's endpoint check
+// (assertHostedRedisEndpoints). Each layer alone must refuse; with both removed the input is accepted,
+// so neither refusal below is vacuous.
+// =============================================================================
+const SHARED_ENDPOINT_CALL = ['    assertHostedRedisEndpoints(mode, env);\n', '\n'] as const;
+const GUARD_HOST_LOOP = ['for (const host of PRODUCTION_REDIS_HOSTNAMES) {', 'for (const host of [] as string[]) {'] as const;
+
+test('C3 C1 CONTROL with the shared-rule endpoint call removed, prod in CREATOR_RENDER_REDIS_URL is still refused by the guard loop', async () => {
+  const env = hostedEnv({ CREATOR_RENDER_REDIS_URL: LIVE_PROD_REDIS });
+  expectRejectedWithout(env, 'prod in CREATOR_RENDER_REDIS_URL (real guard)', 'fixture-pw', /PRODUCTION Redis/);
+  assert.equal(await mutantResolveWith([SHARED_ENDPOINT_CALL], env), 'rejected', 'the guard loop alone must refuse');
+});
+
+test('C3 C1 CONTROL with the guard loop removed, prod in CREATOR_RENDER_REDIS_URL is still refused by the shared rule', async () => {
+  const env = hostedEnv({ CREATOR_RENDER_REDIS_URL: LIVE_PROD_REDIS });
+  assert.equal(await mutantResolveWith([GUARD_HOST_LOOP], env), 'rejected', 'the shared rule alone must refuse');
+});
+
+test('C3 C1 CONTROL with BOTH layers removed, prod in CREATOR_RENDER_REDIS_URL is accepted (so each refusal above is real)', async () => {
+  const env = hostedEnv({ CREATOR_RENDER_REDIS_URL: LIVE_PROD_REDIS });
+  assert.equal(await mutantResolveWith([SHARED_ENDPOINT_CALL, GUARD_HOST_LOOP], env), 'accepted');
+});
+
+test('C3 C1 CONTROL prod identity under another domain in REDIS_HOST: the shared rule is the only layer, and it is load-bearing', async () => {
+  const env = hostedEnv({ REDIS_HOST: 'right-treefrog-90757.evil.example' });
+  expectRejectedWithout(env, 'prod identity, other domain, REDIS_HOST (real guard)', 'right-treefrog', /R-PROD-IDENTITY/);
+  assert.equal(await mutantResolveWith([SHARED_ENDPOINT_CALL], env), 'accepted', 'without the shared-rule call the guard alone would accept it');
+});
+
+test('C3 C1 CONTROL an unapproved hosted CREATOR_RENDER_REDIS_URL: the shared rule is the only layer, and it is load-bearing', async () => {
+  const env = hostedEnv({ CREATOR_RENDER_REDIS_URL: 'rediss://default:fixture-pw@brave-otter-12345.upstash.io:6379' });
+  expectRejectedWithout(env, 'unapproved CREATOR_RENDER_REDIS_URL (real guard)', 'fixture-pw', /R-APPROVAL-MISSING/);
+  assert.equal(await mutantResolveWith([SHARED_ENDPOINT_CALL], env), 'accepted');
 });

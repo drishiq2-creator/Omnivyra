@@ -60,7 +60,7 @@ function makeSandbox(mutations: readonly Mutation[] = []): Sim {
   const bin = path.join(root, 'stub-bin');
   const tmp = path.join(root, 'runner-temp');
   const log = path.join(root, 'calls.log');
-  for (const d of ['stub-bin', 'runner-temp', 'supabase/_schema', 'supabase/migrations', 'tests/supabase-local/supabase', 'tests/auth', 'node_modules/tsx/dist']) {
+  for (const d of ['stub-bin', 'runner-temp', 'supabase/_schema', 'supabase/migrations', 'tests/supabase-local/supabase', 'tests/auth', 'scripts/lib', 'node_modules/tsx/dist']) {
     fs.mkdirSync(path.join(root, d), { recursive: true });
   }
   fs.writeFileSync(log, '');
@@ -76,6 +76,8 @@ function makeSandbox(mutations: readonly Mutation[] = []): Sim {
     'tests/supabase-local/stack-extensions.sql': 'tests/supabase-local/stack-extensions.sql',
     'tests/supabase-local/supabase/config.toml': 'tests/supabase-local/supabase/config.toml',
     'tests/auth/e2eEnvironmentGuard.ts': 'tests/auth/e2eEnvironmentGuard.ts',
+    // round 26 / C3: the guard requires the shared Redis rule by relative path.
+    'scripts/lib/e2eRedisIdentityRule.cjs': 'scripts/lib/e2eRedisIdentityRule.cjs',
   };
   for (const [to, from] of Object.entries(copies)) {
     let text = fs.readFileSync(path.join(REPO, from), 'utf8');

@@ -337,6 +337,14 @@ jobs:
             })();
           "
 
+      # Round 26 / C3 (review C2): the reset below writes only after reading the identity marker
+      # omnivyra:e2e:identity and finding it equal to a per-run token, on loopback too (a loopback
+      # port can be a tunnel to Production). This seeds the marker into the FRESH service container:
+      # the shared rule refuses production first, and only an EMPTY Redis (DBSIZE 0) is ever seeded.
+      # The random per-run token is masked and exported through GITHUB_ENV; it is never printed.
+      - name: Seed the disposable Redis identity marker (per-run token)
+        run: npm run seed:auth-e2e-redis-identity -- --env-out "$GITHUB_ENV"
+
       # lib/auth/rateLimit.ts allows 10 logins per IP per 15 minutes; a full run
       # performs ~5, so repeated runs trip it and /api/auth/login returns 429,
       # which surfaces as an auth timeout. The limiter stays fully active DURING

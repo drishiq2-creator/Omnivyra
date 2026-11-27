@@ -30,6 +30,9 @@ const LIVE = 'right-treefrog-90757.upstash.io';
 const STALE = 'noble-dane-77325.upstash.io';
 const PW = 'fixture-redis-pw';
 const LOOPBACK = 'redis://127.0.0.1:6379';
+// Round 26 / C3 review C2: the reset writes only after proving the identity marker, on loopback too, so
+// every accepted loopback case now carries the run token (the token is required; a missing one is refused).
+const RUN_TOKEN = 'c3-run-token-0123456789abcdef';
 
 function refused(env: Record<string, string | undefined>, why: string, mention?: RegExp): void {
   assert.throws(
@@ -91,10 +94,12 @@ test('RESET malformed, blank or ambiguous targets fail closed', () => {
   }
 });
 
-test('RESET the loopback CI target is still accepted (hosted and local workflow shapes)', () => {
-  assert.deepEqual(reset.resolveResetTarget({ REDIS_URL: LOOPBACK }), { variable: 'REDIS_URL', url: LOOPBACK });
-  assert.deepEqual(reset.resolveResetTarget({ E2E_REDIS_URL: LOOPBACK, REDIS_URL: LOOPBACK }), { variable: 'E2E_REDIS_URL', url: LOOPBACK });
-  assert.equal(reset.resolveResetTarget({ REDIS_URL: 'redis://127.0.0.1:6379/0' }).url, 'redis://127.0.0.1:6379/0');
+test('RESET the loopback CI target is still accepted (hosted and local workflow shapes, with the run token)', () => {
+  assert.deepEqual(reset.resolveResetTarget({ REDIS_URL: LOOPBACK, E2E_REDIS_IDENTITY_TOKEN: RUN_TOKEN }), { variable: 'REDIS_URL', url: LOOPBACK });
+  assert.deepEqual(reset.resolveResetTarget({ E2E_REDIS_URL: LOOPBACK, REDIS_URL: LOOPBACK, E2E_REDIS_IDENTITY_TOKEN: RUN_TOKEN }), { variable: 'E2E_REDIS_URL', url: LOOPBACK });
+  assert.equal(reset.resolveResetTarget({ REDIS_URL: 'redis://127.0.0.1:6379/0', E2E_REDIS_IDENTITY_TOKEN: RUN_TOKEN }).url, 'redis://127.0.0.1:6379/0');
+  // C2: without the token, loopback is refused (a loopback port can be a tunnel to Production).
+  refused({ REDIS_URL: LOOPBACK }, 'loopback without the run token', /R-APPROVAL-MISSING/);
 });
 
 /** A fake ioredis: records every call; SCAN honours MATCH so the deletion scope is observable. */
@@ -127,7 +132,9 @@ test('RESET a production target never creates a Redis client (no connect, SCAN o
 
 test('RESET on loopback only rl:* rate-limit keys in the listed namespaces are deleted', async () => {
   const f = fakeRedis(['rl:login:1.2.3.4', 'rl:otp_send:a', 'rl:uid:invite:u1', 'rl:other:x', 'session:abc', 'bull:queue:1']);
-  const deleted = await reset.main({ env: { REDIS_URL: LOOPBACK }, createRedis: () => f.client, log: () => undefined });
+  const client = { ...f.client, get: async (key: string) => { f.calls.push(`get ${key}`); return RUN_TOKEN; } };
+  const deleted = await reset.main({ env: { REDIS_URL: LOOPBACK, E2E_REDIS_IDENTITY_TOKEN: RUN_TOKEN }, createRedis: () => client, log: () => undefined });
+  assert.equal(f.calls[1], 'get omnivyra:e2e:identity', 'the marker is read before any SCAN/DEL');
   assert.equal(deleted, 3);
   assert.deepEqual([...f.store].sort(), ['bull:queue:1', 'rl:other:x', 'session:abc']);
   assert.ok(!f.calls.some((c) => /flush/i.test(c)));
@@ -166,36 +173,60 @@ test('RESET the real script refuses both production hosts with exit 1 and zero n
 });
 
 test('RESET trap self-check: a permitted loopback target DOES attempt a connection (so 0 above is meaningful)', () => {
-  const r = runScript(SCRIPT, { REDIS_URL: 'redis://127.0.0.1:9' });
+  const r = runScript(SCRIPT, { REDIS_URL: 'redis://127.0.0.1:9', E2E_REDIS_IDENTITY_TOKEN: RUN_TOKEN });
   assert.ok(r.attempts >= 1, `the trap must observe the attempt: ${r.out}`);
 });
 
-test('RESET CONTROL with the live host removed from the script, a production target reaches the network', () => {
-  const source = fs.readFileSync(SCRIPT, 'utf8');
-  const marker = "const PRODUCTION_REDIS_HOSTS = ['right-treefrog-90757.upstash.io', 'noble-dane-77325.upstash.io'];";
-  assert.equal(source.split(marker).length - 1, 1);
+// Round 26 / C3: the production lists and the normalisation now live in THE shared rule
+// (scripts/lib/e2eRedisIdentityRule.cjs), so these two controls mutate a copy of that module. The
+// script and the mutated module are copied side by side (scripts/ + scripts/lib/) so the script's
+// relative require loads the mutant.
+const RULE = path.join(REPO, 'scripts', 'lib', 'e2eRedisIdentityRule.cjs');
+
+function withMutantRule<T>(mutations: ReadonlyArray<readonly [string, string]>, fn: (script: string, rulePath: string) => T): T {
+  let rule = fs.readFileSync(RULE, 'utf8');
+  for (const [marker, replacement] of mutations) {
+    assert.equal(rule.split(marker).length - 1, 1, `mutation marker must occur exactly once: ${marker}`);
+    rule = rule.replace(marker, replacement);
+  }
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'reset-mutant-'));
   try {
-    const mutant = path.join(dir, 'reset-auth-e2e-rate-limits.js');
-    fs.writeFileSync(mutant, source.replace(marker, "const PRODUCTION_REDIS_HOSTS = ['noble-dane-77325.upstash.io'];"));
-    const r = runScript(mutant, { REDIS_URL: `rediss://default:${PW}@${LIVE}:6379` });
-    assert.ok(r.attempts >= 1, `the control must observe a network attempt to the live production host: ${r.out}`);
+    fs.mkdirSync(path.join(dir, 'scripts', 'lib'), { recursive: true });
+    const script = path.join(dir, 'scripts', 'reset-auth-e2e-rate-limits.js');
+    const rulePath = path.join(dir, 'scripts', 'lib', 'e2eRedisIdentityRule.cjs');
+    fs.copyFileSync(SCRIPT, script);
+    fs.writeFileSync(rulePath, rule);
+    return fn(script, rulePath);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+}
+
+test('RESET CONTROL with the live host removed from the shared rule, a production target reaches the network', () => {
+  // C3 defence in depth: a production target must also pass positive identification to be used at all,
+  // so the control approves the live host as itself; only the production-identity lists stop it.
+  const env = { E2E_REDIS_URL: `rediss://default:${PW}@${LIVE}:6379`, E2E_REDIS_APPROVED_HOST: LIVE, E2E_REDIS_IDENTITY_TOKEN: 'c3-run-token-0123456789abcdef' };
+  const real = runScript(SCRIPT, env);
+  assert.equal(real.attempts, 0, `the real script must refuse before the network: ${real.out}`);
+  assert.match(real.out, /production/);
+  withMutantRule([
+    ["const PRODUCTION_REDIS_HOSTS = Object.freeze(['right-treefrog-90757.upstash.io', 'noble-dane-77325.upstash.io']);", "const PRODUCTION_REDIS_HOSTS = Object.freeze(['noble-dane-77325.upstash.io']);"],
+    ["const PRODUCTION_REDIS_IDENTITIES = Object.freeze(['right-treefrog-90757', 'noble-dane-77325']);", "const PRODUCTION_REDIS_IDENTITIES = Object.freeze(['noble-dane-77325']);"],
+  ], (script) => {
+    const r = runScript(script, env);
+    assert.ok(r.attempts >= 1, `the control must observe a network attempt to the live production host: ${r.out}`);
+  });
 });
 
-test('RESET CONTROL with the previous case-sensitive raw check, an upper-case production host passes validation', () => {
-  const source = fs.readFileSync(SCRIPT, 'utf8');
-  const marker = '      if (forms.some((f) => f.includes(marker))) throw';
-  assert.equal(source.split(marker).length - 1, 1);
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'reset-mutant-'));
-  try {
-    const mutant = path.join(dir, 'reset-auth-e2e-rate-limits.js');
-    fs.writeFileSync(mutant, source.replace(marker, '      if (value.includes(marker)) throw'));
-    const m = load(mutant);
-    assert.equal(m.resolveResetTarget({ REDIS_URL: `rediss://default:${PW}@${LIVE.toUpperCase()}:6379` }).variable, 'REDIS_URL', 'the control must observe acceptance');
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
+test('RESET CONTROL with the previous case-sensitive raw check, an upper-case production host is not recognised', () => {
+  const upper = `rediss://default:${PW}@${LIVE.toUpperCase()}:6379`;
+  refused({ REDIS_URL: upper }, 'upper-case live host (real rule)', /production/);
+  withMutantRule([
+    ['  const forms = denialCandidates(value);\n  return [', '  const forms = [String(value)];\n  return ['],
+  ], (_script, rulePath) => {
+    const real = createRequire(__filename)(RULE) as { namesProduction: (v: string) => boolean };
+    const mutant = createRequire(__filename)(rulePath) as { namesProduction: (v: string) => boolean };
+    assert.equal(real.namesProduction(upper), true);
+    assert.equal(mutant.namesProduction(upper), false, 'the control must observe the upper-case host passing the identity check');
+  });
 });

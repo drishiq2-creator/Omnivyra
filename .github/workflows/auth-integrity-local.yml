@@ -76,7 +76,7 @@ jobs:
       - name: Guard and bootstrap unit tests (offline)
         run: |
           npm run test:auth-e2e-guard
-          node node_modules/tsx/dist/cli.mjs --test tests/supabase-local/localStackPlan.spec.ts tests/supabase-local/ciAssertions.spec.ts tests/supabase-local/authIntegrityLocalWorkflow.spec.ts tests/supabase-local/logRedaction.spec.ts tests/supabase-local/bootstrapSimulation.spec.ts tests/supabase-local/resetRateLimits.spec.ts
+          node node_modules/tsx/dist/cli.mjs --test tests/supabase-local/localStackPlan.spec.ts tests/supabase-local/ciAssertions.spec.ts tests/supabase-local/authIntegrityLocalWorkflow.spec.ts tests/supabase-local/logRedaction.spec.ts tests/supabase-local/bootstrapSimulation.spec.ts tests/supabase-local/resetRateLimits.spec.ts tests/supabase-local/resetRedisIdentity.spec.ts
 
       - name: Bootstrap plan (no side effects)
         run: bash tests/supabase-local/bootstrap.sh plan | tee "$RUNNER_TEMP/bootstrap-plan.log"
@@ -231,6 +231,14 @@ jobs:
               s.on('error', retry);
             })();
           "
+
+      # Round 26 / C3 (review C2): the reset below writes only after reading the identity marker
+      # omnivyra:e2e:identity and finding it equal to a per-run token, on loopback too (a loopback
+      # port can be a tunnel to Production). This seeds the marker into the FRESH service container:
+      # the shared rule refuses production first, and only an EMPTY Redis (DBSIZE 0) is ever seeded.
+      # The random per-run token is masked and exported through GITHUB_ENV; it is never printed.
+      - name: Seed the disposable Redis identity marker (per-run token)
+        run: npm run seed:auth-e2e-redis-identity -- --env-out "$GITHUB_ENV"
 
       - name: Reset auth rate-limit counters
         run: npm run reset:auth-e2e-rate-limits
