@@ -54,7 +54,13 @@ async function runWorker() {
   worker = new Worker(QUEUE, async (job) => {
     const { kind, holdMs = 0 } = job.data;
     log(`HARNESS_JOB_START ${job.id} ${kind}`);
-    const browser = await chromium.launch({ headless: true });
+    // 'hold' uses Playwright's defaults, as production's chromium.launch() calls
+    // do (handleSIGTERM: true closes every browser on SIGTERM). 'holdnohandler'
+    // opts out, so the worker's own drain decides when the browser closes.
+    const launchOpts = kind === 'holdnohandler'
+      ? { headless: true, handleSIGTERM: false, handleSIGINT: false, handleSIGHUP: false }
+      : { headless: true };
+    const browser = await chromium.launch(launchOpts);
     try {
       const context = await browser.newContext();
       await context.route('**/*', (route) => {
@@ -72,7 +78,12 @@ async function runWorker() {
         }
         await sleep(1500);
       }
-      if (holdMs) await sleep(holdMs);
+      if (holdMs) {
+        log(`HARNESS_HOLDING ${job.id}`);
+        await sleep(holdMs);
+        // A real job keeps using its page after a wait; so does this one.
+        await page.evaluate(() => document.getElementById('x').textContent);
+      }
       return { pid: process.pid };
     } finally {
       await browser.close().catch(() => {});

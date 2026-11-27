@@ -36,6 +36,13 @@ wait_ready() { # <n>: wait until the worker has logged its n-th HARNESS_READY
   done
   fail "worker never reached READY #$1"; docker logs gi07w 2>&1 | tail -30; docker logs gi07w >"$OUT/worker-not-ready.log" 2>&1; docker rm -f gi07w >/dev/null 2>&1; return 1
 }
+wait_log() { # <line>: wait until the worker has logged it
+  for _ in $(seq 1 120); do
+    docker logs gi07w 2>&1 | grep -qF "$1" && return 0
+    sleep 0.25
+  done
+  fail "worker never logged: $1"; return 1
+}
 hp() { docker run --rm --network "$NET" -e REDIS_HOST=redis -e HARNESS_QUEUE="$Q" -v "$H:/harness:ro" --entrypoint node "$IMG" /harness/harness.js "$@"; }
 census() { docker exec gi07w node /harness/census.js "$@"; }
 exitcode() { docker inspect -f '{{.State.ExitCode}}' "$1"; }
@@ -65,7 +72,13 @@ scenarios() {
   R[$m.S2zombiesAfterCleanup]=$(jq .zombies <<<"$c")
 
   # S3 normal shutdown: SIGTERM (docker stop) with a job in flight
+  # The signal is sent only once the job is HOLDING its open browser, so every
+  # run tests the same moment. Playwright's default handleSIGTERM closes the
+  # browser on SIGTERM, so the job's next page call fails: that is pre-existing
+  # production behaviour (not tini's), asserted EQUAL across modes, and S3b
+  # shows that handleSIGTERM:false lets the drain finish the job.
   out=$(hp produce hold 1 8000 active); echo "$out"; jid=$(jobid "$out")
+  wait_log "HARNESS_HOLDING $jid"
   docker stop -t 30 gi07w >/dev/null
   R[$m.S3exit]=$(exitcode gi07w)
   R[$m.S3sigterms]=$(docker logs gi07w 2>&1 | grep -c 'HARNESS_SIGNAL SIGTERM')
@@ -89,6 +102,14 @@ scenarios() {
   docker kill -s INT gi07w >/dev/null; timeout 60 docker wait gi07w >/dev/null || fail "container did not stop within 60s"
   R[$m.S5exit]=$(exitcode gi07w)
   R[$m.S5sigints]=$(docker logs gi07w 2>&1 | grep -c 'HARNESS_SIGNAL SIGINT')
+
+  # S3b the same in-flight SIGTERM with Playwright's signal handling turned off.
+  docker start gi07w >/dev/null; wait_ready 4 || return
+  out=$(hp produce holdnohandler 1 8000 active); echo "$out"; jid=$(jobid "$out")
+  wait_log "HARNESS_HOLDING $jid"
+  docker stop -t 30 gi07w >/dev/null
+  R[$m.S3bexit]=$(exitcode gi07w)
+  R[$m.S3bjobState]=$(hp state "$jid" | awk '/^STATE/{print $3}')
 
   docker logs gi07w >"$OUT/worker-$m.log" 2>&1
   docker rm -f gi07w >/dev/null
@@ -208,7 +229,10 @@ expect_eq "tini S3 SIGTERM exit" "${R[tini.S3exit]:-}" 0
 expect_eq "tini S3 SIGTERM delivered once" "${R[tini.S3sigterms]:-}" 1
 expect_eq "tini S3 drained" "${R[tini.S3drained]:-}" 1
 expect_eq "tini S3 no hard exit" "${R[tini.S3hardExit]:-}" 0
-expect_eq "tini S3 in-flight job" "${R[tini.S3jobState]:-}" completed
+expect_eq "tini S3 in-flight job (Playwright default closes the browser on SIGTERM: pre-existing)" "${R[tini.S3jobState]:-}" failed
+expect_eq "tini S3b in-flight job, handleSIGTERM false" "${R[tini.S3bjobState]:-}" completed
+expect_eq "control S3b in-flight job, handleSIGTERM false" "${R[control.S3bjobState]:-}" completed
+expect_eq "tini S3b exit" "${R[tini.S3bexit]:-}" 0
 expect_eq "tini S4 SIGKILL exit" "${R[tini.S4exit]:-}" 137
 expect_eq "tini S4 interrupted job after restart" "${R[tini.S4jobState]:-}" completed
 expect_eq "tini S4 new jobs after restart" "${R[tini.S4newJobs]:-}" ok
@@ -217,7 +241,7 @@ expect_eq "tini S5 SIGINT exit" "${R[tini.S5exit]:-}" 0
 expect_eq "tini S5 SIGINT delivered once" "${R[tini.S5sigints]:-}" 1
 
 # Behaviour preserved: identical outcomes in both modes.
-for k in S3exit S3sigterms S3drained S3hardExit S3jobState S4exit S4jobState S4newJobs S5exit S5sigints S6runningAt20s S6exit S6gracefulLog; do
+for k in S3exit S3sigterms S3drained S3hardExit S3jobState S3bexit S3bjobState S4exit S4jobState S4newJobs S5exit S5sigints S6runningAt20s S6exit S6gracefulLog; do
   expect_eq "same in both modes: $k" "${R[tini.$k]:-}" "${R[control.$k]:-}"
 done
 [ "${R[tini.S6runningAt20s]:-}" = true ] && expect_eq "tini S6 real main.js PID 1" "${R[tini.S6pid1]:-}" tini
