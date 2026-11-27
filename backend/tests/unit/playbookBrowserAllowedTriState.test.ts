@@ -26,8 +26,8 @@ describe('SF-2: browser_allowed tri-state', () => {
   });
 
   it('a legacy playbook (flag absent) round-trips with the key STILL ABSENT (never silently converted)', () => {
-    const legacy = { api_allowed: true, rpa_allowed: false, manual_only: false };
-    const saved = applyBrowserAllowedChoice(legacy, browserAllowedToChoice((legacy as any).browser_allowed));
+    const legacy: { api_allowed: boolean; rpa_allowed: boolean; manual_only: boolean; browser_allowed?: boolean } = { api_allowed: true, rpa_allowed: false, manual_only: false };
+    const saved = applyBrowserAllowedChoice(legacy, browserAllowedToChoice(legacy.browser_allowed));
     expect(saved).toEqual(legacy);
     expect(Object.prototype.hasOwnProperty.call(saved, 'browser_allowed')).toBe(false);
     // and the saved shape keeps the runtime meaning of "absent": fallback allowed, explicit refused
