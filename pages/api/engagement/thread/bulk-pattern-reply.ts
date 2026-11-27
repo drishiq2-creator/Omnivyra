@@ -11,6 +11,7 @@ import { resolveUserContext, enforceCompanyAccess } from '../../../../backend/se
 import { enforceRole } from '../../../../backend/services/rbacService';
 import { COMMUNITY_AI_CAPABILITIES } from '../../../../backend/services/rbac/communityAiCapabilities';
 import { supabase } from '../../../../backend/db/supabaseClient';
+import { getControls } from '../../../../backend/services/engagementGovernanceService';
 import { bulkReplyThreads } from '../../../../backend/services/bulkEngagementService';
 import { generateResponse } from '../../../../backend/services/responseGenerationService';
 import { SUPPORTED_TAGS } from '../../../../backend/services/taggedResponseInterpreter';
@@ -57,6 +58,27 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       allowedRoles: [...COMMUNITY_AI_CAPABILITIES.EXECUTE_ACTIONS],
     });
     if (!roleGate) return;
+
+    // FIX-2: the tenant's bulk-reply switch — the same contract bulk-ai-reply
+    // enforces. Checked against the access-validated organizationId, AFTER
+    // access + role and BEFORE any pattern read, LLM generation or send.
+    // NOTE: getControls() returns product defaults (enabled) both when no row
+    // exists AND when the read errors; that is not detectable here, so a
+    // read error currently fails OPEN (shared helper, owner decision).
+    const controls = await getControls(organizationId);
+    if (!controls.bulk_reply_enabled) {
+      console.warn(
+        JSON.stringify({
+          event: 'bulk_pattern_reply_refused',
+          code: 'BULK_REPLY_DISABLED',
+          organization_id: organizationId,
+        })
+      );
+      return res.status(403).json({
+        error: 'Bulk reply is disabled for this organization',
+        code: 'BULK_REPLY_DISABLED',
+      });
+    }
 
     const { data: pattern } = await supabase
       .from('response_patterns')
