@@ -514,7 +514,11 @@
       "method": "unknown_out_of_band",
       "project_ref": "klkiseupptzbecbxwrky",
       "cluster_system_identifier": "7550817586112808987",
-      "ledger_row": false,
+      "ledger_row": true,
+      "ledger_row_history": [
+        "2026-11-10: false (D1 catalogue read: ledger 93 rows, max 20270111000003, no 20261127000000 row; this is what the entry originally recorded).",
+        "2026-11-26: true (read-only, supabase_read_only_user): version 20261127000000, name pi_prospect_lists, statements empty, created_by and idempotency_key NULL, xmin 3772597, the same transaction as the 20270202000000 row and the latest ledger write; ledger 95 rows, max 20270202000000. Writer identified 2026-11-27: the ledger-only D-step of apply-expand35-20261121/apply-expand35.js (about line 312), run 2026-11-21 03:02Z, INSERT ... (version, name) ... ON CONFLICT (version) DO NOTHING; recorded in release-gates/APPLIED-WITHOUT-LEDGER.md row 'LEDGER ROWS WRITTEN 2026-11-21 03:02Z'. Evidence: docs/supabase-e2e-retirement/09-production-readonly-compatibility.md section 3(a) (q09, q16, q18b); re-read unchanged 2026-11-27 (docs/supabase-e2e-retirement/14-repository-production-schema-reconciliation.md, b05_ledger)."
+      ],
       "record": "C:/omnivyra-archive/programme-20261103/completion-20261108/final-20261108/closure-r15-d1-pack-20261110/D1-EXECUTION-RECORD.json (q05/q07/q10/q12/q14/q15/q19; verified by virality-05)",
       "evidence_class": "PRODUCTION_CATALOG_VERIFIED (2026-11-10 D1 catalogue read: every effect present) + CODE_VERIFIED digest (LF bytes at release/attest-20261127000000 base 67d729818). Distinct from the top-level evidence_class, which covers the 2026-11-01 ledger read only."
     }
