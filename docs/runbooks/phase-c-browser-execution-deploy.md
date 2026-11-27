@@ -119,14 +119,19 @@ cache.
   accepted again: there is no per-session revocation list. In practice the
   extension already signed itself out at its first validate during the
   suspension and must be paired again.
-- A lease handed out BEFORE the suspension: the extension's action-result and
-  dispatch/renew are refused, so the outcome is not recorded. The row stays
-  `pending` with a claimed, then lapsed, lease: delivery state unknown. Clients
-  that send `X-Omnivyra-Dispatch-Renewal: 1` are never re-offered a claimed row;
-  it shows in `listClaimedUnknownDispatches` for an operator decision. Legacy
-  (v1.3.9) clients are re-offered lapsed leases by /api/extension/commands
-  after reactivation, which can resend (pre-existing path, see
-  engagementDispatchRecoveryService.ts). Check before reactivating a company:
+- A lease handed out BEFORE the suspension (review S-1): action-result is
+  still accepted for the session's OWN lease (membership 'report-only'), so the
+  outcome is recorded and the lease released; an intermediate chain step is
+  finalised as failed instead of re-opened. Sales Navigator pause/close/cancel
+  are accepted for a run the session user's bound member owns. dispatch/renew,
+  commands, /next, /pages, /bind, /runs/open and /status stay refused. A
+  report that never arrives (extension closed, lease lapsed first) still leaves
+  a claimed, unknown-delivery row: renewal-capable clients never re-offer it;
+  legacy (v1.3.9) clients are re-offered lapsed leases by
+  /api/extension/commands after reactivation, which can resend (pre-existing
+  path, see engagementDispatchRecoveryService.ts). The scheduler and the
+  execute route no longer claim such a row (they require
+  `dispatch_lease_id IS NULL`). Check before reactivating a company:
 
 ```sql
 SELECT id, platform, action_type, dispatch_lease_expires_at, dispatch_acknowledged_at
