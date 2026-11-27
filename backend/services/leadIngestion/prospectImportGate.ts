@@ -33,9 +33,10 @@ export async function resolveProspectImportGate(
       flagKey: PROSPECT_IMPORT_FLAG_KEY,
       cohortKey: null,
     });
-    return result.enabled
+    // STRICT (round 30B): only a boolean true opens it; a malformed answer (missing, a string, null) stays closed.
+    return result?.enabled === true
       ? { allowed: true, reason: `tenant_flag:${result.reason}` }
-      : { allowed: false, reason: `tenant_flag:${result.reason}` };
+      : { allowed: false, reason: `tenant_flag:${result?.reason ?? 'malformed_answer'}` };
   } catch (e) {
     return { allowed: false, reason: `flag_evaluation_failed:${e instanceof Error ? e.message : String(e)}` };
   }

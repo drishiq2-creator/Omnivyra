@@ -154,6 +154,8 @@ export interface ImportOutcome {
   personId?: string | null;
   accountId?: string | null;
   prospectId?: string | null;
+  /** Round 30 / P0-2: WS-1's verdict on the prospect - what "new prospects" counts (not provenanceOutcome). */
+  prospectOutcome?: 'created' | 'matched' | 'insufficient_evidence';
   /**
    * Whether the prospect reached the store the Lead Database reads FIRST.
    * Fail-open by design, which is exactly why it must be surfaced: a prospect

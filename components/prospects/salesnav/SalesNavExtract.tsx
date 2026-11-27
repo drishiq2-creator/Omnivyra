@@ -7,12 +7,18 @@
  *   3. the CONNECTION - the Omnivyra extension binds the user's logged-in LinkedIn account; this page only reports it;
  *   4. the RUN - paste a URL, Extract, then a live status (polled) with Cancel / Resume.
  * Anything the page could not read is shown as "couldn't check", never as "not accepted" / "not connected".
+ *
+ * Round 30 / P0-1: while the LEGAL switch is closed (gate reason `legal_not_cleared`) none of the four states is
+ * shown: no acknowledgement, no list input, no Extract. The page renders SalesNavStoppedState instead - what is
+ * unavailable, and the supported route (the customer's own data through the import wizard). The server refuses
+ * /ack, /bind, /runs and /pages in this state regardless of what any page renders.
  */
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   acceptSalesNavRestriction, cancelSalesNavRun, getSalesNavRun, getSalesNavSetup, resumeSalesNavRun,
   SalesNavApiError, startSalesNavRun, type SalesNavRunView, type SalesNavSetup,
 } from './salesNavClient';
+import SalesNavStoppedState from './SalesNavStoppedState';
 
 const POLL_MS = 5000;
 
@@ -132,6 +138,9 @@ export default function SalesNavExtract({ companyId }: { companyId: string }) {
     return <section className="rounded-2xl border border-red-200 bg-white p-6 text-sm text-red-700" role="alert">{setupError}</section>;
   }
   if (!setup) return <section className="rounded-2xl border border-gray-200 bg-white p-6 text-sm text-gray-500">Loading…</section>;
+
+  // THE legal stop first: it outranks every other state, including an acknowledgement nobody has given yet.
+  if (!setup.gate.allowed && setup.gate.reason === 'legal_not_cleared') return <SalesNavStoppedState />;
 
   const needsAck = setup.acked !== true;
   return (

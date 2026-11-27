@@ -24,7 +24,7 @@ import { deriveExtensionHmacSecret } from '../../services/extensionSessionServic
 import type { ingestLeadBatch } from '../../services/leadIngestion/orchestrator';
 import type { ScreenFn } from '../../services/prospectImportReview/screen';
 import { resolveDailyCap } from '../../services/salesNav/contract';
-import { salesNavRouteGate } from '../../services/salesNav/gate';
+import { SALESNAV_LEGAL_STOP_BODY, salesNavLegalCleared, salesNavRouteGate } from '../../services/salesNav/gate';
 import {
   decideNextPage, reportClose, reportPause, submitPage,
   type LoopRefusal, type NextDecision, type ReportResult, type SubmitResult,
@@ -39,6 +39,8 @@ type ExtSession = { userId: string; orgId: string; expiresAt: number; hmacNonce?
 export interface SalesNavExtensionDeps {
   readonly auth?: (req: NextApiRequest, res: NextApiResponse) => Promise<{ session: ExtSession } | null>;
   readonly gate?: typeof salesNavRouteGate;
+  /** Round 30: the legal switch for /bind and /pages (default: the strict env read). Tests only. */
+  readonly legalCleared?: typeof salesNavLegalCleared;
   readonly binding?: ExtensionMemberBindingPort;
   readonly store?: SalesNavStoreDeps;
   readonly screen?: ScreenFn;
@@ -79,10 +81,25 @@ async function authed(req: NextApiRequest, res: NextApiResponse, deps: SalesNavE
 
 const memberUrn = (id: string) => `urn:li:fsd_profile:${id}`;
 
+/**
+ * Round 30 / P0-1 (closes K18): /bind and /pages stop under the legal switch, server-side. Checked AFTER the extension
+ * signature (an unsigned caller still gets the middleware's 401 and learns nothing) and BEFORE anything is read,
+ * bound or ingested. Fail closed: any value but the exact 'true', or an unreadable switch, refuses. The body is the
+ * one fixed legal-stop body - no run, binding or member state.
+ */
+function legalStop(res: NextApiResponse, deps: SalesNavExtensionDeps): boolean {
+  let cleared = false;
+  try { cleared = (deps.legalCleared ?? salesNavLegalCleared)('extension') === true; } catch { cleared = false; }
+  if (cleared) return false;
+  res.status(403).json({ ...SALESNAV_LEGAL_STOP_BODY });
+  return true;
+}
+
 // -- POST /bind ---------------------------------------------------------------------------------------------------
 export async function bindHandler(req: NextApiRequest, res: NextApiResponse, deps: SalesNavExtensionDeps = {}) {
   const a = await authed(req, res, deps);
   if (!a) return;
+  if (legalStop(res, deps)) return;
   const out = await (deps.binding ?? activeExtensionBinding).bind(a.ctx, body(req).memberId, a.store);
   // `in`, not a boolean test: tsconfig.json:11 is "strict": false (repo-wide), so a boolean-literal discriminant does NOT narrow a union here - do not 'simplify' back
   if (!('reason' in out)) return res.status(200).json({ bound: true });
@@ -139,7 +156,7 @@ export async function statusHandler(req: NextApiRequest, res: NextApiResponse, d
 
 // -- POST /runs/:id/next - the SHARED loop decision (loop.ts), signed for the extension ---------------------------
 const loopDeps = (deps: SalesNavExtensionDeps, store: SalesNavStoreDeps) =>
-  ({ store, gate: deps.gate, screen: deps.screen, ingest: deps.ingest, now: deps.now });
+  ({ store, gate: deps.gate, legalCleared: deps.legalCleared, screen: deps.screen, ingest: deps.ingest, now: deps.now });
 const refuse = (res: NextApiResponse, r: LoopRefusal) => res.status(r.http).json({ error: r.error, ...(r.extra ?? {}) });
 
 export async function nextHandler(req: NextApiRequest, res: NextApiResponse, deps: SalesNavExtensionDeps = {}) {
@@ -173,6 +190,7 @@ export async function nextHandler(req: NextApiRequest, res: NextApiResponse, dep
 export async function pagesHandler(req: NextApiRequest, res: NextApiResponse, deps: SalesNavExtensionDeps = {}) {
   const a = await authed(req, res, deps);
   if (!a) return;
+  if (legalStop(res, deps)) return;
   const b = body(req);
   const out = await submitPage(a.ctx, runIdOf(req), {
     route: 'extension', pageIndex: b.pageIndex, finalUrl: b.finalUrl, outcome: b.outcome, unknownCode: b.unknownCode,

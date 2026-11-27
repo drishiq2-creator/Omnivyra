@@ -451,6 +451,10 @@ export async function ingestNormalizedRecord(
   } catch (e) {
     return fail(externalId, 'prospect_resolution_failed', e);
   }
+  // Round 30 review F-2: a failure AFTER this point leaves the prospect resolved (and, on 'created', the
+  // canonical_leads row already inserted), so those failures still report the prospect verdict - otherwise a
+  // prospect created just before a provenance failure is never counted as new (the retry answers 'matched').
+  const prospectVerdict = () => (prospect ? { prospectId, prospectOutcome: prospect.outcome } : {});
 
   // ── ENRICHMENT PLAN (WS-2 seam) ─────────────────────────────────────────
   // Planning runs only when the caller supplied ports, and only once a
@@ -523,7 +527,7 @@ export async function ingestNormalizedRecord(
         : {}),
     }, at);
   } catch (e) {
-    return fail(externalId, 'provenance_failed', e);
+    return { ...fail(externalId, 'provenance_failed', e), ...prospectVerdict() };
   }
 
   // ── EMPLOYER FIRMOGRAPHICS (P2C) ────────────────────────────────────────
@@ -564,7 +568,7 @@ export async function ingestNormalizedRecord(
     } catch (e) {
       // Consistent with the employer resolution above, which already fails a
       // record rather than proceeding with a half-known employer.
-      return fail(externalId, 'provenance_failed', e);
+      return { ...fail(externalId, 'provenance_failed', e), ...prospectVerdict() };
     }
   }
 
@@ -633,6 +637,7 @@ export async function ingestNormalizedRecord(
         personId,
         accountId,
         prospectId,
+        ...(prospect ? { prospectOutcome: prospect.outcome } : {}),
       };
     }
   }
@@ -796,6 +801,8 @@ export async function ingestNormalizedRecord(
     personId,
     accountId,
     prospectId,
+    // Round 30 / P0-2: the prospect verdict, reported alongside the evidence verdict (never inferred from it).
+    ...(prospect ? { prospectOutcome: prospect.outcome } : {}),
     leadProjection,
     enrichmentPlan,
     provenanceOutcome: ingestion.outcome,

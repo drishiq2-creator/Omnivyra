@@ -63,8 +63,17 @@ export interface CsvDiagnostic {
 export interface CsvParseResult {
   /** The header row, verbatim — never normalised, never renamed. */
   headers: string[];
-  /** One entry per data record, in file order. Always `headers.length` long. */
+  /**
+   * One entry per IMPORTABLE data record, in file order. Always `headers.length` long. A row with more values than
+   * headings is not here (round 30; counted in `excludedRows`).
+   */
   rows: string[][];
+  /**
+   * Round 30 / P0-3: data rows left out because they had MORE values than headings. Such a row almost always has an
+   * unquoted delimiter inside a value, which shifts every later value into the wrong column, so importing its first N
+   * values would store a corrupted record. Each one is also reported as a `long_row` diagnostic.
+   */
+  excludedRows: number;
   delimiter: CsvDelimiter;
   diagnostics: CsvDiagnostic[];
   /**
@@ -274,7 +283,7 @@ export function parseDelimitedText(input: string, options: CsvParseOptions = {})
   }
 
   if (records.length === 0) {
-    return { headers: [], rows: [], delimiter, diagnostics, importable: false };
+    return { headers: [], rows: [], excludedRows: 0, delimiter, diagnostics, importable: false };
   }
 
   const headers = records[0].map((h) => h.trim());
@@ -314,11 +323,13 @@ export function parseDelimitedText(input: string, options: CsvParseOptions = {})
 
   // ── Row shape ───────────────────────────────────────────────────────────
   // Padded to the header width so every consumer can index by column position
-  // without a length check. A short row is reported and kept; a long row is
-  // reported and its overflow is dropped, because there is no heading to map
-  // it to and inventing one would fabricate a field.
+  // without a length check. A short row is reported and kept (trailing empty
+  // values are routine in exports). A long row is reported and LEFT OUT
+  // (round 30): its values are very likely shifted, so neither keeping its
+  // first N values nor inventing a heading for the overflow is safe.
   const width = headers.length;
-  const rows: string[][] = dataRecords.map((record, i) => {
+  let excludedRows = 0;
+  const shaped: Array<string[] | null> = dataRecords.map((record, i) => {
     if (record.length < width) {
       diagnostics.push({
         kind: 'short_row',
@@ -327,24 +338,32 @@ export function parseDelimitedText(input: string, options: CsvParseOptions = {})
       });
       return [...record, ...Array<string>(width - record.length).fill('')];
     }
+    // A trailing delimiter (`1,2,` under `A,B`) adds only EMPTY overflow values: nothing is shifted, so the row is
+    // kept and the empties dropped (round 30 review F-1). Only a row whose overflow carries a value is left out.
+    if (record.length > width && record.slice(width).every((v) => v.trim() === '')) {
+      return record.slice(0, width);
+    }
     if (record.length > width) {
       diagnostics.push({
         kind: 'long_row',
         row: i + 1,
         message:
-          `Row ${i + 1} has ${record.length} values but there are only ${width} headings. ` +
-          `The last ${record.length - width} were dropped — check for an unquoted ${
+          `Row ${i + 1} has ${record.length} values but there are only ${width} headings, so it was left out ` +
+          `of the import — its values may be in the wrong columns. Check for an unquoted ${
             delimiter === '\t' ? 'tab' : `"${delimiter}"`
           } inside a value.`,
       });
-      return record.slice(0, width);
+      excludedRows += 1;
+      return null;
     }
     return record;
   });
+  const rows: string[][] = shaped.filter((r): r is string[] => r !== null);
 
   return {
     headers,
     rows,
+    excludedRows,
     delimiter,
     diagnostics,
     importable: rows.length > 0 && !diagnostics.some((d) => BLOCKING.has(d.kind)),

@@ -43,6 +43,15 @@ jest.mock('../../services/leadIngestion/orchestrator', () => ({
   MAX_BATCH_SIZE: 100,
 }));
 
+// Round 30B: the route now resolves the WIZARD gate (prospectImportGate.ts), which wraps the tenant ingestion gate
+// above. Doubled ALLOW for the same reason, delegating to `tenantGateAllowed` with the real gate's 'ingestion:'
+// reason prefix so the existing LEAD_INGESTION_DISABLED cases still run through the route. Every prospect_import
+// flag state (enabled / disabled / missing / malformed / unreadable) is r30bCsvImportGate.test.ts, on the REAL gate.
+jest.mock('../../services/leadIngestion/prospectImportGate', () => ({
+  resolveProspectImportGate: async () =>
+    (tenantGateAllowed ? { allowed: true, reason: 'tenant_flag:test' } : { allowed: false, reason: 'ingestion:test' }),
+}));
+
 jest.mock('../../services/leadIngestion', () => ({
   registerBuiltInLeadSources: () => registerBuiltInLeadSources(),
 }));

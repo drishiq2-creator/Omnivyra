@@ -139,12 +139,44 @@ describe('PI-LDB CSV parser — malformed input is reported, never thrown', () =
     expect(r.importable).toBe(true);
   });
 
-  it('truncates a long row and says why', () => {
-    const r = parseDelimitedText('A,B\n1,2,3,4\n');
-    expect(r.rows[0]).toEqual(['1', '2']);
+  // RETARGETED (round 30 / P0-3). This test used to pin TRUNCATION: a long row kept its first N values and was
+  // imported. Such a row almost always has an unquoted delimiter inside a value, so every value after it is shifted
+  // into the wrong column - the pin defended importing a corrupted record. The row is now LEFT OUT and counted.
+  it('leaves a long row OUT (its values may be shifted), counts it and says why', () => {
+    const r = parseDelimitedText('A,B\n1,2\n3,4,5,6\n7,8\n');
+    expect(r.rows).toEqual([['1', '2'], ['7', '8']]);
+    expect(r.excludedRows).toBe(1);
     expect(kinds(r.diagnostics)).toEqual(['long_row']);
+    expect(r.diagnostics[0].row).toBe(2);
     expect(r.diagnostics[0].message).toContain('unquoted ","');
+    expect(r.diagnostics[0].message).toContain('left out');
     expect(r.importable).toBe(true);
+  });
+
+  it('a file whose ONLY data row is long has nothing importable', () => {
+    const r = parseDelimitedText('A,B\n1,2,3,4\n');
+    expect(r.rows).toEqual([]);
+    expect(r.excludedRows).toBe(1);
+    expect(r.importable).toBe(false);
+  });
+
+  it('a trailing delimiter (empty overflow only) keeps the row, with no diagnostic', () => {
+    const r = parseDelimitedText('A,B\n1,2,\n3,4,,\n');
+    expect(r.rows).toEqual([['1', '2'], ['3', '4']]);
+    expect(r.excludedRows).toBe(0);
+    expect(r.diagnostics).toEqual([]);
+    expect(r.importable).toBe(true);
+  });
+
+  it('CONTROL: overflow carrying a value is still left out', () => {
+    const r = parseDelimitedText('A,B\n1,2,x\n');
+    expect(r.excludedRows).toBe(1);
+    expect(r.rows).toEqual([]);
+  });
+
+  it('a clean file and a short row exclude nothing', () => {
+    expect(parseDelimitedText('A,B\n1,2\n').excludedRows).toBe(0);
+    expect(parseDelimitedText('A,B,C\n1,2\n').excludedRows).toBe(0);
   });
 
   it('BLOCKS a duplicate heading instead of guessing a suffix', () => {

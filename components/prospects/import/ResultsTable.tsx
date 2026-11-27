@@ -17,6 +17,17 @@
  * The records are still in the wizard's memory. Retry rebuilds a batch from
  * the ones that did not land and submits under a NEW run id, because a retry
  * is a new decision by the operator and should be auditable as one.
+ *
+ * ─── PROSPECTS, NOT EVIDENCE (round 30 / P0-2) ────────────────────────────
+ * "New prospects" counts canonical prospects the resolver CREATED, once each
+ * (`tallyProspectOutcomes`, the same function the Sales Navigator page loop
+ * counts with). A row that resolves to an EXISTING prospect (same source key:
+ * the file's reference, or the email+phone digest without one) is an update
+ * or unchanged, never a new prospect. Prospect resolution matches by source
+ * key only - the same person under another reference or source is a new
+ * prospect, and person duplicates are parked for review, never merged.
+ * Rows the file check left out never reached
+ * the server and are reported separately.
  */
 
 import React, { useMemo, useState } from 'react';
@@ -32,6 +43,7 @@ import {
 import Link from 'next/link';
 import { REJECTION_LABELS, type ImportOutcome } from '@/lib/prospects/import/types';
 import { needsAttention } from '@/lib/leadIntelligence/projectionResult';
+import { tallyProspectOutcomes } from '@/lib/prospects/prospectOutcomeTally';
 
 const PAGE_SIZE = 25;
 
@@ -44,6 +56,7 @@ export default function ResultsTable({
   transportError,
   aborted,
   profileSaveNote,
+  excludedRows = 0,
   onRetry,
   onStartOver,
 }: {
@@ -56,6 +69,8 @@ export default function ResultsTable({
   aborted: boolean;
   /** e.g. "Saving this mapping for reuse is not available yet." */
   profileSaveNote: string | null;
+  /** Round 30: rows the file check left out before submission (more values than headings). */
+  excludedRows?: number;
   onRetry: () => void;
   onStartOver: () => void;
 }) {
@@ -73,6 +88,8 @@ export default function ResultsTable({
       ),
     [outcomes],
   );
+
+  const tally = useMemo(() => tallyProspectOutcomes(outcomes), [outcomes]);
 
   // The fail-open projection gap: imported, but not in the Lead Database.
   // `needsAttention` is the shared predicate, so the screen and the server
@@ -166,6 +183,37 @@ export default function ResultsTable({
             </dd>
           </div>
         </dl>
+
+        <dl className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-3" data-testid="prospect-tally">
+          <div className="rounded-xl bg-gray-50 p-4">
+            <dt className="text-xs font-medium uppercase tracking-wide text-gray-500">New prospects</dt>
+            <dd className="mt-1 text-2xl font-bold text-gray-900" data-testid="tally-new">{tally.newProspects.toLocaleString()}</dd>
+          </div>
+          <div className="rounded-xl bg-gray-50 p-4">
+            <dt className="text-xs font-medium uppercase tracking-wide text-gray-500">Existing prospects updated</dt>
+            <dd className="mt-1 text-2xl font-bold text-gray-900" data-testid="tally-updated">{tally.updated.toLocaleString()}</dd>
+          </div>
+          <div className="rounded-xl bg-gray-50 p-4">
+            <dt className="text-xs font-medium uppercase tracking-wide text-gray-500">Already up to date</dt>
+            <dd className="mt-1 text-2xl font-bold text-gray-900" data-testid="tally-unchanged">{tally.unchanged.toLocaleString()}</dd>
+          </div>
+        </dl>
+
+        {tally.withoutProspect + tally.unclassified > 0 ? (
+          <p className="mt-4 rounded-lg bg-gray-50 px-4 py-3 text-xs text-gray-700" data-testid="tally-other">
+            {(tally.withoutProspect + tally.unclassified).toLocaleString()} imported record
+            {tally.withoutProspect + tally.unclassified === 1 ? ' was' : 's were'} stored without being counted as a
+            new or existing prospect.
+          </p>
+        ) : null}
+
+        {excludedRows > 0 ? (
+          <p className="mt-4 rounded-lg bg-amber-50 px-4 py-3 text-xs text-amber-800" data-testid="excluded-rows">
+            {excludedRows.toLocaleString()} row{excludedRows === 1 ? ' was' : 's were'} left out before import
+            because {excludedRows === 1 ? 'it had' : 'they had'} more values than the file has columns. Fix
+            {excludedRows === 1 ? ' that row' : ' those rows'} and import them as a new file.
+          </p>
+        ) : null}
 
         {duplicates.parked > 0 || duplicates.open > 0 ? (
           <p className="mt-4 rounded-lg bg-amber-50 px-4 py-3 text-xs text-amber-800">
