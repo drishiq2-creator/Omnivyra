@@ -12,7 +12,9 @@
  * Every refusal is paired with a CONTROL.
  */
 type Row = Record<string, any>;
-const store: { actions: Row[]; failNextUpdate: boolean } = { actions: [], failNextUpdate: false };
+const store: { actions: Row[]; failNextUpdate: boolean; staleRead: Row | null; onHistory: (() => void) | null } = {
+  actions: [], failNextUpdate: false, staleRead: null, onHistory: null,
+};
 
 // community_ai_actions_approval_integrity_check (20260522_community_ai_execution_integrity.sql)
 const approvalIntegrityOk = (r: Row) =>
@@ -46,6 +48,8 @@ function actionsQuery() {
 jest.mock('../../db/supabaseClient', () => ({ supabase: { from: () => actionsQuery() } }));
 jest.mock('../../db/communityAiActionStore', () => ({
   getCommunityAiActionById: jest.fn(async (id: string) => {
+    // A stale copy (what the route read a moment ago), when a test installs one.
+    if (store.staleRead && store.staleRead.id === id) { const r = store.staleRead; store.staleRead = null; return { data: { ...r }, error: null }; }
     const hit = store.actions.find((r) => r.id === id);
     return hit ? { data: { ...hit }, error: null } : { data: null, error: new Error('nf') };
   }),
@@ -57,7 +61,11 @@ jest.mock('../../../pages/api/community-ai/utils', () => ({
 jest.mock('../../../lib/platform/routeFactory', () => ({ createApiRoute: (h: unknown) => h }));
 jest.mock('../../services/communityAiActionExecutor', () => ({
   executeAction: jest.fn(async () => ({ ok: true, status: 'executed' })),
-  loadHistoryMetrics: jest.fn(async () => ({ replies_last_hour: 0, follows_today: 0, actions_today: 0 })),
+  loadHistoryMetrics: jest.fn(async () => {
+    // runs after the route's read and before its marking write: an interleaving point
+    if (store.onHistory) { const f = store.onHistory; store.onHistory = null; f(); }
+    return { replies_last_hour: 0, follows_today: 0, actions_today: 0 };
+  }),
 }));
 jest.mock('../../services/communityAiContactGovernanceGate', () => ({
   checkCommunityActionContactGovernance: jest.fn(async () => ({ allowed: true })),
@@ -96,6 +104,8 @@ beforeEach(() => {
   jest.clearAllMocks();
   store.actions = [row()];
   store.failNextUpdate = false;
+  store.staleRead = null;
+  store.onHistory = null;
   currentPlaybook = pbApproval;
   jest.spyOn(console, 'warn').mockImplementation(() => undefined);
   jest.spyOn(console, 'error').mockImplementation(() => undefined);
@@ -137,13 +147,27 @@ describe('B-2: PLAYBOOK_REQUIRES_APPROVAL -> approve -> execute', () => {
     expect((await approve()).statusCode).toBe(200);
   });
 
-  it('the marking write is tenant-scoped: a row of another organization is never touched', async () => {
-    // Same id, other org: the route answers TENANT_SCOPE_VIOLATION before any write.
+  it('the marking write is tenant-scoped: a stale in-scope read of a row now stored under another org -> 409, stored row untouched', async () => {
+    // The route's read check passes (the copy it read says org-1) ...
+    store.staleRead = row();
+    // ... but the stored row belongs to another organization by the time of the write.
     store.actions = [row({ organization_id: 'org-2', tenant_id: 'org-2' })];
     const res = await execute({ execution_mode: 'manual' });
-    expect(res.statusCode).toBe(403);
-    expect(res.body.error).toBe('TENANT_SCOPE_VIOLATION');
-    expect(store.actions[0].requires_human_approval).toBe(false);
+    expect(res.statusCode).toBe(409);
+    expect(res.body.error).toBe('ACTION_STATE_CHANGED');
+    expect(store.actions[0]).toMatchObject({ organization_id: 'org-2', status: 'pending', requires_human_approval: false });
+    expect(executeAction).not.toHaveBeenCalled();
+  });
+
+  it('409 ACTION_STATE_CHANGED: an approval landing between the read and the marking write is not overwritten', async () => {
+    store.onHistory = () => { Object.assign(store.actions[0], { status: 'approved', approved_at: '2026-11-27T10:00:00Z', approved_by: 'user-2' }); };
+    const res = await execute({ execution_mode: 'manual' });
+    expect(res.statusCode).toBe(409);
+    expect(res.body).toMatchObject({ error: 'ACTION_STATE_CHANGED', reason: 'PLAYBOOK_REQUIRES_APPROVAL' });
+    expect(store.actions[0]).toMatchObject({ status: 'approved', approved_by: 'user-2', requires_human_approval: false });
+    expect(executeAction).not.toHaveBeenCalled();
+    // CONTROL: executing again now runs (the approval of record is there)
+    expect((await execute({ execution_mode: 'manual' })).statusCode).toBe(200);
   });
 
   it('a failed marking write is an honest 503 (retryable), nothing executed; CONTROL: the retry records it', async () => {
