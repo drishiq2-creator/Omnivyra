@@ -53,7 +53,17 @@ const mockAdapterFetch = jest.fn();
 const mockEvaluatePostEngagement = jest.fn();
 
 /** What the `user_company_roles` lookup returns, per test. */
-let roleLookupResult: { data: unknown; error?: { message: string } | null } = { data: null };
+// UPDATED (FIX-1, owner 2026-11-27): the role lookup is now a list read (up to 2
+// rows, no `.maybeSingle()`), so `data` is an array of rows.
+let roleLookupResult: { data: unknown; error?: { message: string } | null } = { data: [] };
+
+/**
+ * What the `social_accounts` lookup for the post's account returns, per test.
+ * UPDATED (FIX-1, owner 2026-11-27): attribution now reads the connected
+ * account's company. Default: a legacy account row with company_id NULL, so the
+ * campaign/role behaviour pinned below is exercised unchanged.
+ */
+let accountLookupResult: { data: unknown; error?: { message: string } | null } = { data: { company_id: null } };
 
 /** Every row handed to `post_comments.upsert` — the canonical persistence. */
 let postCommentUpserts: Record<string, unknown>[][] = [];
@@ -76,14 +86,26 @@ function fakeTable(table: string): any {
   }
 
   if (table === 'user_company_roles') {
+    // UPDATED (FIX-1, owner 2026-11-27): `.limit(n)` is now awaited directly (a
+    // list) instead of `.limit(1).maybeSingle()` (one arbitrary row).
     return {
       select: () => ({
         eq: () => ({
           eq: () => ({
-            limit: () => ({
-              maybeSingle: async () => roleLookupResult,
-            }),
+            limit: async () => roleLookupResult,
           }),
+        }),
+      }),
+    };
+  }
+
+  if (table === 'social_accounts') {
+    // UPDATED (FIX-1, owner 2026-11-27): the connected account's company is a
+    // candidate owner.
+    return {
+      select: () => ({
+        eq: () => ({
+          maybeSingle: async () => accountLookupResult,
         }),
       }),
     };
@@ -171,7 +193,8 @@ beforeEach(() => {
   postCommentUpserts = [];
   threadRows = [];
   errorLogs = [];
-  roleLookupResult = { data: null };
+  roleLookupResult = { data: [] }; // UPDATED (FIX-1, owner 2026-11-27): list read
+  accountLookupResult = { data: { company_id: null } }; // UPDATED (FIX-1, owner 2026-11-27): legacy account, no company
   mockGetScheduledPost.mockResolvedValue({ ...POST });
   mockGetToken.mockResolvedValue({ access_token: 'tok', refresh_token: 'r', is_active: true });
   mockAdapterFetch.mockResolvedValue(ONE_COMMENT);
@@ -197,7 +220,8 @@ describe('A — a resolved tenant is persisted normally', () => {
 
   it('the user-role fallback resolves when the campaign has no owner', async () => {
     mockResolveCampaignCompanyId.mockResolvedValue(null);
-    roleLookupResult = { data: { company_id: 'co-fallback' }, error: null };
+    // UPDATED (FIX-1, owner 2026-11-27): list read; exactly ONE active company.
+    roleLookupResult = { data: [{ company_id: 'co-fallback' }], error: null };
 
     await ingestComments('p1');
 
@@ -275,7 +299,7 @@ describe('B — a database lookup error never becomes "belongs to nobody"', () =
 describe('C — a genuinely unowned post is distinguishable from a broken lookup', () => {
   const genuinelyUnowned = () => {
     mockResolveCampaignCompanyId.mockResolvedValue(null);
-    roleLookupResult = { data: null, error: null };
+    roleLookupResult = { data: [], error: null }; // UPDATED (FIX-1, owner 2026-11-27): list read, no roles
   };
 
   it('CRITICAL: it is NOT reported as an attribution failure', async () => {
