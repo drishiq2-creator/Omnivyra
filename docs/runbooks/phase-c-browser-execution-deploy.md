@@ -7,6 +7,14 @@ Applies to the release that ships the durable RPA claim (worker) and the Postgre
 | `supabase/migrations/20270314000001_rpa_retry_queue_claim.sql` | the RPA worker (Railway) | Apply it **together with** the release. Old and new workers must **never overlap**. |
 | `supabase/migrations/20270314000010_extension_handshake_store.sql` | the web app (Vercel) | Apply it **before** the web deploy. |
 
+## 0. Before merging: scale the worker to 0
+
+A merge to `main` triggers the Railway worker deploy by itself, and that deploy is rolling (the new container starts before the old one stops). Merging first would therefore start the new worker next to the old one, which is the overlap that can double-execute a row (section 2).
+
+1. Before merging, scale the RPA worker service to 0 replicas in Railway.
+2. Verify that 0 replicas are running (Railway service view or `railway status`). Do not merge until this is confirmed.
+3. Merge. The deploy the merge triggers then starts the new worker alone. Apply 20270314000001 before you scale the worker back up (section 2).
+
 ## 1. Extension handshake store (20270314000010): before the web deploy
 
 The new web code keeps claim codes and request nonces in Postgres. It calls `extension_claim_code_issue`, `extension_claim_code_peek`, `extension_claim_code_redeem` and `extension_request_nonce_record`. If a web deploy goes out before this migration, every extension route fails closed with a 503. That covers bootstrap, redeem and every signed request, so the extension is down until the migration is applied.
@@ -19,7 +27,7 @@ The new web code keeps claim codes and request nonces in Postgres. It calls `ext
 
 The new worker claims each `rpa_retry_queue` row with a token, renews the lease right before it runs the row, and finalises the row only while the token still matches. The **old** worker's flush reads due rows with a plain SELECT and ignores `claim_token`. An old worker running next to a new one can therefore execute a row the new worker has claimed. The result is a **double post or a double like**.
 
-1. Stop the old RPA worker, every replica. Confirm that none is running. Railway's default rolling deploy starts the new container before it stops the old one, so do not rely on it. Scale the worker to 0 first, or use a stop-then-start deploy.
+1. Stop the old RPA worker, every replica, BEFORE the merge (section 0). Confirm that none is running. Railway's default rolling deploy starts the new container before it stops the old one, so do not rely on it.
 2. Apply `20270314000001_rpa_retry_queue_claim.sql`. Its postcondition block raises if any of its six functions is missing, is not SECURITY INVOKER, or is executable by anyone except service_role.
 3. Start the new worker.
 4. The first flush parks every claim whose lease has expired as `RPA_OUTCOME_UNKNOWN:CLAIM_EXPIRED` and never re-runs it. A row that was claimed but never attempted is released as `RPA_CLAIM_RELEASED_NOT_ATTEMPTED:*` with its attempts unchanged.

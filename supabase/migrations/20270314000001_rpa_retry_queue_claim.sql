@@ -62,6 +62,9 @@
 -- DEPLOY ORDER (review S-3; runbook docs/runbooks/phase-c-browser-execution-deploy.md)
 --   * Apply this file TOGETHER WITH the release that calls these functions (the new
 --     worker code cannot run without them; the old code ignores the new columns).
+--   * A MERGE TO main ITSELF triggers the Railway worker deploy, and that deploy is
+--     rolling (new container up before the old one stops). So: scale the worker to 0
+--     and VERIFY 0 replicas BEFORE merging (runbook step 0).
 --   * NO OVERLAP between the old and the new RPA worker: stop the old worker (all
 --     replicas) BEFORE the new one starts. The old flush reads due rows with a plain
 --     SELECT and ignores claim_token, so an old worker running next to a new one could
