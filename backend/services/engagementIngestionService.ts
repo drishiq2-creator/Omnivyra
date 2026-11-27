@@ -498,24 +498,72 @@ async function persistComments(rows: IngestCommentRow[]): Promise<void> {
 type IngestTenantResolution =
   | { state: 'resolved'; organizationId: string }
   | { state: 'unowned' }
+  | { state: 'refused'; reason: IngestAttributionRefusal; candidateCount: number }
   | { state: 'lookup_failed'; reason: string };
+
+/**
+ * FIX-1 (owner 2026-11-27): why a post whose authorities DID answer was still
+ * not attributed.
+ *
+ *   campaign_account_company_mismatch - the campaign and the connected account
+ *                                       name different companies;
+ *   multiple_author_companies         - no campaign/account company, and the post
+ *                                       author holds ACTIVE roles in 2+ companies;
+ *   social_account_not_found          - the post names a social account whose row
+ *                                       does not exist;
+ *   malformed_company_id              - a company id that is not a non-empty string.
+ *
+ * Every one is a fail-closed skip of the unified sync (post_comments are still
+ * kept, exactly as for lookup_failed).
+ */
+export type IngestAttributionRefusal =
+  | 'campaign_account_company_mismatch'
+  | 'multiple_author_companies'
+  | 'social_account_not_found'
+  | 'malformed_company_id';
+
+/** Why the unified sync was skipped for a post whose comments WERE persisted. */
+export type IngestAttributionSkipReason = IngestAttributionRefusal | 'unowned' | 'lookup_failed';
+
+/** absent (null/undefined) | a usable id | malformed (anything else). */
+function readCompanyId(value: unknown): { kind: 'absent' } | { kind: 'id'; id: string } | { kind: 'malformed' } {
+  if (value === null || value === undefined) return { kind: 'absent' };
+  if (typeof value === 'string' && value.trim() !== '') return { kind: 'id', id: value };
+  return { kind: 'malformed' };
+}
 
 /**
  * Resolve the owning company for an ingested post.
  *
- * The resolution RULES are unchanged and deliberately so — campaign first via
- * the canonical `resolveCampaignCompanyId` seam (B4.1), then the post's own
- * user's active company role. Only the reporting changes: a failed lookup is
- * now a distinct state instead of an indistinguishable null.
+ * This is a cron path: the source of truth is the post's own bindings - its
+ * campaign and its connected social account - never a logged-in user.
+ *
+ *   Candidates: the campaign company (via the canonical `resolveCampaignCompanyId`
+ *   seam, B4.1) and the account company (`social_accounts.company_id` of
+ *   `post.social_account_id`).
+ *     both present and different -> refused (mismatch);
+ *     both present and equal      -> resolved;
+ *     exactly one present         -> resolved with it.
+ *   Neither present -> the post author's ACTIVE company roles, and only when they
+ *   name exactly ONE company. Two or more -> refused; none -> unowned.
+ *
+ * FIX-1 (owner 2026-11-27): the role fallback used `.limit(1).maybeSingle()`,
+ * which picked an ARBITRARY company for an author in several companies, and the
+ * campaign answer short-circuited without ever consulting the connected account.
+ *
+ * A read error is lookup_failed (absence of evidence). A post that names a social
+ * account whose row is missing is refused, never treated as "no company".
  *
  * Known residual (out of scope here): `resolveCampaignCompanyId` swallows its
  * own query error and returns null, so a `campaign_versions` read failure still
- * arrives as "campaign has no owner" and falls through to the role lookup.
- * Closing that requires changing that seam's signature, which is shared with 13
- * authorization callers.
+ * arrives as "campaign has no owner": with an account company present the post
+ * resolves to the account's company; without one it falls through to the role
+ * lookup. Closing that requires changing that seam's signature, which is shared
+ * with 13 authorization callers.
  */
 async function resolveIngestTenant(post: {
   campaign_id?: string | null;
+  social_account_id?: string | null;
   user_id?: string | null;
 }): Promise<IngestTenantResolution> {
   // B4.1 — campaign → company goes through THE seam, not a local copy of it.
@@ -524,20 +572,49 @@ async function resolveIngestTenant(post: {
   // ordering, limit and null handling) while also selecting eight columns
   // nobody here reads. Two copies of one rule is how the X reply endpoint
   // stayed wrong in two places for months.
+  let campaignCompanyId: string | null = null;
   if (post.campaign_id) {
-    const campaignCompanyId = await resolveCampaignCompanyId(post.campaign_id);
-    if (campaignCompanyId) {
-      return { state: 'resolved', organizationId: campaignCompanyId };
+    const c = readCompanyId(await resolveCampaignCompanyId(post.campaign_id));
+    if (c.kind === 'malformed') return { state: 'refused', reason: 'malformed_company_id', candidateCount: 0 };
+    if (c.kind === 'id') campaignCompanyId = c.id;
+  }
+
+  let accountCompanyId: string | null = null;
+  if (post.social_account_id) {
+    const { data: account, error } = await ownedDbTable('social_accounts')
+      .select('company_id')
+      .eq('id', post.social_account_id)
+      .maybeSingle();
+    if (error) {
+      return { state: 'lookup_failed', reason: error.message ?? 'social_accounts lookup failed' };
     }
+    if (!account) return { state: 'refused', reason: 'social_account_not_found', candidateCount: 0 };
+    const a = readCompanyId((account as { company_id?: unknown }).company_id);
+    if (a.kind === 'malformed') return { state: 'refused', reason: 'malformed_company_id', candidateCount: 0 };
+    // absent = a legacy account row with company_id NULL (the column is nullable
+    // for legacy rows): not a candidate, not a refusal.
+    if (a.kind === 'id') accountCompanyId = a.id;
+  }
+
+  if (campaignCompanyId && accountCompanyId) {
+    return campaignCompanyId === accountCompanyId
+      ? { state: 'resolved', organizationId: campaignCompanyId }
+      : { state: 'refused', reason: 'campaign_account_company_mismatch', candidateCount: 2 };
+  }
+  if (campaignCompanyId || accountCompanyId) {
+    return { state: 'resolved', organizationId: (campaignCompanyId ?? accountCompanyId) as string };
   }
 
   if (post.user_id) {
-    const { data: role, error } = await ownedDbTable('user_company_roles')
+    // Two rows are enough to tell "exactly one" from "more than one": active
+    // roles are UNIQUE per (user_id, company_id)
+    // (idx_user_company_roles_user_company_active), and ids are de-duplicated
+    // below regardless.
+    const { data: roles, error } = await ownedDbTable('user_company_roles')
       .select('company_id')
       .eq('user_id', post.user_id)
       .eq('status', 'active')
-      .limit(1)
-      .maybeSingle();
+      .limit(2);
     // Previously destructured as `{ data: role }` — the error was dropped on
     // the floor and the empty `data` that accompanies it was read as "this
     // user belongs to no company".
@@ -547,8 +624,17 @@ async function resolveIngestTenant(post: {
         reason: error.message ?? 'user_company_roles lookup failed',
       };
     }
-    if (role?.company_id) {
-      return { state: 'resolved', organizationId: String(role.company_id) };
+    const companies = new Set<string>();
+    for (const row of (Array.isArray(roles) ? roles : []) as Array<{ company_id?: unknown }>) {
+      const r = readCompanyId(row?.company_id);
+      if (r.kind === 'malformed') return { state: 'refused', reason: 'malformed_company_id', candidateCount: 0 };
+      if (r.kind === 'id') companies.add(r.id);
+    }
+    if (companies.size > 1) {
+      return { state: 'refused', reason: 'multiple_author_companies', candidateCount: companies.size };
+    }
+    if (companies.size === 1) {
+      return { state: 'resolved', organizationId: [...companies][0] };
     }
   }
 
@@ -610,6 +696,12 @@ export type IngestCommentsResult = {
   ingested: number;
   error?: string;
   failure?: IngestFailureKind;
+  /**
+   * FIX-1: set only on success when comments were persisted to post_comments
+   * but the unified sync was skipped because no single owning company was
+   * established. Absent when attribution resolved (or nothing was ingested).
+   */
+  attribution_skipped?: IngestAttributionSkipReason;
 };
 
 /**
@@ -860,8 +952,12 @@ export async function ingestComments(
       platform_post_id: platformPostId,
       ingested,
     });
+    let attributionSkipped: IngestAttributionSkipReason | null = null;
     if (ingested > 0) {
       const tenant = await resolveIngestTenant(post);
+      if (tenant.state !== 'resolved') {
+        attributionSkipped = tenant.state === 'refused' ? tenant.reason : tenant.state;
+      }
       if (tenant.state === 'lookup_failed') {
         // Fail closed: attribute nothing rather than attribute to nobody.
         //
@@ -882,24 +978,42 @@ export async function ingestComments(
         // declining: the next cycle re-reads the same comments and syncs them
         // once the lookup answers.
         console.error('[engagementIngestion] tenant attribution failed; unified sync skipped', {
+          reason_code: 'lookup_failed',
           scheduled_post_id,
           platform: post.platform,
           reason: tenant.reason,
         });
+      } else if (tenant.state === 'refused') {
+        // FIX-1 (owner 2026-11-27): the authorities answered but do not name ONE
+        // company (or the account binding is missing/malformed). Picking one
+        // would attribute another tenant's engagement; skip exactly like
+        // lookup_failed. Ids/counts only — no names, no comment text.
+        console.error('[engagementIngestion] tenant attribution refused; unified sync skipped', {
+          reason_code: tenant.reason,
+          scheduled_post_id,
+          platform: post.platform,
+          candidate_count: tenant.candidateCount,
+        });
+      } else if (tenant.state === 'unowned') {
+        // Not an error — the post genuinely has no owning company, and
+        // inventing one would be worse. Said out loud because it is the
+        // condition `backend/scripts/engagementPhase1Validation.js` flags
+        // after the fact as "ORGANIZATION_ID NOT POPULATED".
+        //
+        // FIX-1 (owner 2026-11-27): no longer synced with organization_id null.
+        // That write created the tenant-less orphan thread described above; the
+        // post_comments rows are kept and a later cycle syncs them once an
+        // owner is bound.
+        console.warn('[engagementIngestion] ingested engagement has no owning company; unified sync skipped', {
+          reason_code: 'unowned',
+          scheduled_post_id,
+          platform: post.platform,
+          candidate_count: 0,
+        });
       } else {
-        if (tenant.state === 'unowned') {
-          // Not an error — the post genuinely has no owning company, and
-          // inventing one would be worse. Said out loud because it is the
-          // condition `backend/scripts/engagementPhase1Validation.js` flags
-          // after the fact as "ORGANIZATION_ID NOT POPULATED".
-          console.warn('[engagementIngestion] ingested engagement has no owning company', {
-            scheduled_post_id,
-            platform: post.platform,
-          });
-        }
         syncToUnifiedEngagement(rows, {
           platform_post_id: platformPostId,
-          organization_id: tenant.state === 'resolved' ? tenant.organizationId : null,
+          organization_id: tenant.organizationId,
           platform: post.platform,
           scheduled_post_id,
         }).catch((syncErr: unknown) => {
@@ -919,7 +1033,9 @@ export async function ingestComments(
         console.warn('[engagementIngestion] evaluation trigger failed', evalErr?.message);
       }
     }
-    return { success: true, ingested };
+    return attributionSkipped
+      ? { success: true, ingested, attribution_skipped: attributionSkipped }
+      : { success: true, ingested };
   } catch (e: any) {
     // Structured, redacted diagnosis. `statusText` alone made a permanent wrong
     // endpoint ("Not Found") and an expired token ("Unauthorized") look like the
@@ -992,6 +1108,9 @@ export async function ingestRecentPublishedPosts(): Promise<{
   const refreshBudget = createRefreshBudget();
   const results = await mapWithConcurrency(list, getSchedulerConcurrency(), (p) => ingestComments(p.id, { refreshBudget }));
   const outcomes: IngestOutcome[] = [];
+  // FIX-1: posts whose comments were kept but not synced to the unified model,
+  // by reason code. A success, so the health summary does not count it.
+  const attributionSkipped: Partial<Record<IngestAttributionSkipReason, number>> = {};
   for (let i = 0; i < results.length; i++) {
     const slot = results[i];
     const result: IngestCommentsResult = (slot.ok && slot.value !== undefined)
@@ -1004,6 +1123,9 @@ export async function ingestRecentPublishedPosts(): Promise<{
       success: result.success,
       failure: result.failure ?? null,
     });
+    if (result.attribution_skipped) {
+      attributionSkipped[result.attribution_skipped] = (attributionSkipped[result.attribution_skipped] ?? 0) + 1;
+    }
     if (result.success) {
       totalIngested += result.ingested;
     } else if (result.error) {
@@ -1031,6 +1153,7 @@ export async function ingestRecentPublishedPosts(): Promise<{
     ...ingestionCycleLogPayload(summary),
     refresh_deferred: refreshBudget.deferred,
     refresh_backed_off: refreshBudget.backedOff,
+    ...(Object.keys(attributionSkipped).length > 0 ? { attribution_skipped: attributionSkipped } : {}),
   };
   if (summary.actionable) {
     // Eligible work existed and NOTHING succeeded. This is the only state

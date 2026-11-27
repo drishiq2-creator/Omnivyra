@@ -59,10 +59,20 @@ jest.mock('../../services/engagementNormalizationService', () => ({
 }));
 jest.mock('../../db/supabaseClient', () => ({ supabase: {} }));
 jest.mock('../../db/writeOwner', () => ({
-  ownedDbTable: () => ({
-    select: () => ({ eq: () => ({ eq: () => ({ limit: () => ({ maybeSingle: async () => roleLookup() }) }) }) }),
-    upsert: () => ({ select: async () => ({ data: [], error: null }) }),
-  }),
+  // UPDATED (FIX-1, owner 2026-11-27): table-aware fake. Attribution now reads the
+  // connected account's company (social_accounts; a legacy row with company_id
+  // NULL here, so the campaign/role behaviour below is exercised unchanged), and
+  // the role read is a LIST (`limit()` awaited, data an array), not
+  // `.limit(1).maybeSingle()`.
+  ownedDbTable: (table: string) => {
+    if (table === 'social_accounts') {
+      return { select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { company_id: null }, error: null }) }) }) };
+    }
+    if (table === 'user_company_roles') {
+      return { select: () => ({ eq: () => ({ eq: () => ({ limit: async () => roleLookup() }) }) }) };
+    }
+    return { upsert: () => ({ select: async () => ({ data: [], error: null }) }) };
+  },
 }));
 
 let ingestComments: typeof import('../../services/engagementIngestionService').ingestComments;
@@ -76,7 +86,7 @@ const ONE_COMMENT = { data: [{ id: 'c1', text: 'hello', author_id: 'a1', created
 
 beforeEach(() => {
   jest.clearAllMocks();
-  roleLookup.mockReturnValue({ data: null });
+  roleLookup.mockReturnValue({ data: [] }); // UPDATED (FIX-1, owner 2026-11-27): list read, no roles
   mockGetScheduledPost.mockResolvedValue({
     id: 'p1', platform: 'x', platform_post_id: 't1',
     social_account_id: 'acct-1', campaign_id: 'camp-1', user_id: 'user-1',
@@ -128,17 +138,19 @@ describe('B — tenant attribution is unchanged by the swap', () => {
   it('CRITICAL: an unresolvable campaign does not invent a company', async () => {
     // Null must stay null through to attribution — never a fallback tenant.
     mockResolveCampaignCompanyId.mockResolvedValue(null);
-    roleLookup.mockReturnValue({ data: null });
+    roleLookup.mockReturnValue({ data: [] }); // UPDATED (FIX-1, owner 2026-11-27): list read, no roles
 
-    await ingestComments('p1');
+    const r = await ingestComments('p1');
 
-    const ctx = mockSyncUnified.mock.calls[0][1];
-    expect(ctx.organization_id).toBeNull();
+    // INVERTED (FIX-1, owner 2026-11-27): unowned posts are skipped, never synced tenant-less
+    expect(r).toEqual({ success: true, ingested: 1, attribution_skipped: 'unowned' });
+    expect(mockSyncUnified).not.toHaveBeenCalled();
+    expect(mockSyncUnified.mock.calls.map((c) => c[1].organization_id)).not.toContain(null);
   });
 
   it('the user-role fallback still applies only when the campaign resolves nothing', async () => {
     mockResolveCampaignCompanyId.mockResolvedValue(null);
-    roleLookup.mockReturnValue({ data: { company_id: 'co-fallback' } });
+    roleLookup.mockReturnValue({ data: [{ company_id: 'co-fallback' }] }); // UPDATED (FIX-1, owner 2026-11-27): list read, exactly one company
 
     await ingestComments('p1');
 
@@ -149,7 +161,7 @@ describe('B — tenant attribution is unchanged by the swap', () => {
     // Order matters: a user may belong to several companies; the campaign is
     // the authoritative owner of the post being ingested.
     mockResolveCampaignCompanyId.mockResolvedValue('co-authoritative');
-    roleLookup.mockReturnValue({ data: { company_id: 'co-other' } });
+    roleLookup.mockReturnValue({ data: [{ company_id: 'co-other' }] }); // UPDATED (FIX-1, owner 2026-11-27): list read
 
     await ingestComments('p1');
 
@@ -161,7 +173,7 @@ describe('B — tenant attribution is unchanged by the swap', () => {
       id: 'p1', platform: 'x', platform_post_id: 't1',
       social_account_id: 'acct-1', campaign_id: null, user_id: 'user-1',
     });
-    roleLookup.mockReturnValue({ data: { company_id: 'co-role' } });
+    roleLookup.mockReturnValue({ data: [{ company_id: 'co-role' }] }); // UPDATED (FIX-1, owner 2026-11-27): list read, exactly one company
 
     await ingestComments('p1');
 

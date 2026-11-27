@@ -68,11 +68,30 @@ describe('engagementCapabilityMap', () => {
     // These assertions encode the decisions we made during the hardening
     // pass. If any of them flip, someone should have to write a migration
     // and update this test, not silently widen the trust surface.
-    it('DM browser dispatch is verified where extension handlers exist', () => {
-      for (const platform of ['linkedin', 'facebook', 'instagram', 'twitter'] as const) {
-        expect(ENGAGEMENT_CAPABILITY_MATRIX[platform].dm.status).toBe('api_verified');
-        expect(ENGAGEMENT_CAPABILITY_MATRIX[platform].dm.mode).toBe('browser');
+    // UPDATED (FIX-3, owner 2026-11-27): this test pinned facebook/instagram/twitter
+    // dm as api_verified/browser, defending the defect — extension 1.5.1 refuses
+    // every non-LinkedIn platform (PLATFORM_NOT_SUPPORTED) and no official-API DM
+    // path exists. Only LinkedIn keeps a verified extension DM handler.
+    it('DM browser dispatch is verified only where an extension handler exists (LinkedIn)', () => {
+      expect(ENGAGEMENT_CAPABILITY_MATRIX.linkedin.dm.status).toBe('api_verified');
+      expect(ENGAGEMENT_CAPABILITY_MATRIX.linkedin.dm.mode).toBe('browser');
+    });
+
+    // UPDATED (FIX-3, owner 2026-11-27): Messenger / Instagram Direct / X DM are
+    // unsupported, with a reason and no execution mode (no silent browser route).
+    it('Facebook, Instagram and X DM are unsupported (no extension handler, no API path)', () => {
+      for (const platform of ['facebook', 'instagram', 'twitter'] as const) {
+        const dm = ENGAGEMENT_CAPABILITY_MATRIX[platform].dm;
+        expect(dm.status).toBe('unsupported');
+        expect(dm.mode).toBeUndefined();
+        expect((dm.reason ?? '').length).toBeGreaterThan(0);
       }
+    });
+
+    // UPDATED (FIX-3, owner 2026-11-27): the Instagram Graph API has no like endpoint.
+    it('Instagram like is unsupported (Graph API exposes only like_count)', () => {
+      expect(ENGAGEMENT_CAPABILITY_MATRIX.instagram.like.status).toBe('unsupported');
+      expect(ENGAGEMENT_CAPABILITY_MATRIX.instagram.like.mode).toBeUndefined();
     });
 
     it('TikTok and Pinterest have no verified inbox actions (reply/like/dm)', () => {
