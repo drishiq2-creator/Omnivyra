@@ -107,9 +107,11 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   // schema applied + this tenant's own `prospect_import` flag), so a direct
   // API call cannot import for a company the wizard is closed for. Fails
   // closed: no flag row, a disabled flag, an unreadable flag or any lookup
-  // error refuses. The response keeps the existing contract: a closed
-  // lead-ingestion gate still answers LEAD_INGESTION_DISABLED, and the import
-  // gate answers PROSPECT_IMPORT_DISABLED exactly as the mapping routes do.
+  // error refuses. The response keeps THIS route's existing contract: a closed
+  // lead-ingestion gate still answers LEAD_INGESTION_DISABLED (the mapping
+  // routes fold that case into PROSPECT_IMPORT_DISABLED; this route does not,
+  // so existing callers see no change), and a closed import gate answers
+  // PROSPECT_IMPORT_DISABLED with the same body shape as the mapping routes.
   const gate = await resolveProspectImportGate(companyId);
   if (!gate.allowed) {
     if (gate.reason.startsWith('ingestion:')) {

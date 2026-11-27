@@ -8,6 +8,10 @@
  * The provenance double ALWAYS answers 'created' - new evidence for every row - so a count taken from evidence would
  * call every row new; only the prospect verdict can tell them apart.
  */
+// A MODULE, not a script: without an import/export this file shares the global scope with every other test file in
+// the backend-tests typecheck, and its ORG / rec / load / Verdict collide with piLdbBatchCounters.test.ts.
+export {};
+
 const ORG = '00000000-0000-4000-8000-0000000000aa';
 
 type Verdict = 'created' | 'matched' | 'insufficient_evidence';

@@ -65,7 +65,7 @@ async function openTenant(org: string, name: string) {
 
 /** Exactly what the route does after authorization: the gate, then the batch. */
 async function routeImport(org: string, records: Array<Record<string, unknown>>) {
-  const gate = await resolveProspectImportGate(org);
+  const gate = await gateWithSchemaReady(org);
   if (!gate.allowed) return { gate, result: null as any, tally: null as any };
   const result = await ingestLeadBatch({ organizationId: org, source: CSV_SOURCE, records, ingestionRunId: RUN, now: AT });
   return { gate, result, tally: tallyProspectOutcomes(result.outcomes) };
@@ -110,9 +110,14 @@ describe('the per-company prospect_import gate, on the real flag store', () => {
       expect(await gateWithSchemaReady(ORG_A)).toMatchObject({ allowed: true });
       // tenant isolation: A's flag does not open B
       expect(await gateWithSchemaReady(ORG_B)).toMatchObject({ allowed: false, reason: 'tenant_flag:no_flag_row' });
-      // the schema switch is part of the gate: unset -> closed even with the flag on
+      // the schema switch is part of the gate: unset -> closed even with the flag on (restored right after)
+      const prevSchema = process.env.PI_LDB_SCHEMA_READY;
       delete process.env.PI_LDB_SCHEMA_READY;
-      expect(await resolveProspectImportGate(ORG_A)).toMatchObject({ allowed: false, reason: 'schema_not_ready' });
+      try {
+        expect(await resolveProspectImportGate(ORG_A)).toMatchObject({ allowed: false, reason: 'schema_not_ready' });
+      } finally {
+        if (prevSchema !== undefined) process.env.PI_LDB_SCHEMA_READY = prevSchema;
+      }
     });
   });
 
@@ -121,8 +126,7 @@ describe('the per-company prospect_import gate, on the real flag store', () => {
       await seedTenant(ORG_A, 'R30B A');
       await flag(ORG_A, PROSPECT_IMPORT_FLAG_KEY, true);
       const g = await gateWithSchemaReady(ORG_A);
-      expect(g.allowed).toBe(false);
-      expect(String(g.reason)).toMatch(/^ingestion:/);
+      expect(g).toMatchObject({ allowed: false, reason: 'ingestion:tenant_flag:no_flag_row' });
     });
   });
 });
@@ -215,15 +219,21 @@ describe('CSV import counts = persisted canonical prospects', () => {
     });
   });
 
-  it('a closed gate imports nothing (the route refuses before ingestLeadBatch)', async () => {
+  it('a missing prospect_import row closes the gate and imports nothing; CONTROL: the same row with the flag ON lands', async () => {
     await inRollback(async () => {
       await seedTenant(ORG_B, 'R30B B');
-      await flag(ORG_B, LEAD_INGESTION_FLAG_KEY, true);             // prospect_import absent
+      await flag(ORG_B, LEAD_INGESTION_FLAG_KEY, true);             // prospect_import absent; schema switch OPEN
       const before = await prospects(ORG_B);
       const out = await routeImport(ORG_B, [row('i')]);
-      expect(out.gate.allowed).toBe(false);
+      expect(out.gate).toMatchObject({ allowed: false, reason: 'tenant_flag:no_flag_row' });
       expect(out.result).toBeNull();
       expect(await prospects(ORG_B)).toBe(before);
+
+      await flag(ORG_B, PROSPECT_IMPORT_FLAG_KEY, true);            // the ONLY change
+      const ok = await routeImport(ORG_B, [row('i')]);
+      expect(ok.gate.allowed).toBe(true);
+      expect(ok.tally.newProspects).toBe(1);
+      expect((await prospects(ORG_B)) - before).toBe(1);
     });
   });
 });
