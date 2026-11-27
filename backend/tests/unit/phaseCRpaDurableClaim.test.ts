@@ -75,8 +75,11 @@ import {
   claimRpaRetryRows,
   finalizeRpaClaim,
   flushRpaRetryQueueForOrg,
+  flushRpaRetryQueueRoundRobin,
   countDueRpaRetries,
+  renewRpaClaim,
 } from '../../services/rpaWorker/rpaRetryQueue';
+import { withHeavyJobSlot } from '../../queue/bullmqClient';
 import { runRpaScript } from '../../services/rpaWorker/rpaPlaywrightRunner';
 import { rpaEnvReady } from '../../services/rpaWorker/rpaEnv';
 import {
@@ -117,6 +120,9 @@ beforeEach(() => {
   queueRpc.calls.length = 0;
   (runRpaScript as jest.Mock).mockReset().mockImplementation(async () => ({ success: true, platform_id: 'p-1' }));
   (rpaEnvReady as jest.Mock).mockClear();
+  const { supabase: sb } = jest.requireMock('../../db/supabaseClient');
+  (sb.rpc as jest.Mock).mockImplementation((fn: string, args: any) => queueRpc.rpc(fn, args));
+  (withHeavyJobSlot as jest.Mock).mockImplementation((fn: () => unknown) => fn());
   policy.execution_enabled = true;
   asWeb();
   delete process.env.RPA_SYNTHETIC_HANDLER_ENABLED;
@@ -389,7 +395,9 @@ describe('synthetic_page_check handler (no real platform)', () => {
     expect(out).toMatchObject({ claimed: 1, succeeded: 1, failed: 0, unknown: 0, errors: 0 });
     expect(runRpaScript).not.toHaveBeenCalled(); // no browser, no platform script
     expect(queueRpc.calls.map((c) => c.fn)).toEqual([
-      'rpa_retry_queue_accept', 'park_expired_rpa_retry_claims', 'claim_rpa_retry_queue', 'finalize_rpa_retry_queue_claim',
+      'rpa_retry_queue_accept', 'park_expired_rpa_retry_claims',
+      'claim_rpa_retry_queue', 'renew_rpa_retry_queue_claim', 'finalize_rpa_retry_queue_claim',
+      'claim_rpa_retry_queue', // one row at a time: the next claim finds nothing
     ]);
     expect(tables.rpa_retry_queue[0]).toMatchObject({ claim_token: null, attempts: 5, last_error: null });
     expect(tables.rpa_retry_queue[0].completed_at).toEqual(expect.any(String));
@@ -402,5 +410,147 @@ describe('synthetic_page_check handler (no real platform)', () => {
     expect(r).toMatchObject({ success: true, platform_id: 'synthetic:data:1' });
     expect(tables.rpa_retry_queue[0].completed_at).toEqual(expect.any(String));
     expect(runRpaScript).not.toHaveBeenCalled();
+  });
+});
+
+// ───────────── S-1: lease check immediately before the handler ─────────────
+describe('S-1: an expired claim is never run (lease renewed immediately before the handler)', () => {
+  const expire = (id: string) => {
+    const r = tables.rpa_retry_queue.find((x) => x.id === id)!;
+    r.claim_expires_at = new Date(Date.now() - 1_000).toISOString();
+  };
+  /** Let the lease run out after the claim, before the first renew (the gap S-1 describes). */
+  const expireBeforeFirstRenew = () => {
+    const { supabase: sb } = jest.requireMock('../../db/supabaseClient');
+    let done = false;
+    (sb.rpc as jest.Mock).mockImplementation((fn: string, args: any) => {
+      if (fn === 'renew_rpa_retry_queue_claim' && !done) { done = true; expire(args.p_queue_id); }
+      return queueRpc.rpc(fn, args);
+    });
+  };
+
+  it('flush: lease expired between claim and handler -> handler NOT called; row released as never attempted (attempts unchanged)', async () => {
+    asWorker();
+    tables.rpa_retry_queue = [queueRow({ id: 'q1', attempts: 1 })];
+    tables.community_ai_actions = [approvedAction(1)];
+    expireBeforeFirstRenew();
+    const out = await rpaSchedulerHooks.flushRetries();
+    expect(runRpaScript).not.toHaveBeenCalled();
+    expect(out).toMatchObject({ claimed: 1, claim_lost: 1, succeeded: 0, failed: 0, unknown: 0 });
+    expect(tables.rpa_retry_queue[0]).toMatchObject({ attempts: 1, claim_token: null, completed_at: null });
+    expect(tables.rpa_retry_queue[0].last_error).toMatch(/^RPA_CLAIM_RELEASED_NOT_ATTEMPTED:/);
+    expect(Date.parse(tables.rpa_retry_queue[0].next_retry_at)).toBeGreaterThan(Date.now()); // not hot-looped
+  });
+
+  it('CONTROL: the same row with its lease intact is run once and tombstoned', async () => {
+    asWorker();
+    tables.rpa_retry_queue = [queueRow({ id: 'q1', attempts: 1 })];
+    tables.community_ai_actions = [approvedAction(1)];
+    const out = await rpaSchedulerHooks.flushRetries();
+    expect(runRpaScript).toHaveBeenCalledTimes(1);
+    expect(out).toMatchObject({ claimed: 1, claim_lost: 0, succeeded: 1 });
+  });
+
+  it('flush: a claim already PARKED by another tick stays parked and is NOT run', async () => {
+    tables.rpa_retry_queue = [queueRow({ id: 'q1', attempts: 1 })];
+    const { supabase: sb } = jest.requireMock('../../db/supabaseClient');
+    let done = false;
+    (sb.rpc as jest.Mock).mockImplementation(async (fn: string, args: any) => {
+      if (fn === 'renew_rpa_retry_queue_claim' && !done) {
+        done = true;
+        expire(args.p_queue_id);
+        await queueRpc.rpc('park_expired_rpa_retry_claims', {}); // another worker's tick parks it first
+      }
+      return queueRpc.rpc(fn, args);
+    });
+    const handler = jest.fn(async () => ({ success: true }));
+    const out = await flushRpaRetryQueueForOrg({ organization_id: ORG, handler, worker: 'A' });
+    expect(handler).not.toHaveBeenCalled();
+    expect(out).toMatchObject({ claimed: 1, claim_lost: 1, succeeded: 0 });
+    expect(tables.rpa_retry_queue[0].last_error).toMatch(/^RPA_OUTCOME_UNKNOWN:CLAIM_EXPIRED/);
+    expect(tables.rpa_retry_queue[0].attempts).toBe(5);
+  });
+
+  it('flush: the lease is re-checked INSIDE the heavy-job slot; expiry during the slot wait -> runner NOT called', async () => {
+    asWorker();
+    tables.rpa_retry_queue = [queueRow({ id: 'q1', attempts: 1 })];
+    tables.community_ai_actions = [approvedAction(1)];
+    (withHeavyJobSlot as jest.Mock).mockImplementationOnce(async (fn: () => unknown) => { expire('q1'); return fn(); });
+    const out = await rpaSchedulerHooks.flushRetries();
+    expect(runRpaScript).not.toHaveBeenCalled();
+    expect(out).toMatchObject({ claimed: 1, claim_lost: 1, succeeded: 0, unknown: 0 });
+    expect(tables.rpa_retry_queue[0]).toMatchObject({ attempts: 1, claim_token: null });
+  });
+
+  it('direct worker path: lease lost while waiting -> NOT run, released and reported queued for the worker', async () => {
+    asWorker();
+    expireBeforeFirstRenew();
+    const r = await executeRpaTask(task(30));
+    expect(runRpaScript).not.toHaveBeenCalled();
+    expect(r).toMatchObject({ success: false, not_attempted: true, claim_lost: true, queued_for_worker: true });
+    expect(tables.rpa_retry_queue[0]).toMatchObject({ attempts: 0, claim_token: null, completed_at: null });
+    expect(tables.rpa_retry_queue[0].last_error).toMatch(/^RPA_CLAIM_RELEASED_NOT_ATTEMPTED:/);
+  });
+
+  it('CONTROL: direct worker path with the lease intact runs once (renewed before the handler)', async () => {
+    asWorker();
+    const r = await executeRpaTask(task(31));
+    expect(r.success).toBe(true);
+    expect(runRpaScript).toHaveBeenCalledTimes(1);
+    expect(queueRpc.calls.filter((c) => c.fn === 'renew_rpa_retry_queue_claim').length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('renewRpaClaim: valid token renews (lease extended); wrong token / expired -> lost', async () => {
+    tables.rpa_retry_queue = [queueRow({ id: 'q1' })];
+    const { rows } = await claimRpaRetryRows({ worker: 'A', limit: 1, leaseSeconds: 60 });
+    const before = Date.parse(tables.rpa_retry_queue[0].claim_expires_at);
+    expect(await renewRpaClaim({ queue_id: 'q1', claim_token: rows[0].claim_token }, 900)).toBe('renewed');
+    expect(Date.parse(tables.rpa_retry_queue[0].claim_expires_at)).toBeGreaterThan(before);
+    expect(await renewRpaClaim({ queue_id: 'q1', claim_token: 'not-the-token' })).toBe('lost');
+    expire('q1');
+    expect(await renewRpaClaim({ queue_id: 'q1', claim_token: rows[0].claim_token })).toBe('lost');
+  });
+
+  it('the flush claims ONE row at a time (claim -> renew -> run -> finalise, then the next claim)', async () => {
+    tables.rpa_retry_queue = [1, 2, 3].map((n) => queueRow({ id: `q${n}`, action_id: ACT(n) }));
+    const handler = jest.fn(async () => ({ success: true }));
+    const out = await flushRpaRetryQueueForOrg({ organization_id: ORG, handler, worker: 'A', limit: 10 });
+    expect(out).toMatchObject({ claimed: 3, succeeded: 3 });
+    const claims = queueRpc.calls.filter((c) => c.fn === 'claim_rpa_retry_queue');
+    expect(claims.every((c) => c.args.p_limit === 1)).toBe(true);
+    expect(queueRpc.calls.map((c) => c.fn)).toEqual([
+      'claim_rpa_retry_queue', 'renew_rpa_retry_queue_claim', 'finalize_rpa_retry_queue_claim',
+      'claim_rpa_retry_queue', 'renew_rpa_retry_queue_claim', 'finalize_rpa_retry_queue_claim',
+      'claim_rpa_retry_queue', 'renew_rpa_retry_queue_claim', 'finalize_rpa_retry_queue_claim',
+      'claim_rpa_retry_queue',
+    ]);
+  });
+});
+
+// ───────────── N-1: no cross-organization queue id ─────────────
+describe('N-1: accept never returns another organization queue row', () => {
+  it('same action id queued under another org -> RPA_ACCEPT_ORG_MISMATCH, no queue_id; CONTROL: same org -> duplicate with its own id', async () => {
+    const OTHER = '00000000-0000-4000-8000-0000000000b2';
+    tables.rpa_retry_queue = [queueRow({ id: 'theirs', action_id: ACT(40), organization_id: OTHER })];
+    const r = await acceptRpaTask(task(40));
+    expect(r).toEqual({ ok: false, error: 'RPA_ACCEPT_ORG_MISMATCH' });
+    expect(JSON.stringify(r)).not.toContain('theirs');
+    const mine = await acceptRpaTask(task(40, { organization_id: OTHER, tenant_id: OTHER }));
+    expect(mine).toEqual({ ok: true, accepted: false, queue_id: 'theirs', claim: null });
+  });
+});
+
+// ───────────── N-6: remaining counts only rows still eligible to run ─────────────
+describe('N-6: remaining excludes in-flight claims and success tombstones', () => {
+  it('a live claim held elsewhere and a tombstone (max_attempts 3) are not backlog; a backed-off row is', async () => {
+    tables.rpa_retry_queue = [
+      queueRow({ id: 'live', action_id: ACT(50), claim_token: 'tok', claimed_by: 'other:1', claimed_at: new Date().toISOString(),
+        claim_expires_at: new Date(Date.now() + 600_000).toISOString() }),
+      queueRow({ id: 'tomb', action_id: ACT(51), attempts: 3, max_attempts: 3, completed_at: new Date().toISOString() }),
+      queueRow({ id: 'later', action_id: ACT(52), attempts: 2, next_retry_at: new Date(Date.now() + 3_600_000).toISOString() }),
+    ];
+    const out = await flushRpaRetryQueueRoundRobin({ handler: async () => ({ success: true }) });
+    expect(out.claimed).toBe(0);
+    expect(out.remaining).toBe(1);
   });
 });

@@ -9,6 +9,9 @@ import {
   flushRpaRetryQueueRoundRobin,
   countDueRpaRetries,
   rpaWorkerIdentity,
+  rpaRunContextForClaim,
+  releaseRpaClaimNotAttempted,
+  RPA_CLAIM_LOST,
 } from './rpaRetryQueue';
 import { isBrowserWorkerRuntime, BROWSER_RUNTIME_REFUSED } from '../browserRuntime/browserRuntimeEnv';
 import { SYNTHETIC_PAGE_CHECK_PLATFORM, syntheticPageCheckHandler } from './syntheticPageCheckHandler';
@@ -59,9 +62,24 @@ export type RpaResult = {
   queued_for_worker?: boolean;
   /** Phase C: the action already has a queue row (queued, running, done or parked): not run again. */
   duplicate?: boolean;
+  /**
+   * Review S-1: the claim's lease check (renew) failed before the handler ran;
+   * nothing was executed. Always paired with not_attempted.
+   */
+  claim_lost?: boolean;
 };
 
-type RpaHandler = (task: RpaTask) => Promise<RpaResult>;
+/**
+ * Per-run context for one claimed queue row. `renewClaim` re-checks the claim
+ * (token still held, lease unexpired) and extends the lease; false = do NOT
+ * run. Absent for runs that hold no claim (tests, diagnostics).
+ */
+export type RpaRunContext = { renewClaim?: () => Promise<boolean> };
+
+type RpaHandler = (task: RpaTask, ctx?: RpaRunContext) => Promise<RpaResult>;
+
+/** Result of a run refused by the lease check: nothing executed. */
+const claimLostResult = (): RpaResult => ({ success: false, not_attempted: true, claim_lost: true, error: RPA_CLAIM_LOST });
 
 const normalizePlatform = (platform: string) => platform.trim().toLowerCase();
 
@@ -96,7 +114,7 @@ export const rpaSchedulerHooks = {
     //      exponentially in rpaEnv and log once per real probe, not per tick);
     //   4. per-row gate (kill switch + approval of record) before any handler.
     const idle = (extra: Partial<RpaFlushTickResult>): RpaFlushTickResult => ({
-      orgs_visited: 0, claimed: 0, succeeded: 0, failed: 0, unknown: 0, errors: 0, remaining: 0,
+      orgs_visited: 0, claimed: 0, succeeded: 0, failed: 0, unknown: 0, claim_lost: 0, errors: 0, remaining: 0,
       due: 0, skipped_empty: 0, skipped_runtime: 0, skipped_policy: 0, skipped_env: 0, env_failure_streak: 0, env_next_probe_in_s: 0,
       parked_expired: 0,
       ...extra,
@@ -138,7 +156,7 @@ export const rpaSchedulerHooks = {
       });
     }
     const flushed = await flushRpaRetryQueueRoundRobin({
-      handler: async (task) => {
+      handler: async (task, ctx) => {
         // Retry path bypasses the admission gate to avoid infinite
         // deferral during partial outages. Env readiness is still
         // enforced downstream by the playwright runner. It does NOT
@@ -151,7 +169,7 @@ export const rpaSchedulerHooks = {
         }
         const h = handlers[normalizePlatform(task.platform)];
         if (!h) return { success: false, error: 'RPA_PLATFORM_NOT_SUPPORTED' };
-        return h(task);
+        return h(task, ctx);
       },
       limitPerOrg: opts?.limit_per_org,
       maxOrgs: opts?.max_orgs,
@@ -163,6 +181,7 @@ export const rpaSchedulerHooks = {
       succeeded: flushed.succeeded,
       failed: flushed.failed,
       unknown: flushed.unknown ?? 0,
+      claim_lost: flushed.claim_lost ?? 0,
       errors: flushed.errors,
       remaining: flushed.remaining,
       parked_expired: flushed.parked_expired ?? 0,
@@ -178,6 +197,8 @@ export type RpaFlushTickResult = {
   failed: number;
   /** Executed, outcome unknown — row parked for reconciliation, not failed. */
   unknown: number;
+  /** Claimed but not run: the lease check before the handler failed (review S-1). */
+  claim_lost: number;
   errors: number;
   remaining: number;
   /** Due rows seen by the pre-check. */
@@ -298,7 +319,7 @@ const rpaRetryPolicyReason = (code: CommunityAiPolicyBlockReason): string => {
  * is delegated to `buildScript(task)`; a platform that has no script for
  * the requested action is surfaced as a structured failure.
  */
-const playwrightHandler: RpaHandler = async (task) => {
+const playwrightHandler: RpaHandler = async (task, ctx) => {
   const script = buildScript(task);
   if ('error' in script) {
     return { success: false, error: script.error };
@@ -307,7 +328,12 @@ const playwrightHandler: RpaHandler = async (task) => {
   // (HEAVY_JOB_CONCURRENCY) alongside ai-heavy + creator-render. buildScript()
   // is cheap and intentionally left outside the slot. Single chokepoint:
   // covers BOTH the scheduler retry path and the executeRpaTask path.
-  return withHeavyJobSlot(() => runRpaScript(task, script));
+  return withHeavyJobSlot(async () => {
+    // Review S-1: the slot wait can be long; re-check (and extend) the claim
+    // immediately before the browser is touched. Lost -> nothing runs.
+    if (ctx?.renewClaim && !(await ctx.renewClaim())) return claimLostResult();
+    return runRpaScript(task, script);
+  });
 };
 
 const handlers: Record<string, RpaHandler> = {
@@ -410,20 +436,36 @@ export const executeRpaTask = async (task: RpaTask): Promise<RpaResult> => {
     return { success: false, not_attempted: true, error: `RPA_DEFERRED:${admission.status}` };
   }
 
-  startRpaWorker(async (queuedTask) => {
+  startRpaWorker(async (queuedTask, ctx) => {
     const taskHandler = handlers[normalizePlatform(queuedTask.platform)];
     if (!taskHandler) {
       return { success: false, error: 'RPA_PLATFORM_NOT_SUPPORTED' };
     }
-    return taskHandler(queuedTask);
+    return taskHandler(queuedTask, ctx);
   });
 
   let result: RpaResult;
   try {
-    result = await enqueueRpaTask(task);
+    // Review S-1: the in-process queue re-checks this claim's lease
+    // immediately before the handler (and the Playwright handler again inside
+    // its heavy-job slot); a lease lost while waiting means nothing runs.
+    result = await enqueueRpaTask(task, rpaRunContextForClaim(claim));
   } catch (error: any) {
     // enqueueRpaTask rejects only before the handler runs (worker not started).
     result = { success: false, not_attempted: true, error: error?.message || 'RPA_QUEUE_FAILED' };
+  }
+
+  if (result.claim_lost === true) {
+    // Never attempted. If this process still holds the (expired) token, give
+    // the row back as not attempted: the worker flush runs it later, behind its
+    // own gate (kill switch, approval of record, contact governance). If it was
+    // already parked by another tick it stays parked; it was not run here.
+    const rel = await releaseRpaClaimNotAttempted(claim, 'LEASE_CHECK_DIRECT_PATH');
+    console.warn(`[rpaWorker] claim lost before run action=${task.action_id}; NOT run, release=${rel}`);
+    if (rel === 'released') {
+      return { success: false, not_attempted: true, queued_for_worker: true, claim_lost: true, error: `${RPA_CLAIM_LOST}:QUEUED_FOR_WORKER` };
+    }
+    return { success: false, not_attempted: true, claim_lost: true, error: `${RPA_CLAIM_LOST}:${rel === 'not_held' ? 'PARKED' : 'RELEASE_FAILED'}` };
   }
 
   if (result.success) {

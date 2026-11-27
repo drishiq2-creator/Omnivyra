@@ -1,4 +1,4 @@
-import type { RpaTask, RpaResult } from './rpaWorkerService';
+import type { RpaTask, RpaResult, RpaRunContext } from './rpaWorkerService';
 
 /**
  * In-process serialiser for RPA execution on the browser worker.
@@ -11,10 +11,16 @@ import type { RpaTask, RpaResult } from './rpaWorkerService';
  *
  * A definite failure (nothing happened) is re-run once in-process; an unknown
  * outcome or a throw is never re-run.
+ *
+ * Review S-1: an item may carry a run context whose renewClaim() is called
+ * immediately before EVERY handler call (first run and the in-process re-run).
+ * If it returns false the claim was lost while the item waited: the handler is
+ * NOT called and the item resolves { claim_lost, not_attempted }.
  */
 
 type QueueItem = {
   task: RpaTask;
+  ctx?: RpaRunContext;
   attempts: number;
   resolve: (value: RpaResult | PromiseLike<RpaResult>) => void;
   reject: (reason?: any) => void;
@@ -25,7 +31,7 @@ const MAX_ATTEMPTS = 2;
 const queue: QueueItem[] = [];
 let isProcessing = false;
 
-let currentHandler: ((task: RpaTask) => Promise<RpaResult>) | null = null;
+let currentHandler: ((task: RpaTask, ctx?: RpaRunContext) => Promise<RpaResult>) | null = null;
 
 const processQueue = async () => {
   if (isProcessing || !currentHandler) return;
@@ -36,7 +42,15 @@ const processQueue = async () => {
     if (!item) continue;
 
     try {
-      const result = await currentHandler(item.task);
+      if (item.ctx?.renewClaim) {
+        let held = false;
+        try { held = await item.ctx.renewClaim(); } catch { held = false; }
+        if (!held) {
+          item.resolve({ success: false, not_attempted: true, claim_lost: true, error: 'RPA_CLAIM_LOST' });
+          continue;
+        }
+      }
+      const result = await currentHandler(item.task, item.ctx);
       // An unknown outcome (the action may already have happened) is never
       // re-run in-process: a second run could double-post or un-like.
       if (!result.success && !result.outcome_unknown && item.attempts < MAX_ATTEMPTS) {
@@ -58,18 +72,18 @@ const processQueue = async () => {
   }
 };
 
-export const startRpaWorker = (handler: (task: RpaTask) => Promise<RpaResult>) => {
+export const startRpaWorker = (handler: (task: RpaTask, ctx?: RpaRunContext) => Promise<RpaResult>) => {
   currentHandler = handler;
   void processQueue();
 };
 
-export const enqueueRpaTask = (task: RpaTask) => {
+export const enqueueRpaTask = (task: RpaTask, ctx?: RpaRunContext) => {
   return new Promise<RpaResult>((resolve, reject) => {
     if (!currentHandler) {
       reject(new Error('RPA_WORKER_NOT_STARTED'));
       return;
     }
-    queue.push({ task, attempts: 1, resolve, reject });
+    queue.push({ task, ctx, attempts: 1, resolve, reject });
     void processQueue();
   });
 };

@@ -33,7 +33,17 @@
 --     claimed_by/claimed_at are kept as evidence, the token is cleared so a late
 --     finaliser is refused.
 --
--- SECURITY. All four functions are SECURITY INVOKER (they run with the caller's
+--   * renew_rpa_retry_queue_claim(...)  - LEASE CHECK BEFORE RUNNING (review S-1): true only
+--     when the caller's token still holds AND the lease has not expired; the lease is
+--     extended in the same statement. The worker calls it immediately before the
+--     handler; on false the row is NOT run.
+--   * release_rpa_retry_queue_claim(...) - give back a claim that was never attempted
+--     (token-matched; attempts unchanged; due again after a short delay). Used when the
+--     renew refused an expired-but-still-held claim: the worker can prove it never ran
+--     the row, so it is not recorded as outcome-unknown. A row already parked stays
+--     parked (its token is gone; release returns false) and is not run.
+--
+-- SECURITY. All six functions are SECURITY INVOKER (they run with the caller's
 -- rights; the table's RLS policy and ACL still apply), pin search_path, and are
 -- executable by service_role ONLY: EXECUTE is revoked from PUBLIC, anon and
 -- authenticated. The application calls them through ownedDbRpc (service-role
@@ -48,6 +58,16 @@
 -- absent, CREATE OR REPLACE FUNCTION, REVOKE/GRANT re-runnable.
 -- FAIL CLOSED. Missing table, missing roles or no unique index on action_id
 -- refuse the whole file (nothing changed).
+--
+-- DEPLOY ORDER (review S-3; runbook docs/runbooks/phase-c-browser-execution-deploy.md)
+--   * Apply this file TOGETHER WITH the release that calls these functions (the new
+--     worker code cannot run without them; the old code ignores the new columns).
+--   * NO OVERLAP between the old and the new RPA worker: stop the old worker (all
+--     replicas) BEFORE the new one starts. The old flush reads due rows with a plain
+--     SELECT and ignores claim_token, so an old worker running next to a new one could
+--     execute a row the new one has claimed: a double post / double like.
+--   * Same release, other file: 20270314000010 (extension handshake store) must be
+--     applied BEFORE the web deploy, or every extension route answers 503.
 --
 -- APPLY  (after explicit authorization only)
 --   *** DO NOT RUN `supabase db push`. *** psql -v ON_ERROR_STOP=1 -f <this file>
@@ -68,6 +88,16 @@ BEGIN
   FOREACH r IN ARRAY ARRAY['anon', 'authenticated', 'service_role'] LOOP
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) THEN
       RAISE EXCEPTION 'RPA-CLAIM preflight: role % does not exist - nothing changed', r;
+    END IF;
+  END LOOP;
+  -- Every pre-existing column the functions below read or write (review N-2): fail
+  -- fast here rather than at the first call in production.
+  FOREACH r IN ARRAY ARRAY['id', 'action_id', 'organization_id', 'platform', 'action_type', 'target_url',
+                           'text', 'attempts', 'max_attempts', 'last_error', 'last_attempt_at',
+                           'next_retry_at', 'updated_at'] LOOP
+    IF NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'public.rpa_retry_queue'::regclass
+                    AND attname = r AND attnum > 0 AND NOT attisdropped) THEN
+      RAISE EXCEPTION 'RPA-CLAIM preflight: column rpa_retry_queue.% does not exist - nothing changed', r;
     END IF;
   END LOOP;
   -- ON CONFLICT DO NOTHING is the idempotency proof; it needs a unique index
@@ -181,9 +211,17 @@ BEGIN
     RETURN;
   END IF;
 
-  -- Duplicate: report the existing row, never touch it.
-  SELECT q.id INTO v_id FROM public.rpa_retry_queue q WHERE q.action_id = p_action_id
-   ORDER BY (q.organization_id = p_organization_id) DESC LIMIT 1;
+  -- Duplicate: report the existing row of THIS organization, never touch it.
+  SELECT q.id INTO v_id FROM public.rpa_retry_queue q
+   WHERE q.action_id = p_action_id AND q.organization_id = p_organization_id
+   LIMIT 1;
+  IF v_id IS NULL AND EXISTS (SELECT 1 FROM public.rpa_retry_queue q WHERE q.action_id = p_action_id) THEN
+    -- Review N-1: under production's unique index (action_id) alone, the conflicting
+    -- row belongs to ANOTHER organization. Never return its id (no cross-tenant leak)
+    -- and never report "already queued" for work this organization does not own.
+    RAISE EXCEPTION 'RPA_ACCEPT_ORG_MISMATCH: action_id is queued under another organization'
+      USING ERRCODE = '42501';
+  END IF;
   RETURN QUERY SELECT false, v_id, NULL::uuid;
 END
 $fn$;
@@ -297,6 +335,77 @@ BEGIN
 END
 $fn$;
 
+-- ── 4b. renew: the lease check immediately before running (review S-1) ──────
+CREATE OR REPLACE FUNCTION public.renew_rpa_retry_queue_claim(
+  p_queue_id      uuid,
+  p_claim_token   uuid,
+  p_lease_seconds integer
+)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = pg_catalog, public
+AS $fn$
+DECLARE
+  v_id uuid;
+BEGIN
+  IF p_lease_seconds IS NULL OR p_lease_seconds < 1 OR p_lease_seconds > 86400 THEN
+    RAISE EXCEPTION 'renew_rpa_retry_queue_claim: lease seconds must be 1..86400' USING ERRCODE = '22023';
+  END IF;
+  IF p_queue_id IS NULL OR p_claim_token IS NULL THEN
+    RETURN false;
+  END IF;
+  -- true ONLY when the token still holds and the lease has not run out (database
+  -- clock). An expired claim is never revived: another worker may park it as
+  -- outcome-unknown at any moment.
+  UPDATE public.rpa_retry_queue q
+     SET claim_expires_at = now() + make_interval(secs => p_lease_seconds),
+         updated_at       = now()
+   WHERE q.id = p_queue_id
+     AND q.claim_token = p_claim_token
+     AND q.claim_expires_at > now()
+  RETURNING q.id INTO v_id;
+  RETURN v_id IS NOT NULL;
+END
+$fn$;
+
+-- ── 4c. release a claim that was never attempted ────────────────────────────
+CREATE OR REPLACE FUNCTION public.release_rpa_retry_queue_claim(
+  p_queue_id            uuid,
+  p_claim_token         uuid,
+  p_reason              text DEFAULT NULL,
+  p_retry_delay_seconds integer DEFAULT 60
+)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = pg_catalog, public
+AS $fn$
+DECLARE
+  v_id uuid;
+BEGIN
+  IF p_retry_delay_seconds IS NULL OR p_retry_delay_seconds < 0 OR p_retry_delay_seconds > 86400 THEN
+    RAISE EXCEPTION 'release_rpa_retry_queue_claim: retry delay must be 0..86400 seconds' USING ERRCODE = '22023';
+  END IF;
+  IF p_queue_id IS NULL OR p_claim_token IS NULL THEN
+    RETURN false;
+  END IF;
+  -- Token-matched (expired or not): the caller proves the row was NOT attempted by
+  -- still holding the token and never having run it. attempts is unchanged; the
+  -- row is due again after the delay. claimed_by / claimed_at stay as evidence.
+  UPDATE public.rpa_retry_queue q
+     SET claim_token      = NULL,
+         claim_expires_at = NULL,
+         next_retry_at    = now() + make_interval(secs => p_retry_delay_seconds),
+         last_error       = left('RPA_CLAIM_RELEASED_NOT_ATTEMPTED:' || coalesce(nullif(p_reason, ''), 'LEASE_LOST'), 500),
+         updated_at       = now()
+   WHERE q.id = p_queue_id
+     AND q.claim_token = p_claim_token
+  RETURNING q.id INTO v_id;
+  RETURN v_id IS NOT NULL;
+END
+$fn$;
+
 -- ── 5. park expired claims: outcome unknown, never re-run ───────────────────
 CREATE OR REPLACE FUNCTION public.park_expired_rpa_retry_claims()
 RETURNS integer
@@ -335,10 +444,14 @@ REVOKE ALL ON FUNCTION public.rpa_retry_queue_accept(uuid, uuid, text, text, tex
 REVOKE ALL ON FUNCTION public.claim_rpa_retry_queue(text, integer, integer, uuid) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.finalize_rpa_retry_queue_claim(uuid, uuid, text, text, integer, boolean) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.park_expired_rpa_retry_claims() FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.renew_rpa_retry_queue_claim(uuid, uuid, integer) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.release_rpa_retry_queue_claim(uuid, uuid, text, integer) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.rpa_retry_queue_accept(uuid, uuid, text, text, text, text, text, integer) TO service_role;
 GRANT EXECUTE ON FUNCTION public.claim_rpa_retry_queue(text, integer, integer, uuid) TO service_role;
 GRANT EXECUTE ON FUNCTION public.finalize_rpa_retry_queue_claim(uuid, uuid, text, text, integer, boolean) TO service_role;
 GRANT EXECUTE ON FUNCTION public.park_expired_rpa_retry_claims() TO service_role;
+GRANT EXECUTE ON FUNCTION public.renew_rpa_retry_queue_claim(uuid, uuid, integer) TO service_role;
+GRANT EXECUTE ON FUNCTION public.release_rpa_retry_queue_claim(uuid, uuid, text, integer) TO service_role;
 
 -- ── 7. postconditions ───────────────────────────────────────────────────────
 DO $verify$
@@ -349,7 +462,9 @@ DECLARE
     'public.rpa_retry_queue_accept(uuid, uuid, text, text, text, text, text, integer)'::regprocedure,
     'public.claim_rpa_retry_queue(text, integer, integer, uuid)'::regprocedure,
     'public.finalize_rpa_retry_queue_claim(uuid, uuid, text, text, integer, boolean)'::regprocedure,
-    'public.park_expired_rpa_retry_claims()'::regprocedure
+    'public.park_expired_rpa_retry_claims()'::regprocedure,
+    'public.renew_rpa_retry_queue_claim(uuid, uuid, integer)'::regprocedure,
+    'public.release_rpa_retry_queue_claim(uuid, uuid, text, integer)'::regprocedure
   ];
 BEGIN
   FOREACH c IN ARRAY ARRAY['claim_token', 'claimed_by', 'claimed_at', 'claim_expires_at', 'completed_at'] LOOP

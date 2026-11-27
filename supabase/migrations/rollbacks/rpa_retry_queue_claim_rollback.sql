@@ -1,7 +1,7 @@
 -- ROLLBACK for 20270314000001_rpa_retry_queue_claim.sql
 --
 -- Restores the pre-migration shape of public.rpa_retry_queue: no claim columns,
--- no claim/accept/finalize/park functions.
+-- no claim/accept/finalize/park/renew/release functions.
 --
 -- REFUSES while any row is claimed (claim_token IS NOT NULL): such a row is being
 -- executed (or its lease expired and it has not been parked yet). Dropping the
@@ -19,7 +19,8 @@
 --
 -- APPLY only after explicit authorization: psql -v ON_ERROR_STOP=1 -f <this file>
 -- Deploy the pre-migration application code first (the new code calls the
--- functions dropped here).
+-- functions dropped here), with no overlap: stop the new worker before the old one
+-- starts (docs/runbooks/phase-c-browser-execution-deploy.md).
 
 BEGIN;
 
@@ -36,6 +37,8 @@ DROP FUNCTION IF EXISTS public.rpa_retry_queue_accept(uuid, uuid, text, text, te
 DROP FUNCTION IF EXISTS public.claim_rpa_retry_queue(text, integer, integer, uuid);
 DROP FUNCTION IF EXISTS public.finalize_rpa_retry_queue_claim(uuid, uuid, text, text, integer, boolean);
 DROP FUNCTION IF EXISTS public.park_expired_rpa_retry_claims();
+DROP FUNCTION IF EXISTS public.renew_rpa_retry_queue_claim(uuid, uuid, integer);
+DROP FUNCTION IF EXISTS public.release_rpa_retry_queue_claim(uuid, uuid, text, integer);
 
 DELETE FROM public.rpa_retry_queue WHERE completed_at IS NOT NULL;
 
@@ -58,7 +61,8 @@ BEGIN
   IF EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
               WHERE n.nspname = 'public'
                 AND p.proname IN ('rpa_retry_queue_accept', 'claim_rpa_retry_queue',
-                                  'finalize_rpa_retry_queue_claim', 'park_expired_rpa_retry_claims')) THEN
+                                  'finalize_rpa_retry_queue_claim', 'park_expired_rpa_retry_claims',
+                                  'renew_rpa_retry_queue_claim', 'release_rpa_retry_queue_claim')) THEN
     RAISE EXCEPTION 'RPA-CLAIM rollback postcondition: claim functions still present';
   END IF;
 END

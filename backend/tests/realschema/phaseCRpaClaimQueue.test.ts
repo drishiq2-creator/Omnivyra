@@ -177,13 +177,15 @@ describe('accept is idempotent per action', () => {
 });
 
 describe('privileges: service_role only', () => {
-  it.each(['anon', 'authenticated'])('%s cannot execute the claim, accept, finalize or park functions', async (role) => {
+  it.each(['anon', 'authenticated'])('%s cannot execute the claim, accept, finalize, park, renew or release functions', async (role) => {
     await inRollback(async () => {
       await db.query(`SET LOCAL ROLE ${role}`);
       expect(await attempt(`SELECT * FROM public.claim_rpa_retry_queue('x', 60, 1, NULL)`)).toBe('42501');
       expect(await attempt(`SELECT public.park_expired_rpa_retry_claims()`)).toBe('42501');
       expect(await attempt(`SELECT public.finalize_rpa_retry_queue_claim(gen_random_uuid(), gen_random_uuid(), 'failed')`)).toBe('42501');
       expect(await attempt(`SELECT * FROM public.rpa_retry_queue_accept(gen_random_uuid(), gen_random_uuid(), 'p', 'like', 'u', NULL, NULL, NULL)`)).toBe('42501');
+      expect(await attempt(`SELECT public.renew_rpa_retry_queue_claim(gen_random_uuid(), gen_random_uuid(), 60)`)).toBe('42501');
+      expect(await attempt(`SELECT public.release_rpa_retry_queue_claim(gen_random_uuid(), gen_random_uuid())`)).toBe('42501');
     });
   });
 
@@ -192,6 +194,8 @@ describe('privileges: service_role only', () => {
       await seedRow(db);
       await db.query(`SET LOCAL ROLE service_role`);
       expect(await attempt(`SELECT * FROM public.claim_rpa_retry_queue('svc', 60, 1, $1)`, [ORG])).toBe('ok');
+      expect(await attempt(`SELECT public.renew_rpa_retry_queue_claim(gen_random_uuid(), gen_random_uuid(), 60)`)).toBe('ok');
+      expect(await attempt(`SELECT public.release_rpa_retry_queue_claim(gen_random_uuid(), gen_random_uuid())`)).toBe('ok');
     });
   });
 
@@ -199,12 +203,151 @@ describe('privileges: service_role only', () => {
     const { rows } = await db.query(
       `SELECT p.proname, p.prosecdef, p.proconfig FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
         WHERE n.nspname = 'public' AND p.proname IN
-          ('claim_rpa_retry_queue','rpa_retry_queue_accept','finalize_rpa_retry_queue_claim','park_expired_rpa_retry_claims')
+          ('claim_rpa_retry_queue','rpa_retry_queue_accept','finalize_rpa_retry_queue_claim','park_expired_rpa_retry_claims',
+           'renew_rpa_retry_queue_claim','release_rpa_retry_queue_claim')
         ORDER BY p.proname`);
-    expect(rows).toHaveLength(4);
+    expect(rows).toHaveLength(6);
     for (const r of rows) {
       expect(r.prosecdef).toBe(false);
       expect(r.proconfig).toEqual(['search_path=pg_catalog, public']);
     }
+  });
+});
+
+describe('S-1: renew_rpa_retry_queue_claim — the lease check immediately before running', () => {
+  const renew = (id: string, token: string, lease = 900) =>
+    db.query(`SELECT public.renew_rpa_retry_queue_claim($1, $2, $3) ok`, [id, token, lease]).then((r) => r.rows[0].ok as boolean);
+
+  it('a valid, unexpired token renews and extends the lease', async () => {
+    await inRollback(async () => {
+      const id = await seedRow(db);
+      const { rows: [c] } = await claim(db, 'w', 1, 60);
+      expect(await renew(id, c.claim_token, 900)).toBe(true);
+      const row = (await db.query(`SELECT claim_expires_at > now() + interval '800 seconds' far, claim_token FROM public.rpa_retry_queue WHERE id = $1`, [id])).rows[0];
+      expect(row.far).toBe(true);
+      expect(row.claim_token).toBe(c.claim_token); // still the same claim
+    });
+  });
+
+  it('a wrong token returns false and writes nothing (CONTROL in the same row: the right token renews)', async () => {
+    await inRollback(async () => {
+      const id = await seedRow(db);
+      const { rows: [c] } = await claim(db, 'w', 1, 60);
+      const before = (await db.query(`SELECT * FROM public.rpa_retry_queue WHERE id = $1`, [id])).rows[0];
+      expect(await renew(id, randomUUID())).toBe(false);
+      expect((await db.query(`SELECT * FROM public.rpa_retry_queue WHERE id = $1`, [id])).rows[0]).toEqual(before);
+      expect(await renew(id, c.claim_token)).toBe(true);
+    });
+  });
+
+  it('an EXPIRED claim is never revived, even with the right token; it stays parkable', async () => {
+    await inRollback(async () => {
+      const id = await seedRow(db);
+      const { rows: [c] } = await claim(db, 'w', 1, 60);
+      await db.query(`UPDATE public.rpa_retry_queue SET claim_expires_at = now() - interval '1 second' WHERE id = $1`, [id]);
+      expect(await renew(id, c.claim_token)).toBe(false);
+      expect((await db.query(`SELECT public.park_expired_rpa_retry_claims() n`)).rows[0].n).toBe(1);
+    });
+  });
+
+  it('a PARKED claim returns false (token gone)', async () => {
+    await inRollback(async () => {
+      const id = await seedRow(db);
+      const { rows: [c] } = await claim(db, 'w', 1, 60);
+      await db.query(`UPDATE public.rpa_retry_queue SET claim_expires_at = now() - interval '1 second' WHERE id = $1`, [id]);
+      await db.query(`SELECT public.park_expired_rpa_retry_claims()`);
+      expect(await renew(id, c.claim_token)).toBe(false);
+    });
+  });
+
+  it('lease seconds outside 1..86400 is refused (22023)', async () => {
+    await inRollback(async () => {
+      expect(await attempt(`SELECT public.renew_rpa_retry_queue_claim(gen_random_uuid(), gen_random_uuid(), 0)`)).toBe('22023');
+    });
+  });
+});
+
+describe('S-1: release_rpa_retry_queue_claim — a claim never attempted goes back, unchanged attempts', () => {
+  it('a held (expired) token releases: claim cleared, attempts unchanged, due later, evidence kept; CONTROL: a parked row is not released', async () => {
+    await inRollback(async () => {
+      const id = await seedRow(db, { attempts: 2 });
+      const { rows: [c] } = await claim(db, 'worker-r', 1, 60);
+      await db.query(`UPDATE public.rpa_retry_queue SET claim_expires_at = now() - interval '1 second' WHERE id = $1`, [id]);
+      const ok = await db.query(`SELECT public.release_rpa_retry_queue_claim($1, $2, 'LEASE_CHECK', 60) ok`, [id, c.claim_token]);
+      expect(ok.rows[0].ok).toBe(true);
+      const row = (await db.query(
+        `SELECT attempts, claim_token, claim_expires_at, claimed_by, last_error, next_retry_at > now() later FROM public.rpa_retry_queue WHERE id = $1`, [id])).rows[0];
+      expect(row).toMatchObject({ attempts: 2, claim_token: null, claim_expires_at: null, claimed_by: 'worker-r', later: true });
+      expect(row.last_error).toBe('RPA_CLAIM_RELEASED_NOT_ATTEMPTED:LEASE_CHECK');
+      // nothing left for park: it is not recorded as outcome-unknown
+      expect((await db.query(`SELECT public.park_expired_rpa_retry_claims() n`)).rows[0].n).toBe(0);
+
+      const id2 = await seedRow(db);
+      const { rows: [c2] } = await claim(db, 'w', 1, 60);
+      await db.query(`UPDATE public.rpa_retry_queue SET claim_expires_at = now() - interval '1 second' WHERE id = $1`, [id2]);
+      await db.query(`SELECT public.park_expired_rpa_retry_claims()`);
+      expect((await db.query(`SELECT public.release_rpa_retry_queue_claim($1, $2) ok`, [id2, c2.claim_token])).rows[0].ok).toBe(false);
+      expect((await db.query(`SELECT last_error FROM public.rpa_retry_queue WHERE id = $1`, [id2])).rows[0].last_error)
+        .toMatch(/^RPA_OUTCOME_UNKNOWN:CLAIM_EXPIRED/);
+    });
+  });
+
+  it('a wrong token releases nothing', async () => {
+    await inRollback(async () => {
+      const id = await seedRow(db);
+      await claim(db, 'w', 1, 60);
+      expect((await db.query(`SELECT public.release_rpa_retry_queue_claim($1, $2) ok`, [id, randomUUID()])).rows[0].ok).toBe(false);
+      expect((await db.query(`SELECT claim_token IS NOT NULL held FROM public.rpa_retry_queue WHERE id = $1`, [id])).rows[0].held).toBe(true);
+    });
+  });
+});
+
+describe('N-1: accept never returns another organization’s queue_id', () => {
+  const OTHER = '00000000-0000-4000-8000-0000000c1b1b';
+  it('the scenario exists: the unique index is on (action_id) alone in this schema', async () => {
+    const { rows } = await db.query(
+      `SELECT array_agg(a.attname::text ORDER BY a.attname) cols FROM pg_index i
+         JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+        WHERE i.indrelid = 'public.rpa_retry_queue'::regclass AND i.indisunique AND NOT i.indisprimary
+        GROUP BY i.indexrelid`);
+    expect(rows.map((r) => r.cols)).toContainEqual(['action_id']);
+  });
+
+  it('same action under another org -> 42501 RPA_ACCEPT_ORG_MISMATCH; CONTROL: the owning org gets accepted=false with its own id', async () => {
+    await inRollback(async () => {
+      const action = randomUUID();
+      const theirs = await db.query(`SELECT * FROM public.rpa_retry_queue_accept($1,$2,'synthetic_page_check','like','u',NULL,NULL,NULL)`, [OTHER, action]);
+      expect(theirs.rows[0]).toMatchObject({ accepted: true });
+      expect(await attempt(`SELECT * FROM public.rpa_retry_queue_accept($1,$2,'synthetic_page_check','like','u',NULL,NULL,NULL)`, [ORG, action])).toBe('42501');
+      await db.query('SAVEPOINT n1');
+      await expect(db.query(`SELECT * FROM public.rpa_retry_queue_accept($1,$2,'synthetic_page_check','like','u',NULL,NULL,NULL)`, [ORG, action]))
+        .rejects.toThrow(/RPA_ACCEPT_ORG_MISMATCH/);
+      await db.query('ROLLBACK TO SAVEPOINT n1');
+      const own = await db.query(`SELECT * FROM public.rpa_retry_queue_accept($1,$2,'synthetic_page_check','like','u',NULL,NULL,NULL)`, [OTHER, action]);
+      expect(own.rows[0]).toMatchObject({ accepted: false, queue_id: theirs.rows[0].queue_id });
+    });
+  });
+});
+
+describe('N-2: the migration preflight fails fast on a missing column', () => {
+  const fs = require('fs') as typeof import('fs');
+  const path = require('path') as typeof import('path');
+  const sql = fs.readFileSync(path.join(__dirname, '../../../supabase/migrations/20270314000001_rpa_retry_queue_claim.sql'), 'utf8');
+  const preflight = sql.slice(sql.indexOf('DO $preflight$'), sql.indexOf('$preflight$;') + '$preflight$;'.length);
+
+  it.each(['max_attempts', 'updated_at', 'last_attempt_at', 'last_error'])('without rpa_retry_queue.%s the preflight raises', async (col) => {
+    await inRollback(async () => {
+      expect(preflight).toContain(`'${col}'`);
+      await db.query(`ALTER TABLE public.rpa_retry_queue RENAME COLUMN ${col} TO ${col}_gone`);
+      await db.query('SAVEPOINT p');
+      await expect(db.query(preflight)).rejects.toThrow(new RegExp(`column rpa_retry_queue\\.${col} does not exist`));
+      await db.query('ROLLBACK TO SAVEPOINT p');
+    });
+  });
+
+  it('CONTROL: the intact table passes the preflight', async () => {
+    await inRollback(async () => {
+      expect(await attempt(preflight)).toBe('ok');
+    });
   });
 });

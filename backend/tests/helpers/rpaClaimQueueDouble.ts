@@ -25,7 +25,11 @@ export function createRpaClaimRpc(rows: () => Row[]) {
     calls.push({ fn, args });
     const table = rows();
     if (fn === 'rpa_retry_queue_accept') {
+      // Mirrors production's unique index on (action_id) alone.
       const dup = table.find((r) => r.action_id === args.p_action_id);
+      if (dup && dup.organization_id !== args.p_organization_id) {
+        return { data: null, error: { code: '42501', message: 'RPA_ACCEPT_ORG_MISMATCH: action_id is queued under another organization' } };
+      }
       if (dup) return { data: [{ accepted: false, queue_id: dup.id, claim_token: null }], error: null };
       const claimed = args.p_claimed_by != null;
       const row: Row = {
@@ -98,6 +102,22 @@ export function createRpaClaimRpc(rows: () => Row[]) {
       r.last_attempt_at = iso(nowMs());
       r.claim_token = null;
       r.claim_expires_at = null;
+      return { data: true, error: null };
+    }
+    if (fn === 'renew_rpa_retry_queue_claim') {
+      const r = table.find((x) => x.id === args.p_queue_id && x.claim_token != null && x.claim_token === args.p_claim_token
+        && Date.parse(x.claim_expires_at) > nowMs());
+      if (!r) return { data: false, error: null };
+      r.claim_expires_at = iso(nowMs() + Number(args.p_lease_seconds) * 1000);
+      return { data: true, error: null };
+    }
+    if (fn === 'release_rpa_retry_queue_claim') {
+      const r = table.find((x) => x.id === args.p_queue_id && x.claim_token != null && x.claim_token === args.p_claim_token);
+      if (!r) return { data: false, error: null };
+      r.claim_token = null;
+      r.claim_expires_at = null;
+      r.next_retry_at = iso(nowMs() + Number(args.p_retry_delay_seconds ?? 60) * 1000);
+      r.last_error = `RPA_CLAIM_RELEASED_NOT_ATTEMPTED:${args.p_reason || 'LEASE_LOST'}`.slice(0, 500);
       return { data: true, error: null };
     }
     if (fn === 'park_expired_rpa_retry_claims') {

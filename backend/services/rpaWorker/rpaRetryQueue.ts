@@ -1,5 +1,5 @@
 import { hostname } from 'os';
-import type { RpaTask, RpaResult } from './rpaWorkerService';
+import type { RpaTask, RpaResult, RpaRunContext } from './rpaWorkerService';
 import { ownedDbTable, ownedDbRpc } from '../../db/writeOwner';
 
 /**
@@ -20,6 +20,13 @@ import { ownedDbTable, ownedDbRpc } from '../../db/writeOwner';
  *     handler itself reported as unknown.
  *   - success keeps the row as a tombstone (completed_at, attempts =
  *     max_attempts) so the same action can never be accepted and run again.
+ *   - LEASE CHECK BEFORE RUNNING (review S-1): `renew_rpa_retry_queue_claim`
+ *     is called immediately before a handler runs (and again by the Playwright
+ *     handler inside its heavy-job slot). It succeeds only while the token
+ *     still holds and the lease is unexpired, and extends the lease. On false
+ *     the row is NOT run: a still-held (expired) claim is released as never
+ *     attempted (`release_rpa_retry_queue_claim`, attempts unchanged); a claim
+ *     already parked stays parked (outcome-unknown) - it was not run here.
  *
  * Phase 9 fairness is unchanged: `flushRpaRetryQueueRoundRobin` visits every
  * org with due work, at most `limit_per_org` claims each, bounded per tick.
@@ -70,6 +77,9 @@ export type RpaAcceptResult =
   | { ok: true; accepted: false; queue_id: string | null; claim: null }
   | { ok: false; error: string };
 
+/** The action id is queued under ANOTHER organization (unique index on action_id alone): refused, no id returned. */
+export const RPA_ACCEPT_ORG_MISMATCH = 'RPA_ACCEPT_ORG_MISMATCH';
+
 /**
  * Durable, idempotent enqueue. With `claimFor` the row is born claimed by that
  * worker (the caller executes it now and must finalise it); without it the row
@@ -94,7 +104,12 @@ export async function acceptRpaTask(
       p_claimed_by: opts?.claimFor ?? null,
       p_lease_seconds: opts?.claimFor ? (opts.leaseSeconds ?? RPA_CLAIM_LEASE_SECONDS) : null,
     });
-    if (error) return { ok: false, error: firstLine((error as any)?.message || 'RPA_ACCEPT_FAILED') };
+    if (error) {
+      const msg = firstLine((error as any)?.message || 'RPA_ACCEPT_FAILED');
+      // Review N-1: a cross-organization duplicate is a distinct, stable refusal.
+      if (msg.includes(RPA_ACCEPT_ORG_MISMATCH)) return { ok: false, error: RPA_ACCEPT_ORG_MISMATCH };
+      return { ok: false, error: msg };
+    }
     const row = (Array.isArray(data) ? data[0] : data) as
       | { accepted?: boolean; queue_id?: string | null; claim_token?: string | null }
       | null
@@ -183,6 +198,71 @@ export async function finalizeRpaClaim(
   }
 }
 
+/**
+ * Lease check immediately before running (review S-1). 'renewed' only when the
+ * token still holds and the lease had not expired (the lease is extended).
+ * 'lost' = expired, parked, or never ours: the row must NOT be run.
+ * 'renew_failed' = no answer: treated exactly like 'lost' (not run).
+ */
+export async function renewRpaClaim(
+  claim: RpaQueueClaim,
+  leaseSeconds: number = RPA_CLAIM_LEASE_SECONDS,
+): Promise<'renewed' | 'lost' | 'renew_failed'> {
+  try {
+    const { data, error } = await ownedDbRpc('renew_rpa_retry_queue_claim', {
+      p_queue_id: claim.queue_id,
+      p_claim_token: claim.claim_token,
+      p_lease_seconds: leaseSeconds,
+    });
+    if (error) return 'renew_failed';
+    if (data === true) return 'renewed';
+    if (data === false) return 'lost';
+    return 'renew_failed';
+  } catch {
+    return 'renew_failed';
+  }
+}
+
+/**
+ * Give back a claim this process never attempted (token-matched). attempts is
+ * unchanged; the row is due again after `retryDelaySeconds`. 'released' = it
+ * is queued again; 'not_held' = the token is gone (already parked by another
+ * tick, or finalised): nothing written, and the row is NOT run.
+ */
+export async function releaseRpaClaimNotAttempted(
+  claim: RpaQueueClaim,
+  reason: string,
+  retryDelaySeconds = 60,
+): Promise<'released' | 'not_held' | 'release_failed'> {
+  try {
+    const { data, error } = await ownedDbRpc('release_rpa_retry_queue_claim', {
+      p_queue_id: claim.queue_id,
+      p_claim_token: claim.claim_token,
+      p_reason: firstLine(reason, 200),
+      p_retry_delay_seconds: Math.max(0, Math.min(86400, Math.floor(retryDelaySeconds))),
+    });
+    if (error) return 'release_failed';
+    if (data === true) return 'released';
+    if (data === false) return 'not_held';
+    return 'release_failed';
+  } catch {
+    return 'release_failed';
+  }
+}
+
+/**
+ * Build the run context handed to a handler for one claimed row: `renewClaim`
+ * re-checks (and extends) the lease. The handler calls it again right before
+ * the browser is touched (inside the heavy-job slot), so a long slot wait
+ * cannot run an expired claim.
+ */
+export const rpaRunContextForClaim = (claim: RpaQueueClaim): RpaRunContext => ({
+  renewClaim: async () => (await renewRpaClaim(claim)) === 'renewed',
+});
+
+/** Error carried by a result whose row was never run because its claim was lost before the handler. */
+export const RPA_CLAIM_LOST = 'RPA_CLAIM_LOST';
+
 /** Park every expired claim as outcome-unknown (never re-run). Returns the count or an error. */
 export async function parkExpiredRpaClaims(): Promise<{ parked: number; error: string | null }> {
   try {
@@ -225,35 +305,43 @@ type PerOrgFlushOutcome = {
   failed: number;
   /** Executed with an unknown outcome — parked, not failed, not retried. */
   unknown: number;
+  /** Claimed but NOT run: the lease check before the handler failed (released or left parked). */
+  claim_lost: number;
   errors: number;
 };
 
 /**
- * Claim and run up to `limit` rows for ONE organization. Only claimed rows are
- * executed; every outcome is written through the token-matched finaliser.
+ * Claim and run up to `limit` rows for ONE organization, ONE ROW AT A TIME
+ * (review S-1: a batch claim let later rows' leases run out while earlier rows
+ * executed). Each row is claimed, its lease re-checked (renew) immediately
+ * before the handler, run, and finalised through the token-matched finaliser.
  * Success = tombstone; definite failure = attempts + 1 with exponential backoff
  * (or retired when terminal); unknown / handler throw = parked, never re-run.
- * A finaliser that cannot write leaves the claim in place: it expires and is
- * parked as unknown, so the row is never executed twice.
+ * A lost lease before the handler = not run (released as never attempted when
+ * the token is still held). A finaliser that cannot write leaves the claim in
+ * place: it expires and is parked as unknown, so the row is never run twice.
  */
 export async function flushRpaRetryQueueForOrg(input: {
   organization_id: string;
-  handler: (task: RpaTask) => Promise<RpaResult>;
+  handler: (task: RpaTask, ctx?: RpaRunContext) => Promise<RpaResult>;
   limit?: number;
   worker?: string;
 }): Promise<PerOrgFlushOutcome> {
   const { organization_id: orgId, handler } = input;
   const limit = input.limit ?? DEFAULT_PER_ORG_LIMIT;
   const worker = input.worker ?? rpaWorkerIdentity();
-  let claimed = 0, succeeded = 0, failed = 0, unknown = 0, errors = 0;
+  let claimed = 0, succeeded = 0, failed = 0, unknown = 0, claimLost = 0, errors = 0;
+  const out = () => ({ organization_id: orgId, claimed, succeeded, failed, unknown, claim_lost: claimLost, errors });
 
-  const claim = await claimRpaRetryRows({ worker, limit, organization_id: orgId });
-  if (claim.error) {
-    console.warn('[rpaRetryQueue] claim failed:', claim.error, 'org=', orgId);
-    return { organization_id: orgId, claimed, succeeded, failed, unknown, errors: 1 };
-  }
-
-  for (const row of claim.rows) {
+  for (let i = 0; i < limit; i += 1) {
+    const claim = await claimRpaRetryRows({ worker, limit: 1, organization_id: orgId });
+    if (claim.error) {
+      console.warn('[rpaRetryQueue] claim failed:', claim.error, 'org=', orgId);
+      errors += 1;
+      return out();
+    }
+    const row = claim.rows[0];
+    if (!row) break;
     claimed += 1;
     const token: RpaQueueClaim = { queue_id: String(row.id), claim_token: String(row.claim_token) };
     const note = (r: 'finalized' | 'token_mismatch' | 'finalize_failed') => {
@@ -261,6 +349,17 @@ export async function flushRpaRetryQueueForOrg(input: {
       errors += 1;
       console.warn(`[rpaRetryQueue] finalise ${r} org=${orgId} row=${row.id}`);
     };
+    const notRun = async (why: string) => {
+      claimLost += 1;
+      const rel = await releaseRpaClaimNotAttempted(token, why);
+      console.warn(`[rpaRetryQueue] claim lost before run (${why}); row NOT run, release=${rel} org=${orgId} row=${row.id}`);
+    };
+    const ctx = rpaRunContextForClaim(token);
+    // Lease check immediately before the handler.
+    if (!(await ctx.renewClaim!())) {
+      await notRun('LEASE_CHECK_BEFORE_HANDLER');
+      continue;
+    }
     let result: RpaResult;
     try {
       const task: RpaTask = {
@@ -272,7 +371,7 @@ export async function flushRpaRetryQueueForOrg(input: {
         text: row.text ?? null,
         action_id: row.action_id,
       };
-      result = await handler(task);
+      result = await handler(task, ctx);
     } catch (err: any) {
       // The handler may have thrown mid-action (after a click/submit): unknown.
       unknown += 1;
@@ -281,7 +380,10 @@ export async function flushRpaRetryQueueForOrg(input: {
       note(await finalizeRpaClaim(token, 'unknown', { error: `HANDLER_THREW:${msg}` }));
       continue;
     }
-    if (result?.success) {
+    if (result?.claim_lost === true) {
+      // The handler's own lease check (inside the heavy-job slot) failed: not run.
+      await notRun('LEASE_CHECK_IN_HANDLER');
+    } else if (result?.success) {
       succeeded += 1;
       note(await finalizeRpaClaim(token, 'succeeded'));
     } else if (result?.outcome_unknown) {
@@ -297,7 +399,7 @@ export async function flushRpaRetryQueueForOrg(input: {
     }
   }
 
-  return { organization_id: orgId, claimed, succeeded, failed, unknown, errors };
+  return out();
 }
 
 /**
@@ -307,7 +409,7 @@ export async function flushRpaRetryQueueForOrg(input: {
  * monopolise the sweep.
  */
 export async function flushRpaRetryQueueRoundRobin(input: {
-  handler: (task: RpaTask) => Promise<RpaResult>;
+  handler: (task: RpaTask, ctx?: RpaRunContext) => Promise<RpaResult>;
   limitPerOrg?: number;
   maxOrgs?: number;
 }): Promise<{
@@ -316,7 +418,10 @@ export async function flushRpaRetryQueueRoundRobin(input: {
   succeeded: number;
   failed: number;
   unknown: number;
+  /** Claimed but not run (lease lost before the handler). */
+  claim_lost: number;
   errors: number;
+  /** Rows still eligible to run later: unclaimed, not completed, attempts < max (due now or backed off). */
   remaining: number;
   /** Expired claims parked as outcome-unknown this tick. */
   parked_expired: number;
@@ -357,11 +462,11 @@ export async function flushRpaRetryQueueRoundRobin(input: {
     orgIds = Array.from(seen);
   } catch (err: any) {
     console.warn('[rpaRetryQueue] org enumeration failed:', err?.message || err);
-    return { orgs_visited: 0, claimed: 0, succeeded: 0, failed: 0, unknown: 0, errors: errors + 1, remaining: 0, parked_expired: park.parked };
+    return { orgs_visited: 0, claimed: 0, succeeded: 0, failed: 0, unknown: 0, claim_lost: 0, errors: errors + 1, remaining: 0, parked_expired: park.parked };
   }
 
   const perOrg: PerOrgFlushOutcome[] = [];
-  let claimed = 0, succeeded = 0, failed = 0, unknown = 0;
+  let claimed = 0, succeeded = 0, failed = 0, unknown = 0, claimLost = 0;
   let budget = MAX_TASKS_PER_TICK;
   for (const orgId of orgIds) {
     if (budget <= 0) break; // per-tick cap reached — remaining orgs drain next tick
@@ -376,14 +481,27 @@ export async function flushRpaRetryQueueRoundRobin(input: {
     succeeded += outcome.succeeded;
     failed += outcome.failed;
     unknown += outcome.unknown;
+    claimLost += outcome.claim_lost;
     errors += outcome.errors;
     budget -= outcome.claimed;
   }
 
-  // Remaining backlog across all orgs (rows still eligible).
-  const { count: remaining } = await ownedDbTable('rpa_retry_queue')
-    .select('id', { count: 'exact', head: true })
-    .lt('attempts', MAX_ATTEMPTS);
+  // Remaining backlog across all orgs (review N-6): only rows that can still
+  // run — not claimed (in flight), not a success tombstone, attempts left. Rows
+  // backed off to a later next_retry_at are still backlog. Parked
+  // outcome-unknown rows and tombstones (attempts = max) are excluded.
+  let remaining = 0;
+  try {
+    const { count, error } = await ownedDbTable('rpa_retry_queue')
+      .select('id', { count: 'exact', head: true })
+      .is('claim_token', null)
+      .is('completed_at', null)
+      .lt('attempts', MAX_ATTEMPTS);
+    if (error || typeof count !== 'number') errors += 1;
+    else remaining = count;
+  } catch {
+    errors += 1;
+  }
 
   return {
     orgs_visited: orgIds.length,
@@ -391,8 +509,9 @@ export async function flushRpaRetryQueueRoundRobin(input: {
     succeeded,
     failed,
     unknown,
+    claim_lost: claimLost,
     errors,
-    remaining: remaining ?? 0,
+    remaining,
     parked_expired: park.parked,
     per_org: perOrg,
   };
