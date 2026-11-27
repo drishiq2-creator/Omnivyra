@@ -39,7 +39,10 @@ jest.mock('../../services/taggedResponseInterpreter', () => ({
 }));
 
 // ── The policy table (DB boundary under the REAL reader) ─────────────────────
-type PolicyResult = { data: unknown; error: unknown };
+// UPDATED (F-FU1 C, owner 2026-11-27): the strict reader now requires the
+// response's status and exact count (a genuine "no row" is status 200 + count 0),
+// so the double carries them like the real postgrest-js response does.
+type PolicyResult = { data: unknown; error: unknown; status?: number; count?: number | null };
 const policyByOrg = new Map<string, PolicyResult>();
 let policyThrows: Error | null = null;
 const policyReads: { table: string; columns: string; org: unknown }[] = [];
@@ -53,7 +56,8 @@ jest.mock('../../db/writeOwner', () => ({
       maybeSingle: async () => {
         policyReads.push(read);
         if (policyThrows) throw policyThrows;
-        return policyByOrg.get(String(read.org)) ?? { data: null, error: null };
+        // UPDATED (F-FU1 C): a genuinely absent row is PostgREST's counted 200.
+        return policyByOrg.get(String(read.org)) ?? { data: null, error: null, status: 200, count: 0 };
       },
       insert: (...a: unknown[]) => { ownedWriteMock('insert', table, ...a); return chain; },
       update: (...a: unknown[]) => { ownedWriteMock('update', table, ...a); return chain; },
@@ -142,8 +146,14 @@ function mockRes() {
 function post(body: Record<string, unknown>) {
   return { method: 'POST', body, headers: {}, query: {} } as any;
 }
-const row = (v: unknown): PolicyResult => ({ data: { bulk_reply_enabled: v }, error: null });
-const readError: PolicyResult = { data: null, error: { message: 'permission denied for table', code: '42501' } };
+// UPDATED (F-FU1 C): rows and errors carry the status/count the real client returns.
+const row = (v: unknown): PolicyResult => ({ data: { bulk_reply_enabled: v }, error: null, status: 200, count: 1 });
+const readError: PolicyResult = {
+  data: null,
+  error: { message: 'permission denied for table', code: '42501' },
+  status: 403,
+  count: null,
+};
 
 const ROUTES = [
   {
@@ -215,7 +225,7 @@ describe.each(ROUTES)('F-FU1 $name — bulk-reply policy fails closed', (r) => {
   });
 
   it('policy row ABSENT -> product default (enabled) -> proceeds', async () => {
-    // no policyByOrg entry: { data: null, error: null }
+    // no policyByOrg entry: { data: null, error: null, status: 200, count: 0 }
     const res = mockRes();
     await r.handler(post({ ...r.body, organization_id: ORG_A }), res);
 

@@ -115,10 +115,24 @@ export class EngagementControlsUnreadableError extends Error {
  *
  * - no organization id        -> throws EngagementControlsUnreadableError
  * - read error                -> throws EngagementControlsUnreadableError
- * - no row                    -> true (product default, pending a separate
+ * - no row, PROVEN            -> true (product default, pending a separate
  *                                product-policy decision)
+ * - ambiguous response        -> throws EngagementControlsUnreadableError
  * - row                       -> same semantics as getControls
- *                                (`bulk_reply_enabled ?? true`)
+ *                                (`bulk_reply_enabled ?? true`); a non-boolean
+ *                                value throws
+ *
+ * "No row" must be PROVEN, not inferred from `!error && !data`.
+ * @supabase/postgrest-js (2.105.3, processResponse) rewrites two non-answers
+ * into error-free responses on its !res.ok path, which maybeSingle() never
+ * touches:
+ *   - a 404 with an EMPTY body (edge, WAF, paused project) becomes
+ *     { status: 204, data: null, error: null };
+ *   - a 404 with a JSON-array body becomes { status: 200, data: [], error: null }.
+ * And a 200 with an empty body (an intermediary, not PostgREST) also yields
+ * { status: 200, data: null }. Only PostgREST's own answer to a counted GET
+ * carries Content-Range, so `count === 0` is the positive proof that the
+ * database answered "no row". Anything else without a usable row fails closed.
  *
  * getControls() is intentionally unchanged: its other consumers keep their
  * existing behaviour.
@@ -128,10 +142,15 @@ export async function readBulkReplyEnabled(organizationId: string): Promise<bool
     throw new EngagementControlsUnreadableError(organizationId, 'organization id required');
   }
 
-  const { data, error } = await ownedDbTable('engagement_system_controls')
-    .select('bulk_reply_enabled')
+  const { data, error, status, count } = (await ownedDbTable('engagement_system_controls')
+    .select('bulk_reply_enabled', { count: 'exact' })
     .eq('organization_id', organizationId)
-    .maybeSingle();
+    .maybeSingle()) as {
+    data: unknown;
+    error: unknown;
+    status?: number;
+    count?: number | null;
+  };
 
   if (error) {
     const message =
@@ -141,7 +160,32 @@ export async function readBulkReplyEnabled(organizationId: string): Promise<bool
     throw new EngagementControlsUnreadableError(organizationId, message);
   }
 
-  if (!data) return true;
+  // Only a 200 is an answer. 204 is the client's rewrite of a blank 404.
+  if (status !== 200) {
+    throw new EngagementControlsUnreadableError(
+      organizationId,
+      `ambiguous policy response (status ${status ?? 'missing'})`,
+    );
+  }
 
-  return (data as { bulk_reply_enabled?: boolean | null }).bulk_reply_enabled ?? true;
+  if (data === null || data === undefined) {
+    if (count === 0) return true; // PostgREST counted zero rows: genuinely absent.
+    throw new EngagementControlsUnreadableError(
+      organizationId,
+      `ambiguous empty policy response (count ${count ?? 'missing'})`,
+    );
+  }
+
+  // maybeSingle() only unwraps arrays on the res.ok path; an array here is the
+  // client's rewrite of a 404, not a row.
+  if (Array.isArray(data) || typeof data !== 'object') {
+    throw new EngagementControlsUnreadableError(organizationId, 'ambiguous policy response shape');
+  }
+
+  const value = (data as { bulk_reply_enabled?: unknown }).bulk_reply_enabled;
+  if (value === null || value === undefined) return true; // same as getControls' `?? true`
+  if (typeof value !== 'boolean') {
+    throw new EngagementControlsUnreadableError(organizationId, 'malformed bulk_reply_enabled value');
+  }
+  return value;
 }
