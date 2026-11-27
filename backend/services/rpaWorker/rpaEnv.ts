@@ -20,10 +20,12 @@
 
 import {
   __setBrowserRuntimeEnvForTests,
+  browserLaunchDecision,
   isBrowserRuntimeRefused,
   launchBrowser,
   releaseBrowserResources,
 } from '../browserRuntime/browserLauncher';
+import { BROWSER_RUNTIME_REFUSED } from '../browserRuntime/browserRuntimeEnv';
 
 export type ProbeResult = { ok: true } | { ok: false; reason: string };
 
@@ -88,6 +90,13 @@ export async function loadPlaywrightModule(): Promise<any | null> {
 
 /** One real probe. Returns the raw (possibly multi-line) reason on failure. */
 async function runProbe(): Promise<ProbeResult> {
+  // Review N-5: outside the browser worker the probe refuses BEFORE Playwright is
+  // even imported (the launcher would refuse the launch anyway; this makes the
+  // refusal independent of whether the module loads). Stable code, nothing spawned.
+  const gate = browserLaunchDecision();
+  if (gate.allowed !== true) {
+    return { ok: false, reason: `${BROWSER_RUNTIME_REFUSED}:${(gate as { reason: string }).reason}` };
+  }
   try {
     const pw = await loadPlaywright();
     if (!pw?.chromium?.launch) {

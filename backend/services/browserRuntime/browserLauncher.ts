@@ -148,8 +148,16 @@ async function importPlaywright(): Promise<PlaywrightLike> {
  * BROWSER_RUNTIME_REFUSED) outside the worker runtime - before anything is
  * imported or spawned, so a refusal is always "not attempted".
  */
+/**
+ * The launcher's runtime decision (the test override, else process.env). Exported so
+ * a caller can refuse BEFORE it imports Playwright (rpaEnv's probe does).
+ */
+export function browserLaunchDecision(): ReturnType<typeof browserRuntimeDecision> {
+  return browserRuntimeDecision(envOverrideForTests ?? process.env);
+}
+
 export async function launchBrowser(opts: LaunchBrowserOptions): Promise<Browser> {
-  const decision = browserRuntimeDecision(envOverrideForTests ?? process.env);
+  const decision = browserLaunchDecision();
   if (decision.allowed !== true) {
     throw new BrowserRuntimeRefusedError((decision as { reason: string }).reason, opts.purpose);
   }
