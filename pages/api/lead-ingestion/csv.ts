@@ -1,7 +1,8 @@
 import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeFactory';
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { enforceCompanyAccess } from '../../../backend/services/userContextService';
-import { ingestLeadBatch, isLeadIngestionEnabled, resolveLeadIngestionGate, MAX_BATCH_SIZE } from '../../../backend/services/leadIngestion/orchestrator';
+import { ingestLeadBatch, isLeadIngestionEnabled, MAX_BATCH_SIZE } from '../../../backend/services/leadIngestion/orchestrator';
+import { resolveProspectImportGate } from '../../../backend/services/leadIngestion/prospectImportGate';
 import { verifyImportMapping } from '../../../backend/services/leadMapping/importMappingProvenance';
 import { requireCapability } from '../../../backend/security/requireCapability';
 import { PROSPECT_INGEST } from '../../../shared/contracts/security';
@@ -100,11 +101,27 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   // have ingestion enabled; only a verified admin of THIS tenant learns its
   // state. The global kill switch above stays first because it is free and
   // leaks nothing.
-  const gate = await resolveLeadIngestionGate(companyId);
+  //
+  // Round 30B (owner decision 6): the SAME per-company gate as the wizard's
+  // mapping routes (prospectImportGate.ts: the lead-ingestion gate + PI-LDB
+  // schema applied + this tenant's own `prospect_import` flag), so a direct
+  // API call cannot import for a company the wizard is closed for. Fails
+  // closed: no flag row, a disabled flag, an unreadable flag or any lookup
+  // error refuses. The response keeps the existing contract: a closed
+  // lead-ingestion gate still answers LEAD_INGESTION_DISABLED, and the import
+  // gate answers PROSPECT_IMPORT_DISABLED exactly as the mapping routes do.
+  const gate = await resolveProspectImportGate(companyId);
   if (!gate.allowed) {
+    if (gate.reason.startsWith('ingestion:')) {
+      return res.status(404).json({
+        error: 'Lead ingestion is not enabled.',
+        code: 'LEAD_INGESTION_DISABLED',
+        reason: gate.reason.slice('ingestion:'.length),
+      });
+    }
     return res.status(404).json({
-      error: 'Lead ingestion is not enabled.',
-      code: 'LEAD_INGESTION_DISABLED',
+      error: 'Prospect import is not enabled.',
+      code: 'PROSPECT_IMPORT_DISABLED',
       reason: gate.reason,
     });
   }

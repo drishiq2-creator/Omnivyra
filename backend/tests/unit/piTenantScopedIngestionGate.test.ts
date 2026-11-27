@@ -346,8 +346,23 @@ describe('G. the surrounding contract is unchanged', () => {
       expect(src).toContain('UUID.test(companyId)');
       expect(src).toContain('enforceCompanyAccess');
       expect(src).toContain('PROSPECT_INGEST');
-      expect(src).toContain('resolveLeadIngestionGate');
+      // Round 30B: csv resolves the WIZARD gate, which wraps this tenant gate (pinned below) - the tenant gate is
+      // still evaluated for csv, just through resolveProspectImportGate.
+      expect(src).toContain(r === 'csv' ? 'resolveProspectImportGate' : 'resolveLeadIngestionGate');
     }
+  });
+
+  it('round 30B: the wizard gate the csv route uses evaluates the tenant ingestion gate FIRST', () => {
+    const fs = require('fs'); const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '../../services/leadIngestion/prospectImportGate.ts'), 'utf8');
+    const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+    const ingestion = code.indexOf('(deps.ingestionGate ?? resolveLeadIngestionGate)(organizationId)');
+    const refuse = code.indexOf("if (!ingestion.allowed) return { allowed: false");
+    const flagRead = code.indexOf('(deps.evaluate ?? evaluateFeatureFlag)(');
+    expect(ingestion).toBeGreaterThan(-1);
+    expect(refuse).toBeGreaterThan(ingestion);
+    expect(flagRead).toBeGreaterThan(refuse);
+    expect(code).toContain("from './orchestrator'");
   });
 
   it('the routes evaluate the tenant gate AFTER authorization, never before', () => {
@@ -357,7 +372,8 @@ describe('G. the surrounding contract is unchanged', () => {
       const kill = src.indexOf('isLeadIngestionEnabled()');
       const member = src.indexOf('enforceCompanyAccess({');
       const cap = src.indexOf('requireCapability(req, res, {');
-      const tenant = src.indexOf('resolveLeadIngestionGate(companyId)');
+      // Round 30B: csv's tenant gate is the wizard gate (it wraps resolveLeadIngestionGate - pinned above).
+      const tenant = src.indexOf(r === 'csv' ? 'resolveProspectImportGate(companyId)' : 'resolveLeadIngestionGate(companyId)');
       // kill switch → membership → capability → tenant flag
       expect(kill).toBeGreaterThan(-1);
       expect(member).toBeGreaterThan(kill);
