@@ -10,7 +10,10 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 import { resolveUserContext, enforceCompanyAccess } from '../../../../backend/services/userContextService';
 import { enforceRole } from '../../../../backend/services/rbacService';
 import { COMMUNITY_AI_CAPABILITIES } from '../../../../backend/services/rbac/communityAiCapabilities';
-import { getControls } from '../../../../backend/services/engagementGovernanceService';
+import {
+  readBulkReplyEnabled,
+  EngagementControlsUnreadableError,
+} from '../../../../backend/services/engagementGovernanceService';
 import { bulkReplyThreads } from '../../../../backend/services/bulkEngagementService';
 import { generateReplySuggestions } from '../../../../backend/services/engagementAiAssistantService';
 import { getThreadActionability } from '../../../../backend/services/engagementThreadService';
@@ -52,9 +55,35 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     });
     if (!roleGate) return;
 
-    const controls = await getControls(organizationId);
-    if (!controls.bulk_reply_enabled) {
-      return res.status(403).json({ error: 'Bulk reply is disabled for this organization' });
+    // F-FU1 (owner 2026-11-27): the tenant's bulk-reply switch fails CLOSED.
+    // Read for the access-validated organizationId, AFTER access + role and
+    // BEFORE any actionability read, generation or send. A policy that cannot
+    // be read refuses with 503; an absent row keeps the product default
+    // (enabled).
+    let bulkReplyEnabled: boolean;
+    try {
+      bulkReplyEnabled = await readBulkReplyEnabled(organizationId);
+    } catch (policyErr) {
+      if (policyErr instanceof EngagementControlsUnreadableError) {
+        console.error(
+          JSON.stringify({
+            event: 'bulk_ai_reply_refused',
+            code: 'BULK_REPLY_CONTROLS_UNREADABLE',
+            organization_id: organizationId,
+          })
+        );
+        return res.status(503).json({
+          error: 'Bulk reply policy could not be read',
+          code: 'BULK_REPLY_CONTROLS_UNREADABLE',
+        });
+      }
+      throw policyErr;
+    }
+    if (!bulkReplyEnabled) {
+      return res.status(403).json({
+        error: 'Bulk reply is disabled for this organization',
+        code: 'BULK_REPLY_DISABLED',
+      });
     }
 
     const batch = rawThreadIds.slice(0, MAX_BATCH);

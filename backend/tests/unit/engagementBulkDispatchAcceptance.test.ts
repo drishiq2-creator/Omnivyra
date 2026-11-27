@@ -80,8 +80,11 @@ jest.mock('../../services/rbacService', () => ({ enforceRole: async () => ({ use
 jest.mock('../../services/rbac/communityAiCapabilities', () => ({
   COMMUNITY_AI_CAPABILITIES: { EXECUTE_ACTIONS: ['SUPER_ADMIN'] },
 }));
+// UPDATED (F-FU1, owner 2026-11-27): bulk-ai-reply now reads the switch via the
+// strict, fail-closed readBulkReplyEnabled instead of getControls.
 jest.mock('../../services/engagementGovernanceService', () => ({
-  getControls: async () => ({ bulk_reply_enabled: true, ai_suggestions_enabled: true }),
+  readBulkReplyEnabled: async () => true,
+  EngagementControlsUnreadableError: class EngagementControlsUnreadableError extends Error {},
 }));
 jest.mock('../../services/engagementAiAssistantService', () => ({
   generateReplySuggestions: async () => ({ suggested_replies: [{ text: 'Sending details now.' }] }),

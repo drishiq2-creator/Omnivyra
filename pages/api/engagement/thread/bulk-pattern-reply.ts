@@ -11,7 +11,10 @@ import { resolveUserContext, enforceCompanyAccess } from '../../../../backend/se
 import { enforceRole } from '../../../../backend/services/rbacService';
 import { COMMUNITY_AI_CAPABILITIES } from '../../../../backend/services/rbac/communityAiCapabilities';
 import { supabase } from '../../../../backend/db/supabaseClient';
-import { getControls } from '../../../../backend/services/engagementGovernanceService';
+import {
+  readBulkReplyEnabled,
+  EngagementControlsUnreadableError,
+} from '../../../../backend/services/engagementGovernanceService';
 import { bulkReplyThreads } from '../../../../backend/services/bulkEngagementService';
 import { generateResponse } from '../../../../backend/services/responseGenerationService';
 import { SUPPORTED_TAGS } from '../../../../backend/services/taggedResponseInterpreter';
@@ -62,11 +65,29 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     // FIX-2: the tenant's bulk-reply switch — the same contract bulk-ai-reply
     // enforces. Checked against the access-validated organizationId, AFTER
     // access + role and BEFORE any pattern read, LLM generation or send.
-    // NOTE: getControls() returns product defaults (enabled) both when no row
-    // exists AND when the read errors; that is not detectable here, so a
-    // read error currently fails OPEN (shared helper, owner decision).
-    const controls = await getControls(organizationId);
-    if (!controls.bulk_reply_enabled) {
+    // F-FU1 (owner 2026-11-27): the switch fails CLOSED. A policy that cannot
+    // be read refuses with 503 BULK_REPLY_CONTROLS_UNREADABLE; an absent row
+    // keeps the product default (enabled).
+    let bulkReplyEnabled: boolean;
+    try {
+      bulkReplyEnabled = await readBulkReplyEnabled(organizationId);
+    } catch (policyErr) {
+      if (policyErr instanceof EngagementControlsUnreadableError) {
+        console.error(
+          JSON.stringify({
+            event: 'bulk_pattern_reply_refused',
+            code: 'BULK_REPLY_CONTROLS_UNREADABLE',
+            organization_id: organizationId,
+          })
+        );
+        return res.status(503).json({
+          error: 'Bulk reply policy could not be read',
+          code: 'BULK_REPLY_CONTROLS_UNREADABLE',
+        });
+      }
+      throw policyErr;
+    }
+    if (!bulkReplyEnabled) {
       console.warn(
         JSON.stringify({
           event: 'bulk_pattern_reply_refused',

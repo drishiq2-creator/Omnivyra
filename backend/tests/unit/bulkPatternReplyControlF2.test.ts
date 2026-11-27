@@ -7,6 +7,10 @@
  * pattern replies. The switch is read through the shared contract
  * (engagementGovernanceService.getControls), for the access-validated tenant,
  * after access + role and before any pattern read, generation or send.
+ *
+ * UPDATED (F-FU1, owner 2026-11-27): the routes now read the switch through the
+ * strict, fail-closed engagementGovernanceService.readBulkReplyEnabled; the
+ * fail-closed behaviour itself is covered in bulkReplyPolicyFailClosedFFU1.test.ts.
  */
 
 // ── Route scaffolding ────────────────────────────────────────────────────────
@@ -34,18 +38,13 @@ jest.mock('../../services/taggedResponseInterpreter', () => ({
 }));
 
 // ── The tenant switch (shared contract) ──────────────────────────────────────
+// UPDATED (F-FU1, owner 2026-11-27): the route reads the switch via the strict
+// readBulkReplyEnabled (fail closed) instead of getControls.
 const disabledOrgs = new Set<string>();
-const getControlsMock = jest.fn(async (org: string) => ({
-  auto_reply_enabled: true,
-  bulk_reply_enabled: !disabledOrgs.has(org),
-  ai_suggestions_enabled: true,
-  triage_engine_enabled: true,
-  opportunity_detection_enabled: true,
-  response_strategy_learning_enabled: true,
-  digest_generation_enabled: true,
-}));
+const readBulkReplyEnabledMock = jest.fn(async (org: string) => !disabledOrgs.has(org));
 jest.mock('../../services/engagementGovernanceService', () => ({
-  getControls: (org: string) => getControlsMock(org),
+  readBulkReplyEnabled: (org: string) => readBulkReplyEnabledMock(org),
+  EngagementControlsUnreadableError: class EngagementControlsUnreadableError extends Error {},
 }));
 
 // ── Side-effect boundaries ───────────────────────────────────────────────────
@@ -127,7 +126,7 @@ describe('FIX-2 bulk-pattern-reply — tenant bulk-reply switch', () => {
 
     expect(res.statusCode).toBe(200);
     expect(res.body).toMatchObject({ success: true, sent: 2 });
-    expect(getControlsMock).toHaveBeenCalledWith(ORG_A);
+    expect(readBulkReplyEnabledMock).toHaveBeenCalledWith(ORG_A);
     expect(fromMock).toHaveBeenCalledWith('response_patterns');
     expect(generateResponseMock).toHaveBeenCalledTimes(2);
     expect(bulkReplyThreadsMock).toHaveBeenCalledTimes(1);
@@ -162,11 +161,11 @@ describe('FIX-2 bulk-pattern-reply — tenant bulk-reply switch', () => {
   it('switch is read only AFTER access + role pass (denied access never reaches it)', async () => {
     enforceCompanyAccessMock.mockImplementationOnce(async () => null);
     await handler(post({ ...BODY, organization_id: ORG_A }), mockRes());
-    expect(getControlsMock).not.toHaveBeenCalled();
+    expect(readBulkReplyEnabledMock).not.toHaveBeenCalled();
 
     enforceRoleMock.mockImplementationOnce(async () => null);
     await handler(post({ ...BODY, organization_id: ORG_A }), mockRes());
-    expect(getControlsMock).not.toHaveBeenCalled();
+    expect(readBulkReplyEnabledMock).not.toHaveBeenCalled();
     expect(bulkReplyThreadsMock).not.toHaveBeenCalled();
   });
 
@@ -180,21 +179,21 @@ describe('FIX-2 bulk-pattern-reply — tenant bulk-reply switch', () => {
     expect(res.body.code).toBe('BULK_REPLY_DISABLED');
     // The switch was read for exactly the tenant access validated.
     expect(enforceCompanyAccessMock).toHaveBeenCalledWith(expect.objectContaining({ companyId: ORG_A }));
-    expect(getControlsMock).toHaveBeenCalledTimes(1);
-    expect(getControlsMock).toHaveBeenCalledWith(ORG_A);
+    expect(readBulkReplyEnabledMock).toHaveBeenCalledTimes(1);
+    expect(readBulkReplyEnabledMock).toHaveBeenCalledWith(ORG_A);
     expect(bulkReplyThreadsMock).not.toHaveBeenCalled();
 
     // ...and B, enabled, still proceeds — A's switch does not leak to B.
     const resB = mockRes();
     await handler(post({ ...BODY, organization_id: ORG_B }), resB);
     expect(resB.statusCode).toBe(200);
-    expect(getControlsMock).toHaveBeenLastCalledWith(ORG_B);
+    expect(readBulkReplyEnabledMock).toHaveBeenLastCalledWith(ORG_B);
     expect(bulkReplyThreadsMock).toHaveBeenCalledTimes(1);
     expect(bulkReplyThreadsMock.mock.calls[0][0]).toBe(ORG_B);
   });
 
   it('controls lookup that THROWS: no generation, no send, non-2xx (fails closed)', async () => {
-    getControlsMock.mockImplementationOnce(async () => { throw new Error('controls unavailable'); });
+    readBulkReplyEnabledMock.mockImplementationOnce(async () => { throw new Error('controls unavailable'); });
     const res = mockRes();
     await handler(post({ ...BODY, organization_id: ORG_A }), res);
 
@@ -207,8 +206,10 @@ describe('FIX-2 bulk-pattern-reply — tenant bulk-reply switch', () => {
 
 describe('FIX-2 — documented shared-helper behaviour (owner decision, NOT changed here)', () => {
   // getControls swallows a read error into DEFAULTS (bulk_reply_enabled: true),
-  // the same value it returns for "no row". The route cannot tell the two apart,
-  // so an unreadable policy currently fails OPEN for both bulk routes.
+  // the same value it returns for "no row".
+  // UPDATED (F-FU1, owner 2026-11-27): getControls is still UNCHANGED (its other
+  // consumers keep this behaviour), but the bulk routes no longer use it — they
+  // use readBulkReplyEnabled, which fails CLOSED on a read error.
   function realGetControlsWith(result: { data: unknown; error: unknown }) {
     let getControls!: (org: string) => Promise<{ bulk_reply_enabled: boolean }>;
     jest.isolateModules(() => {
@@ -234,7 +235,9 @@ describe('FIX-2 — documented shared-helper behaviour (owner decision, NOT chan
     expect((await getControls(ORG_A)).bulk_reply_enabled).toBe(true);
   });
 
-  it('READ ERROR -> enabled (fails OPEN; undetectable at the route — reported dependency)', async () => {
+  // UPDATED (F-FU1, owner 2026-11-27): pin kept — getControls itself is unchanged;
+  // the bulk routes are protected by readBulkReplyEnabled instead.
+  it('READ ERROR -> enabled (getControls unchanged; bulk routes no longer use it)', async () => {
     const getControls = realGetControlsWith({ data: null, error: { message: 'permission denied' } });
     expect((await getControls(ORG_A)).bulk_reply_enabled).toBe(true);
   });
