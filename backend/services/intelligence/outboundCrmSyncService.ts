@@ -189,9 +189,12 @@ export async function resolveWebhookDestination(companyId: string): Promise<Webh
 
 interface LedgerRow { attemptId: string | null; outcome: string }
 
+/** A ledger read either answers (rows, possibly none) or is explicitly unavailable; never conflate the two. */
+type LedgerRead = { rows: LedgerRow[] } | { unavailable: true };
+
 const TERMINAL = new Set(['synced', 'failed', 'unknown', 'aborted']);
 
-async function readLedger(companyId: string, key: string): Promise<LedgerRow[] | null> {
+async function readLedger(companyId: string, key: string): Promise<LedgerRead> {
   try {
     const { data, error } = await ownedDbTable('audit_events')
       .select('id, metadata, created_at')
@@ -200,13 +203,15 @@ async function readLedger(companyId: string, key: string): Promise<LedgerRow[] |
       .eq('resource_id', key)
       .limit(LEDGER_READ_LIMIT);
     // A null error is not an answer: a blank/odd response must not read as "empty".
-    if (error || !Array.isArray(data)) return null;
-    return (data as Array<{ metadata?: Record<string, unknown> | null }>).map((r) => ({
-      attemptId: typeof r.metadata?.attemptId === 'string' ? (r.metadata.attemptId as string) : null,
-      outcome: String(r.metadata?.outcome ?? ''),
-    }));
+    if (error || !Array.isArray(data)) return { unavailable: true };
+    return {
+      rows: (data as Array<{ metadata?: Record<string, unknown> | null }>).map((r) => ({
+        attemptId: typeof r.metadata?.attemptId === 'string' ? (r.metadata.attemptId as string) : null,
+        outcome: String(r.metadata?.outcome ?? ''),
+      })),
+    };
   } catch {
-    return null;
+    return { unavailable: true };
   }
 }
 
@@ -374,8 +379,8 @@ async function claimAndSend(
   const integrationId = dest.integrationId;
 
   const before = await readLedger(companyId, dedupeKey);
-  if (!before) return { ...base, status: 'failed', detail: 'sync ledger unavailable; nothing was sent', retryable: true };
-  const s0 = evaluate(before);
+  if ('unavailable' in before) return { ...base, status: 'failed', detail: 'sync ledger unavailable; nothing was sent', retryable: true };
+  const s0 = evaluate(before.rows);
   if (s0.synced) return { ...base, status: 'deduped', detail: 'already synced (confirmed 2xx on an earlier attempt)', retryable: false };
   if (s0.unknown || s0.unresolvedAttempts.size > 0) {
     return { ...base, status: 'unknown', detail: 'an earlier attempt may have been delivered and its outcome is unknown; not resending automatically (operator review required)', retryable: false };
@@ -384,12 +389,12 @@ async function claimAndSend(
   const attemptId = crypto.randomUUID();
   await recordSyncLineage(input, companyId, dedupeKey, 'dispatching', { attemptId, integrationId });
   const after = await readLedger(companyId, dedupeKey);
-  const mineVisible = !!after && after.some((r) => r.attemptId === attemptId && r.outcome === 'dispatching');
-  if (!after || !mineVisible) {
+  const mineVisible = 'rows' in after && after.rows.some((r) => r.attemptId === attemptId && r.outcome === 'dispatching');
+  if (!('rows' in after) || !mineVisible) {
     await recordSyncLineage(input, companyId, dedupeKey, 'aborted', { attemptId, integrationId, reason: 'claim_not_confirmed' });
     return { ...base, status: 'failed', detail: 'could not durably record the send claim; nothing was sent', retryable: true };
   }
-  const s1 = evaluate(after);
+  const s1 = evaluate(after.rows);
   s1.unresolvedAttempts.delete(attemptId);
   if (s1.synced || s1.unknown || s1.unresolvedAttempts.size > 0) {
     await recordSyncLineage(input, companyId, dedupeKey, 'aborted', { attemptId, integrationId, reason: 'concurrent_attempt' });

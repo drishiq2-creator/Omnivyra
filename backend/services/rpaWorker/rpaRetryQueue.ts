@@ -115,7 +115,7 @@ export const RPA_OUTCOME_UNKNOWN_PREFIX = 'RPA_OUTCOME_UNKNOWN';
  * action), next_retry_at is left as-is, last_error carries the
  * RPA_OUTCOME_UNKNOWN prefix for operator reconciliation.
  */
-async function parkOutcomeUnknown(rowId: string, error: string, maxAttempts: number): Promise<boolean> {
+async function parkOutcomeUnknown(rowId: string, error: string, maxAttempts: number): Promise<'parked' | 'park_failed'> {
   const msg = error.startsWith(RPA_OUTCOME_UNKNOWN_PREFIX) ? error : `${RPA_OUTCOME_UNKNOWN_PREFIX}:${error}`;
   try {
     const { error: upErr } = await ownedDbTable('rpa_retry_queue')
@@ -126,9 +126,9 @@ async function parkOutcomeUnknown(rowId: string, error: string, maxAttempts: num
         updated_at: new Date().toISOString(),
       })
       .eq('id', rowId);
-    return !upErr;
+    return upErr ? 'park_failed' : 'parked';
   } catch {
-    return false;
+    return 'park_failed';
   }
 }
 
@@ -209,7 +209,7 @@ export async function flushRpaRetryQueueForOrg(input: {
         unknown += 1;
         const msg = String(err?.message || err || 'HANDLER_THREW').split(/\r?\n/)[0];
         console.warn(`[rpaRetryQueue] handler threw; outcome unknown, row parked org=${orgId} row=${row.id}: ${msg.slice(0, 200)}`);
-        if (!(await parkOutcomeUnknown(row.id as string, `HANDLER_THREW:${msg}`, maxAttempts))) errors += 1;
+        if ((await parkOutcomeUnknown(row.id as string, `HANDLER_THREW:${msg}`, maxAttempts)) !== 'parked') errors += 1;
         continue;
       }
       try {
@@ -223,7 +223,7 @@ export async function flushRpaRetryQueueForOrg(input: {
           }
         } else if (result.outcome_unknown) {
           unknown += 1;
-          if (!(await parkOutcomeUnknown(row.id as string, result.error ?? 'UNKNOWN', maxAttempts))) errors += 1;
+          if ((await parkOutcomeUnknown(row.id as string, result.error ?? 'UNKNOWN', maxAttempts)) !== 'parked') errors += 1;
         } else {
           failed += 1;
           // Round 26 (suppression): a terminal refusal (e.g. RPA_RETRY_CONTACT_SUPPRESSED) is retired at once, not retried.
