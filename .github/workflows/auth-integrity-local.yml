@@ -1,0 +1,284 @@
+# Auth integrity against a DISPOSABLE local Supabase stack (workstream C3; the auth E2E gate since
+# the hosted E2E retirement, docs/supabase-e2e-retirement/15-application-and-ci-connection-transition.md).
+#
+# Everything runs on the GitHub-hosted runner itself: a throw-away Supabase stack
+# (tests/supabase-local), a Redis service container, and the app under test. The runner is
+# discarded afterwards. NO hosted Supabase project (production or the retired hosted E2E project)
+# is contacted.
+#
+# Safety properties (enforced by tests/supabase-local/authIntegrityLocalWorkflow.spec.ts):
+#   - references NO repository secret at all (no production and no hosted-E2E credential);
+#   - every Supabase target is loopback: tests/auth/e2eEnvironmentGuard.ts (AUTH_E2E_TARGET=local)
+#     refuses anything else, and a hosted marker anywhere in the environment or the app server
+#     log fails the job;
+#   - ALLOW_PROD_DB_WITH_LOCAL_REDIS is deliberately NOT set, so the app's own
+#     prod-Supabase/local-Redis hard block stays active as a second line of defence;
+#   - the stack is always torn down (if: always()), and teardown is scoped to this stack only;
+#   - a skipped, missing or extra test fails the job (exact counts are asserted).
+#
+# Triggers: every pull_request (no path filter, like the hosted job it replaces, so it can be made
+# a required check without leaving PRs pending), workflow_dispatch, and pushes to
+# ci-only/c3-auth-local/** branches (acceptance re-runs without a pull request).
+# Making "Auth integrity regression suite (local Supabase)" a REQUIRED check is an owner action.
+
+name: Auth integrity (local Supabase)
+
+on:
+  pull_request:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'ci-only/c3-auth-local/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: auth-integrity-local-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    # Explicit "shell: bash" makes GitHub use `bash -eo pipefail`, so a failing command piped
+    # into `tee` still fails the step.
+    shell: bash
+
+env:
+  SUPABASE_CLI_VERSION: 2.122.0
+  # The suite: 5 spec files (scripts/run-auth-integrity-tests.js), one test each.
+  EXPECTED_AUTH_SPECS: '5'
+  EXPECTED_AUTH_TESTS: '5'
+
+jobs:
+  local-stack-validation:
+    name: Local Supabase stack validation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Supabase CLI (pinned)
+        uses: supabase/setup-cli@v1
+        with:
+          version: ${{ env.SUPABASE_CLI_VERSION }}
+
+      - name: Guard and bootstrap unit tests (offline)
+        run: |
+          npm run test:auth-e2e-guard
+          node node_modules/tsx/dist/cli.mjs --test tests/supabase-local/localStackPlan.spec.ts tests/supabase-local/ciAssertions.spec.ts tests/supabase-local/authIntegrityLocalWorkflow.spec.ts tests/supabase-local/logRedaction.spec.ts tests/supabase-local/bootstrapSimulation.spec.ts tests/supabase-local/resetRateLimits.spec.ts tests/supabase-local/resetRedisIdentity.spec.ts
+
+      - name: Bootstrap plan (no side effects)
+        run: bash tests/supabase-local/bootstrap.sh plan | tee "$RUNNER_TEMP/bootstrap-plan.log"
+
+      - name: Start, restore and replay the disposable stack
+        run: bash tests/supabase-local/bootstrap.sh up 2>&1 | tee "$RUNNER_TEMP/bootstrap-up.log"
+
+      - name: Record status variable NAMES (values are never written)
+        run: |
+          supabase status --workdir tests/supabase-local -o env | cut -d= -f1 | sort > "$RUNNER_TEMP/status-variable-names.txt"
+          cat "$RUNNER_TEMP/status-variable-names.txt"
+
+      - name: Verify bootstrap result (stack, baseline, all migrations, health)
+        run: |
+          expected="$(node node_modules/tsx/dist/cli.mjs tests/supabase-local/localStackPlan.ts migrations | grep -c .)"
+          echo "migrations expected: $expected"
+          node node_modules/tsx/dist/cli.mjs tests/supabase-local/ciAssertions.ts assert-bootstrap-result "$RUNNER_TEMP/bootstrap-up.log" "$expected"
+
+      - name: Final schema verification (read-only queries against the local stack)
+        run: |
+          # The DB URL is the one the plan validates strictly (loopback, port, one "@", no query);
+          # psql runs with an empty environment, a private HOME and -X, as in the bootstrap.
+          umask 077
+          status_file="$(mktemp "$RUNNER_TEMP/status.XXXXXX")"
+          supabase status --workdir tests/supabase-local -o env > "$status_file"
+          DB_URL="$(node node_modules/tsx/dist/cli.mjs tests/supabase-local/localStackPlan.ts validated-db-url "$status_file")"
+          rm -f "$status_file"
+          echo "::add-mask::$DB_URL"
+          psql_home="$(mktemp -d "$RUNNER_TEMP/psql-home.XXXXXX")"
+          env -i PATH="$PATH" HOME="$psql_home" LC_ALL=C psql -X "$DB_URL" -v ON_ERROR_STOP=1 -tA <<'SQL' | tee "$RUNNER_TEMP/schema-verification.txt"
+          select 'public_tables=' || count(*) from pg_class c join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'public' and c.relkind = 'r';
+          select 'auth_users_table=' || (to_regclass('auth.users') is not null);
+          select 'auth_uid_is_gotrue=' || (select count(*) from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'auth' and p.proname = 'uid');
+          select 'extensions=' || string_agg(extname, ',' order by extname) from pg_extension where extname in ('pgcrypto','uuid-ossp','pg_trgm','btree_gin','vector');
+          select 'server_version=' || current_setting('server_version_num');
+          SQL
+
+      - name: Tear down the disposable stack
+        if: always()
+        run: bash tests/supabase-local/bootstrap.sh down
+
+      - name: Redact credentials from the evidence before upload
+        id: redact
+        if: always()
+        run: node node_modules/tsx/dist/cli.mjs tests/supabase-local/ciAssertions.ts redact-logs "$RUNNER_TEMP/bootstrap-plan.log" "$RUNNER_TEMP/bootstrap-up.log" "$RUNNER_TEMP/status-variable-names.txt" "$RUNNER_TEMP/schema-verification.txt"
+
+      - name: Upload stack validation evidence
+        # Evidence is uploaded only if redaction succeeded (fail closed: no upload beats a leak).
+        if: always() && steps.redact.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: local-stack-validation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/bootstrap-plan.log
+            ${{ runner.temp }}/bootstrap-up.log
+            ${{ runner.temp }}/status-variable-names.txt
+            ${{ runner.temp }}/schema-verification.txt
+          if-no-files-found: warn
+
+  auth-integrity-local:
+    name: Auth integrity regression suite (local Supabase)
+    needs: local-stack-validation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 127.0.0.1:6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      AUTH_E2E_BASE_URL: http://localhost:3000
+      AUTH_E2E_TIMEOUT_MS: '120000'
+      REDIS_URL: redis://127.0.0.1:6379
+      OPENAI_API_KEY: e2e-placeholder-not-a-real-key
+      # A path that does not exist: no .env.e2e (hosted credentials) can ever be loaded.
+      AUTH_E2E_ENV_FILE: /nonexistent/auth-e2e-env-file
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Chromium
+        run: npx playwright install chromium
+
+      - name: Install Supabase CLI (pinned)
+        uses: supabase/setup-cli@v1
+        with:
+          version: ${{ env.SUPABASE_CLI_VERSION }}
+
+      - name: Static auth integrity invariants
+        run: npm run check:auth-integrity-invariants
+
+      - name: Assert no env file with hosted credentials is present
+        run: |
+          for f in .env .env.local .env.cert .env.development .env.development.local .env.e2e .env.vault; do
+            if [ -f "$f" ]; then echo "::error::$f exists in the CI workspace; refusing."; exit 1; fi
+          done
+          for v in ENV_FILE SUPABASE_POOLER_URL DOTENV_KEY; do
+            if [ -n "${!v:-}" ]; then echo "::error::$v is set; it would redirect the app under test. Refusing."; exit 1; fi
+          done
+          echo "No app env file present; ENV_FILE, SUPABASE_POOLER_URL and DOTENV_KEY unset."
+
+      - name: Generate per-run app secrets (random, never reused)
+        run: |
+          session="$(openssl rand -hex 32)"; enc="$(openssl rand -hex 32)"
+          echo "::add-mask::$session"; echo "::add-mask::$enc"
+          { echo "SESSION_COOKIE_SECRET=$session"; echo "ENCRYPTION_KEY=$enc"; } >> "$GITHUB_ENV"
+
+      - name: Start, restore and replay the disposable stack (exports AUTH_E2E_TARGET=local)
+        run: bash tests/supabase-local/bootstrap.sh up --env-out "$GITHUB_ENV" 2>&1 | tee "$RUNNER_TEMP/bootstrap-up.log"
+
+      - name: Verify bootstrap result
+        run: |
+          expected="$(node node_modules/tsx/dist/cli.mjs tests/supabase-local/localStackPlan.ts migrations | grep -c .)"
+          node node_modules/tsx/dist/cli.mjs tests/supabase-local/ciAssertions.ts assert-bootstrap-result "$RUNNER_TEMP/bootstrap-up.log" "$expected"
+
+      - name: Refuse any hosted target (local mode only, no hosted marker in the environment)
+        run: |
+          node node_modules/tsx/dist/cli.mjs tests/supabase-local/ciAssertions.ts assert-env-local
+          npm run check:auth-e2e-target
+
+      - name: Verify ephemeral Redis is healthy
+        run: |
+          node -e "
+            const net = require('net');
+            const u = new URL(process.env.REDIS_URL || '');
+            const host = u.hostname.replace(/^\[|\]$/g, '');
+            if (!['localhost', '127.0.0.1', '::1'].includes(host)) { console.error('REFUSING: Redis is not the loopback service container.'); process.exit(1); }
+            const port = Number(u.port || 6379);
+            const deadline = Date.now() + 30000;
+            (function attempt() {
+              const s = net.createConnection({ host, port });
+              let buf = '';
+              const retry = () => { s.destroy(); if (Date.now() > deadline) { console.error('::error::Redis never answered PING'); process.exit(1); } setTimeout(attempt, 1000); };
+              s.setTimeout(3000);
+              s.on('connect', () => s.write('PING\r\n'));
+              s.on('data', (d) => { buf += d.toString(); if (buf.includes('+PONG')) { console.log('Loopback Redis answered +PONG'); s.end(); process.exit(0); } });
+              s.on('timeout', retry);
+              s.on('error', retry);
+            })();
+          "
+
+      # Round 26 / C3 (review C2): the reset below writes only after reading the identity marker
+      # omnivyra:e2e:identity and finding it equal to a per-run token, on loopback too (a loopback
+      # port can be a tunnel to Production). This seeds the marker into the FRESH service container:
+      # the shared rule refuses production first, and only an EMPTY Redis (DBSIZE 0) is ever seeded.
+      # The random per-run token is masked and exported through GITHUB_ENV; it is never printed.
+      - name: Seed the disposable Redis identity marker (per-run token)
+        run: npm run seed:auth-e2e-redis-identity -- --env-out "$GITHUB_ENV"
+
+      - name: Reset auth rate-limit counters
+        run: npm run reset:auth-e2e-rate-limits
+
+      - name: Start app server (against the local stack)
+        run: |
+          npm run dev > "$RUNNER_TEMP/auth-integrity-local-server.log" 2>&1 &
+          node -e "const url=process.env.AUTH_E2E_BASE_URL; const deadline=Date.now()+180000; (async()=>{ while(Date.now()<deadline){ try{ const res=await fetch(url); if(res.status<500) return; }catch{} await new Promise(r=>setTimeout(r,1000)); } console.error('App server did not become ready'); process.exit(1); })();"
+
+      - name: Auth integrity regression suite (local)
+        run: npm run test:auth-integrity 2>&1 | tee "$RUNNER_TEMP/auth-suite.log"
+
+      - name: Assert exact suite result (no skipped, missing or extra test)
+        run: node node_modules/tsx/dist/cli.mjs tests/supabase-local/ciAssertions.ts assert-suite-result "$RUNNER_TEMP/auth-suite.log" "$EXPECTED_AUTH_SPECS" "$EXPECTED_AUTH_TESTS"
+
+      - name: Assert no hosted Supabase target appears in the app server log
+        run: node node_modules/tsx/dist/cli.mjs tests/supabase-local/ciAssertions.ts assert-no-hosted-in-log "$RUNNER_TEMP/auth-integrity-local-server.log"
+
+      - name: Tear down the disposable stack
+        if: always()
+        run: bash tests/supabase-local/bootstrap.sh down
+
+      - name: Redact credentials from the evidence before upload
+        id: redact
+        if: always()
+        run: |
+          node node_modules/tsx/dist/cli.mjs tests/supabase-local/ciAssertions.ts redact-logs "$RUNNER_TEMP/bootstrap-up.log" "$RUNNER_TEMP/auth-suite.log" "$RUNNER_TEMP/auth-integrity-local-server.log"
+          if [ -d test-results/auth-integrity ]; then
+            find test-results/auth-integrity -type f -name '*.json' -print0 | xargs -0 -r node node_modules/tsx/dist/cli.mjs tests/supabase-local/ciAssertions.ts redact-logs
+          fi
+
+      - name: Upload auth integrity (local) evidence
+        # Evidence is uploaded only if redaction succeeded (fail closed: no upload beats a leak).
+        if: always() && steps.redact.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: auth-integrity-local-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/bootstrap-up.log
+            ${{ runner.temp }}/auth-suite.log
+            ${{ runner.temp }}/auth-integrity-local-server.log
+            test-results/auth-integrity/**
+            !test-results/auth-integrity/**/storage-state.json
+          if-no-files-found: warn

@@ -30,13 +30,13 @@ export const PRODUCTION_REFS: readonly string[] = ['klkiseupptzbecbxwrky'];
 
 /**
  * Workflows allowed to read E2E_-prefixed secrets (i.e. to reach the hosted E2E project).
- * STAGE 1: the hosted auth-integrity job is still live. STAGE 2 sets this to [].
+ * STAGE 2 (hosted E2E retired): none. The auth suite runs on a disposable stack (auth-integrity-local.yml).
  */
-export const HOSTED_E2E_SECRET_WORKFLOWS: readonly string[] = ['auth-integrity.yml'];
+export const HOSTED_E2E_SECRET_WORKFLOWS: readonly string[] = [];
 /** Workflows allowed to name the hosted E2E ref in text (comments / refusal markers). */
-export const HOSTED_E2E_REF_WORKFLOWS: readonly string[] = ['auth-integrity.yml'];
-/** Workflows allowed to set ALLOW_PROD_DB_WITH_LOCAL_REDIS. STAGE 2 sets this to []. */
-export const PROD_DB_LOCAL_REDIS_BYPASS_WORKFLOWS: readonly string[] = ['auth-integrity.yml'];
+export const HOSTED_E2E_REF_WORKFLOWS: readonly string[] = [];
+/** Workflows allowed to set ALLOW_PROD_DB_WITH_LOCAL_REDIS. STAGE 2: none. */
+export const PROD_DB_LOCAL_REDIS_BYPASS_WORKFLOWS: readonly string[] = [];
 /** Workflows allowed to read production-valued repository secrets. */
 export const PRODUCTION_SECRET_WORKFLOWS: readonly string[] = ['platform-parity.yml'];
 

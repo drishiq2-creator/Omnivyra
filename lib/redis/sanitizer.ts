@@ -125,11 +125,14 @@ export function maskRedisUrl(url: string): string {
     if (parsed.password) {
       parsed.password = '***';
     }
+    // A query string or fragment can carry credentials (?password=...): never logged.
+    parsed.search = '';
+    parsed.hash = '';
     return parsed.toString();
   } catch {
-    // If URL parsing fails, return truncated version
-    const prefix = url.substring(0, 30);
-    return prefix.endsWith('...') ? prefix : prefix + '...';
+    // A value that does not parse is never echoed, not even partly: it may be a
+    // credential-bearing string (review finding F17).
+    return '<unparseable Redis URL; value redacted>';
   }
 }
 

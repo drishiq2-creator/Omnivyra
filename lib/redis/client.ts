@@ -68,7 +68,8 @@ export function getRedisConnectionConfig() {
   } catch (error) {
     console.error('[redis.client] Failed to parse REDIS_URL', {
       error: (error as Error).message,
-      url: url.substring(0, 50) + '...',
+      // Never any part of the raw value: it may carry user:password@ (review finding F17).
+      url: '<redacted>',
     });
     throw error;
   }
