@@ -352,3 +352,23 @@ Run `45939076841` (Auth Integrity, `pull_request`, PR #469 `release/r28-consolid
 - The read-only user sees `pg_stat_activity` rows for other roles (role, application, type, state, timestamps), but no query text was selected.
 - Vercel server-side and preview values, and operator `.env.e2e` files, are unverifiable from here (18 §10.1).
 - This report and the `g0*` files are uncommitted.
+
+## 7. Observation execution log (added 2026-11-27)
+
+- **T0** 06:43:00Z (first observed absence of the 7 secrets). **S0** 06:44:11–06:44:21Z. The last hosted run ended 04:20:38Z, so the grace rule was already met.
+- **04:28Z → S0:** no data or write change (18 §11).
+- **S0 → 08:18Z (rehearsal observation):** all row counts, timestamps and write counters unchanged; `capability_audit_log` still 3,301 (max `occurred_at` 04:20:29Z). `client_role_calls` rose: `supabase_storage_admin` +3, `supabase_auth_admin` +1, `service_role` +3, `pgbouncer` +17.
+- **Controlled attribution** (`attribution-20261127T0824Z/`, `attribution2-20261127T0826Z/`; g07 before and after each single action, with no-action controls):
+
+  | Action (this executor) | Role-call delta | Data/write change |
+|---|---|---|
+  | none, 20 s (×3 controls) | none, except `pgbouncer` +1 shortly after a pooler login | none |
+  | Management API `GET storage/buckets` | `supabase_storage_admin` +1, `service_role` +3, `pgbouncer` +1 | none |
+  | `GET health` (all services) | `supabase_storage_admin` +1, `pgbouncer` +1 | none |
+  | `GET config/auth` | none | none |
+  | temporary login role create + delete | none | none |
+  | one pooler login attempt | `pgbouncer` +4 | none |
+
+  The pass-1 archive made one `storage/buckets` GET, one `health` GET and about five pooler login attempts, which accounts for `service_role` +3, two of the three storage-admin calls and the `pgbouncer` growth. **Not attributed:** `supabase_auth_admin` +1 by 08:18Z (+2 by 08:27Z) and one `supabase_storage_admin` call; single statements with no data or write change. They will be judged against the S1 checkpoints.
+- **S1** 08:27:17Z, after all pass-1 archive actions: the comparison point for the role-call criterion (§3.3 line 4). The data, write and timestamp criteria still run from S0.
+- **Checkpoints:** `checkpoint.sh` (g07 + g05 only, diffed against S0 and S1) at 2026-11-28 ~06:47Z; the final pass at 2026-11-30 after 06:43Z (72 h, because the Vercel check is NOT YET VERIFIED). No archive or Management API action is taken between S1 and the final pass.

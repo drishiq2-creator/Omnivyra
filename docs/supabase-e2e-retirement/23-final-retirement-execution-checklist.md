@@ -106,7 +106,7 @@
 
 ## C. Requires green replacement CI and verified zero traffic
 
-- [ ] **C1. Observation window:** at least 24 h after S0 (72 h if A1 is still open). It must include at least one full PR check set and one `main` push run.
+- [ ] **C1. In progress.** S0 06:44Z; S1 08:27:17Z (role-call point after the archive pass; 21 §7). Checkpoints 11-28 ~06:47Z and the final pass after 11-30 06:43Z. **Observation window:** at least 24 h after S0 (72 h if A1 is still open). It must include at least one full PR check set and one `main` push run.
   - **Zero activity** = all seven criteria in 21 §3 hold against S0:
     - `capability_audit_log` count and max `occurred_at` are unchanged;
     - auth, idempotency and storage counts and timestamps are unchanged;
@@ -121,12 +121,12 @@
   - operators are told that `.env.e2e` hosted mode is retired (hosted mode is still the guard's default when `AUTH_E2E_TARGET` is unset);
   - recommended: rotate or revoke the E2E service-role key in the E2E project, because deleting the GitHub secret does not invalidate it.
 
-- [ ] **C3. Before pausing:**
+- [ ] **C3. Pass 1 done 2026-11-27** (`C:/omnivyra-archive/e2e-retirement-20261127/archive-20261127T0801Z/`: encrypted full dump, schema, roles, config, manifest, checksums, local restore test; 18 §9). The final pass (`final-pass.sh`: re-export, final g07, final dump + restore test, manifest, checksums) runs after the window. **Before pausing:**
   - re-export `capability_audit_log` (it is now beyond the archived 3,247 rows) as a new file in the archive, and update `SHA256SUMS`;
   - take a final `g07` snapshot (a paused project cannot be queried);
   - re-check the archive checksums.
 
-- [ ] **C4. Pause the E2E project** `lomndxmrpyudaegddpef` (reversible; Supabase dashboard or Management API pause). Record the time.
+- [ ] **C4.** Tool ready: `run-pause.ps1 --confirm lomndxmrpyudaegddpef <final archive dir>`. It refuses before the window ends, without a verified final manifest, or if the project id or name does not match. **Pause the E2E project** `lomndxmrpyudaegddpef` (reversible; Supabase dashboard or Management API pause). Record the time.
 
 - [ ] **C5. While paused, 7–14 days:**
   - `main` and PR CI stay green;
@@ -137,7 +137,7 @@
 
 - [ ] **C6. Final validation:** C5 was clean, the retention decision is recorded, and docs 18 §9 and §11 are updated.
 
-- [ ] **C7. Delete the hosted E2E project.** This is irreversible. The data is test residue, archived outside production and outside the public repository. Record the time and the confirmation.
+- [ ] **C7. Not before the C5 pause period, and only on the user's explicit confirmation.** **Delete the hosted E2E project.** This is irreversible. The data is test residue, archived outside production and outside the public repository. Record the time and the confirmation.
 
 - [ ] **C8. Publish the final report** as a documentation PR:
   - contents: docs 18–23 plus the doc 17 status update;

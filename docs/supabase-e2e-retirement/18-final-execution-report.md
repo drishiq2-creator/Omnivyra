@@ -235,6 +235,16 @@ Only classifications were printed, never values. Script: `C:/omnivyra-archive/to
 
 **In progress.** Baseline S0 taken 2026-11-27 06:44:11–06:44:21Z (§11). Observation window open; pause not yet performed; deletion not performed.
 
+**Recovery archive, pass 1 (2026-11-27 ~08:05–08:45Z):** `C:/omnivyra-archive/e2e-retirement-20261127/archive-20261127T0801Z/`
+- `MANIFEST.json` + `SHA256SUMS` (93 files, all verify) and `RESTORE.md` (steps, dependencies, known gaps).
+- Database: `pg_dump` 17.11 custom-format full dump, **encrypted** (`db/full.dump.gpg`, gpg AES-256; key in Windows Credential Manager `omnivyra-e2e-archive-20261127`, decrypt-and-compare verified), plus plain `schema.sql`, `roles.sql` (no passwords), per-table row counts, extension list, TOC.
+- Configuration (GET-only, secret fields redacted): project, auth, database, pooler, PostgREST, realtime, storage, functions (none), secrets (names only), buckets (none), migration history (empty), network, SSL, branches, add-ons.
+- Integrity: `pg_restore --list` 9,699 entries; full data read PASS; 895/896 data entries (the missing one is the partitioned parent `realtime.messages`, 0 rows).
+- **Restore test (local throwaway PostgreSQL 17.11, no Docker):** 890/896 tables restored with identical row counts; not restored: the 5 tables with pgvector columns and `vault.secrets` (all 0 rows), because pgvector and supabase_vault are not installed locally; 0 unexplained errors. A Supabase local-stack restore was **not performed** (Docker prohibited).
+- Secret scan: gitleaks (default and repo config) and a credential-pattern grep over the archive: clean.
+- Access: temporary read-only CLI login roles (Management API `cli/login-role`), each deleted after use; `h01` shows no `cli_login` role left.
+- A complete rehearsal of the final pass (`archive-rehearsal-20261127T0818Z/`) produced the same result. The **final pass** (`final-pass.sh`) runs after 2026-11-30 06:43Z, before the pause.
+
 **Final inventory (read-only, 2026-11-27 ~02:45Z):**
 - 850 public tables, of which 2 hold rows: `capability_audit_log` 3,247 (it grows only while the hosted job runs) and `api_idempotency_keys` 2;
 - 1 auth user; 0 storage buckets or objects; no cron; no migration ledger table; database about 69 MB.
@@ -271,5 +281,9 @@ Only classifications were printed, never values. Script: `C:/omnivyra-archive/to
 | 06:43:00 | **T0** | set to the first observed absence of the secrets (conservative; actual deletion time unknown) | grace already satisfied: last hosted run ended 04:20:38Z, none in flight |
 | 06:44:11–06:44:21 | **S0** baseline: exact prepared `g01`–`g07` via the E2E read-only endpoint | taken; guard ACCEPT ×7, selftest PASS (read-only user, `transaction_read_only on`) | `C:/omnivyra-archive/e2e-retirement-20261127/s0-20261127/` + `SHA256SUMS` |
 | 04:28 → 06:44 | pre-window comparison (`g07_E` vs S0) | no write activity | `capability_audit_log` 3,301 (max `occurred_at` 04:20:29Z), auth/idem/storage counts and timestamps, all write counters and client-role call totals unchanged; only `xact_commit` (+4,017, read-only/monitoring transactions), client backends 4→1 and `newest_client_state_change` (idle connections closed) moved |
+
+| ~08:05–08:45 | recovery archive pass 1 + rehearsal | PASS (see §9) | `C:/omnivyra-archive/e2e-retirement-20261127/archive-20261127T0801Z/`, `archive-rehearsal-20261127T0818Z/` |
+| 08:18–08:27 | client-role counter movement after S0 investigated | attributed to this executor's archive calls, except `supabase_auth_admin` +2 and `supabase_storage_admin` +1 (single reads, no data change) | 21 §7 |
+| 08:27:17 | **S1** (role-call comparison point after all pass-1 archive actions) | taken | `s1-20261127/` + `SHA256SUMS` |
 
 Still pending: observation window (C1: ≥ 72 h from S0 while the Vercel check is NOT YET VERIFIED, i.e. not before 2026-11-30 06:44Z; 24 h if it becomes USER VERIFIED), pause (C4), paused period (C5), deletion (C7, separate final verification).
