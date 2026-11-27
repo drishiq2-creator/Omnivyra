@@ -64,6 +64,7 @@ bash tests/supabase-local/bootstrap.sh down        # CI runner only (use in an `
    - every migration with a 14-digit version above `ledgerMax`, in order, with `ON_ERROR_STOP`;
    - 104 files at base `2bc52db7a`, from `20260917000000…` to `20270217000075…`;
    - **the same selection rule as `real-schema-ci`.**
+   - then, **after** all of those, each entry of `supabase/_schema/baseline-gap-migrations.txt` in manifest order (migrations at or below `ledgerMax` that are absent from the dump; today one: `20260718000003_content_learning_performance.sql`, so 105 files in all). Same entry rules as `real-schema-ci.sh` step 3b; the whole manifest is validated by `plan`, before the stack starts, and any malformed, duplicate, above-`ledgerMax` or missing entry fails the run. An absent manifest means no gaps.
 7. **health:** `GET /auth/v1/health` and `GET /rest/v1/` on the validated loopback API URL, for up to 30 s. **There is no fallback target.**
 8. **export:** with `--env-out`, appends `AUTH_E2E_TARGET=local`, `E2E_SUPABASE_URL`, `SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_URL`, `E2E_SUPABASE_SECRET_KEY`, `SUPABASE_SECRET_KEY` and `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`. Keys are registered as GitHub log masks. The database URL is **not** exported.
 

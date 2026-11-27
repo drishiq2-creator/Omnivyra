@@ -16,6 +16,9 @@ import {
   readStackConfig,
   repoRootFrom,
   selectMigrations,
+  BASELINE_GAP_MANIFEST,
+  parseBaselineGapManifest,
+  planReplay,
 } from './localStackPlan';
 import { E2EEnvironmentError } from '../auth/e2eEnvironmentGuard';
 
@@ -82,6 +85,85 @@ test('C1 migration selection on the real repository is non-empty and every selec
   const selected = selectMigrations(fs.readdirSync(dir), String(meta.ledgerMax));
   assert.ok(selected.length > 0);
   for (const f of selected) assert.ok(fs.existsSync(path.join(dir, f)));
+});
+
+// ---------------- Baseline-gap manifest (same rules as real-schema-ci.sh step 3b) ----------------
+const GAP_LEDGER = '20260916000000';
+const GAP_FILES = ['20260101000000_gap_a.sql', '20260916000000_gap_at_max.sql', '20260917000000_after.sql', '20261001000000_later.sql'];
+const gapExists = (name: string): boolean => GAP_FILES.includes(name);
+const parseGaps = (text: string | null): string[] => parseBaselineGapManifest(text, GAP_LEDGER, gapExists);
+const gapRefusal = (text: string, why: RegExp): void => {
+  assert.ok(text.trim() !== '', 'scenario must contain an entry');
+  assert.throws(() => parseGaps(text), (e: unknown) => e instanceof LocalStackPlanError && why.test((e as Error).message), `expected ${why} for ${JSON.stringify(text)}`);
+};
+
+test('GAP a valid manifest yields its entries in manifest order (comments, CRLF, padding and a missing final newline tolerated)', () => {
+  const text = '# header\r\n\r\n  20260916000000_gap_at_max.sql  # at ledgerMax is allowed\r\n\t20260101000000_gap_a.sql';
+  assert.deepEqual(parseGaps(text), ['20260916000000_gap_at_max.sql', '20260101000000_gap_a.sql']);
+});
+
+test('GAP an empty manifest (comments and blank lines only) and a missing manifest both mean no gaps', () => {
+  assert.deepEqual(parseGaps('# only a comment\n\n   \n# 20260101000000_gap_a.sql\n'), []);
+  assert.deepEqual(parseGaps(''), []);
+  assert.deepEqual(parseGaps(null), []);
+});
+
+test('GAP a duplicate entry is refused', () => {
+  assert.deepEqual(parseGaps('20260101000000_gap_a.sql\n'), ['20260101000000_gap_a.sql'], 'the single entry is valid');
+  gapRefusal('20260101000000_gap_a.sql\n# again\n20260101000000_gap_a.sql\n', /listed twice/);
+});
+
+test('GAP an entry that is not a bare file name is refused (path, backslash, inner whitespace)', () => {
+  gapRefusal('supabase/migrations/20260101000000_gap_a.sql\n', /bare migration file name/);
+  gapRefusal('..\\20260101000000_gap_a.sql\n', /bare migration file name/);
+  gapRefusal('20260101000000_gap a.sql\n', /bare migration file name/);
+});
+
+test('GAP an entry without .sql is refused', () => {
+  gapRefusal('20260101000000_gap_a\n', /not a \.sql file name/);
+  gapRefusal('20260101000000_gap_a.sql.bak\n', /not a \.sql file name/);
+});
+
+test('GAP an entry without a 14-digit version is refused', () => {
+  gapRefusal('gap_a.sql\n', /no numeric version prefix/);
+  gapRefusal('20260101000000.sql\n', /no numeric version prefix/);
+  gapRefusal('2026010100000x_gap_a.sql\n', /no numeric version prefix/);
+  gapRefusal('20260101_gap_a.sql\n', /14-digit version/);
+  gapRefusal('202601010000000_gap_a.sql\n', /14-digit version/);
+});
+
+test('GAP an entry above ledgerMax is refused (the normal replay already applies it: no double apply)', () => {
+  const normal = selectMigrations(GAP_FILES, GAP_LEDGER);
+  assert.ok(normal.includes('20260917000000_after.sql'), 'scenario: the entry IS selected by the normal replay');
+  gapRefusal('20260917000000_after.sql\n', /above ledgerMax/);
+});
+
+test('GAP an entry naming a file that does not exist is refused', () => {
+  gapRefusal('20260102000000_missing.sql\n', /does not exist/);
+});
+
+test('GAP a malformed ledgerMax is refused even with no manifest', () => {
+  assert.throws(() => parseBaselineGapManifest(null, '2026', gapExists), LocalStackPlanError);
+});
+
+test('GAP replay order: every migration above ledgerMax first, then the gaps in manifest order, each exactly once', () => {
+  const plan = planReplay([...GAP_FILES, 'README.md'], GAP_LEDGER, '20260916000000_gap_at_max.sql\n20260101000000_gap_a.sql\n', gapExists);
+  assert.deepEqual(plan.aboveLedgerMax, ['20260917000000_after.sql', '20261001000000_later.sql']);
+  assert.deepEqual(plan.baselineGaps, ['20260916000000_gap_at_max.sql', '20260101000000_gap_a.sql']);
+  assert.deepEqual(plan.ordered, ['20260917000000_after.sql', '20261001000000_later.sql', '20260916000000_gap_at_max.sql', '20260101000000_gap_a.sql']);
+  assert.equal(new Set(plan.ordered).size, plan.ordered.length);
+  assert.deepEqual(planReplay(GAP_FILES, GAP_LEDGER, null, gapExists).ordered, selectMigrations(GAP_FILES, GAP_LEDGER), 'no manifest: unchanged plan');
+});
+
+test('GAP the repository manifest is valid and puts content_learning_performance after every migration above ledgerMax', () => {
+  const meta = JSON.parse(fs.readFileSync(path.join(ROOT, 'supabase', '_schema', 'baseline.json'), 'utf8'));
+  const dir = path.join(ROOT, 'supabase', 'migrations');
+  const manifest = fs.readFileSync(path.join(ROOT, BASELINE_GAP_MANIFEST), 'utf8');
+  const plan = planReplay(fs.readdirSync(dir), String(meta.ledgerMax), manifest, (n) => fs.existsSync(path.join(dir, n)));
+  assert.deepEqual(plan.baselineGaps, ['20260718000003_content_learning_performance.sql']);
+  assert.deepEqual(plan.ordered.slice(0, plan.aboveLedgerMax.length), plan.aboveLedgerMax);
+  assert.equal(plan.ordered[plan.ordered.length - 1], '20260718000003_content_learning_performance.sql');
+  assert.equal(plan.ordered.length, plan.aboveLedgerMax.length + 1);
 });
 
 test('C1 restore classification tolerates only "already exists"', () => {
