@@ -471,3 +471,50 @@ test('SIM B2 CONTROL without the table-count check, a partial restore is reporte
   const x = restoreRun({ exit: 0, stderr: '', tables: '822' }, [['tests/supabase-local/bootstrap.sh', '[ "$TABLES" -ge "$MIN_TABLES" ] || fail', 'true || fail']]);
   assert.equal(x.run.result?.status, 'ok', 'the control must observe the false success');
 });
+
+// ---------------- Baseline-gap manifest (real-schema-ci.sh step 3b) ----------------
+const GAP_MANIFEST = 'supabase/_schema/baseline-gap-migrations.txt';
+const GAP_ENTRY = '20260101000000_before_ledger.sql';
+const PLAN_ORDERED = '  return { aboveLedgerMax, baselineGaps, ordered: [...aboveLedgerMax, ...baselineGaps] };';
+
+function gapRun(manifest: string, extra: Record<string, string> = {}, mutations: readonly Mutation[] = []): Run {
+  return withSandbox((sim) => {
+    fs.writeFileSync(path.join(sim.root, GAP_MANIFEST), manifest);
+    return runBootstrap(sim, ['up'], extra);
+  }, mutations);
+}
+const appliedNames = (r: Run): string[] => migrationCalls(r.calls).map((c) => /supabase[\\/]migrations[\\/](\S+\.sql)/.exec(c)?.[1] ?? c);
+
+test('SIM GAP a manifest entry is applied once, AFTER every migration above ledgerMax, and counted', () => {
+  const r = gapRun(`# gap\n${GAP_ENTRY}\n`);
+  assert.equal(r.status, 0, r.out);
+  assert.equal(r.result?.stage, 'complete');
+  assert.equal(r.result?.migrationsReplayed, 3);
+  assert.deepEqual(appliedNames(r), ['20260917000000_sim_a.sql', '20260918000000_sim_b.sql', GAP_ENTRY]);
+});
+
+test('SIM GAP CONTROL without the gap entries in the plan, the gap migration is never applied', () => {
+  const r = gapRun(`${GAP_ENTRY}\n`, {}, [['tests/supabase-local/localStackPlan.ts', PLAN_ORDERED, '  return { aboveLedgerMax, baselineGaps, ordered: [...aboveLedgerMax] };']]);
+  assert.equal(r.status, 0, r.out);
+  assert.equal(r.result?.migrationsReplayed, 2, 'the control must observe the missing gap');
+  assert.ok(!appliedNames(r).includes(GAP_ENTRY));
+});
+
+test('SIM GAP an invalid manifest stops the bootstrap before the stack starts (no partial replay)', () => {
+  for (const [why, manifest] of [['above ledgerMax', '20260917000000_sim_a.sql\n'], ['duplicate', `${GAP_ENTRY}\n${GAP_ENTRY}\n`], ['missing file', '20260102000000_nope.sql\n'], ['path', `supabase/migrations/${GAP_ENTRY}\n`]]) {
+    const r = gapRun(manifest);
+    assert.notEqual(r.status, 0, `${why}: ${r.out}`);
+    assert.equal(r.result?.status, 'failed', why);
+    assert.ok(!r.calls.some((c) => c.startsWith('supabase start')), `${why}: the stack must not start`);
+    assert.equal(migrationCalls(r.calls).length, 0, `${why}: no migration may be applied`);
+    assert.match(r.out, /baseline-gap-migrations\.txt: entry/, why);
+  }
+});
+
+test('SIM GAP a gap migration that fails to apply fails the bootstrap at that migration', () => {
+  const r = gapRun(`${GAP_ENTRY}\n`, { SIM_PSQL_FAIL_FILE: GAP_ENTRY });
+  assert.notEqual(r.status, 0, r.out);
+  assert.equal(r.result?.stage, 'migration-replay');
+  assert.equal(r.result?.migrationsReplayed, 2);
+  assert.match(r.out, /migration 20260101000000_before_ledger\.sql did not apply/);
+});

@@ -10,7 +10,8 @@
  *   plan                                  print the bootstrap plan (no side effects)
  *   check-ci                              exit 0 only on a GitHub-hosted CI runner
  *   check-env                             exit 0 only if no hosted-Supabase variables are set
- *   migrations                            print the migration files the replay will apply, one per line
+ *   migrations                            print the migration files the replay will apply, one per line, in
+ *                                         order: those above ledgerMax, then the baseline-gap manifest entries
  *   min-tables                            print the baseline's expected minimum public table count
  *   classify-restore <stderr-file>        exit 0 if baseline-restore errors are only "already exists"
  *   export-env <status-env-file> <out>    validate `supabase status -o env` output and write the
@@ -112,6 +113,66 @@ export function selectMigrations(fileNames: readonly string[], ledgerMax: string
       return /^\d{14}$/.test(ver) && ver > ledgerMax;
     })
     .sort();
+}
+
+/** Governed manifest of migrations at or below ledgerMax whose objects are absent from baseline.sql. */
+export const BASELINE_GAP_MANIFEST = 'supabase/_schema/baseline-gap-migrations.txt';
+
+/** POSIX [[:space:]] in the C locale, as real-schema-ci.sh's sed/case patterns see it. */
+const POSIX_SPACE = /[ \t\n\v\f\r]/;
+
+/**
+ * Same rules as real-schema-ci.sh step 3b ("Baseline-gap replay"), entry by entry and in the same
+ * check order: '#' starts a comment, CRs are dropped, surrounding whitespace is trimmed, blank lines
+ * are ignored; an entry must be a bare file name (no '/', '\' or whitespace) ending in .sql, whose
+ * version (the text before the first '_') is exactly 14 digits and <= ledgerMax, listed once, and
+ * an existing regular file in supabase/migrations/. `manifestText === null` means the manifest is
+ * absent: no gaps. Every violation throws; nothing is skipped. Returns the entries in manifest order.
+ * (CI validates while applying; here the whole list is validated before anything is applied.)
+ */
+export function parseBaselineGapManifest(
+  manifestText: string | null,
+  ledgerMax: string,
+  migrationExists: (fileName: string) => boolean,
+): string[] {
+  if (!/^\d{14}$/.test(ledgerMax)) throw new LocalStackPlanError(`baseline ledgerMax "${ledgerMax}" is not a 14-digit version.`);
+  if (manifestText === null) return [];
+  const gaps: string[] = [];
+  for (const line of manifestText.split('\n')) {
+    const hash = line.indexOf('#');
+    const gap = (hash === -1 ? line : line.slice(0, hash)).replace(/\r/g, '').replace(/^[ \t\n\v\f\r]+/, '').replace(/[ \t\n\v\f\r]+$/, '');
+    if (gap === '') continue;
+    const bad = (why: string): never => {
+      throw new LocalStackPlanError(`${BASELINE_GAP_MANIFEST}: entry '${gap}' ${why}.`);
+    };
+    if (gap.includes('/') || gap.includes('\\') || POSIX_SPACE.test(gap)) bad('must be a bare migration file name');
+    if (!gap.endsWith('.sql')) bad('is not a .sql file name');
+    const ver = gap.split('_')[0];
+    if (!/^\d+$/.test(ver)) bad('has no numeric version prefix');
+    if (ver.length !== 14) bad('must carry a 14-digit version');
+    if (ver > ledgerMax) bad(`is above ledgerMax ${ledgerMax}; the normal replay already applies it`);
+    if (gaps.includes(gap)) bad('is listed twice');
+    if (!migrationExists(gap)) bad('does not exist in supabase/migrations/');
+    gaps.push(gap);
+  }
+  return gaps;
+}
+
+/**
+ * The full ordered replay, exactly as real-schema-ci.sh applies it: every migration above ledgerMax
+ * (selectMigrations), THEN the baseline-gap entries in manifest order. Gaps run last so that no
+ * reviewed migration sees a different catalog (see the manifest header and CI step 3b).
+ */
+export function planReplay(
+  fileNames: readonly string[],
+  ledgerMax: string,
+  gapManifestText: string | null,
+  migrationExists: (fileName: string) => boolean,
+): { aboveLedgerMax: string[]; baselineGaps: string[]; ordered: string[] } {
+  const aboveLedgerMax = selectMigrations(fileNames, ledgerMax);
+  const baselineGaps = parseBaselineGapManifest(gapManifestText, ledgerMax, migrationExists);
+  // Disjoint by construction: a gap's version is <= ledgerMax, every selected version is above it.
+  return { aboveLedgerMax, baselineGaps, ordered: [...aboveLedgerMax, ...baselineGaps] };
 }
 
 /**
@@ -222,6 +283,26 @@ function readBaselineMeta(root: string): { ledgerMax: string; tables: number } {
   return { ledgerMax: String(meta.ledgerMax), tables: Number(meta.tables) };
 }
 
+/** The replay plan for this checkout. An absent gap manifest means no gaps; any other read error throws. */
+function readReplayPlan(root: string): ReturnType<typeof planReplay> {
+  const migrationsDir = path.join(root, 'supabase', 'migrations');
+  let manifest: string | null;
+  try {
+    manifest = fs.readFileSync(path.join(root, BASELINE_GAP_MANIFEST), 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    manifest = null;
+  }
+  const exists = (name: string): boolean => {
+    try {
+      return fs.statSync(path.join(migrationsDir, name)).isFile();
+    } catch {
+      return false;
+    }
+  };
+  return planReplay(fs.readdirSync(migrationsDir), readBaselineMeta(root).ledgerMax, manifest, exists);
+}
+
 function main(argv: string[]): number {
   const [cmd, ...args] = argv;
   const root = repoRootFrom(__dirname);
@@ -230,7 +311,8 @@ function main(argv: string[]): number {
     case 'plan': {
       const cfg = readStackConfig(fs.readFileSync(path.join(workdir, 'supabase', 'config.toml'), 'utf8'));
       const meta = readBaselineMeta(root);
-      const migrations = selectMigrations(fs.readdirSync(path.join(root, 'supabase', 'migrations')), meta.ledgerMax);
+      const replay = readReplayPlan(root);
+      const migrations = replay.ordered;
       for (const f of ['supabase/_schema/baseline.sql', 'supabase/_schema/baseline.json', `${WORKDIR_RELATIVE}/stack-extensions.sql`]) {
         if (!fs.existsSync(path.join(root, f))) throw new LocalStackPlanError(`missing ${f}`);
       }
@@ -238,6 +320,7 @@ function main(argv: string[]): number {
         workdir: WORKDIR_RELATIVE, projectId: cfg.projectId, apiPort: cfg.apiPort, dbPort: cfg.dbPort,
         pinnedCli: PINNED_SUPABASE_CLI_VERSION, baselineLedgerMax: meta.ledgerMax, baselineMinTables: meta.tables,
         migrationsToReplay: migrations.length, firstMigration: migrations[0] ?? null, lastMigration: migrations[migrations.length - 1] ?? null,
+        aboveLedgerMax: replay.aboveLedgerMax.length, baselineGapMigrations: replay.baselineGaps,
       }));
       return 0;
     }
@@ -252,16 +335,12 @@ function main(argv: string[]): number {
       console.log(buildStackEndpoints(parseStatusEnv(fs.readFileSync(args[0], 'utf8'))).STACK_DB_URL);
       return 0;
     }
-    case 'migration-count': {
-      const meta = readBaselineMeta(root);
-      console.log(String(selectMigrations(fs.readdirSync(path.join(root, 'supabase', 'migrations')), meta.ledgerMax).length));
+    case 'migration-count':
+      console.log(String(readReplayPlan(root).ordered.length));
       return 0;
-    }
-    case 'migrations': {
-      const meta = readBaselineMeta(root);
-      for (const f of selectMigrations(fs.readdirSync(path.join(root, 'supabase', 'migrations')), meta.ledgerMax)) console.log(f);
+    case 'migrations':
+      for (const f of readReplayPlan(root).ordered) console.log(f);
       return 0;
-    }
     case 'min-tables':
       console.log(String(readBaselineMeta(root).tables));
       return 0;
