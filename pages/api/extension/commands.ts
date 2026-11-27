@@ -23,6 +23,7 @@ import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeF
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { createHash, randomBytes, randomUUID } from 'crypto';
 import { requireExtensionAuth } from '@/backend/middleware/extensionAuthMiddleware';
+import { withExtensionRawBody } from '@/backend/middleware/extensionRawBody';
 import { supabase } from '@/backend/db/supabaseClient';
 import { resolveEngagementCapability, CAPABILITY_MAP_VERSION } from '@/backend/services/engagementCapabilityMap';
 import { isCurrentlyDisabled } from '@/backend/services/extensionReliabilityService';
@@ -573,4 +574,7 @@ async function handleAck(req: NextApiRequest, res: NextApiResponse) {
 }
 
 // W0-1 (Gate A): canonical route pipeline — pass-through observability + request context.
-export default __createApiRoute(handler, { route: '/api/extension/commands' });
+// Phase E: the extension request signature covers the RAW body bytes - Next must not consume the stream;
+// withExtensionRawBody captures them and parses req.body exactly as the default parser did.
+export const config = { api: { bodyParser: false } };
+export default __createApiRoute(withExtensionRawBody(handler), { route: '/api/extension/commands' });

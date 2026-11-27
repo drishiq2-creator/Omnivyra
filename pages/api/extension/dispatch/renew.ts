@@ -32,6 +32,7 @@ import { createApiRoute as __createApiRoute } from '../../../../lib/platform/rou
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { createHash } from 'crypto';
 import { requireExtensionAuth } from '@/backend/middleware/extensionAuthMiddleware';
+import { withExtensionRawBody } from '@/backend/middleware/extensionRawBody';
 import { supabase } from '@/backend/db/supabaseClient';
 
 /**
@@ -171,4 +172,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   }
 }
 
-export default __createApiRoute(handler, { route: '/api/extension/dispatch/renew' });
+// Phase E: the extension request signature covers the RAW body bytes - Next must not consume the stream;
+// withExtensionRawBody captures them and parses req.body exactly as the default parser did.
+export const config = { api: { bodyParser: false } };
+export default __createApiRoute(withExtensionRawBody(handler), { route: '/api/extension/dispatch/renew' });

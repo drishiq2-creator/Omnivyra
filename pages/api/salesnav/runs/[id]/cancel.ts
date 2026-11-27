@@ -2,6 +2,7 @@ import { createApiRoute as __createApiRoute } from '../../../../../lib/platform/
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { cancelRunSessionHandler } from '../../../../../backend/apiHandlers/salesNav/uiRoutes';
 import { cancelRunExtensionHandler } from '../../../../../backend/apiHandlers/salesNav/extensionRoutes';
+import { withExtensionRawBody } from '../../../../../backend/middleware/extensionRawBody';
 
 /**
  * POST /api/salesnav/runs/:id/cancel - from the web app (browser session) OR the extension popup (a9: the popup has
@@ -13,4 +14,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   return signed ? cancelRunExtensionHandler(req, res) : cancelRunSessionHandler(req, res);
 }
 
-export default __createApiRoute(handler, { route: '/api/salesnav/runs/[id]/cancel' });
+// Phase E: the extension request signature covers the RAW body bytes - Next must not consume the stream;
+// withExtensionRawBody captures them and parses req.body exactly as the default parser did.
+export const config = { api: { bodyParser: false } };
+export default __createApiRoute(withExtensionRawBody(handler), { route: '/api/salesnav/runs/[id]/cancel' });
