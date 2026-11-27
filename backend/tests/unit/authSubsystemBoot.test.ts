@@ -93,3 +93,21 @@ describe('bootAuthSubsystem', () => {
     expect(getAuthReadiness()).not.toBeNull();
   });
 });
+
+// ROUND 12 (additive): the boot orchestrator used to pass `schema.checkedAt`
+// (an ISO timestamp) as the manifest-hash hint, so the readiness-first instance
+// cached a TIMESTAMP as `schemaManifestHash`. Failing control at 2bc52db7a:
+// this assertion received the checkedAt value.
+describe('bootAuthSubsystem — schema manifest hash is the committed manifest, never the probe time', () => {
+  it('fingerprint.schemaManifestHash == generated/schema-column-manifest.json manifest_hash', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const committed = require('../../../generated/schema-column-manifest.json').manifest_hash;
+    supabaseFrom.mockReturnValueOnce(infoSchema(
+      REQUIRED_LIFECYCLE_COLUMNS.map((c) => ({ table_name: c.table, column_name: c.column })),
+    ));
+    const readiness = await bootAuthSubsystem();
+    expect(readiness.fingerprint.schemaManifestHash).toBe(committed);
+    expect(readiness.fingerprint.schemaManifestHash).not.toBe(readiness.schema.checkedAt);
+    expect(readiness.fingerprint.schemaManifestHash).not.toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  });
+});

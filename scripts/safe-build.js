@@ -20,6 +20,11 @@ try {
   assertNoActiveDevRuntime('build');
   run(process.execPath, [path.join(root, 'scripts', 'enforce-decision-intelligence.js')]);
   run(process.execPath, [path.join(root, 'scripts', 'clean.js'), '--trigger=safe-build']);
+  // Build provenance (round 12): re-hash the files the deploy-time stamp lists
+  // and write generated/build-provenance/result.json (verified / unverified /
+  // missing) BEFORE next build, which bundles it. Exits non-zero only if a
+  // stale result cannot be replaced.
+  run(process.execPath, [path.join(root, 'backend', 'security', 'startup', 'buildProvenanceStamp.js'), '--verify-build']);
   run(process.execPath, [nextBin, 'build', '--webpack']);
 } catch (error) {
   if (error?.code !== 'ACTIVE_DEV_RUNTIME') {
