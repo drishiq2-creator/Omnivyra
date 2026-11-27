@@ -166,6 +166,8 @@ Required order:
 
 ## 5. The administrator action
 
+> **Status 2026-11-27 08:50Z: preconditions met, action OUTSTANDING.** #468 merged at 05:10:39Z (`130ce223`). Both checks ran and passed on PR #470 (`e76e0fb4`), so the UI search offers them. `main` still requires the same 9 contexts. `kulrashm-jpg` is still `admin:false`; the only admin collaborator is `drishiq2-creator`. The request and exact steps (UI path, or API Option B) were handed to the owner. Verification after the change: `gh api repos/drishiq2-creator/Omnivyra/branches/main --jq .protection.required_status_checks` shows 11 contexts, including both names.
+
 Preconditions: §3 steps 1-2 are done. Use an account with **admin** on `drishiq2-creator/Omnivyra`. `kulrashm-jpg` is not
 an admin.
 

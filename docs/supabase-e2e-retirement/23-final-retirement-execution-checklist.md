@@ -9,7 +9,7 @@
 
 ## A. Can be done now, without merging
 
-- [ ] **A1. Vercel check: owner only.** Status: **NOT YET VERIFIED.**
+- [x] **A1. USER VERIFIED: PASS (2026-11-27).** Basis: the user confirmed on 2026-11-27 (~08:45Z) that all four Vercel entries (`SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_URL`, Production and Preview) hold the same Supabase URL. One of them, Production `NEXT_PUBLIC_SUPABASE_URL`, is compiled into the live browser bundle, which was verified as `https://klkiseupptzbecbxwrky.supabase.co` (18 §5). Therefore all four are the canonical production URL. No value was read, exposed or changed. The owner approved the 24 h observation route as a result. Earlier status: **A1. Vercel check: owner only.** Status: **NOT YET VERIFIED.**
   - **Why owner only:** the API cannot read Vercel "sensitive" variables. The browser bundle is verified as production (18 §5).
   - **Where:** Vercel → project `omnivyra` (team `rawats-projects-5fb9f1f3`) → Settings → Environment Variables.
   - **What to check:** for `SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_URL`, in **Production** and in **Preview**, confirm that the project reference inside the URL is `klkiseupptzbecbxwrky`.
@@ -150,5 +150,5 @@
 | ~~Control Tower merge hold on `main`~~ released 04:45Z; #468 merged 05:10Z | — | done |
 | ~~gitleaks decision for #468 (A4)~~ resolved by fingerprints | — | done |
 | Observation window from S0 06:44Z | time | C1–C4: earliest pause 2026-11-30 06:44Z (72 h), or 11-28 06:44Z if A1 is USER VERIFIED |
-| Vercel check (A1) | owner | C2; shortens C1 to 24 h |
+| ~~Vercel check (A1)~~ USER VERIFIED PASS 2026-11-27 | — | C1 is 24 h: earliest pause 2026-11-28 06:44:21Z (24 h after the end of S0) |
 | Branch protection admin action (A2) | repository admin | B5 completion |

@@ -255,7 +255,7 @@ Only classifications were printed, never values. Script: `C:/omnivyra-archive/to
 
 ## 10. Unresolved exceptions
 
-1. **Vercel server-side and preview Supabase URLs** are Vercel "sensitive" variables, so no API can read them back.
+1. **Vercel server-side and preview Supabase URLs** (RESOLVED 2026-11-27: USER VERIFIED PASS; the user confirmed on 2026-11-27 (~08:45Z) that all four Vercel entries (`SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_URL`, Production and Preview) hold the same Supabase URL. One of them, Production `NEXT_PUBLIC_SUPABASE_URL`, is compiled into the live browser bundle, which was verified as `https://klkiseupptzbecbxwrky.supabase.co` (18 §5). Therefore all four are the canonical production URL. No value was read, exposed or changed.) Original note: they are Vercel "sensitive" variables, so no API can read them back.
    - The production browser bundle is verified as production.
    - Owner check: in the Vercel project's Environment Variables page, confirm that `SUPABASE_URL` (Production and Preview) contains `klkiseupptzbecbxwrky`.
 2. **Required checks:** add both "Local Supabase stack validation" and "Auth integrity regression suite (local Supabase)" to `main`'s branch protection (doc 22: both, because the auth job `needs` the stack job). This needs repository admin; this account has push only. **Still outstanding at 06:43Z: 9 checks required, neither local check among them.**
