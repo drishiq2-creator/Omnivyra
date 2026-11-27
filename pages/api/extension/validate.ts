@@ -61,12 +61,15 @@ async function handler(
     // user_company_roles row AND an active company. The 403 body text is load-bearing: the extension's
     // core/authBridge.js VALIDATE_DEAD_403 maps exactly 'Access denied to organization' to ORG_ACCESS_REVOKED.
     const membership = await checkExtensionMembership(session.userId, effectiveOrgId);
-    if (membership.ok === false) {
-      if ((membership as { outcome: string }).outcome === 'unavailable') {
-        // Transient: never a denial (the extension keeps its session on a non-403 failure).
-        return res.status(503).json({ success: false, error: 'Failed to validate organization access', timestamp: Date.now() });
+    // Review S-2: allow ONLY on ok === true; a definite denial is 403, anything else (lookup error, unexpected
+    // shape) is a transient 503 - never an allow.
+    const m = membership as { ok?: unknown; outcome?: unknown } | null | undefined;
+    if (m?.ok !== true) {
+      if (m?.ok === false && m.outcome === 'denied') {
+        return res.status(403).json({ success: false, error: 'Access denied to organization', timestamp: Date.now() });
       }
-      return res.status(403).json({ success: false, error: 'Access denied to organization', timestamp: Date.now() });
+      // Transient: never a denial (the extension keeps its session on a non-403 failure).
+      return res.status(503).json({ success: false, error: 'Failed to validate organization access', timestamp: Date.now() });
     }
   }
 

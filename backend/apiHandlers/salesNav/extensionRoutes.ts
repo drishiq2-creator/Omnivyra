@@ -31,7 +31,7 @@ import {
 } from '../../services/salesNav/loop';
 import { activeExtensionBinding, storeDepsFor, type ExtensionMemberBindingPort } from '../../services/salesNav/memberBinding';
 import { SALESNAV_NEXT_TTL_SECONDS, signNextEnvelope, type SalesNavNextEnvelope } from '../../services/salesNav/nextEnvelope';
-import { consumedToday, findOpenRun, toRunStatusView, type SalesNavStoreDeps } from '../../services/salesNav/store';
+import { consumedToday, findOpenRun, loadRun, toRunStatusView, type SalesNavStoreDeps } from '../../services/salesNav/store';
 import { cancelRunCore } from './uiRoutes';
 
 type ExtSession = { userId: string; orgId: string; expiresAt: number; hmacNonce?: string };
@@ -65,16 +65,42 @@ const post = (req: NextApiRequest, res: NextApiResponse): boolean => {
 const defaultSecret = (s: ExtSession): string | null =>
   (s.hmacNonce ? deriveExtensionHmacSecret({ userId: s.userId, orgId: s.orgId, expiresAt: s.expiresAt, nonce: s.hmacNonce }) : null);
 
-async function authed(req: NextApiRequest, res: NextApiResponse, deps: SalesNavExtensionDeps) {
+async function authed(req: NextApiRequest, res: NextApiResponse, deps: SalesNavExtensionDeps, mode: 'required' | 'report-outcome' = 'required') {
   if (!post(req, res)) return null;
   // ROUTE-AUTH-001: the primitive is INVOKED directly (provenance-checked by check-route-auth); deps only for tests
   const a = deps.auth
     ? await deps.auth(req, res)
-    : ((await requireExtensionAuth(req, res)) as unknown as { session: ExtSession } | null);
+    : ((await requireExtensionAuth(req, res, { membership: mode })) as unknown as { session: ExtSession; membership?: 'active' | 'report-only' } | null);
   if (!a) return null;                                   // the middleware already answered
   const s = a.session;
   const store = storeDepsFor(deps.binding ?? activeExtensionBinding, { ...(deps.store ?? {}), ...(deps.now ? { now: deps.now } : {}) });
-  return { s, ctx: { organizationId: s.orgId, initiatedBy: s.userId }, store, now: (deps.now ?? (() => new Date()))() };
+  return {
+    s, ctx: { organizationId: s.orgId, initiatedBy: s.userId }, store, now: (deps.now ?? (() => new Date()))(),
+    reportOnly: (a as { membership?: string }).membership === 'report-only',
+  };
+}
+
+/**
+ * Review S-1: a report-only session (membership denied / unreadable) may stop or close ONLY a run its OWN bound member
+ * runs (the member this user bound for the extension). Answers true when the handler may proceed (a missing run id or
+ * run is left to the handler's own 400/404), false after writing the refusal.
+ */
+async function reportOnlyOwnsRun(
+  a: NonNullable<Awaited<ReturnType<typeof authed>>>, req: NextApiRequest, res: NextApiResponse, deps: SalesNavExtensionDeps,
+): Promise<boolean> {
+  if (!a.reportOnly) return true;
+  const runId = runIdOf(req);
+  if (!runId) return true;
+  const run = await loadRun(a.ctx.organizationId, runId, a.store);
+  if (run === 'unreadable') { res.status(503).json({ error: 'STORE_UNREADABLE' }); return false; }
+  if (!run) return true;
+  const member = await (deps.binding ?? activeExtensionBinding).memberFor(a.ctx.organizationId, a.s.userId, a.store);
+  if (member === 'unreadable') { res.status(503).json({ error: 'STORE_UNREADABLE' }); return false; }
+  if (run.transport !== 'extension' || !member || run.member_id !== member) {
+    res.status(403).json({ success: false, error: 'Access denied to organization', code: 'EXTENSION_MEMBERSHIP_INACTIVE', reason: 'RUN_NOT_OWNED_BY_SESSION_MEMBER' });
+    return false;
+  }
+  return true;
 }
 
 const memberUrn = (id: string) => `urn:li:fsd_profile:${id}`;
@@ -192,15 +218,19 @@ async function report(res: NextApiResponse, r: ReportResult, okBody: Record<stri
 }
 
 export async function pauseHandler(req: NextApiRequest, res: NextApiResponse, deps: SalesNavExtensionDeps = {}) {
-  const a = await authed(req, res, deps);
+  // Review S-1: stopping/closing reports an outcome; accepted for the session's own run without an active membership.
+  const a = await authed(req, res, deps, 'report-outcome');
   if (!a) return;
+  if (!(await reportOnlyOwnsRun(a, req, res, deps))) return;
   const b = body(req);
   return report(res, await reportPause(a.ctx, runIdOf(req), { route: 'extension', status: b.status, code: b.code }, loopDeps(deps, a.store)), { paused: true });
 }
 
 export async function closeHandler(req: NextApiRequest, res: NextApiResponse, deps: SalesNavExtensionDeps = {}) {
-  const a = await authed(req, res, deps);
+  // Review S-1: stopping/closing reports an outcome; accepted for the session's own run without an active membership.
+  const a = await authed(req, res, deps, 'report-outcome');
   if (!a) return;
+  if (!(await reportOnlyOwnsRun(a, req, res, deps))) return;
   const b = body(req);
   return report(res, await reportClose(a.ctx, runIdOf(req),
     { route: 'extension', status: b.status, code: b.code, retryAfterAt: b.retryAfterAt }, loopDeps(deps, a.store)), { closed: true });
@@ -208,7 +238,9 @@ export async function closeHandler(req: NextApiRequest, res: NextApiResponse, de
 
 // -- POST /runs/:id/cancel (extension half) -----------------------------------------------------------------------
 export async function cancelRunExtensionHandler(req: NextApiRequest, res: NextApiResponse, deps: SalesNavExtensionDeps = {}) {
-  const a = await authed(req, res, deps);
+  // Review S-1: cancelling stops work; accepted for the session's own run without an active membership.
+  const a = await authed(req, res, deps, 'report-outcome');
   if (!a) return;
+  if (!(await reportOnlyOwnsRun(a, req, res, deps))) return;
   return cancelRunCore(a.ctx.organizationId, a.s.userId, runIdOf(req), res, a.store);
 }

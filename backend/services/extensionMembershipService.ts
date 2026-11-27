@@ -47,7 +47,15 @@ async function platformAdminConsult(userId: string): Promise<boolean> {
   }
 }
 
-export async function checkExtensionMembership(userId: string, organizationId: string): Promise<ExtensionMembershipDecision> {
+/**
+ * `explainPlatformAdmin` (default true): after a no-membership denial, consult isPlatformSuperAdmin to pick the
+ * explanatory code. The per-request middleware turns it off (review N-1): it would add a read and change nothing.
+ */
+export async function checkExtensionMembership(
+  userId: string,
+  organizationId: string,
+  opts: { explainPlatformAdmin?: boolean } = {},
+): Promise<ExtensionMembershipDecision> {
   const r = await assertTenantAccess({
     userId,
     organizationId,
@@ -57,7 +65,7 @@ export async function checkExtensionMembership(userId: string, organizationId: s
   if (r.ok === true) return { ok: true };
   const reason = String((r as { reason?: unknown }).reason ?? 'NOT_A_MEMBER');
   if (reason === 'TENANT_LOOKUP_ERROR') return { ok: false, outcome: 'unavailable', reason: 'TENANT_LOOKUP_ERROR' };
-  if (NO_MEMBERSHIP_REASONS.has(reason) && (await platformAdminConsult(userId))) {
+  if (opts.explainPlatformAdmin !== false && NO_MEMBERSHIP_REASONS.has(reason) && (await platformAdminConsult(userId))) {
     return { ok: false, outcome: 'denied', reason, platformAdminWithoutMembership: true };
   }
   return { ok: false, outcome: 'denied', reason };

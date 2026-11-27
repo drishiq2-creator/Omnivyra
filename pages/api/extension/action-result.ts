@@ -74,9 +74,14 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     return res.status(405).json({ success: false, error: 'Method not allowed' });
   }
 
-  const auth = await requireExtensionAuth(req, res);
+  // Review S-1: an outcome report for this session's OWN lease is recorded even after the company was suspended or
+  // the member removed (membership 'report-only'): losing it leaves an unknown-delivery row a legacy client can be
+  // re-offered and resend. The lease-holder binding below still applies; a report-only session never re-opens a
+  // chain for more work (it finalises the action instead).
+  const auth = await requireExtensionAuth(req, res, { membership: 'report-outcome' });
   if (!auth) return;
   const { session } = auth;
+  const reportOnly = auth.membership === 'report-only';
 
   if (!session.hmacNonce) {
     return res.status(401).json({ success: false, error: 'INVALID_SESSION', reason: 'SESSION_MISSING_HMAC_NONCE' });
@@ -198,6 +203,34 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     const chain = Array.isArray(rawChain) ? rawChain : null;
     const chainIndex = Number((existing as any).command_chain_index ?? 0);
     const isIntermediateStep = !!(chain && chainIndex < chain.length - 1);
+
+    if (isIntermediateStep && status === 'success' && reportOnly) {
+      // The membership is gone: do not re-open the row for the next step (that would hand out more work). The
+      // remaining steps (the send is the LAST step of a chain) never ran, so the action is finalised as failed.
+      const stopped = await persistExecutionResult({
+        actionId: commandId,
+        organizationId: session.orgId,
+        correlationId,
+        idempotencyKey: idempotencyKey ?? existing.idempotency_key ?? null,
+        leaseGuard: { expectedLeaseId: rowLeaseId, expectedHolderId: rowHolderId },
+        rowHint: {
+          platform: existing.platform ?? null,
+          action_type: existing.action_type ?? null,
+          target_id: (existing as any).target_id ?? null,
+        },
+        result: {
+          ok: false,
+          status: 'failed',
+          execution_mode: 'browser',
+          response: { source: 'extension', chain_stopped_at_index: chainIndex, reason: 'MEMBERSHIP_INACTIVE' },
+          error: 'CHAIN_STOPPED_MEMBERSHIP_INACTIVE',
+        },
+      });
+      if (!stopped.ok) {
+        return res.status(409).json({ success: false, error: 'LEASE_MISMATCH', current_status: stopped.current_status ?? null });
+      }
+      return res.status(200).json({ success: true, status: 'failed', chain_stopped: true, error: 'CHAIN_STOPPED_MEMBERSHIP_INACTIVE' });
+    }
 
     if (isIntermediateStep && status === 'success') {
       const rowCorrelationIdForChain = (existing as any).execution_correlation_id as string | null;

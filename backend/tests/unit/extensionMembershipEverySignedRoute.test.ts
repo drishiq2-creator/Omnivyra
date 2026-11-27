@@ -26,26 +26,49 @@ const mockDb = {
   roles: [] as Row[],
   companies: new Map<string, string>(),
   rolesDown: false,
+  /** other tables (community_ai_actions, salesnav_*): in-memory rows, every filter evaluated */
+  tables: {} as Record<string, Row[]>,
   /** every table a route touched (other than the membership / company reads and the handshake rpcs) */
   touches: [] as string[],
+  /** reads of the membership tables (review N-1 / N-2) */
+  reads: { user_company_roles: 0, companies: 0 } as Record<string, number>,
 };
 
 function mockFrom(table: string) {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { orFilter } = require('../helpers/rpaClaimQueueDouble');
   const preds: Array<(r: Row) => boolean> = [];
   const known = table === 'user_company_roles' || table === 'companies';
   if (!known) mockDb.touches.push(table);
+  else mockDb.reads[table] += 1;
+  let patch: Row | null = null;
+  let inserted: Row | null = null;
   const rows = (): Row[] => {
     if (table === 'user_company_roles') return mockDb.roles;
     if (table === 'companies') return [...mockDb.companies.entries()].map(([id, status]) => ({ id, status }));
-    return [];
+    return (mockDb.tables[table] ??= []);
   };
   const result = () => {
-    if (table === 'user_company_roles' && mockDb.rolesDown) return { data: null, error: { code: 'PGRST001', message: 'connection refused' } };
-    return { data: rows().filter((r) => preds.every((p) => p(r))).map((r) => ({ ...r })), error: null };
+    if (table === 'user_company_roles' && mockDb.rolesDown) return { data: null, error: { code: 'PGRST001', message: 'connection refused' }, status: 503, count: null };
+    if (inserted) { rows().push(inserted); return { data: [{ ...inserted }], error: null, status: 201, count: 1 }; }
+    const hits = rows().filter((r) => preds.every((p) => p(r)));
+    if (patch) for (const h of hits) Object.assign(h, patch);
+    return { data: hits.map((r) => ({ ...r })), error: null, status: 200, count: hits.length };
   };
+  const cmp = (c: string, f: (v: any) => boolean) => { preds.push((r) => f(r[c] ?? null)); return q; };
   const q: any = {};
-  for (const m of ['select', 'limit', 'order', 'in', 'is', 'or', 'lt', 'lte', 'gt', 'gte', 'neq', 'not', 'update', 'insert', 'upsert', 'delete', 'filter', 'contains', 'range']) q[m] = () => q;
-  q.eq = (c: string, v: unknown) => { preds.push((r) => r[c] === v); return q; };
+  for (const m of ['select', 'limit', 'order', 'not', 'upsert', 'delete', 'filter', 'contains', 'range']) q[m] = () => q;
+  q.update = (p: Row) => { patch = p; return q; };
+  q.insert = (r: Row) => { inserted = { ...r }; return q; };
+  q.eq = (c: string, v: unknown) => cmp(c, (x) => x === v);
+  q.neq = (c: string, v: unknown) => cmp(c, (x) => x !== v);
+  q.in = (c: string, v: unknown[]) => cmp(c, (x) => v.includes(x));
+  q.is = (c: string, v: unknown) => cmp(c, (x) => x === v);
+  q.lt = (c: string, v: string) => cmp(c, (x) => x !== null && String(x) < v);
+  q.lte = (c: string, v: string) => cmp(c, (x) => x !== null && String(x) <= v);
+  q.gt = (c: string, v: string) => cmp(c, (x) => x !== null && String(x) > v);
+  q.gte = (c: string, v: string) => cmp(c, (x) => x !== null && String(x) >= v);
+  q.or = (expr: string) => { preds.push(orFilter(expr)); return q; };
   q.maybeSingle = async () => { const r = result(); return { data: r.data ? r.data[0] ?? null : null, error: r.error }; };
   q.single = async () => { const r = result(); return { data: r.data ? r.data[0] ?? null : null, error: r.error ?? (r.data?.length ? null : { code: 'PGRST116', message: 'no rows' }) }; };
   q.then = (ok: any, ko: any) => Promise.resolve(result()).then(ok, ko);
@@ -218,6 +241,8 @@ beforeEach(() => {
   mockDb.nonces.clear();
   mockDb.touches.length = 0;
   mockDb.rolesDown = false;
+  mockDb.tables = {};
+  mockDb.reads = { user_company_roles: 0, companies: 0 };
   mockDb.roles = [
     { user_id: ADMIN, company_id: ORG, status: 'active', role: 'COMPANY_ADMIN' },
     { user_id: MEMBER, company_id: ORG, status: 'active', role: 'CONTENT_CREATOR' },
@@ -232,8 +257,18 @@ beforeEach(() => {
 });
 afterEach(() => jest.restoreAllMocks());
 
-describe('F(1): a live session for a company that becomes SUSPENDED is refused on every signed route', () => {
-  it.each(ROUTES)('%s: CONTROL passes auth while active; refused 403 once suspended', async (_name, send) => {
+// Review S-1: these report the outcome of work the session already holds; they are accepted without an active
+// membership (bound to the session's own lease / run) - tested in the S-1 block below, not refused here.
+const OUTCOME_ROUTES = new Set(['action-result', 'salesnav /runs/:id/pause', 'salesnav /runs/:id/close', 'salesnav /runs/:id/cancel']);
+const STRICT_ROUTES = ROUTES.filter(([n]) => !OUTCOME_ROUTES.has(n));
+const route = (name: string) => { const r = ROUTES.find(([n]) => n === name); if (!r) throw new Error(name); return r[1]; };
+
+describe('F(1): a live session for a company that becomes SUSPENDED is refused on every signed route that hands out or starts work', () => {
+  it('the strict set is every signed route except the four outcome reports', () => {
+    expect(STRICT_ROUTES.map(([n]) => n)).toEqual(expect.arrayContaining(['validate', 'commands (hand-out)', 'dispatch renew', 'salesnav /runs/:id/next', 'salesnav /runs/:id/pages', 'salesnav /bind', 'salesnav /runs/open', 'salesnav /status']));
+    expect(STRICT_ROUTES).toHaveLength(ROUTES.length - OUTCOME_ROUTES.size);
+  });
+  it.each(STRICT_ROUTES)('%s: CONTROL passes auth while active; refused 403 once suspended', async (_name, send) => {
     const s = await pair();
     const before = await send(s);
     expect(passedAuth(before)).toBe(true);
@@ -313,7 +348,7 @@ describe('F(4): revoked membership / deactivated user', () => {
   it('role row deleted -> refused NOT_A_MEMBER (the super-admin user-delete path flips rows to inactive: covered above)', async () => {
     const s = await pair();
     mockDb.roles = mockDb.roles.filter((r) => r.user_id !== MEMBER);
-    const r = await ROUTES[2][1](s);
+    const r = await ROUTES[1][1](s);
     expect(r.body).toMatchObject({ ...MEMBERSHIP_REFUSAL, reason: 'NOT_A_MEMBER' });
   });
 });
@@ -387,5 +422,259 @@ describe('E: who may pair', () => {
   it.each([['company admin', ADMIN], ['ordinary active member', MEMBER]])('%s: pairs and validates (unchanged)', async (_l, user) => {
     const s = await pair(user);
     expect((await ROUTES[0][1](s)).statusCode).toBe(200);
+  });
+});
+
+// ---- review S-1 / S-2 / N-1 / N-2 / N-3 ------------------------------------------------------------------------
+const decodeToken = (t: string) => JSON.parse(Buffer.from(t.split('.')[0], 'base64url').toString('utf8'));
+const holderOf = (s: Session) => {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { createHash } = require('crypto');
+  const p = decodeToken(s.token);
+  return createHash('sha256').update(`lease-holder:${p.userId}:${p.orgId}:${p.hmacNonce}`).digest('hex').slice(0, 32);
+};
+const action = (over: Row = {}): Row => ({
+  id: 'cmd-1', tenant_id: ORG, organization_id: ORG, platform: 'linkedin', action_type: 'like', target_id: 'urn:li:activity:1',
+  suggested_text: null, final_text: null, execution_mode: 'browser', status: 'pending', created_at: '2026-11-27T00:00:00.000Z',
+  approved_at: '2026-11-27T00:00:00.000Z', dispatch_lease_id: null, dispatch_lease_holder_id: null, dispatch_lease_expires_at: null,
+  dispatch_acknowledged_at: null, execution_correlation_id: null, command_chain: null, command_chain_index: 0,
+  idempotency_key: null, execution_result: null, risk_level: 'low', ...over,
+});
+const legacyCommands = (s: Session) => signedCall(R.commands, s, 'GET', '/api/extension/commands', undefined, `?organization_id=${ORG}`, { 'X-Omnivyra-Capability-Version': CAPABILITY_MAP_VERSION });
+const result = (s: Session, leaseId: string, over: Row = {}) => signedCall(R.actionResult, s, 'POST', '/api/extension/action-result',
+  { commandId: 'cmd-1', status: 'success', leaseId, result: { success: true, confirmed: true, mode: 'browser' }, ...over });
+
+
+/** The lease /api/extension/commands writes on claim (commands.ts claim CAS), for THIS session. */
+function claimFor(s: Session, over: Row = {}) {
+  const leaseId = 'lease-abc';
+  mockDb.tables.community_ai_actions = [action({
+    dispatch_lease_id: leaseId, dispatch_lease_holder_id: holderOf(s),
+    dispatch_lease_expires_at: new Date(Date.now() + 90_000).toISOString(), ...over,
+  })];
+  return leaseId;
+}
+const row1 = () => mockDb.tables.community_ai_actions[0];
+
+describe('S-1: an outcome report for work already handed out is recorded after the membership is lost', () => {
+  it('suspension between claim and action-result: result recorded, row finalised, lease released, not re-offered', async () => {
+    const s = await pair();
+    const leaseId = claimFor(s);
+    mockDb.companies.set(ORG, 'suspended');
+    const r = await result(s, leaseId);
+    expect(r.statusCode).toBe(200);
+    expect(r.body).toMatchObject({ success: true, status: 'executed' });
+    expect(row1()).toMatchObject({ status: 'executed', dispatch_lease_id: null, dispatch_lease_holder_id: null, dispatch_lease_expires_at: null });
+    // no re-offer: after reactivation a LEGACY client of another member asks for work - the row is terminal
+    mockDb.companies.set(ORG, 'active');
+    const admin = await pair(ADMIN);
+    const offer = await legacyCommands(admin);
+    expect(offer.statusCode).toBe(200);
+    expect((offer.body.commands ?? []).map((c: Row) => c.id)).not.toContain('cmd-1');
+    expect(row1().status).toBe('executed');
+  });
+
+  it('CONTROLS while suspended: commands hand-out 403 and dispatch renew 403 (work is not handed out or extended)', async () => {
+    const s = await pair();
+    const leaseId = claimFor(s);
+    mockDb.companies.set(ORG, 'suspended');
+    expect((await ROUTES[1][1](s)).statusCode).toBe(403);
+    const renew = await signedCall(R.renew, s, 'POST', '/api/extension/dispatch/renew', { commandId: 'cmd-1', leaseId });
+    expect(renew.statusCode).toBe(403);
+    expect(renew.body.code).toBe('EXTENSION_MEMBERSHIP_INACTIVE');
+  });
+
+  it('the lease-holder binding still applies: another (also suspended) member cannot close this lease', async () => {
+    const s = await pair();
+    const leaseId = claimFor(s);
+    const other = await pair(ADMIN);
+    mockDb.companies.set(ORG, 'suspended');
+    const r = await result(other, leaseId);
+    expect(r.statusCode).toBe(409);
+    expect(r.body.error).toBe('LEASE_HOLDER_MISMATCH');
+    expect(row1()).toMatchObject({ status: 'pending', dispatch_lease_id: leaseId });
+  });
+
+  it('report-only never re-opens a chain: an intermediate step finalises the action as failed (CONTROL: active -> chain advances)', async () => {
+    const chain = [{ action_type: 'open_thread' }, { action_type: 'send_dm' }];
+    const s = await pair();
+    let leaseId = claimFor(s, { command_chain: chain, command_chain_index: 0 });
+    let r = await result(s, leaseId);
+    expect(r.body).toMatchObject({ chain_advanced: true, next_index: 1 }); // CONTROL
+    expect(row1()).toMatchObject({ status: 'pending', command_chain_index: 1, dispatch_lease_id: null });
+
+    leaseId = claimFor(s, { command_chain: chain, command_chain_index: 0 });
+    mockDb.companies.set(ORG, 'suspended');
+    r = await result(s, leaseId);
+    expect(r.statusCode).toBe(200);
+    expect(r.body).toMatchObject({ status: 'failed', chain_stopped: true });
+    expect(row1()).toMatchObject({ status: 'failed', command_chain_index: 0, dispatch_lease_id: null });
+  });
+
+  it('a membership LOOKUP ERROR on action-result: the report is still recorded (recording authorises nothing new)', async () => {
+    const s = await pair();
+    const leaseId = claimFor(s);
+    mockDb.rolesDown = true;
+    const r = await result(s, leaseId);
+    expect(r.statusCode).toBe(200);
+    expect(row1().status).toBe('executed');
+  });
+
+  describe("Sales Navigator: stopping / closing the session member's own run", () => {
+    const MEMBER_ID = 'ACwAAA1';
+    const run = (over: Row = {}): Row => ({
+      id: 'r1', organization_id: ORG, transport: 'extension', member_id: MEMBER_ID, status: 'running', active_route: 'extension',
+      next_page_index: 1, pending_page_index: null, pending_granted: null, ...over,
+    });
+    beforeEach(() => {
+      mockDb.tables.salesnav_extraction_runs = [run()];
+      mockDb.tables.salesnav_member_bindings = [{ organization_id: ORG, user_id: MEMBER, transport: 'extension', member_id: MEMBER_ID }];
+    });
+    const close = (s: Session) => signedCall(R.snClose, s, 'POST', '/api/salesnav/runs/r1/close', { status: 'failed', code: 'internal_error' }, '?id=r1');
+
+    it('close after suspension: accepted and the run is closed; CONTROL: /next after suspension refused 403', async () => {
+      const s = await pair();
+      mockDb.companies.set(ORG, 'suspended');
+      const c = await close(s);
+      expect(c.statusCode).toBe(200);
+      expect(mockDb.tables.salesnav_extraction_runs[0]).toMatchObject({ status: 'failed', status_code: 'internal_error' });
+      const n = await route('salesnav /runs/:id/next')(s);
+      expect(n.statusCode).toBe(403);
+      expect(n.body.code).toBe('EXTENSION_MEMBERSHIP_INACTIVE');
+    });
+
+    it('pause and cancel after suspension are accepted for the own run', async () => {
+      const s = await pair();
+      mockDb.companies.set(ORG, 'suspended');
+      const p = await signedCall(R.snPause, s, 'POST', '/api/salesnav/runs/r1/pause', { status: 'auth_expired', code: 'checkpoint' }, '?id=r1');
+      expect(p.statusCode).toBe(200);
+      mockDb.tables.salesnav_extraction_runs = [run()];
+      const c = await signedCall(R.snCancel, s, 'POST', '/api/salesnav/runs/r1/cancel', {}, '?id=r1');
+      expect(c.statusCode).toBe(200);
+      expect(mockDb.tables.salesnav_extraction_runs[0].status).toBe('cancelled');
+    });
+
+    it('a run of ANOTHER member is refused in report-only mode (run-owner binding); CONTROL: own run closes', async () => {
+      mockDb.tables.salesnav_extraction_runs = [run({ member_id: 'ACwOTHER' })];
+      const s = await pair();
+      mockDb.companies.set(ORG, 'suspended');
+      const c = await close(s);
+      expect(c.statusCode).toBe(403);
+      expect(c.body.reason).toBe('RUN_NOT_OWNED_BY_SESSION_MEMBER');
+      expect(mockDb.tables.salesnav_extraction_runs[0].status).toBe('running');
+      mockDb.tables.salesnav_extraction_runs = [run()];
+      expect((await close(s)).statusCode).toBe(200);
+    });
+
+    it('lookup outage: close accepted; /next answers 503 TENANT_LOOKUP_ERROR (N-3)', async () => {
+      const s = await pair();
+      mockDb.rolesDown = true;
+      expect((await close(s)).statusCode).toBe(200);
+      const n = await route('salesnav /runs/:id/next')(s);
+      expect(n.statusCode).toBe(503);
+      expect(n.body.error).toBe('TENANT_LOOKUP_ERROR');
+    });
+  });
+
+  it('the exemption is an allowlist: report-outcome asked for on another path is refused as usual', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { requireExtensionAuth } = require('../../middleware/extensionAuthMiddleware');
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { withExtensionRawBody } = require('../../middleware/extensionRawBody');
+    const probe = withExtensionRawBody(async (rq: any, rs: any) => {
+      const a = await requireExtensionAuth(rq, rs, { membership: 'report-outcome' });
+      if (a) rs.status(200).json({ membership: a.membership });
+    });
+    const s = await pair();
+    mockDb.companies.set(ORG, 'suspended');
+    const off = await signedCall(probe, s, 'POST', '/api/extension/dispatch/renew', { commandId: 'cmd-1', leaseId: 'x' });
+    expect(off.statusCode).toBe(403);
+    const on = await signedCall(probe, s, 'POST', '/api/extension/action-result', {});
+    expect(on.body).toEqual({ membership: 'report-only' }); // CONTROL: an allowlisted path
+  });
+
+  it('only action-result and the SN pause/close/cancel handlers ask for report-outcome (it cannot spread silently)', () => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { execFileSync } = require('child_process');
+    const out: string = execFileSync('git', ['grep', '-l', "'report-outcome'", '--', 'pages', 'backend', 'lib', ':!backend/tests'], { encoding: 'utf8' });
+    expect(out.trim().split(/\r?\n/).sort()).toEqual([
+      'backend/apiHandlers/salesNav/extensionRoutes.ts',
+      'backend/middleware/extensionAuthMiddleware.ts',
+      'pages/api/extension/action-result.ts',
+    ]);
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const src: string = require('fs').readFileSync(require('path').join(process.cwd(), 'backend/apiHandlers/salesNav/extensionRoutes.ts'), 'utf8');
+    expect((src.match(/authed\(req, res, deps, 'report-outcome'\)/g) ?? []).length).toBe(3);
+  });
+});
+
+describe('S-2 / N-3: an unexpected membership answer or a throw fails CLOSED (503), never open', () => {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const svc = require('../../services/extensionMembershipService');
+  it('a shape-less result ({}) -> commands 503; CONTROL: ok:true -> 200', async () => {
+    const s = await pair();
+    const spy = jest.spyOn(svc, 'checkExtensionMembership').mockResolvedValueOnce({} as any);
+    const r = await ROUTES[1][1](s);
+    expect(r.statusCode).toBe(503);
+    expect(r.body.error).toBe('TENANT_LOOKUP_ERROR');
+    spy.mockResolvedValueOnce({ ok: true });
+    expect((await ROUTES[1][1](s)).statusCode).toBe(200);
+  });
+
+  it("validate's own check: shape-less -> 503, not 200 (middleware answered ok, validate got {})", async () => {
+    const s = await pair();
+    jest.spyOn(svc, 'checkExtensionMembership').mockResolvedValueOnce({ ok: true }).mockResolvedValueOnce({} as any);
+    const r = await ROUTES[0][1](s);
+    expect(r.statusCode).toBe(503);
+  });
+
+  it('checkExtensionMembership THROWS -> commands 503 and renew 503; action-result (outcome) still recorded', async () => {
+    const s = await pair();
+    const leaseId = claimFor(s);
+    jest.spyOn(svc, 'checkExtensionMembership').mockRejectedValue(new Error('boom'));
+    expect((await ROUTES[1][1](s)).statusCode).toBe(503);
+    expect((await signedCall(R.renew, s, 'POST', '/api/extension/dispatch/renew', { commandId: 'cmd-1', leaseId })).statusCode).toBe(503);
+    const r = await result(s, leaseId);
+    expect(r.statusCode).toBe(200);
+    expect(row1().status).toBe('executed');
+  });
+
+  it('lookup outage (rolesDown): renew 503 (not 403, not 200)', async () => {
+    const s = await pair();
+    const leaseId = claimFor(s);
+    mockDb.rolesDown = true;
+    const r = await signedCall(R.renew, s, 'POST', '/api/extension/dispatch/renew', { commandId: 'cmd-1', leaseId });
+    expect(r.statusCode).toBe(503);
+    expect(r.body.error).toBe('TENANT_LOOKUP_ERROR');
+  });
+});
+
+describe('N-1 / N-2: membership reads per signed request', () => {
+  it('N-1: a denied signed request reads user_company_roles ONCE (no platform-admin consult); CONTROL: bootstrap consults (2 reads)', async () => {
+    const s = await pair();
+    mockDb.roles = mockDb.roles.filter((r) => r.user_id !== MEMBER);
+    mockDb.roles.push({ user_id: MEMBER, company_id: PLATFORM_ORG, status: 'active', role: 'SUPER_ADMIN' }); // would match the consult
+    mockDb.reads = { user_company_roles: 0, companies: 0 };
+    const r = await ROUTES[1][1](s);
+    expect(r.statusCode).toBe(403);
+    expect(mockDb.reads.user_company_roles).toBe(1);
+    mockDb.reads = { user_company_roles: 0, companies: 0 };
+    const b = await bootstrap(MEMBER);
+    expect(b.body.error).toBe('EXTENSION_PLATFORM_ADMIN_NOT_MEMBER');
+    expect(mockDb.reads.user_company_roles).toBe(2);
+  });
+
+  it('N-2: unsigned and bad-signature requests read NO membership/company row; CONTROL: a signed one does', async () => {
+    const s = await pair();
+    mockDb.reads = { user_company_roles: 0, companies: 0 };
+    const unsigned = await call(R.commands, { method: 'GET', url: '/api/extension/commands', headers: { Authorization: `Bearer ${s.token}` } });
+    expect(unsigned.statusCode).toBe(401);
+    const bad = await signedCall(R.commands, { ...s, secret: 'not-the-secret' }, 'GET', '/api/extension/commands');
+    expect(bad.statusCode).toBe(401);
+    const noToken = await signedCall(R.commands, { ...s, token: 'garbage' }, 'GET', '/api/extension/commands');
+    expect(noToken.statusCode).toBe(401);
+    expect(mockDb.reads).toEqual({ user_company_roles: 0, companies: 0 });
+    await ROUTES[1][1](s);
+    expect(mockDb.reads.user_company_roles).toBeGreaterThan(0);
   });
 });
