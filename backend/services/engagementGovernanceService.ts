@@ -86,3 +86,62 @@ export async function updateControls(
     digest_generation_enabled: data?.digest_generation_enabled ?? true,
   };
 }
+
+/**
+ * Raised by readBulkReplyEnabled when the bulk-reply policy cannot be read.
+ * Carries the organization id and the underlying message only — never the raw
+ * database error object.
+ */
+export class EngagementControlsUnreadableError extends Error {
+  readonly organizationId: string;
+  readonly causeMessage: string | null;
+
+  constructor(organizationId: string, causeMessage: string | null) {
+    super(
+      `Engagement controls could not be read for organization ${organizationId || '(none)'}` +
+        (causeMessage ? `: ${causeMessage}` : ''),
+    );
+    this.name = 'EngagementControlsUnreadableError';
+    this.organizationId = organizationId;
+    this.causeMessage = causeMessage;
+  }
+}
+
+/**
+ * Strict reader for the tenant's bulk-reply switch, used by the bulk-reply
+ * routes. Owner decision F-FU1 (2026-11-27): the shared bulk-reply policy
+ * fails CLOSED when the database read fails — a read error is never read as
+ * "enabled"; it throws EngagementControlsUnreadableError instead.
+ *
+ * - no organization id        -> throws EngagementControlsUnreadableError
+ * - read error                -> throws EngagementControlsUnreadableError
+ * - no row                    -> true (product default, pending a separate
+ *                                product-policy decision)
+ * - row                       -> same semantics as getControls
+ *                                (`bulk_reply_enabled ?? true`)
+ *
+ * getControls() is intentionally unchanged: its other consumers keep their
+ * existing behaviour.
+ */
+export async function readBulkReplyEnabled(organizationId: string): Promise<boolean> {
+  if (!organizationId) {
+    throw new EngagementControlsUnreadableError(organizationId, 'organization id required');
+  }
+
+  const { data, error } = await ownedDbTable('engagement_system_controls')
+    .select('bulk_reply_enabled')
+    .eq('organization_id', organizationId)
+    .maybeSingle();
+
+  if (error) {
+    const message =
+      typeof (error as { message?: unknown }).message === 'string'
+        ? (error as { message: string }).message
+        : null;
+    throw new EngagementControlsUnreadableError(organizationId, message);
+  }
+
+  if (!data) return true;
+
+  return (data as { bulk_reply_enabled?: boolean | null }).bulk_reply_enabled ?? true;
+}
