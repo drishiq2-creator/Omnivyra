@@ -5,6 +5,7 @@ import {
   playbookExecutionModeDecision,
   PLAYBOOK_GATED_MODES,
   type ExecutionModesConfig,
+  type ExecutionModeOrigin,
 } from '../communityAiExecutionModes';
 
 // Phase C: the closed execution-mode enum and the playbook permission rule live
@@ -18,12 +19,18 @@ export {
   playbookExecutionModeDecision,
   PLAYBOOK_GATED_MODES,
 } from '../communityAiExecutionModes';
-export type { KnownExecutionMode, ExecutionModesConfig, ParsedExecutionMode } from '../communityAiExecutionModes';
+export type { KnownExecutionMode, ExecutionModesConfig, ExecutionModeOrigin, ParsedExecutionMode } from '../communityAiExecutionModes';
 
 type ValidationAction = {
   action_type?: string | null;
   text?: string | null;
   execution_mode?: 'api' | 'rpa' | 'manual' | string | null;
+  /**
+   * Who chose execution_mode (default 'requested'). The executor passes
+   * 'system_fallback' when it probed the mode itself (no declared mode); see
+   * playbookExecutionModeDecision for the browser rule this selects.
+   */
+  execution_mode_origin?: ExecutionModeOrigin;
   risk_level?: 'low' | 'medium' | 'high' | string | null;
   intent_classification?: { primary_intent?: string | null } | null;
 };
@@ -257,6 +264,7 @@ export const validateActionAgainstPlaybook = (
     const modeDecision = playbookExecutionModeDecision(
       playbook.execution_modes as ExecutionModesConfig,
       requestedMode,
+      action.execution_mode_origin ?? 'requested',
     );
     if (modeDecision.allowed === false) {
       return { allowed: false, requires_approval: false, reason: modeDecision.reason };

@@ -80,6 +80,8 @@ export type PendingAction = TenantScoped & {
   execution_modes_config?: {
     api_allowed: boolean;
     rpa_allowed: boolean;
+    /** Playbook browser (extension) flag; absent on playbooks saved before it existed. */
+    browser_allowed?: boolean;
     manual_only: boolean;
   } | null;
   playbook_id?: string | null;

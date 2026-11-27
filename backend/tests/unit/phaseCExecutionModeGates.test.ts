@@ -13,6 +13,7 @@
  */
 import { validateActionAgainstPlaybook } from '../../services/playbooks/playbookValidator';
 import { EXECUTION_MODES, playbookExecutionModeDecision } from '../../services/communityAiExecutionModes';
+import { getToken } from '../../services/platformTokenService';
 
 // ─────────────────────────────── validator ────────────────────────────────
 describe('validator: closed mode enum and explicit rpa/browser permission', () => {
@@ -156,9 +157,9 @@ describe('executor: fail-closed mode + playbook rules', () => {
     expect(auto).toMatchObject({ ok: false, error: 'PLAYBOOK_REQUIRED' });
   });
 
-  it('API failure does not fall back to browser unless the playbook permits browser', async () => {
+  it('API failure does not fall back to browser when the playbook sets browser_allowed === false', async () => {
     connector.mockImplementation(async () => ({ success: false, error: 'API_DOWN' }));
-    currentPlaybook = { execution_modes: { api_allowed: true } };
+    currentPlaybook = { execution_modes: { api_allowed: true, browser_allowed: false } };
     const refused = await run({ execution_mode: 'api', playbook_id: 'pb-1' }, 'scheduler');
     expect(refused).toMatchObject({ ok: false, status: 'failed', error: 'API_DOWN' });
     expect(refused.response).toMatchObject({ fallback_refused: 'BROWSER_NOT_PERMITTED_BY_PLAYBOOK' });
@@ -172,5 +173,59 @@ describe('executor: fail-closed mode + playbook rules', () => {
     connector.mockImplementation(async () => ({ success: false, error: 'API_DOWN' }));
     const r = await run({ execution_mode: 'api' }, 'manual');
     expect(r).toMatchObject({ ok: true, status: 'dispatched' });
+  });
+});
+
+// ───────────── B-1: system-chosen browser fallback vs requested browser ─────────────
+describe('B-1: browser_allowed — requested browser needs true; the system fallback is refused only by false', () => {
+  beforeEach(() => {
+    rpaTask.mockClear().mockImplementation(async () => ({ success: true }));
+    connector.mockClear().mockImplementation(async () => ({ success: true, platform_id: 'urn:li:like:1' }));
+    (getToken as jest.Mock).mockClear().mockImplementation(async () => ({ access_token: 'test-token' }));
+    currentPlaybook = null;
+  });
+
+  it('decision table (pure)', () => {
+    const d = (modes: any, origin: 'requested' | 'system_fallback') => playbookExecutionModeDecision(modes, 'browser', origin).allowed;
+    // requested: opt-in only
+    expect(d({ api_allowed: true }, 'requested')).toBe(false);
+    expect(d({ browser_allowed: false }, 'requested')).toBe(false);
+    expect(d({ browser_allowed: true }, 'requested')).toBe(true);
+    // system fallback: pre-change behaviour unless explicitly refused
+    expect(d({ api_allowed: true }, 'system_fallback')).toBe(true);
+    expect(d(null, 'system_fallback')).toBe(true);
+    expect(d({ browser_allowed: true }, 'system_fallback')).toBe(true);
+    expect(d({ browser_allowed: false }, 'system_fallback')).toBe(false);
+    expect(d({ manual_only: true }, 'system_fallback')).toBe(false);
+    // default origin is 'requested'
+    expect(playbookExecutionModeDecision({ api_allowed: true }, 'browser').allowed).toBe(false);
+  });
+
+  it('PROBED browser (no declared mode, no API token) with a playbook lacking the flag dispatches (regression fixed)', async () => {
+    (getToken as jest.Mock).mockImplementation(async () => null);
+    currentPlaybook = { execution_modes: { api_allowed: true, rpa_allowed: false, manual_only: false } };
+    const r = await run({ playbook_id: 'pb-1' }, 'scheduler');
+    expect(r).toMatchObject({ ok: true, status: 'dispatched' });
+    // CONTROL: the same playbook with browser_allowed === false refuses the probed browser
+    currentPlaybook = { execution_modes: { api_allowed: true, browser_allowed: false } };
+    const refused = await run({ playbook_id: 'pb-1' }, 'scheduler');
+    expect(refused).toMatchObject({ ok: false, error: 'Browser execution is not permitted by playbook.' });
+  });
+
+  it('API -> browser fallback with a playbook lacking the flag falls back (regression fixed); CONTROL: an explicit browser request with the same playbook is refused', async () => {
+    connector.mockImplementation(async () => ({ success: false, error: 'API_DOWN' }));
+    currentPlaybook = { execution_modes: { api_allowed: true } };
+    const fellBack = await run({ execution_mode: 'api', playbook_id: 'pb-1' }, 'scheduler');
+    expect(fellBack).toMatchObject({ ok: true, status: 'dispatched' });
+    expect(fellBack.response).toMatchObject({ fallback_from: 'api' });
+    const requested = await run({ execution_mode: 'browser', playbook_id: 'pb-1' }, 'scheduler');
+    expect(requested).toMatchObject({ ok: false, error: 'Browser execution is not permitted by playbook.' });
+  });
+
+  it('validator: execution_mode_origin selects the rule (absent flag)', () => {
+    const pb: any = { execution_modes: { api_allowed: true } };
+    const base = { action_type: 'like', text: '', execution_mode: 'browser', risk_level: 'low' };
+    expect(validateActionAgainstPlaybook(base, pb, null).allowed).toBe(false);
+    expect(validateActionAgainstPlaybook({ ...base, execution_mode_origin: 'system_fallback' }, pb, null).allowed).toBe(true);
   });
 });

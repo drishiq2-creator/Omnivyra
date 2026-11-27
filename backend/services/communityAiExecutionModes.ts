@@ -39,8 +39,9 @@ export const parseExecutionMode = (value: unknown): ParsedExecutionMode => {
 export const PLAYBOOK_GATED_MODES: ReadonlySet<KnownExecutionMode> = new Set<KnownExecutionMode>(['rpa', 'browser']);
 
 /**
- * A playbook's execution_modes block. playbookTypes has no browser flag: a
- * playbook opts in to browser execution with `browser_allowed === true`.
+ * A playbook's execution_modes block. `browser_allowed` is the playbook's
+ * browser (extension) flag: true opts in, false opts out, absent / null means
+ * "not set" (see playbookExecutionModeDecision for what "not set" means).
  */
 export type ExecutionModesConfig = {
   api_allowed?: boolean | null;
@@ -50,14 +51,35 @@ export type ExecutionModesConfig = {
 } | null | undefined;
 
 /**
- * Does the playbook permit this mode? rpa and browser need their own flag set
- * to true (a missing execution_modes block permits neither). api keeps its
+ * Who chose the mode being checked:
+ *   'requested'       - the caller / planner asked for this mode explicitly
+ *                       (execute body, the action row's execution_mode);
+ *   'system_fallback' - the executor chose it itself: the probe found no API
+ *                       token (resolveExecutionMode -> 'browser') or the API
+ *                       call failed and the single API -> browser fallback ran.
+ */
+export type ExecutionModeOrigin = 'requested' | 'system_fallback';
+
+/**
+ * Does the playbook permit this mode? rpa needs `rpa_allowed === true` (a
+ * missing execution_modes block permits nothing gated). api keeps its
  * historical rule (refused only when a present block has api_allowed falsy).
  * manual is always permitted; manual_only refuses every other mode.
+ *
+ * browser (B-1 decision, deliberate):
+ *   - EXPLICITLY REQUESTED browser needs `browser_allowed === true` (opt-in);
+ *   - a SYSTEM-CHOSEN browser fallback keeps the pre-Phase-C behaviour: it is
+ *     permitted unless the playbook explicitly sets `browser_allowed === false`
+ *     (or manual_only). Before Phase C the fallback was never gated by a
+ *     playbook flag (none existed), and every playbook saved before this flag
+ *     existed has it absent; refusing "absent" would have silently stopped the
+ *     probed API -> browser path for every playbook-bound action. An operator
+ *     who does not want the fallback unticks "Browser (extension) allowed".
  */
 export const playbookExecutionModeDecision = (
   executionModes: ExecutionModesConfig,
   mode: KnownExecutionMode,
+  origin: ExecutionModeOrigin = 'requested',
 ): { allowed: true } | { allowed: false; reason: string } => {
   if (mode === 'manual') return { allowed: true };
   if (executionModes?.manual_only) {
@@ -73,6 +95,11 @@ export const playbookExecutionModeDecision = (
     return executionModes?.rpa_allowed === true
       ? { allowed: true }
       : { allowed: false, reason: 'RPA execution is not permitted by playbook.' };
+  }
+  if (origin === 'system_fallback') {
+    return executionModes?.browser_allowed === false
+      ? { allowed: false, reason: 'Browser execution is not permitted by playbook.' }
+      : { allowed: true };
   }
   return executionModes?.browser_allowed === true
     ? { allowed: true }

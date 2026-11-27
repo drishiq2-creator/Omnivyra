@@ -47,6 +47,14 @@ export type EngagementPlaybook = {
   execution_modes: {
     api_allowed: boolean;
     rpa_allowed: boolean;
+    /**
+     * Browser (Omnivyra extension) execution. true: an explicitly requested
+     * 'browser' mode is permitted. false: refused, and the executor's own
+     * API -> browser fallback is refused too. Absent (playbooks saved before
+     * this flag): explicit 'browser' refused, system fallback permitted
+     * (pre-Phase-C behaviour). See communityAiExecutionModes.
+     */
+    browser_allowed?: boolean;
     manual_only: boolean;
   };
   conflict_policy: {

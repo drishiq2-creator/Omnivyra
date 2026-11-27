@@ -634,6 +634,9 @@ const runExecution = async (
         action_type: action.action_type,
         text: action.suggested_text,
         execution_mode: executionMode,
+        // B-1: a mode the executor probed itself (no declared mode) is a
+        // system fallback; a declared one was requested.
+        execution_mode_origin: declaredMode === null ? 'system_fallback' : 'requested',
         risk_level: action.risk_level,
       },
       playbook,
@@ -661,11 +664,12 @@ const runExecution = async (
     return { ok: false, status: 'failed', error: 'PLAYBOOK_REQUIRED' };
   }
 
-  // The API -> browser fallback is a browser execution: allowed only where a
-  // direct browser request would be (a playbook permitting browser, or the
-  // playbook-less human-initiated exception above).
+  // The API -> browser fallback is a SYSTEM-CHOSEN browser execution (B-1):
+  // with a playbook it keeps the pre-Phase-C behaviour (allowed unless the
+  // playbook explicitly sets browser_allowed === false, or manual_only);
+  // without one, only the playbook-less human-initiated exception above.
   const browserFallbackAllowed = playbook
-    ? playbookExecutionModeDecision((playbook as any)?.execution_modes, 'browser').allowed
+    ? playbookExecutionModeDecision((playbook as any)?.execution_modes, 'browser', 'system_fallback').allowed
     : options?.source === 'manual';
 
   const enforcement = await checkUsageBeforeExecution({

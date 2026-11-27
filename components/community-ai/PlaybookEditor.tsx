@@ -48,6 +48,10 @@ const defaultPlaybook = (tenantId: string, organizationId: string): EngagementPl
   execution_modes: {
     api_allowed: true,
     rpa_allowed: false,
+    // New playbooks keep browser (extension) execution on, matching what every
+    // playbook had before the flag existed; untick to refuse explicit browser
+    // requests AND the executor's API -> browser fallback.
+    browser_allowed: true,
     manual_only: false,
   },
   conflict_policy: {
@@ -280,6 +284,19 @@ export default function PlaybookEditor({ playbook, onSave, onCancel }: PlaybookE
               }
             />
             RPA allowed
+          </label>
+          <label className="flex items-center gap-2 text-xs">
+            <input
+              type="checkbox"
+              checked={draft.execution_modes.browser_allowed === true}
+              onChange={(event) =>
+                setDraft({
+                  ...draft,
+                  execution_modes: { ...draft.execution_modes, browser_allowed: event.target.checked },
+                })
+              }
+            />
+            Browser (extension) allowed
           </label>
           <label className="flex items-center gap-2 text-xs">
             <input
