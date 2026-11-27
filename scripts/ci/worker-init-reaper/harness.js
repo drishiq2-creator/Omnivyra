@@ -81,6 +81,7 @@ async function runWorker() {
   }, { connection, concurrency: 1, lockDuration: 5000, stalledInterval: 3000, maxStalledCount: 3 });
   worker.on('ready', () => log(`HARNESS_READY pid=${process.pid} pid1=${comm(1)}`));
   worker.on('error', (e) => log(`HARNESS_WORKER_ERROR ${e.message}`));
+  worker.on('failed', (job, err) => log(`HARNESS_JOB_FAILED ${job ? job.id : '?'} ${err ? (err.stack || err.message).split('\n').slice(0, 4).join(' | ') : '?'}`));
 }
 
 function comm(pid) { try { return fs.readFileSync(`/proc/${pid}/comm`, 'utf8').trim(); } catch { return '?'; } }
@@ -123,7 +124,7 @@ async function state(id) {
   const queue = new Queue(QUEUE, { connection });
   const job = await Job.fromId(queue, id);
   const s = job ? await job.getState() : 'missing';
-  log(`STATE ${id} ${s} attemptsMade=${job ? job.attemptsMade : '-'} stalledCounter=${job ? job.stalledCounter : '-'}`);
+  log(`STATE ${id} ${s} attemptsMade=${job ? job.attemptsMade : '-'} stalledCounter=${job ? job.stalledCounter : '-'} failedReason=${job && job.failedReason ? JSON.stringify(job.failedReason).slice(0, 300) : '-'}`);
   await queue.close();
 }
 

@@ -134,7 +134,8 @@ real_env() {
     "SUPABASE_URL=http://127.0.0.1:9" "NEXT_PUBLIC_SUPABASE_URL=http://127.0.0.1:9" \
     "SUPABASE_SECRET_KEY=ci-dummy-not-a-key" "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=ci-dummy-not-a-key" \
     "REDIS_URL=redis://redis:6379" "OPENAI_API_KEY=ci-dummy-not-a-key" \
-    "ENCRYPTION_KEY=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+    "ENCRYPTION_KEY=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')" \
+    "SESSION_COOKIE_SECRET=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 }
 start_real() { # <mode> <name>
   local entry=()
@@ -155,6 +156,9 @@ real_lifecycle() {
     R[$m.S7pid1]=$(jq -r .pid1 <<<"$c")
     t0=$(date +%s); docker stop -t 30 gi07real >/dev/null; t1=$(date +%s)
     R[$m.S7stopWithin30s]=$([ $((t1 - t0)) -lt 30 ] && echo yes || echo no)
+  else
+    echo "S7 $m: real worker exited before 45 s; its fatal lines:"
+    docker logs gi07real 2>&1 | grep -E 'FATAL|Error|❌|exit' | grep -v 'Direct process.env' | head -15 | sed 's/^/  S7LOG /'
   fi
   R[$m.S7exit]=$(exitcode gi07real)
   R[$m.S7sigtermLogged]=$(docker logs gi07real 2>&1 | grep -c '\[main\] SIGTERM received')
