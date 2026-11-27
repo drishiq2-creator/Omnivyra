@@ -64,6 +64,19 @@ RUN apt-get update \
  && fc-cache -f \
  && rm -rf /var/lib/apt/lists/*
 
+# PID 1 init. Without one, node is PID 1 and every process orphaned inside the
+# container is re-parented to it. Chromium's zygote/renderer children are
+# orphaned whenever a browser exits or is force-killed (Playwright SIGKILLs the
+# browser's process group on a failed close); node only waits on children it
+# spawned itself, so those orphans stay as zombies, each holding a pid. Over a
+# long uptime they exhaust the container's pid/thread budget and Chromium's
+# fork()/pthread_create() fail ("Zygote could not fork", "Failed to start
+# BrowserThread:IO"). tini reaps every orphan and forwards SIGTERM/SIGINT to
+# node, so the worker's graceful shutdown is unchanged.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends tini \
+ && rm -rf /var/lib/apt/lists/*
+
 # Copy compiled output from builder
 COPY --from=builder /app/dist ./dist
 
@@ -75,6 +88,9 @@ RUN rm -f .env .env.local .env.production
 
 ENV NODE_ENV=production
 ENV PORT=8080
+# This image is the ONLY browser runtime (backend/services/browserRuntime/):
+# everywhere else a Chromium launch is refused before anything is spawned.
+ENV OMNIVYRA_BROWSER_RUNTIME=worker
 
 # wget is not present on debian-slim; use a node-based health probe.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
@@ -82,4 +98,5 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
 
 EXPOSE 8080
 
+ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["node", "dist/backend/workers/main.js"]
