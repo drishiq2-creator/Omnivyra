@@ -12,15 +12,16 @@ import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeF
  *
  * Phase E: after enforceCompanyAccess (authentication + the web app's access rules), the EXTENSION membership rule
  * (backend/services/extensionMembershipService.ts - the one validate and redeem apply) must also hold, so a
- * principal the extension routes would refuse (platform super admin with no role row in this company, legacy
- * fallback principals) is refused HERE with EXTENSION_MEMBERSHIP_REQUIRED, before any code exists. The code is
+ * principal the extension routes would refuse (legacy fallback principals) is refused HERE with
+ * EXTENSION_MEMBERSHIP_REQUIRED, and a platform super admin with no active role row in this company with
+ * EXTENSION_PLATFORM_ADMIN_NOT_MEMBER (item E: still a refusal, no bypass), before any code exists. The code is
  * stored in the shared handshake store (any instance can redeem it); a store failure is a 503.
  */
 
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { enforceCompanyAccess } from '@/backend/services/userContextService';
 import { createClaimCode } from '@/backend/services/extensionClaimCodeService';
-import { checkExtensionMembership } from '@/backend/services/extensionMembershipService';
+import { checkExtensionMembership, extensionMembershipDeniedBody } from '@/backend/services/extensionMembershipService';
 import { isExtensionHandshakeStoreUnavailable } from '@/backend/services/extensionHandshakeStore';
 import { isSigningSecretUnavailable } from '@/backend/auth/signingSecrets';
 
@@ -45,11 +46,9 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       if ((membership as { outcome: string }).outcome === 'unavailable') {
         return res.status(503).json({ success: false, error: 'TENANT_LOOKUP_ERROR', retryable: true });
       }
-      return res.status(403).json({
-        success: false,
-        error: 'EXTENSION_MEMBERSHIP_REQUIRED',
-        message: 'The browser extension needs an active membership in this company.',
-      });
+      // Item E: a platform super admin without an active role here gets EXTENSION_PLATFORM_ADMIN_NOT_MEMBER
+      // (still a refusal - no bypass); everyone else EXTENSION_MEMBERSHIP_REQUIRED.
+      return res.status(403).json(extensionMembershipDeniedBody(membership as { reason: string; platformAdminWithoutMembership?: true }));
     }
 
     const claim = await createClaimCode(access.userId, organizationId);

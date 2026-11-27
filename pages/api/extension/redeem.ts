@@ -67,7 +67,7 @@ import {
   isExtensionProduct,
   type ExtensionProduct,
 } from '@/backend/services/extensionSessionService';
-import { checkExtensionMembership } from '@/backend/services/extensionMembershipService';
+import { checkExtensionMembership, extensionMembershipDeniedBody } from '@/backend/services/extensionMembershipService';
 import { isExtensionHandshakeStoreUnavailable } from '@/backend/services/extensionHandshakeStore';
 import { CAPABILITY_MAP_VERSION } from '@/backend/services/engagementCapabilityMap';
 import { isSigningSecretUnavailable } from '@/backend/auth/signingSecrets';
@@ -114,7 +114,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       if ((membership as { outcome: string }).outcome === 'unavailable') {
         return res.status(503).json({ success: false, error: 'TENANT_LOOKUP_ERROR', retryable: true });
       }
-      return res.status(403).json({ success: false, error: 'EXTENSION_MEMBERSHIP_REQUIRED' });
+      return res.status(403).json(extensionMembershipDeniedBody(membership as { reason: string; platformAdminWithoutMembership?: true }));
     }
 
     expiresAt = Date.now() + 12 * 60 * 60 * 1000; // 12 h

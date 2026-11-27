@@ -375,7 +375,7 @@ describe('tenant binding', () => {
 });
 
 describe('ONE membership rule at bootstrap, redeem and validate', () => {
-  it('a principal admitted by enforceCompanyAccess but with NO role row (platform super admin) is refused at BOOTSTRAP; no code exists', async () => {
+  it('a principal admitted by enforceCompanyAccess but with NO role row is refused at BOOTSTRAP; no code exists (a platform super admin gets the distinct EXTENSION_PLATFORM_ADMIN_NOT_MEMBER: extensionMembershipEverySignedRoute.test.ts)', async () => {
     const r = await bootstrap(A, SUPER_ADMIN_NO_ROLE);
     expect(r.statusCode).toBe(403);
     expect(r.body.error).toBe('EXTENSION_MEMBERSHIP_REQUIRED');
