@@ -16,6 +16,7 @@ function actionsQuery() {
     select: () => q,
     eq: (k: string, v: unknown) => { filters.push((r) => r[k] === v); return q; },
     in: (k: string, v: unknown[]) => { filters.push((r) => v.includes(r[k])); return q; },
+    is: (k: string, v: unknown) => { filters.push((r) => (r[k] ?? null) === v); return q; },
     gte: () => q,
     update: (p: Row) => { patch = p; return q; },
     maybeSingle: async () => {
@@ -130,7 +131,8 @@ describe('rpa / browser need a playbook that explicitly permits them', () => {
   });
 
   it.each([['rpa', 'rpa_allowed'], ['browser', 'browser_allowed']])('CONTROL: %s with a permitting playbook reaches the executor', async (mode, flag) => {
-    store.actions = [row({ playbook_id: 'pb-1' })];
+    // rpa also needs an approval of record (S-2); browser does not.
+    store.actions = [row({ playbook_id: 'pb-1', approved_at: mode === 'rpa' ? '2026-11-01T00:00:00Z' : null })];
     currentPlaybook = { execution_modes: { [flag]: true } };
     const res = await post({ execution_mode: mode });
     expect(res.statusCode).toBe(200);
@@ -138,7 +140,7 @@ describe('rpa / browser need a playbook that explicitly permits them', () => {
   });
 
   it('a queued rpa run (non-worker runtime) is answered 202 queued, not 400', async () => {
-    store.actions = [row({ playbook_id: 'pb-1' })];
+    store.actions = [row({ playbook_id: 'pb-1', approved_at: '2026-11-01T00:00:00Z' })];
     currentPlaybook = { execution_modes: { rpa_allowed: true } };
     (executeAction as jest.Mock).mockImplementationOnce(async () => ({ ok: false, status: 'failed', error: 'RPA_QUEUED_FOR_WORKER', reason: 'NOT_ATTEMPTED' }));
     const res = await post({ execution_mode: 'rpa' });
@@ -155,7 +157,7 @@ describe('requires_approval is honoured', () => {
     expect(v).toMatchObject({ allowed: true, requires_approval: true });
   });
 
-  it('no approval of record: 403 APPROVAL_REQUIRED, row left as it is, executor never called (was: executed)', async () => {
+  it('no approval of record: 403 APPROVAL_REQUIRED, row marked for approval (B-2) but not transitioned, executor never called (was: executed)', async () => {
     store.actions = [row({ playbook_id: 'pb-1', risk_level: 'medium' })];
     currentPlaybook = pbApproval;
     const res = await post({ execution_mode: 'manual' });

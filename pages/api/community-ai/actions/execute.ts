@@ -196,17 +196,54 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       reason: validation.reason || 'Playbook validation failed.',
     });
   }
-  // Phase C: the playbook says a human must approve this action. The approval
-  // of record is approved_at (set by /api/community-ai/actions/approve); the
-  // body's approved:true is the caller's click, not that record. Without it
-  // nothing executes and the row stays in its current state.
-  if (validation.requires_approval === true && !action.approved_at) {
+  // Approval of record (approved_at, set only by /api/community-ai/actions/approve)
+  // is required before anything executes when:
+  //   - the playbook says a human must approve this action (Phase C); the
+  //     body's approved:true is the caller's click, not that record;
+  //   - S-2: the mode is rpa. An rpa run is executed by the browser worker,
+  //     whose gate (checkRpaRetryAuthorised) refuses a row without approved_at;
+  //     answering 202 "queued" for work the worker will refuse would be a lie.
+  // B-2: the refusal must not be a dead end. approve.ts acts only on a row that
+  // is 'pending' AND requires_human_approval = true, so the refusal records
+  // exactly that (tenant-scoped, only while the row is still executable and
+  // unapproved). status becomes 'pending' because the DB CHECK
+  // community_ai_actions_approval_integrity_check admits requires_human_approval
+  // without approved_at only for 'pending' / 'skipped'; a 'scheduled' row
+  // therefore becomes 'pending' and is executed by the user after approval.
+  // Nothing executes, nothing transitions to 'executing', no executor call.
+  const approvalReason = validation.requires_approval === true && !action.approved_at
+    ? 'PLAYBOOK_REQUIRES_APPROVAL'
+    : executionMode === 'rpa' && !action.approved_at
+      ? 'RPA_REQUIRES_APPROVAL_OF_RECORD'
+      : null;
+  if (approvalReason) {
+    const { data: marked, error: markError } = await supabase
+      .from('community_ai_actions')
+      .update({ requires_human_approval: true, status: 'pending', updated_at: new Date().toISOString() })
+      .eq('id', actionId)
+      .eq('tenant_id', scope.tenantId)
+      .eq('organization_id', scope.organizationId)
+      .in('status', Array.from(EXECUTABLE_FROM_STATUSES))
+      .is('approved_at', null)
+      .select('id, status, requires_human_approval')
+      .maybeSingle();
+    if (markError) {
+      // Nothing executed and nothing recorded: an honest retry.
+      console.error('[community-ai/execute] approval-required state write failed:', markError.message);
+      return res.status(503).json({ error: 'APPROVAL_STATE_WRITE_FAILED', reason: approvalReason, retryable: true });
+    }
+    if (!marked) {
+      // The row changed under us (approved, executed or moved on): re-read and retry.
+      return res.status(409).json({ error: 'ACTION_STATE_CHANGED', reason: approvalReason });
+    }
     return res.status(403).json({
       error: 'APPROVAL_REQUIRED',
-      reason: 'PLAYBOOK_REQUIRES_APPROVAL',
+      reason: approvalReason,
       approval_required: true,
       action_id: actionId,
-      status: action.status,
+      status: marked.status,
+      requires_human_approval: true,
+      next_step: 'approve',
     });
   }
 
