@@ -1,0 +1,1 @@
+select current_user as current_user, session_user as session_user, current_database() as db, version() as version, now() as now_utc, pg_postmaster_start_time() as postmaster_start, (select stats_reset from pg_stat_database where datname = current_database()) as stats_reset, (select count(*) from pg_stat_user_tables) as user_tables_in_stats;

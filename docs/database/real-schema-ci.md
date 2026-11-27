@@ -62,6 +62,17 @@ docker exec -it w6-real-schema psql -U postgres -d w6
    ledger position. Because those migrations are already represented in the
    baseline, this proves they are **idempotent**, which is what makes them safe
    to re-apply.
+3b. **Baseline gaps** (`supabase/_schema/baseline-gap-migrations.txt`) — after
+   the replay, applies in listed order each named migration that sits at or
+   below the ledger position but whose objects are absent from the dump (so
+   step 3 never applies it). Entries are validated (bare file name, 14-digit
+   version `<= ledgerMax`, file exists, no duplicates) and applied with
+   `ON_ERROR_STOP`. The migration file stays the single source of the DDL. It
+   runs after step 3 so that no reviewed migration sees a different catalog
+   than before. This is a stop-gap: when a regenerated baseline contains an
+   entry's objects, delete the entry. `npm run db:drift` deliberately keeps
+   reporting these objects as drift until then, because it compares
+   `baseline.sql` alone.
 4. **Verify** — runs `backend/tests/realschema/**` against the result.
 
 Any stage failing fails the run. There is no `continue-on-error`.
