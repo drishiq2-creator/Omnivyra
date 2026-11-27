@@ -1,0 +1,15 @@
+# Gitleaks exceptions: exact finding fingerprints only (commit:file:rule:line).
+# No file, directory, rule or commit is ignored as a whole, and .gitleaks.toml is unchanged:
+# any new finding, including a new finding on these same lines in another commit, is still reported.
+# Each entry was checked against the gitleaks 8.30.1 JSON report and the line at that commit (2026-11-27).
+#
+# 1. Synthetic `supabase status` output for the C3 bootstrap simulation (loopback stub stack);
+#    value "sim-publishable-key-0001" is a fabricated placeholder, not a key of any project.
+90dd30498b4d5163bdcab19fc9340ad8dc5be497:tests/supabase-local/bootstrapSimulation.spec.ts:generic-api-key:46
+# 2. The same fabricated status block (second copy, used by a later simulation case).
+90dd30498b4d5163bdcab19fc9340ad8dc5be497:tests/supabase-local/bootstrapSimulation.spec.ts:generic-api-key:282
+# 3. Redaction-test input URL with the made-up password "pa/ss" (contains "/") on the placeholder
+#    host "h", fed to redactSecrets() to prove it is fully masked.
+90dd30498b4d5163bdcab19fc9340ad8dc5be497:tests/supabase-local/ciAssertions.spec.ts:postgres-url-with-password:213
+# 4. The same redaction-test input after its password was changed to the placeholder "fake/pw".
+20373e8aa286cf6a6b43c70256156c77d1a3fd60:tests/supabase-local/ciAssertions.spec.ts:postgres-url-with-password:213
