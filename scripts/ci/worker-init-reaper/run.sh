@@ -77,7 +77,7 @@ scenarios() {
   docker start gi07w >/dev/null; wait_ready 2 || return
   c=$(census); echo "CENSUS $m restart $c"
   out=$(hp produce hold 1 8000 active); echo "$out"; jid=$(jobid "$out")
-  docker kill -s KILL w >/dev/null; docker wait gi07w >/dev/null
+  docker kill -s KILL gi07w >/dev/null; timeout 60 docker wait gi07w >/dev/null || fail "container did not stop within 60s"
   R[$m.S4exit]=$(exitcode gi07w)
   docker start gi07w >/dev/null; wait_ready 3 || return
   R[$m.S4jobState]=$(hp wait "$jid" 90000 | awk '/^WAITED/{print $3}')
@@ -86,7 +86,7 @@ scenarios() {
   R[$m.S4zombies]=$(jq .zombies <<<"$c")
 
   # S5 SIGINT
-  docker kill -s INT w >/dev/null; docker wait gi07w >/dev/null
+  docker kill -s INT gi07w >/dev/null; timeout 60 docker wait gi07w >/dev/null || fail "container did not stop within 60s"
   R[$m.S5exit]=$(exitcode gi07w)
   R[$m.S5sigints]=$(docker logs gi07w 2>&1 | grep -c 'HARNESS_SIGNAL SIGINT')
 
