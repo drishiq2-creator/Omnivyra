@@ -1,9 +1,10 @@
-# Auth integrity against a DISPOSABLE local Supabase stack — ADVISORY (workstream C3).
+# Auth integrity against a DISPOSABLE local Supabase stack (workstream C3; the auth E2E gate since
+# the hosted E2E retirement, docs/supabase-e2e-retirement/15-application-and-ci-connection-transition.md).
 #
-# Purpose: prove the auth E2E suite can run without the permanently hosted omnivyra-e2e
-# project. Everything runs on the GitHub-hosted runner itself: a throw-away Supabase stack
+# Everything runs on the GitHub-hosted runner itself: a throw-away Supabase stack
 # (tests/supabase-local), a Redis service container, and the app under test. The runner is
-# discarded afterwards.
+# discarded afterwards. NO hosted Supabase project (production or the retired hosted E2E project)
+# is contacted.
 #
 # Safety properties (enforced by tests/supabase-local/authIntegrityLocalWorkflow.spec.ts):
 #   - references NO repository secret at all (no production and no hosted-E2E credential);
@@ -15,17 +16,15 @@
 #   - the stack is always torn down (if: always()), and teardown is scoped to this stack only;
 #   - a skipped, missing or extra test fails the job (exact counts are asserted).
 #
-# ADVISORY: not a required check. Its job names deliberately differ from every existing job
-# name, so it can neither satisfy nor replace a required status context. It does not modify or
-# replace .github/workflows/auth-integrity.yml (the hosted job stays as it is until C4).
-#
-# Triggers: workflow_dispatch (only once this file is on the default branch), and pushes to
-# ci-only/c3-auth-local/** branches (no other workflow runs on such a push, and no pull_request
-# is involved, so the hosted E2E job is not triggered).
+# Triggers: every pull_request (no path filter, like the hosted job it replaces, so it can be made
+# a required check without leaving PRs pending), workflow_dispatch, and pushes to
+# ci-only/c3-auth-local/** branches (acceptance re-runs without a pull request).
+# Making "Auth integrity regression suite (local Supabase)" a REQUIRED check is an owner action.
 
-name: Auth integrity (local Supabase, advisory)
+name: Auth integrity (local Supabase)
 
 on:
+  pull_request:
   workflow_dispatch:
   push:
     branches:
@@ -52,7 +51,7 @@ env:
 
 jobs:
   local-stack-validation:
-    name: Local Supabase stack validation (advisory)
+    name: Local Supabase stack validation
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -137,7 +136,7 @@ jobs:
           if-no-files-found: warn
 
   auth-integrity-local:
-    name: Auth integrity regression suite (local Supabase, advisory)
+    name: Auth integrity regression suite (local Supabase)
     needs: local-stack-validation
     runs-on: ubuntu-24.04
     timeout-minutes: 45

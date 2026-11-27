@@ -3,10 +3,10 @@ import test from 'node:test';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
-import { execFileSync } from 'node:child_process';
 
 /**
- * Static lock on .github/workflows/auth-integrity-local.yml (C3, advisory). Hermetic: reads files and
+ * Static lock on .github/workflows/auth-integrity-local.yml (C3; the auth E2E gate on every pull request
+ * since the hosted E2E retirement, docs/supabase-e2e-retirement/15-*). Hermetic: reads files and
  * parses YAML; no network. checkWorkflow() returns every violated rule; the controls at the end mutate the
  * workflow text and prove each key rule is detected.
  */
@@ -27,6 +27,12 @@ function load(text: string): Workflow {
   if (wf.on === undefined && (parsed as Record<string, unknown>)['true'] !== undefined) wf.on = (parsed as Record<string, unknown>)['true'] as Record<string, unknown>;
   return wf;
 }
+
+/** Pinned status-context names (candidates for required checks once the hosted job is retired). */
+const EXPECTED_JOB_NAMES: Record<string, string> = {
+  'local-stack-validation': 'Local Supabase stack validation',
+  'auth-integrity-local': 'Auth integrity regression suite (local Supabase)',
+};
 
 function otherJobNamesAndIds(): Set<string> {
   const out = new Set<string>();
@@ -64,7 +70,10 @@ function checkWorkflow(text: string): string[] {
   for (const marker of ['klkiseupptzbecbxwrky', 'lomndxmrpyudaegddpef', '.supabase.co', '.supabase.in']) if (text.includes(marker)) add(`contains hosted marker ${marker}`);
   const on = wf.on ?? {};
   const triggers = Object.keys(on).sort();
-  if (triggers.join(',') !== 'push,workflow_dispatch') add(`triggers must be exactly push + workflow_dispatch, got ${triggers.join(',')}`);
+  if (triggers.join(',') !== 'pull_request,push,workflow_dispatch') add(`triggers must be exactly pull_request + push + workflow_dispatch, got ${triggers.join(',')}`);
+  // No filter on pull_request: a path- or branch-filtered required check leaves PRs pending forever, and
+  // the hosted job this replaces ran on every PR.
+  if (on.pull_request !== null && on.pull_request !== undefined && Object.keys(on.pull_request as object).length !== 0) add('pull_request must run on every PR (no paths/branches/types filter)');
   const push = on.push as { branches?: string[]; tags?: unknown; paths?: unknown } | null | undefined;
   if (!push || JSON.stringify(push.branches) !== JSON.stringify(['ci-only/c3-auth-local/**']) || Object.keys(push).length !== 1) add('push must be limited to branches ci-only/c3-auth-local/** only');
   if (JSON.stringify(wf.permissions) !== JSON.stringify({ contents: 'read' })) add('permissions must be exactly contents: read');
@@ -79,7 +88,8 @@ function checkWorkflow(text: string): string[] {
   const others = otherJobNamesAndIds();
   for (const [id, job] of Object.entries(jobs)) {
     if (others.has(id) || (job.name && others.has(job.name))) add(`job ${id} reuses an existing job id or name (could satisfy a required context)`);
-    if (!job.name || !/\badvisory\)$/.test(job.name)) add(`job ${id} name must end with "advisory)"`);
+    // The status-context names are pinned: the owner makes them required checks after cutover.
+    if (job.name !== EXPECTED_JOB_NAMES[id]) add(`job ${id} name must be exactly "${EXPECTED_JOB_NAMES[id]}"`);
     if (!/^ubuntu-\d/.test(String(job['runs-on']))) add(`job ${id} must run on a GitHub-hosted ubuntu runner`);
     if (job['continue-on-error'] !== undefined) add(`job ${id} must not use continue-on-error`);
     if (job.env && 'ALLOW_PROD_DB_WITH_LOCAL_REDIS' in job.env) add(`job ${id} sets ALLOW_PROD_DB_WITH_LOCAL_REDIS`);
@@ -154,9 +164,9 @@ test('C3 workflow: the expected counts come from the real runner (5 spec files, 
   assert.deepEqual(expectedAuthCounts(), { specs: 5, tests: 5 });
 });
 
-test('C3 workflow: the hosted auth-integrity.yml is byte-identical to HEAD (untouched)', () => {
-  const head = execFileSync('git', ['-C', ROOT, 'show', 'HEAD:.github/workflows/auth-integrity.yml'], { encoding: 'utf8' });
-  assert.equal(fs.readFileSync(path.join(WF_DIR, 'auth-integrity.yml'), 'utf8'), head);
+test('C3 workflow: the hosted E2E job is retired from auth-integrity.yml (only the static job remains)', () => {
+  const hosted = load(fs.readFileSync(path.join(WF_DIR, 'auth-integrity.yml'), 'utf8'));
+  assert.deepEqual(Object.keys(hosted.jobs ?? {}), ['auth-invariants-static']);
 });
 
 // ---------------- failing controls: each mutation must be detected ----------------
@@ -170,8 +180,16 @@ test('C3 CONTROL a hosted-E2E secret reference is detected', () => {
   expectDetected('secret', "OPENAI_API_KEY: e2e-placeholder-not-a-real-key", 'OPENAI_API_KEY: e2e-placeholder-not-a-real-key\n      E2E_SUPABASE_URL: ${{ secrets.E2E_SUPABASE_URL }}', /repository secret/);
 });
 
-test('C3 CONTROL a pull_request trigger is detected', () => {
-  expectDetected('pull_request', 'on:\n  workflow_dispatch:', 'on:\n  pull_request:\n  workflow_dispatch:', /triggers must be exactly/);
+test('C3 CONTROL dropping the pull_request trigger is detected', () => {
+  expectDetected('pull_request', 'on:\n  pull_request:\n  workflow_dispatch:', 'on:\n  workflow_dispatch:', /triggers must be exactly/);
+});
+
+test('C3 CONTROL a path-filtered pull_request trigger is detected', () => {
+  expectDetected('pr paths', 'on:\n  pull_request:\n', "on:\n  pull_request:\n    paths:\n      - 'tests/auth/**'\n", /must run on every PR/);
+});
+
+test('C3 CONTROL renaming a pinned status-context job is detected', () => {
+  expectDetected('rename', 'name: Local Supabase stack validation\n', 'name: Local Supabase stack validation (advisory)\n', /name must be exactly/);
 });
 
 test('C3 CONTROL teardown that does not always run is detected', () => {
@@ -191,7 +209,7 @@ test('C3 CONTROL the prod-DB/local-Redis bypass flag is detected', () => {
 });
 
 test('C3 CONTROL a job name that reuses an existing (possibly required) context is detected', () => {
-  expectDetected('name', 'name: Auth integrity regression suite (local Supabase, advisory)', 'name: Auth integrity regression lock', /reuses an existing job id or name/);
+  expectDetected('name', 'name: Auth integrity regression suite (local Supabase)\n', 'name: Static auth invariants (hermetic, no secrets)\n', /reuses an existing job id or name/);
 });
 
 test('C3 CONTROL skipping the migration replay is detected', () => {
