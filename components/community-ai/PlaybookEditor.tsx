@@ -1,5 +1,11 @@
 import React, { useEffect, useState } from 'react';
 import type { EngagementPlaybook } from '../../lib/shared/playbookTypes';
+import {
+  BROWSER_ALLOWED_OPTIONS,
+  applyBrowserAllowedChoice,
+  browserAllowedToChoice,
+  isBrowserAllowedChoice,
+} from './browserAllowedSetting';
 
 type PlaybookEditorProps = {
   playbook?: EngagementPlaybook | null;
@@ -285,18 +291,24 @@ export default function PlaybookEditor({ playbook, onSave, onCancel }: PlaybookE
             />
             RPA allowed
           </label>
-          <label className="flex items-center gap-2 text-xs">
-            <input
-              type="checkbox"
-              checked={draft.execution_modes.browser_allowed === true}
-              onChange={(event) =>
+          <label className="flex flex-col gap-1 text-xs">
+            Browser (extension)
+            <select
+              className="border rounded px-2 py-1 text-xs"
+              value={browserAllowedToChoice(draft.execution_modes.browser_allowed)}
+              onChange={(event) => {
+                const choice = event.target.value;
+                if (!isBrowserAllowedChoice(choice)) return;
                 setDraft({
                   ...draft,
-                  execution_modes: { ...draft.execution_modes, browser_allowed: event.target.checked },
-                })
-              }
-            />
-            Browser (extension) allowed
+                  execution_modes: applyBrowserAllowedChoice(draft.execution_modes, choice),
+                });
+              }}
+            >
+              {BROWSER_ALLOWED_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>{o.label}</option>
+              ))}
+            </select>
           </label>
           <label className="flex items-center gap-2 text-xs">
             <input
