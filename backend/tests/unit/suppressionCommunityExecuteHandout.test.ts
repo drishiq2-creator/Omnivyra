@@ -85,12 +85,12 @@ const from = (t: string) => {
 jest.mock('@/backend/db/supabaseClient', () => ({ supabase: { from: (t: string) => from(t) } }));
 jest.mock('../../db/supabaseClient', () => ({ supabase: { from: (t: string) => from(t) } }));
 
-jest.mock('../../services/communityAiPlatformPolicyService', () => ({
-  getCommunityAiPlatformPolicy: jest.fn(async () => ({ execution_enabled: true, auto_rules_enabled: true, require_human_approval: false })),
-}));
-jest.mock('@/backend/services/communityAiPlatformPolicyService', () => ({
-  getCommunityAiPlatformPolicy: jest.fn(async () => ({ execution_enabled: true, auto_rules_enabled: true, require_human_approval: false })),
-}));
+// Round 28: the real fail-closed evaluator decides over this value (configured row unless stated).
+jest.mock('../../services/communityAiPlatformPolicyService', () =>
+  jest.requireActual('../helpers/communityAiPolicyMock').policyServiceMock(() => ({ execution_enabled: true, auto_rules_enabled: true, require_human_approval: false })));
+// Round 28: the real fail-closed evaluator decides over this value (configured row unless stated).
+jest.mock('@/backend/services/communityAiPlatformPolicyService', () =>
+  jest.requireActual('../helpers/communityAiPolicyMock').policyServiceMock(() => ({ execution_enabled: true, auto_rules_enabled: true, require_human_approval: false })));
 jest.mock('../../db/communityAiActionStore', () => ({
   getCommunityAiActionById: jest.fn(async (id: string) => {
     const hit = store.actions.find((r) => r.id === id);

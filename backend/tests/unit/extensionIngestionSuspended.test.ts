@@ -130,6 +130,9 @@ describe('server-queued collection', () => {
     id, organization_id: 'org-r3', platform: 'linkedin', action_type: action, target_id: 'urn:li:activity:1',
     suggested_text: action === 'reply' ? 'thanks' : null, execution_mode: 'browser', status: 'pending',
     created_at: new Date().toISOString(), dispatch_lease_expires_at: null, command_chain: null, command_chain_index: 0,
+    // Round 28 kill switch: this suite has no policy row, so the hand-out only offers a row carrying an
+    // approval of record (a human send stamps approved_at on insert).
+    approved_at: '2026-11-27T00:00:00.000Z',
   });
   const poll = () => call(commandsHandler, { method: 'GET', url: '/api/extension/commands', headers: { 'x-omnivyra-capability-version': 'cap-test', 'x-omnivyra-dispatch-renewal': '1' } });
 

@@ -62,9 +62,9 @@ jest.mock('../../db/writeOwner', () => ({
 }));
 
 // ── Executor collaborators (side effects are spies) ─────────────────────────
-jest.mock('../../services/communityAiPlatformPolicyService', () => ({
-  getCommunityAiPlatformPolicy: jest.fn(async () => ({ execution_enabled: true, auto_rules_enabled: true, require_human_approval: false })),
-}));
+// Round 28: the real fail-closed evaluator decides over this value (configured row unless stated).
+jest.mock('../../services/communityAiPlatformPolicyService', () =>
+  jest.requireActual('../helpers/communityAiPolicyMock').policyServiceMock(() => ({ execution_enabled: true, auto_rules_enabled: true, require_human_approval: false })));
 jest.mock('../../services/communityAiActionExecutorContracts', () => {
   const actual = jest.requireActual('../../services/communityAiActionExecutorContracts');
   return {

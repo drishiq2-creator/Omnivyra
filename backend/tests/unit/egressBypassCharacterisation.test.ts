@@ -126,9 +126,9 @@ jest.mock('../../auth/metaAuthService', () => ({ getValidAccessToken: async () =
 jest.mock('../../auth/credentialEncryption', () => ({ requireEncryptionKey: () => Buffer.from('11'.repeat(32), 'hex') }));
 
 // Community executor (API, RPA, browser)
-jest.mock('../../services/communityAiPlatformPolicyService', () => ({
-  getCommunityAiPlatformPolicy: async () => ({ execution_enabled: true, require_human_approval: false }),
-}));
+// Round 28: the real fail-closed evaluator decides over this value (configured row unless stated).
+jest.mock('../../services/communityAiPlatformPolicyService', () =>
+  jest.requireActual('../helpers/communityAiPolicyMock').policyServiceMock(() => ({ execution_enabled: true, require_human_approval: false })));
 jest.mock('../../services/usageEnforcementService', () => ({ checkUsageBeforeExecution: async () => ({ allowed: true }) }));
 jest.mock('../../services/usageLedgerService', () => ({ logUsageEvent: async () => undefined }));
 jest.mock('../../services/usageMeterService', () => ({ incrementUsageMeter: async () => undefined }));

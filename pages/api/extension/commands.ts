@@ -29,7 +29,7 @@ import { isCurrentlyDisabled } from '@/backend/services/extensionReliabilityServ
 import { validateCommandPayload, COMMAND_SCHEMA_VERSION } from '@/backend/services/extensionCommandSchema';
 import { recordExecutionMetric } from '@/backend/services/communityAiExecutionResultService';
 import { resolveAccountTier } from '@/backend/services/rpaWorker/rpaAccountTier';
-import { getCommunityAiPlatformPolicy } from '@/backend/services/communityAiPlatformPolicyService';
+import { resolveCommunityAiPlatformPolicy, decideCommunityAiExecutionPolicy } from '@/backend/services/communityAiPlatformPolicyService';
 import { checkCommunityActionContactGovernance } from '@/backend/services/communityAiContactGovernanceGate';
 import { EXTENSION_BROWSER_INGESTION_SUSPENDED, SUSPENDED_COLLECTION_COMMANDS } from '@/backend/services/extensionIngestionSuspension';
 
@@ -211,7 +211,11 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     // approval became required, must not go out. An unreadable policy is
     // fail-closed (execution off, approval required). A gated row is left
     // unclaimed, which is provably unsent; dispatch recovery releases it later.
-    const policy = await getCommunityAiPlatformPolicy();
+    // Round 28 (review P-4): the fail-closed evaluator decides per row, from
+    // one policy read per poll. With NO policy row only a row carrying an
+    // approval of record (approved_at: stamped by a human send or the approve
+    // route) is handed out; unreadable or execution off hands out nothing.
+    const policyResolution = await resolveCommunityAiPlatformPolicy();
 
     for (const row of data || []) {
       // ── Chain-aware step selection ────────────────────────────────────────
@@ -240,8 +244,11 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       if (isCurrentlyDisabled(row.platform, topAction)) continue;
 
       if (!READ_ONLY_EXTENSION_ACTIONS.has(capabilityAction)) {
-        if (!policy.execution_enabled) continue;
-        if (policy.require_human_approval && !(row as any).approved_at) continue;
+        const policyDecision = decideCommunityAiExecutionPolicy(policyResolution, {
+          initiator: 'extension_handout',
+          approved_at: ((row as any).approved_at as string | null) ?? null,
+        });
+        if (policyDecision.allowed === false) continue;
 
         // Round 24D / G-7 — contact governance is re-checked at hand-out,
         // the last point before the browser sends: a recipient suppressed

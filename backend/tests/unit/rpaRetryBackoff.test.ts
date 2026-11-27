@@ -65,9 +65,9 @@ jest.mock('../../db/supabaseClient', () => ({
 
 const policy = { execution_enabled: true, auto_rules_enabled: true, require_human_approval: false };
 const policyRead = jest.fn(async () => ({ ...policy, updated_at: null, updated_by: null }));
-jest.mock('../../services/communityAiPlatformPolicyService', () => ({
-  getCommunityAiPlatformPolicy: () => policyRead(),
-}));
+// Round 28: the real fail-closed evaluator decides over this value (configured row unless stated).
+jest.mock('../../services/communityAiPlatformPolicyService', () =>
+  jest.requireActual('../helpers/communityAiPolicyMock').policyServiceMock(() => policyRead()));
 jest.mock('../../services/rpaWorker/rpaQueueState', () => ({
   admitRpaTask: jest.fn(async () => ({ admit: true })),
   observeAllActiveOrgs: jest.fn(async () => undefined),

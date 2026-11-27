@@ -5,7 +5,12 @@ import { rpaEnvReady, assertRpaEnvReady, isProbeFailure, getRpaEnvProbeDiagnosti
 import { admitRpaTask, observeAllActiveOrgs } from './rpaQueueState';
 import { enqueueRpaRetry, flushRpaRetryQueueRoundRobin, countDueRpaRetries } from './rpaRetryQueue';
 import { withHeavyJobSlot } from '../../queue/bullmqClient';
-import { getCommunityAiPlatformPolicy } from '../communityAiPlatformPolicyService';
+import {
+  resolveCommunityAiPlatformPolicy,
+  decideCommunityAiAutomatedTick,
+  decideCommunityAiExecutionPolicy,
+  type CommunityAiPolicyBlockReason,
+} from '../communityAiPlatformPolicyService';
 import { ownedDbTable } from '../../db/writeOwner';
 import { checkCommunityActionContactGovernance } from '../communityAiContactGovernanceGate';
 
@@ -85,12 +90,13 @@ export const rpaSchedulerHooks = {
     }
     if (dueCheck.due === 0) return idle({ skipped_empty: 1 });
 
-    // Platform kill switch: when execution is disabled nothing is run and
-    // no retry row is touched (mirrors the community scheduler). An
-    // unreadable policy is fail-closed (execution_enabled=false).
-    const policy = await getCommunityAiPlatformPolicy();
-    if (!policy?.execution_enabled) {
-      console.warn('[rpaRetryQueueFlush] skipped — community execution disabled by platform policy');
+    // Platform kill switch (round 28, review P-3): fail-closed tick gate. A
+    // missing policy row, an unreadable policy or execution_enabled=false
+    // stops the flush with no launch and no row touched. Runs AFTER the
+    // due-count, so an empty queue still never reads policy.
+    const tick = decideCommunityAiAutomatedTick(await resolveCommunityAiPlatformPolicy(), 'rpa_retry');
+    if (tick.allowed === false) {
+      console.warn(`[rpaRetryQueueFlush] skipped — platform policy refused (${tick.reason_code})`);
       return idle({ due: dueCheck.due, skipped_policy: 1 });
     }
 
@@ -178,7 +184,8 @@ export type RpaRetryGate = { ok: true } | { ok: false; reason: string; terminal?
  * the retry flush must honour the platform kill switch and approval of
  * record instead of calling the Playwright handler blindly).
  *
- *   1. platform policy execution_enabled (kill switch; fail-closed on
+ *   1. platform policy via the fail-closed evaluator (round 28: missing row,
+ *      unreadable or execution_enabled=false all refuse; fail-closed on
  *      unreadable policy);
  *   2. the community_ai_actions row of record exists in the SAME
  *      organization as the retry row;
@@ -198,8 +205,13 @@ export type RpaRetryGate = { ok: true } | { ok: false; reason: string; terminal?
  * Any read error refuses.
  */
 export async function checkRpaRetryAuthorised(task: RpaTask): Promise<RpaRetryGate> {
-  const policy = await getCommunityAiPlatformPolicy();
-  if (!policy?.execution_enabled) return { ok: false, reason: 'RPA_RETRY_EXECUTION_DISABLED' };
+  // Round 28: ONE gate, in order — policy (kill switch) → action of record →
+  // re-executable status → approval of record → contact governance. The
+  // policy is resolved once and decided twice: before the row read (no row is
+  // read when automation is off) and against the row's approved_at.
+  const resolution = await resolveCommunityAiPlatformPolicy();
+  const preRead = decideCommunityAiAutomatedTick(resolution, 'rpa_retry');
+  if (preRead.allowed === false) return { ok: false, reason: rpaRetryPolicyReason(preRead.reason_code) };
   if (!task?.action_id || !task?.organization_id) {
     return { ok: false, reason: 'RPA_RETRY_ACTION_UNKNOWN' };
   }
@@ -221,7 +233,11 @@ export async function checkRpaRetryAuthorised(task: RpaTask): Promise<RpaRetryGa
   if (!RPA_RETRY_REEXECUTABLE_STATUSES.has(String(row.status ?? ''))) {
     return { ok: false, reason: 'RPA_RETRY_ACTION_NOT_RETRYABLE' };
   }
-  if (!row.approved_at) return { ok: false, reason: 'RPA_RETRY_NOT_APPROVED' };
+  const decision = decideCommunityAiExecutionPolicy(resolution, {
+    initiator: 'rpa_retry',
+    approved_at: (row.approved_at as string | null) ?? null,
+  });
+  if (decision.allowed === false) return { ok: false, reason: rpaRetryPolicyReason(decision.reason_code) };
   const contactGate = await checkCommunityActionContactGovernance({
     id: String(row.id),
     organization_id: task.organization_id,
@@ -237,6 +253,17 @@ export async function checkRpaRetryAuthorised(task: RpaTask): Promise<RpaRetryGa
   }
   return { ok: true };
 }
+
+/** Keep the retry refusal strings existing tests and dashboards read. */
+const rpaRetryPolicyReason = (code: CommunityAiPolicyBlockReason): string => {
+  switch (code) {
+    case 'execution_disabled': return 'RPA_RETRY_EXECUTION_DISABLED';
+    case 'approval_required': return 'RPA_RETRY_NOT_APPROVED';
+    case 'policy_missing_fail_closed': return 'RPA_RETRY_POLICY_MISSING';
+    case 'policy_unreadable_fail_closed': return 'RPA_RETRY_POLICY_UNREADABLE';
+    default: return `RPA_RETRY_${String(code).toUpperCase()}`;
+  }
+};
 
 /**
  * Unified Playwright-backed handler for every platform. Script selection

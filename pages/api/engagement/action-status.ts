@@ -2,6 +2,7 @@ import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeF
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { enforceCompanyAccess } from '../../../backend/services/userContextService';
 import { supabase } from '../../../backend/db/supabaseClient';
+import { presentCommunityActionStatus } from '../../../backend/services/communityAiPersistedStatus';
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'GET') {
@@ -21,7 +22,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
 
     const { data, error } = await supabase
       .from('community_ai_actions')
-      .select('id, organization_id, status, platform, action_type, execution_mode, execution_result, dispatch_lease_id, dispatch_lease_expires_at, dispatch_acknowledged_at, updated_at')
+      .select('id, organization_id, status, skip_reason, platform, action_type, execution_mode, execution_result, dispatch_lease_id, dispatch_lease_expires_at, dispatch_acknowledged_at, updated_at')
       .eq('id', actionId)
       .eq('organization_id', organizationId)
       .maybeSingle();
@@ -65,7 +66,9 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     return res.status(200).json({
       success: true,
       action_id: data.id,
-      status: data.status,
+      // Round 28: a lost-response row is stored as skipped + skip_reason (the DB CHECK has no
+      // sent_unverified); present it in the vocabulary the inbox already renders.
+      status: presentCommunityActionStatus(data),
       platform: data.platform,
       action_type: data.action_type,
       execution_mode: data.execution_mode,

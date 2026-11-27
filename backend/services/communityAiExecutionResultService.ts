@@ -1,6 +1,7 @@
 import { createHash } from 'crypto';
 import { supabase } from '../db/supabaseClient';
 import { ownedDbTable } from '../db/writeOwner';
+import { toPersistedCommunityActionStatus, presentCommunityActionStatus, LOST_RESPONSE_SKIP_REASONS } from './communityAiPersistedStatus';
 
 type ExecutionMode = 'api' | 'rpa' | 'browser' | 'manual';
 type ResultStatus = 'executed' | 'sent_unverified' | 'dispatched' | 'failed' | 'skipped' | 'blocked';
@@ -126,9 +127,14 @@ export async function persistExecutionResult(input: {
   // pending | approved | executed | failed | skipped — there is NO 'blocked'. A 'blocked' write is rejected, the row
   // stays 'pending' and is re-offered / re-gated forever. A terminal refusal is therefore stored as 'skipped' with its
   // reason in skip_reason (a column Production has). The in-memory result handed back to the caller is unchanged.
-  const finalStatus = result.status === 'dispatched' ? 'pending' : result.status === 'blocked' ? 'skipped' : result.status;
-  const errorCode = result.error && typeof result.error === 'object' ? (result.error as { code?: unknown }).code : result.error;
-  const skipReason = finalStatus === 'skipped' ? (String(result.reason ?? errorCode ?? '').slice(0, 200) || null) : null;
+  // Round 28: every write goes through the one CHECK-faithful mapping
+  // (communityAiPersistedStatus): sent_unverified -> skipped/SENT_UNVERIFIED,
+  // an unknown RPA outcome -> skipped/OUTCOME_UNKNOWN, blocked -> skipped.
+  const persisted = toPersistedCommunityActionStatus(result);
+  const finalStatus: string = persisted.status;
+  const skipReason = persisted.skip_reason;
+  /** The send happened or may have happened (confirmed or not): stamp executed_at, count a send. */
+  const sendIssued = result.status === 'executed' || result.status === 'sent_unverified';
   const effectiveMode = result.execution_mode || null;
 
   const update: Record<string, unknown> = {
@@ -155,7 +161,7 @@ export async function persistExecutionResult(input: {
     update.dispatch_lease_expires_at = null;
     update.dispatch_lease_holder_id = null;
     update.dispatch_acknowledged_at = null;
-    if (finalStatus === 'executed' || finalStatus === 'sent_unverified') {
+    if (sendIssued) {
       update.executed_at = new Date().toISOString();
     }
   }
@@ -182,14 +188,14 @@ export async function persistExecutionResult(input: {
   if (updateError) {
     if (update.idempotency_key) {
       const { data: prior } = await ownedDbTable('community_ai_actions')
-        .select('id, status')
+        .select('id, status, skip_reason')
         .eq('organization_id', input.organizationId)
         .eq('idempotency_key', String(update.idempotency_key))
         .maybeSingle();
       if (prior?.id) {
         return {
           ok: true,
-          current_status: prior.status || finalStatus,
+          current_status: presentCommunityActionStatus(prior) || finalStatus,
           deduplicated: true,
           prior_action_id: prior.id,
         };
@@ -205,7 +211,7 @@ export async function persistExecutionResult(input: {
     return { ok: false, current_status: latest?.status ?? undefined, error: 'STATE_MISMATCH' };
   }
 
-  if (finalStatus === 'executed' || finalStatus === 'sent_unverified') {
+  if (sendIssued) {
     await recordExecutionMetric({
       organization_id: input.organizationId,
       action_id: input.actionId,
@@ -215,11 +221,12 @@ export async function persistExecutionResult(input: {
       action_type: input.rowHint?.action_type ?? null,
       execution_mode: effectiveMode,
       metadata: {
-        status: finalStatus,
+        status: result.status,
         platform_id: result.platform_id ?? null,
       },
     });
-  } else if (finalStatus === 'failed' || finalStatus === 'skipped') {
+  } else if (finalStatus === 'failed' || (finalStatus === 'skipped' && !LOST_RESPONSE_SKIP_REASONS.has(String(skipReason ?? '')))) {
+    // A lost/unknown outcome is neither a success nor a failure: no metric claims either.
     await recordExecutionMetric({
       organization_id: input.organizationId,
       action_id: input.actionId,

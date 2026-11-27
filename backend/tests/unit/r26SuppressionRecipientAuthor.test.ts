@@ -93,9 +93,9 @@ function fakeTable(table: string) {
 jest.mock('../../db/writeOwner', () => ({ ownedDbTable: (t: string) => fakeTable(t) }));
 jest.mock('../../db/supabaseClient', () => ({ supabase: { from: (t: string) => fakeTable(t) } }));
 
-jest.mock('../../services/communityAiPlatformPolicyService', () => ({
-  getCommunityAiPlatformPolicy: jest.fn(async () => ({ execution_enabled: true, auto_rules_enabled: true, require_human_approval: false })),
-}));
+// Round 28: the real fail-closed evaluator decides over this value (configured row unless stated).
+jest.mock('../../services/communityAiPlatformPolicyService', () =>
+  jest.requireActual('../helpers/communityAiPolicyMock').policyServiceMock(() => ({ execution_enabled: true, auto_rules_enabled: true, require_human_approval: false })));
 jest.mock('../../services/communityAiActionExecutorContracts', () => {
   const actual = jest.requireActual('../../services/communityAiActionExecutorContracts');
   return {

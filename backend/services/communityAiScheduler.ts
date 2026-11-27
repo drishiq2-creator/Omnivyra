@@ -8,7 +8,7 @@ import { persistExecutionResult } from './communityAiActionExecutor';
 import { getPlaybookById } from './playbooks/playbookService';
 import { validateActionAgainstPlaybook } from './playbooks/playbookValidator';
 import { getToken } from './platformTokenService';
-import { getCommunityAiPlatformPolicy } from './communityAiPlatformPolicyService';
+import { resolveCommunityAiPlatformPolicy, decideCommunityAiAutomatedTick } from './communityAiPlatformPolicyService';
 import { canExecuteAction } from './executionGuardrailService';
 import { ownedDbTable } from '../db/writeOwner';
 
@@ -78,17 +78,22 @@ const loadHistoryMetrics = async (
 };
 
 export const runCommunityAiScheduler = async (now = new Date()): Promise<SchedulerResult> => {
-  const policy = await getCommunityAiPlatformPolicy();
-  if (!policy.execution_enabled) {
+  // Round 28 (review P-1): fail-closed tick gate. A missing policy row, an
+  // unreadable policy or execution_enabled=false stops the scheduler before
+  // any row is read. Per-row approval of record is enforced by the executor.
+  const tick = decideCommunityAiAutomatedTick(await resolveCommunityAiPlatformPolicy(), 'scheduler');
+  if (tick.allowed === false) {
     console.debug('COMMUNITY_AI_PLATFORM_POLICY_BLOCK', {
-      reason: 'execution_enabled=false',
+      reason: tick.reason_code,
       source: 'scheduler',
     });
     await ownedDbTable('audit_logs').insert({
       actor_user_id: null,
       action: 'COMMUNITY_AI_PLATFORM_POLICY_BLOCK',
       metadata: {
-        policy_flag: 'execution_enabled',
+        policy_flag: tick.policy_flag === 'policy_unreadable' ? 'execution_enabled' : tick.policy_flag,
+        reason_code: tick.reason_code,
+        policy_state: tick.policy_state,
         source: 'scheduler',
       },
       created_at: new Date().toISOString(),
