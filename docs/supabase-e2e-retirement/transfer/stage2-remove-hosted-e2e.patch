@@ -1,0 +1,823 @@
+diff --git a/.github/workflows/auth-integrity-local.yml b/.github/workflows/auth-integrity-local.yml
+index b1313006..2d985e5b 100644
+--- a/.github/workflows/auth-integrity-local.yml
++++ b/.github/workflows/auth-integrity-local.yml
+@@ -1,9 +1,10 @@
+-# Auth integrity against a DISPOSABLE local Supabase stack — ADVISORY (workstream C3).
++# Auth integrity against a DISPOSABLE local Supabase stack (workstream C3; the auth E2E gate since
++# the hosted E2E retirement, docs/supabase-e2e-retirement/15-application-and-ci-connection-transition.md).
+ #
+-# Purpose: prove the auth E2E suite can run without the permanently hosted omnivyra-e2e
+-# project. Everything runs on the GitHub-hosted runner itself: a throw-away Supabase stack
++# Everything runs on the GitHub-hosted runner itself: a throw-away Supabase stack
+ # (tests/supabase-local), a Redis service container, and the app under test. The runner is
+-# discarded afterwards.
++# discarded afterwards. NO hosted Supabase project (production or the retired hosted E2E project)
++# is contacted.
+ #
+ # Safety properties (enforced by tests/supabase-local/authIntegrityLocalWorkflow.spec.ts):
+ #   - references NO repository secret at all (no production and no hosted-E2E credential);
+@@ -15,17 +16,15 @@
+ #   - the stack is always torn down (if: always()), and teardown is scoped to this stack only;
+ #   - a skipped, missing or extra test fails the job (exact counts are asserted).
+ #
+-# ADVISORY: not a required check. Its job names deliberately differ from every existing job
+-# name, so it can neither satisfy nor replace a required status context. It does not modify or
+-# replace .github/workflows/auth-integrity.yml (the hosted job stays as it is until C4).
+-#
+-# Triggers: workflow_dispatch (only once this file is on the default branch), and pushes to
+-# ci-only/c3-auth-local/** branches (no other workflow runs on such a push, and no pull_request
+-# is involved, so the hosted E2E job is not triggered).
++# Triggers: every pull_request (no path filter, like the hosted job it replaces, so it can be made
++# a required check without leaving PRs pending), workflow_dispatch, and pushes to
++# ci-only/c3-auth-local/** branches (acceptance re-runs without a pull request).
++# Making "Auth integrity regression suite (local Supabase)" a REQUIRED check is an owner action.
+ 
+-name: Auth integrity (local Supabase, advisory)
++name: Auth integrity (local Supabase)
+ 
+ on:
++  pull_request:
+   workflow_dispatch:
+   push:
+     branches:
+@@ -52,7 +51,7 @@ env:
+ 
+ jobs:
+   local-stack-validation:
+-    name: Local Supabase stack validation (advisory)
++    name: Local Supabase stack validation
+     runs-on: ubuntu-24.04
+     timeout-minutes: 30
+     steps:
+@@ -137,7 +136,7 @@ jobs:
+           if-no-files-found: warn
+ 
+   auth-integrity-local:
+-    name: Auth integrity regression suite (local Supabase, advisory)
++    name: Auth integrity regression suite (local Supabase)
+     needs: local-stack-validation
+     runs-on: ubuntu-24.04
+     timeout-minutes: 45
+diff --git a/.github/workflows/auth-integrity.yml b/.github/workflows/auth-integrity.yml
+index 92a2d547..d200498b 100644
+--- a/.github/workflows/auth-integrity.yml
++++ b/.github/workflows/auth-integrity.yml
+@@ -1,53 +1,27 @@
+ name: Auth Integrity
+ 
+-# This file holds TWO jobs with deliberately different lifecycles.
+-#
+-# 1. `auth-invariants-static` — RUNS ON EVERY PR. Hermetic: node builtins only
+-#    (fs + path), no secrets, no network, no database, no node_modules. It is the
+-#    static half that never needed the live backend, and it was being lost purely
+-#    because it shared a file with the parked E2E job below.
+-#
+-# 2. `auth-integrity` — activated by PROVISIONING (see `e2e-secrets-preflight`):
+-#    it runs when its secrets exist and SKIPS (never fails) while they do not.
+-#    This is a LIVE-Supabase E2E gate — tests/auth/authTestHarness.ts creates,
+-#    confirms and deletes real users via the Supabase admin API and exercises real
+-#    login/callback/logout flows. Redis is NOT a secret: the job brings its own
+-#    ephemeral loopback `redis:7-alpine` service container. Placeholders are
+-#    impossible for Supabase (admin.createUser needs a real backend); prod must
+-#    NOT be used (the suite deletes users) and is refused before the app server
+-#    starts (preflight, two job steps, and again at harness load).
++# Static auth invariants ONLY — hermetic: node builtins only (fs + path), no
++# secrets, no network, no database, no node_modules. Runs on every PR and feeds
++# the required status context "Static auth invariants (hermetic, no secrets)".
+ #
+ # ─────────────────────────────────────────────────────────────────────────────
+-# E2E-SPECIFIC SECRET NAMES — the E2E half reads E2E_-prefixed secrets ONLY.
+-# The plain names (SUPABASE_URL, SUPABASE_SECRET_KEY / SUPABASE_SERVICE_ROLE_KEY,
+-# NEXT_PUBLIC_SUPABASE_*, SESSION_COOKIE_SECRET) are consumed by
+-# platform-parity.yml, which audits the PRODUCTION deployment and needs the
+-# production values. Filling the plain names with E2E values would silently
+-# repoint that workflow at the E2E project; filling them with production values
+-# would point THIS suite at production, where it creates and deletes real users.
+-# The prefix makes both mistakes impossible. tests/auth/
+-# authIntegrityWorkflow.spec.ts fails if a plain secret name is reintroduced.
+-#
+-# TARGET: the dedicated non-production project `omnivyra-e2e`
+-# (ref lomndxmrpyudaegddpef). Never klkiseupptzbecbxwrky (production).
+-#
+-# Repo secrets that activate the live half (6 values):
+-#   E2E_SUPABASE_URL
+-#   E2E_NEXT_PUBLIC_SUPABASE_URL          (optional — falls back to E2E_SUPABASE_URL)
+-#   E2E_SUPABASE_SECRET_KEY               (or legacy E2E_SUPABASE_SERVICE_ROLE_KEY)
+-#   E2E_NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY (or legacy E2E_NEXT_PUBLIC_SUPABASE_ANON_KEY)
+-#   E2E_SESSION_COOKIE_SECRET
+-#   E2E_ENCRYPTION_KEY                    (64 hex characters)
+-# E2E_REDIS_URL is no longer read: Redis is the ephemeral service container.
++# HOSTED E2E RETIRED (docs/supabase-e2e-retirement/15-application-and-ci-
++# connection-transition.md, stage 2). The live browser regression suite that
++# used to run here against the hosted, long-lived E2E Supabase project (the
++# `e2e-secrets-preflight` and `auth-integrity` jobs, fed by E2E_-prefixed
++# repository secrets) has been REPLACED by .github/workflows/auth-integrity-
++# local.yml, which runs the same five specs against a DISPOSABLE Supabase stack
++# created and destroyed on the runner. This file reads NO repository secret and
++# reaches NO hosted project. tests/auth/authIntegrityWorkflow.spec.ts and
++# tests/auth/hostedSupabaseConnections.spec.ts fail if either is reintroduced.
+ # ─────────────────────────────────────────────────────────────────────────────
+ #
+-# WHY THE SPLIT: the static check enforces two invariants that are live-relevant
+-# right now — the auth callback must fail CLOSED (no auth.getSession() fallback,
+-# session only from token exchange, clear browser state on failure), and NO
+-# feature file may read or write the global `selected_company_id` / `company_id`
+-# localStorage keys, which is a cross-tenant leakage vector. Tenant-authorization
+-# fixes are landing regularly; that invariant should be checked on the PR that
+-# would break it, not on a manual dispatch nobody runs.
++# WHAT THE STATIC CHECK ENFORCES: the auth callback must fail CLOSED (no
++# auth.getSession() fallback, session only from token exchange, clear browser
++# state on failure), and NO feature file may read or write the global
++# `selected_company_id` / `company_id` localStorage keys, which is a
++# cross-tenant leakage vector. Tenant-authorization fixes are landing
++# regularly; that invariant should be checked on the PR that would break it.
+ #
+ on:
+   # Repo-wide on purpose: the localStorage invariant is scanned across EVERY
+@@ -61,7 +35,6 @@ concurrency:
+   cancel-in-progress: false
+ 
+ jobs:
+-  # ── PR-SAFE HALF ────────────────────────────────────────────────────────────
+   # Deliberately installs NOTHING. scripts/check-auth-integrity-invariants.js
+   # requires only `fs` and `path` (Node builtins), so `npm ci` would add ~2
+   # minutes and a lockfile dependency for zero benefit. If that script ever grows
+@@ -89,278 +62,3 @@ jobs:
+       # selected_company_id / company_id localStorage keys (cross-tenant vector).
+       - name: Static auth integrity invariants
+         run: node scripts/check-auth-integrity-invariants.js
+-
+-  # ── PROVISIONING PREFLIGHT ──────────────────────────────────────────────────
+-  # Reports ONLY whether the E2E_-prefixed secrets exist. It never echoes a
+-  # secret. It does not fail on absence — an unprovisioned repo yields
+-  # provisioned=false and the E2E job below is skipped rather than failed. It
+-  # DOES fail loudly if a supplied E2E URL points at production, because that is
+-  # a misconfiguration which must never be silently skipped past.
+-  e2e-secrets-preflight:
+-    name: E2E provisioning preflight
+-    runs-on: ubuntu-latest
+-    timeout-minutes: 3
+-    outputs:
+-      provisioned: ${{ steps.check.outputs.provisioned }}
+-    steps:
+-      - name: Detect E2E secret provisioning
+-        id: check
+-        # Same expressions as the job env below. E2E_ names ONLY (see header).
+-        env:
+-          S1: ${{ secrets.E2E_SUPABASE_URL }}
+-          S2: ${{ secrets.E2E_SUPABASE_SECRET_KEY || secrets.E2E_SUPABASE_SERVICE_ROLE_KEY }}
+-          S3: ${{ secrets.E2E_NEXT_PUBLIC_SUPABASE_URL || secrets.E2E_SUPABASE_URL }}
+-          S4: ${{ secrets.E2E_NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || secrets.E2E_NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+-          S5: ${{ secrets.E2E_SESSION_COOKIE_SECRET }}
+-          S6: ${{ secrets.E2E_ENCRYPTION_KEY }}
+-          PRODUCTION_PROJECT_REF: klkiseupptzbecbxwrky
+-        # REDIS_URL is deliberately NOT a required secret: the E2E job runs its
+-        # own ephemeral loopback Redis service (see `services:` below), so no
+-        # externally hosted Redis — the only one that exists is production —
+-        # can ever be wired into this suite.
+-        run: |
+-          # Fail closed and loudly if a production target has been configured,
+-          # whether or not the rest of the provisioning is complete.
+-          for url in "${S1:-}" "${S3:-}"; do
+-            case "$url" in
+-              *"$PRODUCTION_PROJECT_REF"*)
+-                echo "::error::E2E secrets point at the PRODUCTION Supabase project. Refusing to run."
+-                exit 1
+-                ;;
+-            esac
+-          done
+-
+-          missing=0
+-          for v in S1 S2 S3 S4 S5 S6; do
+-            if [ -z "${!v}" ]; then missing=$((missing+1)); fi
+-          done
+-          # Count only — naming which secret is absent is still safe, but the
+-          # count alone is enough and leaks nothing about configuration.
+-          if [ "$missing" -eq 0 ]; then
+-            echo "All 6 E2E secrets present — auth E2E will run."
+-            echo "provisioned=true" >> "$GITHUB_OUTPUT"
+-          else
+-            echo "$missing of 6 E2E secrets absent — auth E2E will SKIP (not fail)."
+-            echo "provisioned=false" >> "$GITHUB_OUTPUT"
+-          fi
+-
+-  # ── PARKED HALF (live Supabase E2E) ─────────────────────────────────────────
+-  auth-integrity:
+-    name: Auth integrity regression lock
+-    # ACTIVATION IS DRIVEN BY PROVISIONING, NOT BY A HARD-CODED PARK.
+-    #
+-    # This job runs as soon as the E2E secrets exist and SKIPS (never fails)
+-    # while they do not. A hard-coded park meant a human had to remember to
+-    # come back and flip it; an unconditional trigger with no secrets would
+-    # paint every PR red for an environment reason unrelated to authentication.
+-    #
+-    # The `secrets` context is NOT available in a job-level `if:`, so presence
+-    # is computed by the preflight job, which emits only a boolean.
+-    needs: e2e-secrets-preflight
+-    if: needs.e2e-secrets-preflight.outputs.provisioned == 'true'
+-    # Pinned: `ubuntu-latest` now resolves to ubuntu-26.04, where
+-    # `npx playwright install chromium` fails ("Playwright does not support
+-    # chromium on ubuntu26.04-x64"). Return to ubuntu-latest once the pinned
+-    # Playwright version supports 26.04.
+-    runs-on: ubuntu-24.04
+-    timeout-minutes: 30
+-    # EPHEMERAL, per-run Redis. Created with the job and destroyed with the
+-    # runner, so it holds no production state and the scoped rate-limit reset
+-    # below is safe by construction. Published on the runner's LOOPBACK only.
+-    # lib/auth/rateLimit.ts backs the login limiter with Redis and the pre-run
+-    # counter reset connects explicitly, so a present-but-unreachable URL is not
+-    # enough. The container's --health-cmd runs INSIDE the container (where
+-    # redis-cli exists); the host-side check is the node socket step below.
+-    services:
+-      redis:
+-        image: redis:7-alpine
+-        ports:
+-          - 127.0.0.1:6379:6379
+-        options: >-
+-          --health-cmd "redis-cli ping"
+-          --health-interval 10s
+-          --health-timeout 5s
+-          --health-retries 5
+-    env:
+-      # MUST be localhost, not 127.0.0.1: next.config.js 307-redirects the
+-      # 127.0.0.1 host to http://localhost:3000 (distinct browser origin, so a
+-      # separate cookie jar), and the E2E project's auth redirect allow-list only
+-      # accepts its site_url (http://localhost:3000). Measured on the branch that
+-      # first ran this suite green in CI: with 127.0.0.1 the callback specs fail.
+-      AUTH_E2E_BASE_URL: http://localhost:3000
+-      AUTH_E2E_TIMEOUT_MS: '120000'
+-      # E2E_-prefixed secrets ONLY — see the header. `.env.local` is never
+-      # created or read by this job. The harness and check:auth-e2e-target read
+-      # the E2E_* names first; the dev server and config/env.schema.ts read the
+-      # canonical unprefixed names, so the SAME E2E values are bound to both.
+-      # Each env var is set from an E2E secret — never from the plain repo
+-      # secrets that platform-parity.yml uses for production.
+-      E2E_SUPABASE_URL: ${{ secrets.E2E_SUPABASE_URL }}
+-      E2E_SUPABASE_SECRET_KEY: ${{ secrets.E2E_SUPABASE_SECRET_KEY || secrets.E2E_SUPABASE_SERVICE_ROLE_KEY }}
+-      NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.E2E_NEXT_PUBLIC_SUPABASE_URL || secrets.E2E_SUPABASE_URL }}
+-      NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.E2E_NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || secrets.E2E_NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+-      SUPABASE_URL: ${{ secrets.E2E_SUPABASE_URL }}
+-      SUPABASE_SECRET_KEY: ${{ secrets.E2E_SUPABASE_SECRET_KEY || secrets.E2E_SUPABASE_SERVICE_ROLE_KEY }}
+-      SESSION_COOKIE_SECRET: ${{ secrets.E2E_SESSION_COOKIE_SECRET }}
+-      # Phase 138 finding: config/env.schema.ts requires BOTH of these and the
+-      # job supplied neither, so `npm run dev` died at config validation and the
+-      # readiness poll timed out with a message that looked like an auth failure.
+-      # REDIS_URL is the ephemeral loopback service above — never a secret, so it
+-      # can never be pointed at the production Redis. 127.0.0.1 (not localhost)
+-      # because the port is published on IPv4 loopback only and Node may resolve
+-      # localhost to ::1 first.
+-      REDIS_URL: redis://127.0.0.1:6379
+-      ENCRYPTION_KEY: ${{ secrets.E2E_ENCRYPTION_KEY }}
+-      # config/env.schema.ts marks OPENAI_API_KEY required and validateEnv()
+-      # calls process.exit(1) on a miss: the dev server boots, serves the warmup
+-      # routes, then dies the moment a route imports the config module —
+-      # surfacing as "fetch failed" / chrome-error pages that look like auth
+-      # failures. NON-SECRET placeholder on purpose: the auth specs exercise
+-      # login/callback/logout only and never reach an AI code path.
+-      OPENAI_API_KEY: e2e-placeholder-not-a-real-key
+-      # lib/env/namespace.ts enforceEnvIsolationFatal() hard-blocks "remote
+-      # Supabase URL + loopback REDIS_URL" ("prod-Supabase + local-Redis topology
+-      # blocked") on every server-side Supabase client construction, so without
+-      # this every auth API route 500s. Its danger is a local process mutating a
+-      # REMOTE PRODUCTION DB while its queue jobs land in a Redis no remote worker
+-      # reads. This job matches the shape but not the danger: the database is
+-      # proven to be the dedicated non-production E2E project twice before the
+-      # server starts ("Refuse to run against production" + check:auth-e2e-target)
+-      # and again at harness load; that project has no remote queue workers; and
+-      # the Redis is an ephemeral container destroyed with the runner. Bypasses
+-      # ONLY that topology check — the production-target refusals are untouched.
+-      # (Invisible locally because Next.js also loads .env.local; CI has none —
+-      # asserted below — so the guard fires in CI and only in CI.)
+-      ALLOW_PROD_DB_WITH_LOCAL_REDIS: '1'
+-    steps:
+-      - name: Checkout
+-        uses: actions/checkout@v4
+-
+-      - name: Setup Node
+-        uses: actions/setup-node@v4
+-        with:
+-          node-version: '22'
+-          cache: npm
+-
+-      - name: Install dependencies
+-        run: npm ci
+-
+-      - name: Install Chromium
+-        run: npx playwright install chromium
+-
+-      - name: Static auth integrity invariants
+-        run: npm run check:auth-integrity-invariants
+-
+-      # Unit tests for the production guard, the auth-state predicate (with its
+-      # drift test against utils/authStorage.ts) and the identity cleanup.
+-      # Hermetic — no network, no database. If these fail the guard is not
+-      # trustworthy and nothing below should run.
+-      - name: E2E production-guard unit tests
+-        run: npm run test:auth-e2e-guard
+-
+-      # The harness must never read .env.local: it points at PRODUCTION.
+-      - name: Assert no .env.local is present
+-        run: |
+-          if [ -f .env.local ]; then
+-            echo "::error::.env.local exists in the CI workspace; it must never be materialized for Auth E2E."
+-            exit 1
+-          fi
+-          echo "No .env.local present."
+-
+-      # HARD SAFETY GATE. The harness calls admin.listUsers and admin.deleteUser.
+-      # If SUPABASE_URL ever points at the production project this job must die
+-      # BEFORE the server starts. Compares against the known production ref and
+-      # prints only a boolean verdict, never the URL.
+-      # Checks the job-level values (bound from the E2E_ secrets above) that the
+-      # server AND the browser client will actually use.
+-      - name: Refuse to run against production
+-        run: |
+-          node -e "
+-            const PROD='klkiseupptzbecbxwrky';
+-            for (const name of ['SUPABASE_URL', 'NEXT_PUBLIC_SUPABASE_URL', 'E2E_SUPABASE_URL']) {
+-              const url=String(process.env[name]||'');
+-              if (!url) { console.error(name + ' empty'); process.exit(1); }
+-              if (url.includes(PROD)) {
+-                console.error('REFUSING TO RUN: ' + name + ' points at the PRODUCTION project.');
+-                process.exit(1);
+-              }
+-            }
+-            console.log('Target is non-production: OK');
+-          "
+-
+-      # Stricter than the denylist above: the same fail-closed guard the harness
+-      # runs at module load (tests/auth/e2eEnvironmentGuard.ts) — rejects the
+-      # production ref/host AND anything that is not the expected E2E project,
+-      # plus empty, malformed, local and placeholder targets. Verdict only.
+-      - name: Assert target is the dedicated E2E project
+-        run: npm run check:auth-e2e-target
+-
+-      - name: Validate auth test environment
+-        run: |
+-          node -e "const required=['NEXT_PUBLIC_SUPABASE_URL','NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY','SUPABASE_SECRET_KEY','SESSION_COOKIE_SECRET']; const missing=required.filter((key)=>!process.env[key]); if (missing.length) { console.error('Missing auth integrity CI env:', missing.join(', ')); process.exit(1); }"
+-
+-      # Proves the service container is reachable from the job before anything
+-      # depends on it, so an infrastructure failure is distinguishable from a test
+-      # failure. Refuses any non-loopback target. Speaks RESP over a raw socket:
+-      # `redis-cli` is NOT installed on the runner host.
+-      - name: Verify ephemeral Redis is healthy
+-        run: |
+-          node -e "
+-            const net = require('net');
+-            const u = new URL(process.env.REDIS_URL || '');
+-            const host = u.hostname.replace(/^\[|\]$/g, '');
+-            if (!['localhost', '127.0.0.1', '::1'].includes(host)) {
+-              console.error('REFUSING: E2E Redis is not the ephemeral loopback service container.');
+-              process.exit(1);
+-            }
+-            const port = Number(u.port || 6379);
+-            const deadline = Date.now() + 30000;
+-            (function attempt() {
+-              const s = net.createConnection({ host, port });
+-              let buf = '';
+-              const retry = () => {
+-                s.destroy();
+-                if (Date.now() > deadline) {
+-                  console.error('::error::Ephemeral Redis service never answered PING');
+-                  process.exit(1);
+-                }
+-                setTimeout(attempt, 1000);
+-              };
+-              s.setTimeout(3000);
+-              s.on('connect', () => s.write('PING\r\n'));
+-              s.on('data', (d) => {
+-                buf += d.toString();
+-                if (buf.includes('+PONG')) { console.log('Ephemeral loopback Redis answered +PONG'); s.end(); process.exit(0); }
+-              });
+-              s.on('timeout', retry);
+-              s.on('error', retry);
+-            })();
+-          "
+-
+-      # lib/auth/rateLimit.ts allows 10 logins per IP per 15 minutes; a full run
+-      # performs ~5, so repeated runs trip it and /api/auth/login returns 429,
+-      # which surfaces as an auth timeout. The limiter stays fully active DURING
+-      # the run; only pre-run counters are cleared. Scoped SCAN+DEL of the auth
+-      # rl:* namespaces only, never FLUSHDB; refuses a production Redis URL.
+-      - name: Reset auth rate-limit counters
+-        run: npm run reset:auth-e2e-rate-limits
+-
+-      - name: Start app server
+-        run: |
+-          npm run dev > auth-integrity-server.log 2>&1 &
+-          node -e "const url=process.env.AUTH_E2E_BASE_URL; const deadline=Date.now()+120000; (async()=>{ while(Date.now()<deadline){ try{ const res=await fetch(url); if(res.status<500) return; }catch{} await new Promise(r=>setTimeout(r,1000)); } console.error('Auth integrity dev server did not become ready'); process.exit(1); })();"
+-
+-      # Runs every spec even if an earlier one fails, prints a PASS/FAIL
+-      # summary, and still exits non-zero if any failed.
+-      - name: Auth integrity regression suite
+-        run: npm run test:auth-integrity
+-
+-      - name: Upload auth integrity artifacts
+-        if: always()
+-        uses: actions/upload-artifact@v4
+-        with:
+-          name: auth-integrity-artifacts
+-          path: |
+-            auth-integrity-server.log
+-            test-results/auth-integrity/**
+-          if-no-files-found: ignore
+diff --git a/tests/auth/authIntegrityWorkflow.spec.ts b/tests/auth/authIntegrityWorkflow.spec.ts
+index 8eeb7c6b..d0050150 100644
+--- a/tests/auth/authIntegrityWorkflow.spec.ts
++++ b/tests/auth/authIntegrityWorkflow.spec.ts
+@@ -5,50 +5,32 @@ import path from 'node:path';
+ import { createRequire } from 'node:module';
+ 
+ /**
+- * Static lock on .github/workflows/auth-integrity.yml: the live E2E half must
+- * source its Supabase / session / encryption values ONLY from E2E_-prefixed
+- * repository secrets.
++ * Static lock on .github/workflows/auth-integrity.yml AFTER the hosted E2E retirement
++ * (docs/supabase-e2e-retirement/15-application-and-ci-connection-transition.md, stage 2).
+  *
+- * WHY: platform-parity.yml consumes the plain names (SUPABASE_URL,
+- * SUPABASE_SECRET_KEY, SUPABASE_SERVICE_ROLE_KEY, NEXT_PUBLIC_SUPABASE_*,
+- * SESSION_COOKIE_SECRET) to audit the PRODUCTION deployment. If the E2E job read
+- * those names it would either run against production (it creates and deletes
+- * real users) or force the owner to repoint platform-parity at the E2E project.
++ * The file now holds exactly ONE job: the hermetic static-invariant check that feeds the required
++ * status context. The live suite runs against a DISPOSABLE Supabase stack in
++ * .github/workflows/auth-integrity-local.yml instead (locked by
++ * tests/supabase-local/authIntegrityLocalWorkflow.spec.ts).
+  *
+- * Hermetic: reads one file from disk and parses it. js-yaml is resolved from the
+- * lockfile's hoisted dev tree; if it ever disappears this spec fails loudly
+- * rather than skipping.
++ * This spec fails if the hosted E2E job, its provisioning preflight, ANY repository secret, the
++ * prod-DB/local-Redis bypass or a hosted Supabase marker is reintroduced, and if the required job
++ * is renamed, gains secrets or loses its pull_request trigger.
++ *
++ * Hermetic: reads one file from disk and parses it. js-yaml is resolved from the lockfile's hoisted
++ * dev tree; if it ever disappears this spec fails loudly rather than skipping.
+  */
+ const yaml = createRequire(__filename)('js-yaml') as { load(source: string): unknown };
+ 
+ const WORKFLOW_PATH = path.join(__dirname, '..', '..', '.github', 'workflows', 'auth-integrity.yml');
+-const E2E_JOB = 'auth-integrity';
+-const PREFLIGHT_JOB = 'e2e-secrets-preflight';
+ const STATIC_JOB = 'auth-invariants-static';
+ const STATIC_JOB_REQUIRED_CONTEXT = 'Static auth invariants (hermetic, no secrets)';
+-
+-/** Plain secret names that belong to production (platform-parity.yml). */
+-const PLAIN_PRODUCTION_SECRET_NAMES = [
+-  'SUPABASE_URL',
+-  'SUPABASE_SECRET_KEY',
+-  'SUPABASE_SERVICE_ROLE_KEY',
+-  'NEXT_PUBLIC_SUPABASE_URL',
+-  'NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY',
+-  'NEXT_PUBLIC_SUPABASE_ANON_KEY',
+-  'SESSION_COOKIE_SECRET',
+-  'ENCRYPTION_KEY',
+-  'REDIS_URL',
+-];
++/** Job ids of the retired hosted half. */
++const RETIRED_JOBS = ['auth-integrity', 'e2e-secrets-preflight'];
++const HOSTED_MARKERS = ['klkiseupptzbecbxwrky', 'lomndxmrpyudaegddpef', '.supabase.co', '.supabase.in', '.supabase.com'];
+ 
+ type Step = { name?: string; run?: string; uses?: string; env?: Record<string, unknown> };
+-type Job = {
+-  name?: string;
+-  if?: string;
+-  needs?: string | string[];
+-  env?: Record<string, unknown>;
+-  steps?: Step[];
+-  services?: Record<string, { image?: string; ports?: string[] }>;
+-};
++type Job = { name?: string; env?: Record<string, unknown>; steps?: Step[]; services?: unknown };
+ type Workflow = { on?: Record<string, unknown>; jobs: Record<string, Job> };
+ 
+ function loadWorkflow(source = fs.readFileSync(WORKFLOW_PATH, 'utf8')): Workflow {
+@@ -57,142 +39,95 @@ function loadWorkflow(source = fs.readFileSync(WORKFLOW_PATH, 'utf8')): Workflow
+   return parsed;
+ }
+ 
+-/**
+- * Every secret name a job references, in any position (job env, step env,
+- * `with:`, `run:` bodies, `if:`), in both `secrets.NAME` and `secrets['NAME']`
+- * forms.
+- */
+-function referencedSecretNames(job: unknown): string[] {
+-  const text = JSON.stringify(job);
++/** Every secret name referenced anywhere, in both `secrets.NAME` and `secrets['NAME']` forms. */
++function referencedSecretNames(value: unknown): string[] {
++  const text = typeof value === 'string' ? value : JSON.stringify(value);
+   const names = new Set<string>();
+   for (const m of text.matchAll(/secrets\.([A-Za-z0-9_]+)/g)) names.add(m[1]);
+   for (const m of text.matchAll(/secrets\[\s*\\?['"]([^'"\\]+)\\?['"]\s*\]/g)) names.add(m[1]);
+   return [...names].sort();
+ }
+ 
+-function nonE2ESecrets(job: unknown): string[] {
+-  return referencedSecretNames(job).filter((name) => !name.startsWith('E2E_'));
++/** All problems with a workflow source; [] means the post-retirement shape holds. */
++function checkWorkflow(source: string): string[] {
++  const problems: string[] = [];
++  let wf: Workflow;
++  try {
++    wf = loadWorkflow(source);
++  } catch (e) {
++    return [`does not parse: ${(e as Error).message}`];
++  }
++  const ids = Object.keys(wf.jobs);
++  if (ids.join(',') !== STATIC_JOB) problems.push(`jobs must be exactly ${STATIC_JOB}, got ${ids.join(',')}`);
++  for (const retired of RETIRED_JOBS) if (wf.jobs[retired]) problems.push(`retired hosted job "${retired}" is back`);
++  const secrets = referencedSecretNames(source);
++  if (secrets.length) problems.push(`references repository secret(s): ${secrets.join(', ')}`);
++  if (/ALLOW_PROD_DB_WITH_LOCAL_REDIS/.test(source)) problems.push('sets or names ALLOW_PROD_DB_WITH_LOCAL_REDIS');
++  const lowered = source.toLowerCase();
++  for (const m of HOSTED_MARKERS) if (lowered.includes(m)) problems.push(`contains hosted marker ${m}`);
++  const job = wf.jobs[STATIC_JOB];
++  if (!job) {
++    problems.push(`required job ${STATIC_JOB} is missing`);
++  } else {
++    if (job.name !== STATIC_JOB_REQUIRED_CONTEXT) problems.push(`required job must keep the name "${STATIC_JOB_REQUIRED_CONTEXT}"`);
++    if (job.services) problems.push('the static job must not start services');
++    const steps = job.steps ?? [];
++    if (steps.some((s) => /npm (ci|install)\b/.test(String(s.run ?? '')))) problems.push('the static job must install nothing');
++    if (!steps.some((s) => /node scripts\/check-auth-integrity-invariants\.js/.test(String(s.run ?? '')))) problems.push('the static job must run the invariant checker');
++  }
++  if (!wf.on || !('pull_request' in wf.on)) problems.push('the pull_request trigger feeds a required check and must stay');
++  return problems;
+ }
+ 
+-test('the workflow parses and keeps its three jobs', () => {
+-  const wf = loadWorkflow();
+-  for (const job of [STATIC_JOB, PREFLIGHT_JOB, E2E_JOB]) {
+-    assert.ok(wf.jobs[job], `job "${job}" is missing from auth-integrity.yml`);
+-  }
+-});
++const SOURCE = fs.readFileSync(WORKFLOW_PATH, 'utf8');
+ 
+-test('the E2E job references ONLY E2E_-prefixed secrets', () => {
+-  const job = loadWorkflow().jobs[E2E_JOB];
+-  assert.deepEqual(
+-    nonE2ESecrets(job),
+-    [],
+-    'the E2E job must not read plain repository secrets; platform-parity.yml owns those production values',
+-  );
+-  for (const plain of PLAIN_PRODUCTION_SECRET_NAMES) {
+-    assert.ok(
+-      !referencedSecretNames(job).includes(plain),
+-      `the E2E job references the production secret name "${plain}"`,
+-    );
+-  }
++test('the workflow holds only the hermetic static job (hosted E2E retired)', () => {
++  assert.deepEqual(checkWorkflow(SOURCE), []);
+ });
+ 
+-test('the provisioning preflight tests the E2E_-prefixed secrets only', () => {
+-  const wf = loadWorkflow();
+-  const preflight = wf.jobs[PREFLIGHT_JOB];
+-  const names = referencedSecretNames(preflight);
+-  assert.ok(names.length > 0, 'the preflight must test at least one E2E secret');
+-  assert.deepEqual(nonE2ESecrets(preflight), [], 'the preflight must test E2E_ secrets, not plain names');
+-  // The E2E job must still be gated on that preflight.
+-  const e2e = wf.jobs[E2E_JOB];
+-  assert.equal(e2e.needs, PREFLIGHT_JOB);
+-  assert.match(String(e2e.if), /needs\.e2e-secrets-preflight\.outputs\.provisioned == 'true'/);
+-});
++// ------------------------------------------------------------ FAILING CONTROLS
++function expectDetected(label: string, from: string, to: string, problem: RegExp): void {
++  assert.equal(SOURCE.split(from).length - 1, 1, `mutation anchor for "${label}" must occur exactly once`);
++  const problems = checkWorkflow(SOURCE.replace(from, to));
++  assert.ok(problems.some((p) => problem.test(p)), `${label}: expected a problem matching ${problem}, got ${JSON.stringify(problems)}`);
++}
+ 
+-test('the preflight and the job require the same secret set', () => {
+-  const wf = loadWorkflow();
+-  assert.deepEqual(
+-    referencedSecretNames(wf.jobs[PREFLIGHT_JOB]),
+-    referencedSecretNames(wf.jobs[E2E_JOB]),
+-    'a secret the job consumes but the preflight does not test would let the job start half-provisioned',
+-  );
++const HOSTED_JOB_SNIPPET = [
++  '',
++  '  auth-integrity:',
++  '    name: Auth integrity regression lock',
++  '    runs-on: ubuntu-24.04',
++  '    env:',
++  '      SUPABASE_URL: ${{ secrets.E2E_SUPABASE_URL }}',
++  "      ALLOW_PROD_DB_WITH_LOCAL_REDIS: '1'",
++  '    steps:',
++  '      - run: npm run test:auth-integrity',
++  '',
++].join('\n');
++
++test('CONTROL: reintroducing the hosted E2E job is detected', () => {
++  const problems = checkWorkflow(`${SOURCE.trimEnd()}\n${HOSTED_JOB_SNIPPET}`);
++  for (const re of [/jobs must be exactly/, /retired hosted job "auth-integrity"/, /E2E_SUPABASE_URL/, /ALLOW_PROD_DB_WITH_LOCAL_REDIS/]) {
++    assert.ok(problems.some((p) => re.test(p)), `expected ${re} in ${JSON.stringify(problems)}`);
++  }
+ });
+ 
+-test('the canonical runtime env names are bound from E2E_ secrets', () => {
+-  const env = loadWorkflow().jobs[E2E_JOB].env ?? {};
+-  for (const name of [
+-    'SUPABASE_URL',
+-    'NEXT_PUBLIC_SUPABASE_URL',
+-    'SUPABASE_SECRET_KEY',
+-    'NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY',
+-    'SESSION_COOKIE_SECRET',
+-    'ENCRYPTION_KEY',
+-    'E2E_SUPABASE_URL',
+-    'E2E_SUPABASE_SECRET_KEY',
+-  ]) {
+-    const value = env[name];
+-    assert.equal(typeof value, 'string', `job env ${name} must be set`);
+-    const refs = referencedSecretNames(value);
+-    assert.ok(refs.length > 0, `job env ${name} must come from a repository secret`);
+-    assert.deepEqual(
+-      refs.filter((ref) => !ref.startsWith('E2E_')),
+-      [],
+-      `job env ${name} must be bound from an E2E_ secret only`,
+-    );
+-  }
++test('CONTROL: a secret in the static job (bracket form too) is detected', () => {
++  expectDetected('secret', 'run: node scripts/check-auth-integrity-invariants.js', "run: node scripts/check-auth-integrity-invariants.js ${{ secrets['SUPABASE_URL'] }}", /repository secret\(s\): SUPABASE_URL/);
+ });
+ 
+-test('Redis is the ephemeral loopback service, never a secret', () => {
+-  const job = loadWorkflow().jobs[E2E_JOB];
+-  assert.match(String(job.env?.REDIS_URL), /^redis:\/\/(127\.0\.0\.1|localhost):6379$/);
+-  assert.equal(job.services?.redis?.image, 'redis:7-alpine');
+-  assert.ok(
+-    (job.services?.redis?.ports ?? []).every((port) => String(port).startsWith('127.0.0.1:')),
+-    'the Redis service must be published on loopback only',
+-  );
++test('CONTROL: renaming the required job is detected', () => {
++  expectDetected('rename', `name: ${STATIC_JOB_REQUIRED_CONTEXT}`, 'name: Static auth invariants', /keep the name/);
+ });
+ 
+-test('the production refusals run before the app server starts', () => {
+-  const steps = loadWorkflow().jobs[E2E_JOB].steps ?? [];
+-  const indexOf = (predicate: (step: Step) => boolean) => steps.findIndex(predicate);
+-  const refuse = indexOf((s) => s.name === 'Refuse to run against production');
+-  const target = indexOf((s) => /npm run check:auth-e2e-target/.test(String(s.run)));
+-  const server = indexOf((s) => /npm run dev/.test(String(s.run)));
+-  const suite = indexOf((s) => /npm run test:auth-integrity/.test(String(s.run)));
+-  assert.ok(refuse >= 0, 'production-refusal step is missing');
+-  assert.ok(target >= 0, 'check:auth-e2e-target step is missing');
+-  assert.ok(server >= 0 && suite >= 0, 'server start / suite steps are missing');
+-  assert.ok(refuse < server && target < server, 'production refusals must precede the app server');
+-  assert.ok(server < suite);
+-  assert.match(String(steps[refuse].run), /klkiseupptzbecbxwrky/);
++test('CONTROL: dropping the pull_request trigger is detected', () => {
++  expectDetected('trigger', '  pull_request:\n', '', /pull_request trigger/);
+ });
+ 
+-test('the required static job stays hermetic and keeps its required name', () => {
+-  const wf = loadWorkflow();
+-  const job = wf.jobs[STATIC_JOB];
+-  assert.equal(job.name, STATIC_JOB_REQUIRED_CONTEXT);
+-  assert.deepEqual(referencedSecretNames(job), [], 'the static job must read no secrets');
+-  assert.ok(wf.on && 'pull_request' in wf.on, 'the pull_request trigger feeds a required check');
++test('CONTROL: a hosted Supabase marker is detected', () => {
++  expectDetected('marker', '# Static auth invariants ONLY', '# Static auth invariants ONLY https://lomndxmrpyudaegddpef.supabase.co', /hosted marker lomndxmrpyudaegddpef/);
+ });
+ 
+-// ------------------------------------------------------------ MUTATION TEST
+-test('MUTATION: reintroducing a plain production secret name is caught', () => {
+-  const source = fs.readFileSync(WORKFLOW_PATH, 'utf8');
+-  // Anchored at line start so it hits the job's SUPABASE_URL binding, not the
+-  // E2E_SUPABASE_URL line that contains the same text as a suffix.
+-  const mutated = source.replace(
+-    /^(\s+)SUPABASE_URL: \$\{\{ secrets\.E2E_SUPABASE_URL \}\}/m,
+-    '$1SUPABASE_URL: ${{ secrets.SUPABASE_URL }}',
+-  );
+-  assert.notEqual(mutated, source, 'mutation anchor not found — update this test with the workflow');
+-  const job = loadWorkflow(mutated).jobs[E2E_JOB];
+-  assert.deepEqual(nonE2ESecrets(job), ['SUPABASE_URL']);
+-
+-  // Bracket form, and a reference buried in a run: body, are caught too.
+-  assert.deepEqual(referencedSecretNames({ run: "echo ${{ secrets['SESSION_COOKIE_SECRET'] }}" }), [
+-    'SESSION_COOKIE_SECRET',
+-  ]);
+-  assert.deepEqual(
+-    referencedSecretNames({ steps: [{ run: 'x=${{ secrets.SUPABASE_SECRET_KEY || secrets.E2E_SUPABASE_SECRET_KEY }}' }] }),
+-    ['E2E_SUPABASE_SECRET_KEY', 'SUPABASE_SECRET_KEY'],
+-  );
++test('CONTROL: installing dependencies in the static job is detected', () => {
++  expectDetected('install', 'run: test -f scripts/check-auth-integrity-invariants.js', 'run: npm ci', /install nothing/);
+ });
+diff --git a/tests/auth/hostedSupabaseConnections.spec.ts b/tests/auth/hostedSupabaseConnections.spec.ts
+index be7c012b..ebf6f7aa 100644
+--- a/tests/auth/hostedSupabaseConnections.spec.ts
++++ b/tests/auth/hostedSupabaseConnections.spec.ts
+@@ -30,13 +30,13 @@ export const PRODUCTION_REFS: readonly string[] = ['klkiseupptzbecbxwrky'];
+ 
+ /**
+  * Workflows allowed to read E2E_-prefixed secrets (i.e. to reach the hosted E2E project).
+- * STAGE 1: the hosted auth-integrity job is still live. STAGE 2 sets this to [].
++ * STAGE 2 (hosted E2E retired): none. The auth suite runs on a disposable stack (auth-integrity-local.yml).
+  */
+-export const HOSTED_E2E_SECRET_WORKFLOWS: readonly string[] = ['auth-integrity.yml'];
++export const HOSTED_E2E_SECRET_WORKFLOWS: readonly string[] = [];
+ /** Workflows allowed to name the hosted E2E ref in text (comments / refusal markers). */
+-export const HOSTED_E2E_REF_WORKFLOWS: readonly string[] = ['auth-integrity.yml'];
+-/** Workflows allowed to set ALLOW_PROD_DB_WITH_LOCAL_REDIS. STAGE 2 sets this to []. */
+-export const PROD_DB_LOCAL_REDIS_BYPASS_WORKFLOWS: readonly string[] = ['auth-integrity.yml'];
++export const HOSTED_E2E_REF_WORKFLOWS: readonly string[] = [];
++/** Workflows allowed to set ALLOW_PROD_DB_WITH_LOCAL_REDIS. STAGE 2: none. */
++export const PROD_DB_LOCAL_REDIS_BYPASS_WORKFLOWS: readonly string[] = [];
+ /** Workflows allowed to read production-valued repository secrets. */
+ export const PRODUCTION_SECRET_WORKFLOWS: readonly string[] = ['platform-parity.yml'];
+ 
+diff --git a/tests/supabase-local/authIntegrityLocalWorkflow.spec.ts b/tests/supabase-local/authIntegrityLocalWorkflow.spec.ts
+index cca6f2db..05a7ebc3 100644
+--- a/tests/supabase-local/authIntegrityLocalWorkflow.spec.ts
++++ b/tests/supabase-local/authIntegrityLocalWorkflow.spec.ts
+@@ -3,10 +3,10 @@ import test from 'node:test';
+ import fs from 'node:fs';
+ import path from 'node:path';
+ import { createRequire } from 'node:module';
+-import { execFileSync } from 'node:child_process';
+ 
+ /**
+- * Static lock on .github/workflows/auth-integrity-local.yml (C3, advisory). Hermetic: reads files and
++ * Static lock on .github/workflows/auth-integrity-local.yml (C3; the auth E2E gate on every pull request
++ * since the hosted E2E retirement, docs/supabase-e2e-retirement/15-*). Hermetic: reads files and
+  * parses YAML; no network. checkWorkflow() returns every violated rule; the controls at the end mutate the
+  * workflow text and prove each key rule is detected.
+  */
+@@ -28,6 +28,12 @@ function load(text: string): Workflow {
+   return wf;
+ }
+ 
++/** Pinned status-context names (candidates for required checks once the hosted job is retired). */
++const EXPECTED_JOB_NAMES: Record<string, string> = {
++  'local-stack-validation': 'Local Supabase stack validation',
++  'auth-integrity-local': 'Auth integrity regression suite (local Supabase)',
++};
++
+ function otherJobNamesAndIds(): Set<string> {
+   const out = new Set<string>();
+   for (const f of fs.readdirSync(WF_DIR)) {
+@@ -64,7 +70,10 @@ function checkWorkflow(text: string): string[] {
+   for (const marker of ['klkiseupptzbecbxwrky', 'lomndxmrpyudaegddpef', '.supabase.co', '.supabase.in']) if (text.includes(marker)) add(`contains hosted marker ${marker}`);
+   const on = wf.on ?? {};
+   const triggers = Object.keys(on).sort();
+-  if (triggers.join(',') !== 'push,workflow_dispatch') add(`triggers must be exactly push + workflow_dispatch, got ${triggers.join(',')}`);
++  if (triggers.join(',') !== 'pull_request,push,workflow_dispatch') add(`triggers must be exactly pull_request + push + workflow_dispatch, got ${triggers.join(',')}`);
++  // No filter on pull_request: a path- or branch-filtered required check leaves PRs pending forever, and
++  // the hosted job this replaces ran on every PR.
++  if (on.pull_request !== null && on.pull_request !== undefined && Object.keys(on.pull_request as object).length !== 0) add('pull_request must run on every PR (no paths/branches/types filter)');
+   const push = on.push as { branches?: string[]; tags?: unknown; paths?: unknown } | null | undefined;
+   if (!push || JSON.stringify(push.branches) !== JSON.stringify(['ci-only/c3-auth-local/**']) || Object.keys(push).length !== 1) add('push must be limited to branches ci-only/c3-auth-local/** only');
+   if (JSON.stringify(wf.permissions) !== JSON.stringify({ contents: 'read' })) add('permissions must be exactly contents: read');
+@@ -79,7 +88,8 @@ function checkWorkflow(text: string): string[] {
+   const others = otherJobNamesAndIds();
+   for (const [id, job] of Object.entries(jobs)) {
+     if (others.has(id) || (job.name && others.has(job.name))) add(`job ${id} reuses an existing job id or name (could satisfy a required context)`);
+-    if (!job.name || !/\badvisory\)$/.test(job.name)) add(`job ${id} name must end with "advisory)"`);
++    // The status-context names are pinned: the owner makes them required checks after cutover.
++    if (job.name !== EXPECTED_JOB_NAMES[id]) add(`job ${id} name must be exactly "${EXPECTED_JOB_NAMES[id]}"`);
+     if (!/^ubuntu-\d/.test(String(job['runs-on']))) add(`job ${id} must run on a GitHub-hosted ubuntu runner`);
+     if (job['continue-on-error'] !== undefined) add(`job ${id} must not use continue-on-error`);
+     if (job.env && 'ALLOW_PROD_DB_WITH_LOCAL_REDIS' in job.env) add(`job ${id} sets ALLOW_PROD_DB_WITH_LOCAL_REDIS`);
+@@ -154,9 +164,9 @@ test('C3 workflow: the expected counts come from the real runner (5 spec files,
+   assert.deepEqual(expectedAuthCounts(), { specs: 5, tests: 5 });
+ });
+ 
+-test('C3 workflow: the hosted auth-integrity.yml is byte-identical to HEAD (untouched)', () => {
+-  const head = execFileSync('git', ['-C', ROOT, 'show', 'HEAD:.github/workflows/auth-integrity.yml'], { encoding: 'utf8' });
+-  assert.equal(fs.readFileSync(path.join(WF_DIR, 'auth-integrity.yml'), 'utf8'), head);
++test('C3 workflow: the hosted E2E job is retired from auth-integrity.yml (only the static job remains)', () => {
++  const hosted = load(fs.readFileSync(path.join(WF_DIR, 'auth-integrity.yml'), 'utf8'));
++  assert.deepEqual(Object.keys(hosted.jobs ?? {}), ['auth-invariants-static']);
+ });
+ 
+ // ---------------- failing controls: each mutation must be detected ----------------
+@@ -170,8 +180,16 @@ test('C3 CONTROL a hosted-E2E secret reference is detected', () => {
+   expectDetected('secret', "OPENAI_API_KEY: e2e-placeholder-not-a-real-key", 'OPENAI_API_KEY: e2e-placeholder-not-a-real-key\n      E2E_SUPABASE_URL: ${{ secrets.E2E_SUPABASE_URL }}', /repository secret/);
+ });
+ 
+-test('C3 CONTROL a pull_request trigger is detected', () => {
+-  expectDetected('pull_request', 'on:\n  workflow_dispatch:', 'on:\n  pull_request:\n  workflow_dispatch:', /triggers must be exactly/);
++test('C3 CONTROL dropping the pull_request trigger is detected', () => {
++  expectDetected('pull_request', 'on:\n  pull_request:\n  workflow_dispatch:', 'on:\n  workflow_dispatch:', /triggers must be exactly/);
++});
++
++test('C3 CONTROL a path-filtered pull_request trigger is detected', () => {
++  expectDetected('pr paths', 'on:\n  pull_request:\n', "on:\n  pull_request:\n    paths:\n      - 'tests/auth/**'\n", /must run on every PR/);
++});
++
++test('C3 CONTROL renaming a pinned status-context job is detected', () => {
++  expectDetected('rename', 'name: Local Supabase stack validation\n', 'name: Local Supabase stack validation (advisory)\n', /name must be exactly/);
+ });
+ 
+ test('C3 CONTROL teardown that does not always run is detected', () => {
+@@ -191,7 +209,7 @@ test('C3 CONTROL the prod-DB/local-Redis bypass flag is detected', () => {
+ });
+ 
+ test('C3 CONTROL a job name that reuses an existing (possibly required) context is detected', () => {
+-  expectDetected('name', 'name: Auth integrity regression suite (local Supabase, advisory)', 'name: Auth integrity regression lock', /reuses an existing job id or name/);
++  expectDetected('name', 'name: Auth integrity regression suite (local Supabase)\n', 'name: Static auth invariants (hermetic, no secrets)\n', /reuses an existing job id or name/);
+ });
+ 
+ test('C3 CONTROL skipping the migration replay is detected', () => {

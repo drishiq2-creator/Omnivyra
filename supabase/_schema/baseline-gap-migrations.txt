@@ -1,0 +1,36 @@
+# W6 baseline-gap replay manifest.
+#
+# WHAT THIS IS. supabase/_schema/baseline.sql is a schema-only dump of production
+# at ledger position baseline.json `ledgerMax`, and scripts/ci/real-schema-ci.sh
+# replays only migrations ABOVE that position. A migration at or below ledgerMax
+# whose objects are NOT in the dump is therefore never applied by CI. Each entry
+# below names such a migration. CI applies it, in the order listed, AFTER the
+# >ledgerMax replay (so no reviewed migration sees a different catalog than
+# before; see real-schema-ci.sh step 3b), with ON_ERROR_STOP. The migration file
+# stays the single source of truth for the DDL; nothing is copied.
+#
+# RULES (enforced by real-schema-ci.sh; any violation fails the run):
+#   - one bare file name per line, exactly as it appears in supabase/migrations/;
+#     '#' starts a comment, blank lines are ignored;
+#   - the 14-digit version must be <= baseline.json ledgerMax (above it the file
+#     is already replayed, and listing it would apply it twice);
+#   - the file must exist, and may appear only once;
+#   - the file must apply cleanly onto the replayed schema (re-runnable DDL).
+#
+# REMOVAL. This is a stop-gap, not the canonical fix. The canonical fix is an
+# owner-run regeneration of the baseline from production
+# (node scripts/ci/generate-schema-baseline.js, then npm run db:drift). When a
+# regenerated baseline.sql contains an entry's objects, delete the entry.
+#
+# ---------------------------------------------------------------------------
+# 20260718000003 (WRITER-EXEC-006 Wave 5): content_performance, content_prediction,
+# learning_intelligence, learning_memory (+ learning_memory_set_updated_at trigger
+# and public.set_content_updated_at()). All four tables are absent from
+# baseline.sql (ledgerMax 20260916000000); the fifth table in the file,
+# publication_lineage, is in the dump and every statement touching it is
+# IF NOT EXISTS / guarded. Present with identical columns in the 2026-11-08
+# production clone (E2E). Production presence today: unverified.
+# Known divergence: in that clone content_block_set_updated_at executes
+# set_content_updated_at() (this file ran before 20261212000000 there); in CI it
+# stays on omnivyra_touch_updated_at() because gaps run after the replay.
+20260718000003_content_learning_performance.sql

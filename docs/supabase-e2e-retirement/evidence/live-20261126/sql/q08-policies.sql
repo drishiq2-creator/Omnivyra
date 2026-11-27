@@ -1,0 +1,1 @@
+select json_agg(json_build_object('table', tablename, 'policy', policyname, 'cmd', cmd, 'roles', roles, 'qual', qual, 'with_check', with_check)) as result from pg_policies where schemaname = 'public';

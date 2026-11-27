@@ -1,0 +1,70 @@
+{
+ "rows": 910,
+ "publicTables": 864,
+ "platformTables": 46,
+ "counts": {
+  "ACTIVE": 16,
+  "DEPENDENCY": 63,
+  "HISTORICAL": 19,
+  "UNUSED": 14,
+  "UNKNOWN": 798
+ },
+ "dropped": [
+  "activity_class_economics",
+  "ai_model_versions",
+  "attribution_summary_cache",
+  "content_generation_budget",
+  "credential_rotation_attempts",
+  "expected_event_definitions",
+  "external_api_usage_logs",
+  "incident_events",
+  "ip_org_creations",
+  "job_idempotency_keys",
+  "orchestration_attempts",
+  "pending_invite_unlocks",
+  "sync_jobs",
+  "webhook_events"
+ ],
+ "historical": [
+  "public.api_idempotency_keys",
+  "public.attested_engagement_identities",
+  "public.audit_export_jobs",
+  "public.author_identity_links",
+  "public.campaign_versions",
+  "public.campaigns",
+  "public.canonical_leads",
+  "public.canonical_users",
+  "public.daily_content_plans",
+  "public.engagement_messages",
+  "public.engagement_threads",
+  "public.investigation_workspace_items",
+  "public.investigation_workspaces",
+  "public.lead_intelligence_profiles",
+  "public.lead_signals",
+  "public.opportunity_feed_items",
+  "public.opportunity_items",
+  "public.outreach_tasks",
+  "public.reports"
+ ],
+ "absentPostBaseline": [
+  "pi_erasure_authorizations",
+  "person_erasure_requests",
+  "person_erasure_inventories",
+  "person_erasure_verifications",
+  "prospect_import_review_items",
+  "source_mapping_profiles",
+  "source_mapping_profile_entries",
+  "salesnav_member_owner",
+  "salesnav_member_bindings",
+  "salesnav_extraction_runs",
+  "salesnav_daily_quota"
+ ],
+ "e2eOnly": [
+  "content_performance",
+  "content_prediction",
+  "learning_intelligence",
+  "learning_memory",
+  "prospect_list_members",
+  "prospect_lists"
+ ]
+}

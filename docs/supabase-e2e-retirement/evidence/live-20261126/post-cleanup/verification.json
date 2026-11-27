@@ -1,0 +1,147 @@
+{
+ "checks": [
+  {
+   "name": "exactly the 14 deletion-set tables are gone",
+   "ok": true,
+   "detail": {
+    "removed": [
+     "activity_class_economics",
+     "ai_model_versions",
+     "attribution_summary_cache",
+     "content_generation_budget",
+     "credential_rotation_attempts",
+     "expected_event_definitions",
+     "external_api_usage_logs",
+     "incident_events",
+     "ip_org_creations",
+     "job_idempotency_keys",
+     "orchestration_attempts",
+     "pending_invite_unlocks",
+     "sync_jobs",
+     "webhook_events"
+    ]
+   }
+  },
+  {
+   "name": "no table added",
+   "ok": true,
+   "detail": {
+    "added": []
+   }
+  },
+  {
+   "name": "public table count 864 -> 850",
+   "ok": true,
+   "detail": {
+    "pre": 864,
+    "post": 850
+   }
+  },
+  {
+   "name": "every ACTIVE / DEPENDENCY / HISTORICAL / non-empty table is present",
+   "ok": true,
+   "detail": {
+    "missing": []
+   }
+  },
+  {
+   "name": "row counts of retained tables unchanged (except live CI traffic on capability_audit_log)",
+   "ok": true,
+   "detail": {
+    "rowChanges": []
+   }
+  },
+  {
+   "name": "foreign keys = pre minus those owned by dropped tables (none lost from retained tables)",
+   "ok": true,
+   "detail": {
+    "pre": 877,
+    "expected": 865,
+    "post": 865,
+    "removedFromDropped": 12
+   }
+  },
+  {
+   "name": "no dropped table was the TARGET of any foreign key",
+   "ok": true,
+   "detail": {}
+  },
+  {
+   "name": "triggers = pre minus those on dropped tables",
+   "ok": true,
+   "detail": {
+    "pre": 282,
+    "post": 281,
+    "removed": [
+     "public.content_generation_budget.trg_content_generation_budget_updated_at"
+    ]
+   }
+  },
+  {
+   "name": "policies = pre minus those on dropped tables",
+   "ok": true,
+   "detail": {
+    "pre": 616,
+    "post": 611,
+    "removed": [
+     "attribution_summary_cache.service_role_full_access",
+     "content_generation_budget.service_role_content_generation_budget",
+     "expected_event_definitions.service_role_full_access",
+     "sync_jobs.service_role_full_access",
+     "webhook_events.service_role_full_access"
+    ]
+   }
+  },
+  {
+   "name": "view dependencies identical",
+   "ok": true,
+   "detail": {}
+  },
+  {
+   "name": "function-to-table mentions identical",
+   "ok": true,
+   "detail": {}
+  },
+  {
+   "name": "function and view counts unchanged in every schema",
+   "ok": true,
+   "detail": {
+    "public": {
+     "pre": {
+      "schema": "public",
+      "owner": "pg_database_owner",
+      "tables": 864,
+      "views": 37,
+      "functions": 171
+     },
+     "post": {
+      "schema": "public",
+      "owner": "pg_database_owner",
+      "tables": 850,
+      "views": 37,
+      "functions": 171
+     }
+    }
+   }
+  },
+  {
+   "name": "non-public schemas untouched (table counts)",
+   "ok": true,
+   "detail": {}
+  },
+  {
+   "name": "extensions, publications and event triggers unchanged",
+   "ok": true,
+   "detail": {}
+  },
+  {
+   "name": "auth / storage / cron state unchanged",
+   "ok": true,
+   "detail": {
+    "authUsers": 1,
+    "triggers": 11
+   }
+  }
+ ],
+ "pass": true
+}

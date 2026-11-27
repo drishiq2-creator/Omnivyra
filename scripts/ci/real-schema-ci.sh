@@ -12,7 +12,10 @@
 #   3. replay     - every migration newer than the baseline's ledger position,
 #                   which must apply idempotently on top of it, plus any
 #                   migration added by the current branch
-#   4. verify     - jest real-schema suite (W0/W0.1/W0.2, W3, W4, W5, tenancy)
+#   3b. gaps      - the migrations listed in supabase/_schema/baseline-gap-migrations.txt:
+#                   at or below the ledger position, but their objects are absent
+#                   from the dump, so step 3 never applies them
+#   4. verify    - jest real-schema suite (W0/W0.1/W0.2, W3, W4, W5, tenancy)
 #
 # Usage:
 #   scripts/ci/real-schema-ci.sh              # creates and owns its own container
@@ -31,6 +34,7 @@ HOST_PORT="${W6_PG_PORT:-5433}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BASELINE="$ROOT/supabase/_schema/baseline.sql"
 BASELINE_META="$ROOT/supabase/_schema/baseline.json"
+BASELINE_GAPS="$ROOT/supabase/_schema/baseline-gap-migrations.txt"
 BOOTSTRAP="$ROOT/scripts/ci/schema-bootstrap.sql"
 OWN_CID=""              # container ID THIS invocation created; "" = none
 RUNDIR=""               # private per-invocation temp dir; "" until created
@@ -445,6 +449,61 @@ done
 REPLAY_SECS=$(( $(date +%s) - REPLAY_START ))
 echo "  replayed $REPLAYED migration(s) in ${REPLAY_SECS}s"
 
+# ---------------------------------------------------------------------------
+# 3b. Baseline-gap replay
+#
+# A migration at or below the ledger position whose objects are NOT in the dump
+# is skipped by step 3 forever. The governed manifest names each such migration
+# and it is applied here, in manifest order. The migration file stays the single
+# source of truth; nothing is copied. An absent manifest means no gaps. Every
+# entry is validated, and a malformed entry fails the run rather than being
+# skipped. The canonical fix is regenerating the baseline; see the manifest.
+#
+# WHY AFTER STEP 3, NOT BEFORE. Applying a gap first would let it change what a
+# later, already-reviewed migration sees. Concretely, 20260718000003 creates
+# public.set_content_updated_at(); 20261212000000 STEP 7 prefers that function
+# when it exists, so content_block's trigger would move off
+# omnivyra_touch_updated_at() and 20270111000003's reviewed trigger-count
+# postcondition (74) would fail. Running gaps last leaves step 3 byte-for-byte
+# as before and only adds the missing objects.
+# ---------------------------------------------------------------------------
+STAGE="baseline-gap-replay"
+GAPS_REPLAYED=0
+if [ -f "$BASELINE_GAPS" ]; then
+  log "Replaying baseline-gap migrations (at or below $LEDGER_MAX, absent from the dump)"
+  [ -n "$LEDGER_MAX" ] || fail "baseline.json has no ledgerMax; cannot validate $BASELINE_GAPS"
+  GAPS_SEEN=" "
+  while IFS= read -r gap_line || [ -n "$gap_line" ]; do
+    gap="${gap_line%%#*}"
+    gap=$(printf '%s' "$gap" | tr -d '\r' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+    [ -n "$gap" ] || continue
+    case "$gap" in
+      */*|*\\*|*[[:space:]]*) fail "baseline-gap entry '$gap' must be a bare migration file name" ;;
+      *.sql) ;;
+      *) fail "baseline-gap entry '$gap' is not a .sql file name" ;;
+    esac
+    gver="${gap%%_*}"
+    case "$gver" in (""|*[!0-9]*) fail "baseline-gap entry '$gap' has no numeric version prefix" ;; esac
+    [ "${#gver}" -eq 14 ] || fail "baseline-gap entry '$gap' must carry a 14-digit version"
+    if [ "$gver" \> "$LEDGER_MAX" ]; then
+      fail "baseline-gap entry '$gap' is above ledgerMax $LEDGER_MAX; step 3 already replays it"
+    fi
+    case "$GAPS_SEEN" in *" $gap "*) fail "baseline-gap entry '$gap' is listed twice" ;; esac
+    GAPS_SEEN="$GAPS_SEEN$gap "
+    [ -f "$ROOT/supabase/migrations/$gap" ] || fail "baseline-gap entry '$gap' does not exist in supabase/migrations/"
+    printf '  %-64s' "$gap"
+    if "${PSQL[@]}" < "$ROOT/supabase/migrations/$gap" > /tmp/w6_mig.out 2>&1; then
+      echo "ok"
+      GAPS_REPLAYED=$((GAPS_REPLAYED + 1))
+    else
+      echo "FAILED"
+      tail -5 /tmp/w6_mig.out | sed 's/^/      /'
+      fail "baseline-gap migration $gap did not apply after the replay"
+    fi
+  done < "$BASELINE_GAPS"
+  echo "  applied $GAPS_REPLAYED baseline-gap migration(s)"
+fi
+
 # W6-SAFE-02 — the stamp is written HERE: after every DDL stage has SUCCEEDED, and
 # BEFORE jest, so no post-suite statement can discard SUITE_STATUS. It AUTHORIZES
 # NOTHING and is never read as permission. It is mutable metadata serving as a
@@ -488,6 +547,7 @@ echo "  target           : database=$ACTUAL_DB $([ -n "$OWN_CID" ] && echo "cont
 echo "  gate             : $GATE"
 echo "  baseline restore : ${BASE_SECS}s"
 echo "  migration replay : ${REPLAY_SECS}s ($REPLAYED migrations)"
+echo "  baseline gaps    : $GAPS_REPLAYED migration(s)"
 echo "  public tables    : $TABLES"
 echo "  jest exit code   : $SUITE_STATUS"
 [ "$GATE" = "full" ] || echo "  NOTE: PARTIAL run — the real-schema gate requires W6_ONLY unset"

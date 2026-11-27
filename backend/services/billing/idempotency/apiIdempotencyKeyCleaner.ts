@@ -152,3 +152,142 @@ export async function cleanStaleApiIdempotencyKeys(opts?: {
 
   return result;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PROPOSAL — terminal-row retention (NOT ENABLED; nothing calls this)
+//
+// `api_idempotency_keys` has no retention today: the cleaner above only moves
+// stale 'processing' rows to 'failed', and no code deletes 'completed' or
+// 'failed' rows. No retention interval is established anywhere in the repo
+// (code, migrations, docs), and the replay window is a product decision: once a
+// 'completed' row is deleted, a client retry with the same key RE-EXECUTES the
+// handler instead of replaying the stored response.
+//
+// This function is therefore inert until an owner decides the interval:
+//   • it has NO default retention — without an explicit `retentionSec` it
+//     returns `enabled:false` and touches nothing;
+//   • a retention below MIN_API_IDEMPOTENCY_RETENTION_SEC is refused;
+//   • it is not wired into `runIdempotencyExpiryJob` or any route.
+//
+// Semantics when enabled:
+//   • only terminal rows ('completed' | 'failed') whose `updated_at` (the last
+//     state transition) is older than the cutoff; 'processing' rows are never
+//     selected and never deleted, stale or not;
+//   • criteria never reference caller_id / scope — no tenant-dependent policy,
+//     and only `api_idempotency_keys` is touched;
+//   • one bounded batch per call, deterministic order (updated_at, id);
+//   • the DELETE re-asserts the full predicate (status terminal AND
+//     updated_at < cutoff) next to the id list, so a row a concurrent retry
+//     re-claimed ('failed' → 'processing', updated_at = now) between the scan
+//     and the delete survives;
+//   • repeated execution converges (already-deleted ids simply do not match).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Floor: a retention shorter than one day would cut the replay window below
+ *  any reasonable client retry horizon. Refused, not clamped. */
+export const MIN_API_IDEMPOTENCY_RETENTION_SEC = 24 * 60 * 60;
+const DEFAULT_PURGE_BATCH = 200;
+// The id list travels in the PostgREST DELETE URL (~37 bytes per uuid), so the
+// batch is capped to keep the request line well under common proxy limits.
+const MAX_PURGE_BATCH     = 250;
+const TERMINAL_STATUSES   = ['completed', 'failed'] as const;
+
+export interface ApiIdempotencyPurgeResult {
+  enabled:      boolean;
+  reason?:      'retention_not_configured' | 'retention_below_minimum';
+  dryRun:       boolean;
+  retentionSec: number | null;
+  cutoff:       string | null;
+  batchLimit:   number;
+  /** Terminal rows older than the cutoff found by the scan (≤ batchLimit). */
+  scanned:      number;
+  /** Rows actually removed by the guarded DELETE. */
+  deleted:      number;
+  /** Scanned rows the guarded DELETE did not remove (re-claimed or already gone). */
+  skipped:      number;
+  errors:       number;
+  byStatus:     { completed: number; failed: number };
+}
+
+export async function purgeExpiredApiIdempotencyKeys(opts?: {
+  /** Required. No default: the retention interval is an owner decision. */
+  retentionSec?: number;
+  limit?:        number;
+  dryRun?:       boolean;
+  now?:          () => number;
+}): Promise<ApiIdempotencyPurgeResult> {
+  const dryRun     = opts?.dryRun ?? false;
+  const rawLimit   = Math.floor(opts?.limit ?? DEFAULT_PURGE_BATCH);
+  const batchLimit = Math.min(MAX_PURGE_BATCH, Math.max(1, Number.isFinite(rawLimit) ? rawLimit : DEFAULT_PURGE_BATCH));
+  const retention  = opts?.retentionSec;
+
+  const base: ApiIdempotencyPurgeResult = {
+    enabled: false, dryRun, retentionSec: retention ?? null, cutoff: null, batchLimit,
+    scanned: 0, deleted: 0, skipped: 0, errors: 0, byStatus: { completed: 0, failed: 0 },
+  };
+
+  if (retention === undefined || retention === null || !Number.isFinite(retention)) {
+    return { ...base, retentionSec: null, reason: 'retention_not_configured' };
+  }
+  if (retention < MIN_API_IDEMPOTENCY_RETENTION_SEC) {
+    logger.warn('api_idempotency_purge_refused', { retentionSec: retention, minimumSec: MIN_API_IDEMPOTENCY_RETENTION_SEC });
+    return { ...base, reason: 'retention_below_minimum' };
+  }
+
+  const nowMs  = (opts?.now ?? Date.now)();
+  const cutoff = new Date(nowMs - retention * 1000).toISOString();
+  const result: ApiIdempotencyPurgeResult = { ...base, enabled: true, cutoff };
+
+  const { data, error } = await supabase
+    .from('api_idempotency_keys')
+    .select('id, status, updated_at')
+    .in('status', [...TERMINAL_STATUSES])
+    .lt('updated_at', cutoff)
+    .order('updated_at', { ascending: true })
+    .order('id', { ascending: true })
+    .limit(batchLimit);
+
+  if (error) {
+    logger.error('api_idempotency_purge_scan_failed', { message: error.message });
+    return { ...result, errors: 1 };
+  }
+
+  const rows = ((data ?? []) as Array<{ id: string; status: string; updated_at: string }>).slice(0, batchLimit);
+  result.scanned = rows.length;
+
+  if (rows.length > 0 && !dryRun) {
+    const { data: removed, error: delErr } = await ownedDbTable('api_idempotency_keys')
+      .delete()
+      .in('id', rows.map((r) => r.id))
+      // Re-assert the predicate in the DELETE itself (see header).
+      .in('status', [...TERMINAL_STATUSES])
+      .lt('updated_at', cutoff)
+      .select('id, status');
+
+    if (delErr) {
+      result.errors += 1;
+      logger.warn('api_idempotency_purge_delete_failed', { message: delErr.message, batch: rows.length });
+    } else {
+      const deletedRows = (removed ?? []) as Array<{ id: string; status: string }>;
+      result.deleted = deletedRows.length;
+      for (const r of deletedRows) {
+        if (r.status === 'completed') result.byStatus.completed += 1;
+        else if (r.status === 'failed') result.byStatus.failed += 1;
+      }
+      result.skipped = result.scanned - result.deleted;
+    }
+  } else if (dryRun) {
+    for (const r of rows) {
+      if (r.status === 'completed') result.byStatus.completed += 1;
+      else if (r.status === 'failed') result.byStatus.failed += 1;
+    }
+  }
+
+  logger.info('api_idempotency_purge_completed', {
+    dryRun, retentionSec: retention, cutoff, batchLimit,
+    scanned: result.scanned, deleted: result.deleted, skipped: result.skipped,
+    errors: result.errors, byStatus: result.byStatus,
+  });
+
+  return result;
+}

@@ -47,25 +47,22 @@ if (loadedEnvFiles.length === 0 && process.env.CI !== 'true') {
 // than only under CERT_ENV=1: a test run must never reach production, even if
 // .env.test is edited or deleted, or a production value is exported by the
 // shell before jest starts.
+//
+// E2E consolidation (docs/supabase-e2e-retirement/15-*): the same scan also
+// refuses the hosted E2E project. Automated tests use a disposable/loopback
+// stack only; the hosted E2E project is shared, persistent and being retired.
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { PROD_MARKERS, CONNECTION_VARS } = require('../../scripts/lib/certAwareEnv.cjs');
+const { scanHostedTargets } = require('../../scripts/lib/certAwareEnv.cjs');
 
-const productionViolations: string[] = [];
-for (const key of CONNECTION_VARS as string[]) {
-  const value = process.env[key];
-  if (typeof value !== 'string') continue;
-  for (const marker of PROD_MARKERS as string[]) {
-    // Report the variable and marker only — never the value.
-    if (value.includes(marker)) productionViolations.push(`${key} contains "${marker}"`);
-  }
-}
+// Reports the variable and marker only — never the value.
+const hostedTargetViolations: string[] = scanHostedTargets(process.env);
 
-if (productionViolations.length > 0) {
+if (hostedTargetViolations.length > 0) {
   throw new Error(
-    '[test-env] REFUSING TO RUN TESTS AGAINST PRODUCTION.\n  ' +
-      productionViolations.join('\n  ') +
+    '[test-env] REFUSING TO RUN TESTS AGAINST PRODUCTION OR THE HOSTED E2E PROJECT.\n  ' +
+      hostedTargetViolations.join('\n  ') +
       `\n\nLoaded env files: ${loadedEnvFiles.join(', ')}. ` +
-      'Tests must use .env.test / .env.cert (local). Never .env.local.'
+      'Tests must use .env.test / .env.cert (local). Never .env.local or .env.e2e.'
   );
 }
 
