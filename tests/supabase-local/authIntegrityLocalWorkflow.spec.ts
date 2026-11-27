@@ -277,3 +277,33 @@ test('C3 CONTROL review F-2 a seed step moved after the rate-limit reset is dete
 test('C3 CONTROL review F-2 a seed step before the Redis health check is detected', () => {
   expectDetected('health renamed away', '- name: Verify ephemeral Redis is healthy', '- name: Ping Redis', /after the hosted-target refusal and the Redis health check/);
 });
+
+// Independent re-review F-2 (2026-11-27): the ORDER half of the rule must be load-bearing too, so these controls
+// MOVE the seed step (whole block) ahead of the Redis health check and ahead of the hosted-target refusal.
+const SEED_BLOCK = '      - name: Seed the disposable Redis identity marker (per-run token)\n        run: npm run seed:auth-e2e-redis-identity -- --env-out "$GITHUB_ENV"\n';
+function moveSeedBefore(stepName: string): string {
+  const lf = SOURCE.replace(/\r\n/g, '\n');
+  assert.equal(lf.split(SEED_BLOCK).length - 1, 1, 'seed block anchor');
+  const without = lf.replace(SEED_BLOCK, '');
+  const anchor = `      - name: ${stepName}\n`;
+  assert.equal(without.split(anchor).length - 1, 1, `anchor ${stepName}`);
+  return without.replace(anchor, SEED_BLOCK + '\n' + anchor);
+}
+
+test('C3 CONTROL review F-2 a seed step moved ahead of the Redis health check is detected', () => {
+  const problems = checkWorkflow(moveSeedBefore('Verify ephemeral Redis is healthy'));
+  assert.ok(problems.some((p) => /after the hosted-target refusal and the Redis health check/.test(p)), JSON.stringify(problems));
+});
+
+test('C3 CONTROL review F-2 a hosted-target refusal moved after the seed (health check still first) is detected', () => {
+  // Moving the SEED ahead of the refusal would also put it ahead of the health check, which a weaker rule
+  // (health only) already catches. Moving the REFUSAL to just after the seed keeps health < seed < refusal, so
+  // only the seed > refusal comparison can detect it.
+  const lf = SOURCE.replace(/\r\n/g, '\n');
+  const refusal = '      - name: Refuse any hosted target (local mode only, no hosted marker in the environment)\n        run: |\n          node node_modules/tsx/dist/cli.mjs tests/supabase-local/ciAssertions.ts assert-env-local\n          npm run check:auth-e2e-target\n\n';
+  assert.equal(lf.split(refusal).length - 1, 1, 'refusal block anchor');
+  assert.equal(lf.split(SEED_BLOCK).length - 1, 1, 'seed block anchor');
+  const moved = lf.replace(refusal, '').replace(SEED_BLOCK, SEED_BLOCK + '\n' + refusal.replace(/\n\n$/, '\n'));
+  const problems = checkWorkflow(moved);
+  assert.ok(problems.some((p) => /after the hosted-target refusal and the Redis health check/.test(p)), JSON.stringify(problems));
+});
