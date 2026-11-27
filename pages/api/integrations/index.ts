@@ -1,13 +1,14 @@
 import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeFactory';
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { enforceCompanyAccess } from '../../../backend/services/userContextService';
-import { enforceRole, getUserCompanyRole, Role } from '../../../backend/services/rbacService';
+import { enforceRole, Role } from '../../../backend/services/rbacService';
 import { INTEGRATIONS_UNAVAILABLE } from '../../../shared/integrations/integrationsReadCodes';
-import { canViewIntegrationSecrets, redactIntegrationSecrets } from '../../../backend/services/integrationSecretRedaction';
 import {
   createIntegration,
   getIntegrations,
   IntegrationType,
+  IntegrationValidationError,
+  toPublicIntegration,
 } from '../../../backend/services/integrationService';
 
 const ALLOWED_TYPES: IntegrationType[] = [
@@ -45,13 +46,12 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       console.error('[api/integrations] read failed', { company_id: companyId, message: err instanceof Error ? err.message : String(err) });
       return res.status(503).json({ error: "Couldn't load integrations.", code: INTEGRATIONS_UNAVAILABLE });
     }
-    // Hydrated integrations carry DECRYPTED credentials. Only company admins see them; every other member gets them
-    // redacted (backend/services/integrationSecretRedaction.ts). A failed role read answers null, i.e. redacted.
-    const { role } = await getUserCompanyRole(req, companyId);
-    const secretsVisible = canViewIntegrationSecrets(role);
+    // R26 T-2: hydrated integrations carry DECRYPTED credentials, and no role is shown them, admins and SUPER_ADMIN
+    // included. `secret_fields_set` says which secrets are stored; `secrets_visible` is kept (always false) for
+    // clients that still read it.
     return res.status(200).json({
-      integrations: secretsVisible ? integrations : integrations.map(redactIntegrationSecrets),
-      secrets_visible: secretsVisible,
+      integrations: integrations.map(toPublicIntegration),
+      secrets_visible: false,
     });
   }
 
@@ -78,8 +78,9 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       const integration = await createIntegration(companyId, roleGate.userId, type, name.trim(), config, {
         websiteId: typeof website_id === 'string' && website_id.trim() ? website_id.trim() : null,
       });
-      return res.status(201).json({ integration });
+      return res.status(201).json({ integration: toPublicIntegration(integration) });
     } catch (err) {
+      if (err instanceof IntegrationValidationError) return res.status(400).json({ error: err.message });
       return res.status(500).json({ error: err instanceof Error ? err.message : 'Failed to create integration' });
     }
   }

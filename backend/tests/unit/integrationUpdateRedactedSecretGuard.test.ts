@@ -38,20 +38,21 @@ import { updateIntegration } from '../../services/integrationService';
 
 beforeEach(() => {
   credentialWrites.length = 0;
+  // R26 final: a lead_webhook must carry an https:// webhook_url (write-time destination check), so the fixture does.
   stored = {
     id: 'int-1', company_id: 'co-A', created_by: 'u0', type: 'lead_webhook', name: 'Site form', status: 'connected',
-    website_connection_id: 'conn-1', config: { site_url: 'https://a.example' }, non_secret_config: { site_url: 'https://a.example' },
+    website_connection_id: 'conn-1', config: { site_url: 'https://a.example', webhook_url: 'https://hooks.example/x' }, non_secret_config: { site_url: 'https://a.example', webhook_url: 'https://hooks.example/x' },
   };
 });
 
 describe('updateIntegration × redacted placeholder', () => {
   it('a PUT carrying "********" keeps the STORED secret (never writes the placeholder)', async () => {
-    await updateIntegration('int-1', 'co-A', { config: { site_url: 'https://a.example', secret: '********' } });
+    await updateIntegration('int-1', 'co-A', { config: { site_url: 'https://a.example', webhook_url: 'https://hooks.example/x', secret: '********' } });
     expect(credentialWrites).toEqual([{ secret: 'whsec_REAL' }]);
   });
 
   it('CONTROL: a real new secret is written as sent (the guard only touches the placeholder)', async () => {
-    await updateIntegration('int-1', 'co-A', { config: { site_url: 'https://a.example', secret: 'whsec_NEW' } });
+    await updateIntegration('int-1', 'co-A', { config: { site_url: 'https://a.example', webhook_url: 'https://hooks.example/x', secret: 'whsec_NEW' } });
     expect(credentialWrites).toEqual([{ secret: 'whsec_NEW' }]);
   });
 });

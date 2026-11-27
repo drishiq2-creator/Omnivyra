@@ -1,12 +1,13 @@
 import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeFactory';
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { enforceCompanyAccess } from '../../../backend/services/userContextService';
-import { enforceRole, getUserCompanyRole, Role } from '../../../backend/services/rbacService';
-import { canViewIntegrationSecrets, redactIntegrationSecrets } from '../../../backend/services/integrationSecretRedaction';
+import { enforceRole, Role } from '../../../backend/services/rbacService';
 import {
   getIntegration,
   updateIntegration,
   deleteIntegration,
+  IntegrationValidationError,
+  toPublicIntegration,
 } from '../../../backend/services/integrationService';
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
@@ -24,13 +25,8 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method === 'GET') {
     const integration = await getIntegration(id, companyId);
     if (!integration) return res.status(404).json({ error: 'Integration not found' });
-    // Decrypted credentials are for company admins only (backend/services/integrationSecretRedaction.ts).
-    const { role } = await getUserCompanyRole(req, companyId);
-    const secretsVisible = canViewIntegrationSecrets(role);
-    return res.status(200).json({
-      integration: secretsVisible ? integration : redactIntegrationSecrets(integration),
-      secrets_visible: secretsVisible,
-    });
+    // R26 T-2: decrypted credentials never leave the server, for any role (integrationService.toPublicIntegration).
+    return res.status(200).json({ integration: toPublicIntegration(integration), secrets_visible: false });
   }
 
   // PUT / DELETE require admin
@@ -53,16 +49,25 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     }
     try {
       const integration = await updateIntegration(id, companyId, updates);
-      return res.status(200).json({ integration });
+      return res.status(200).json({ integration: toPublicIntegration(integration) });
     } catch (err) {
+      if (err instanceof IntegrationValidationError) return res.status(400).json({ error: err.message });
       return res.status(500).json({ error: err instanceof Error ? err.message : 'Update failed' });
     }
   }
 
   if (req.method === 'DELETE') {
     try {
-      await deleteIntegration(id, companyId);
-      return res.status(200).json({ status: 'deleted' });
+      // R26 T-4: the stored credentials are deleted with the integration and the disconnect is audited. No CMS or
+      // webhook provider offers a revoke call we can make, so the tenant is told to rotate the secret at the source.
+      const result = await deleteIntegration(id, companyId, { actorUserId: roleGate.userId ?? null });
+      if (!result.deleted) return res.status(404).json({ error: 'Integration not found' });
+      return res.status(200).json({
+        status: 'deleted',
+        credentials_deleted: result.credentials_deleted,
+        provider_revocation: result.provider_revocation,
+        guidance: 'Stored credentials were deleted. Revoke or rotate the key, password or webhook secret at the provider as well.',
+      });
     } catch (err) {
       return res.status(500).json({ error: err instanceof Error ? err.message : 'Delete failed' });
     }
