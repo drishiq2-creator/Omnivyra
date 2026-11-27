@@ -83,10 +83,13 @@ import {
   once,
   resolveDrainDeadlineMs,
   POST_DRAIN_STEP_TIMEOUT_MS,
+  BROWSER_CLOSE_STEP_TIMEOUT_MS,
+  BROWSER_CLOSE_GRACE_MS,
   runRuntimeStops,
   type RuntimeStop,
   type ShutdownConsumer,
 } from './workerShutdown';
+import { closeAllBrowsers, forceKillAllBrowsersSync } from '../services/browserRuntime/browserLauncher';
 
 // ── Graceful shutdown — installed BEFORE any worker is constructed ────────────
 //
@@ -177,6 +180,7 @@ const shutdown = async (signal: string) => {
   // release or connection close hangs (e.g. Redis unreachable).
   const hardExit = setTimeout(() => {
     console.error('[main] shutdown exceeded its budget — forcing exit');
+    forceKillAllBrowsersSync();
     process.exit(0);
   }, drainDeadlineMs + 10_000);
   if (typeof hardExit.unref === 'function') hardExit.unref();
@@ -198,7 +202,16 @@ const shutdown = async (signal: string) => {
   // and can hang when the backend is already gone. 3 × 3 s = 9 s fits inside
   // the 10 s hard-exit grace, so a normal shutdown finishes BEFORE the
   // backstop rather than relying on it.
-  await closeWithin('BOLT claim release', POST_DRAIN_STEP_TIMEOUT_MS, releaseHeldBoltClaims);
+  //
+  // Open Chromium browsers are closed (then force-killed) CONCURRENTLY with the
+  // claim release: the close touches no Redis/Postgres, so it adds nothing to
+  // the post-drain budget. After a clean drain the registry is normally empty;
+  // after a drain that hit its deadline this is what stops an in-flight job's
+  // browser from outliving the process.
+  await Promise.all([
+    closeWithin('BOLT claim release', POST_DRAIN_STEP_TIMEOUT_MS, releaseHeldBoltClaims),
+    closeWithin('browser close', BROWSER_CLOSE_STEP_TIMEOUT_MS, () => closeAllBrowsers(BROWSER_CLOSE_GRACE_MS)),
+  ]);
   // WS-1: the producer Queues opened by content-queues-init had no close
   // path at all — their Redis connections outlived every shutdown.
   await closeWithin('producer queue close', POST_DRAIN_STEP_TIMEOUT_MS, sharedConsumers.closeQueues);

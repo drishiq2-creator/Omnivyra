@@ -58,6 +58,14 @@ export const HARD_EXIT_GRACE_MS = 10_000;
  * postDrainBudgetMs() asserts the relationship; a test pins it.
  */
 export const POST_DRAIN_STEP_TIMEOUT_MS = 3_000;
+/**
+ * Browser teardown at shutdown (closeAllBrowsers in browserLauncher.ts). It runs
+ * CONCURRENTLY with the BOLT claim release step - it talks to no backend - so it
+ * is not counted in postDrainBudgetMs(). The graceful close gets
+ * BROWSER_CLOSE_GRACE_MS; the rest of the step cap is left for the force-kill.
+ */
+export const BROWSER_CLOSE_STEP_TIMEOUT_MS = POST_DRAIN_STEP_TIMEOUT_MS;
+export const BROWSER_CLOSE_GRACE_MS = 2_000;
 /** How long the post-drain phase can take in the worst case. */
 export function postDrainBudgetMs(steps = 3): number {
   return steps * POST_DRAIN_STEP_TIMEOUT_MS;

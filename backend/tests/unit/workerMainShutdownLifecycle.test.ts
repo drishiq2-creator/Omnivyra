@@ -97,6 +97,13 @@ jest.mock('../../services/boltExecutionRecovery', () => ({
   }),
 }));
 jest.mock('../../services/boltExecutionLock', () => ({ getHeldRunLocks: () => mockH.heldLocks }));
+jest.mock('../../services/browserRuntime/browserLauncher', () => ({
+  closeAllBrowsers: jest.fn(async (ms: number) => {
+    mockH.events.push(`closeAllBrowsers:${ms}`);
+    return { total: 1, closed: 1, force_killed: 0, failed: 0 };
+  }),
+  forceKillAllBrowsersSync: jest.fn(() => { mockH.events.push('forceKillAllBrowsersSync'); return 0; }),
+}));
 jest.mock('../../workers/intelligencePollingWorker', () => ({
   getIntelligencePollingWorker: () => mockH.makeWorker('intelligence-polling'),
 }));
@@ -433,5 +440,25 @@ describe('SIGTERM after boot', () => {
     await settle();
     await jest.advanceTimersByTimeAsync(120_000);
     expect(polls()).toBe(before);
+  });
+});
+
+describe('open browsers are closed on shutdown', () => {
+  it.each(['SIGTERM', 'SIGINT'] as const)('%s: closeAllBrowsers runs after the drain and before exit', async (sig) => {
+    await bootFully();
+    // CONTROL: booting alone closes no browser.
+    expect(mockH.events.filter((e) => e.startsWith('closeAllBrowsers'))).toEqual([]);
+
+    signal(sig);
+    await settle();
+    const closeBrowsers = mockH.events.indexOf('closeAllBrowsers:2000');
+    expect(closeBrowsers).toBeGreaterThan(-1);
+    const lastWorkerClose = mockH.events.map((e) => e.startsWith('close:')).lastIndexOf(true);
+    expect(closeBrowsers).toBeGreaterThan(lastWorkerClose);
+    expect(closeBrowsers).toBeLessThan(mockH.events.indexOf('exit:0'));
+    expect(mockH.events.filter((e) => e.startsWith('closeAllBrowsers'))).toHaveLength(1);
+    // The sync force-kill is the backstop only; a normal shutdown never reaches it.
+    expect(mockH.events).not.toContain('forceKillAllBrowsersSync');
+    expect(exits()).toEqual([0]);
   });
 });
