@@ -155,14 +155,27 @@ run_psql "$DB_URL" -v ON_ERROR_STOP=1 -q -f "$EXTENSIONS" >/dev/null
 
 STAGE="baseline-restore"
 # Same rule as scripts/ci/real-schema-ci.sh: the baseline is a pg_dump, so "already exists"
-# collisions are expected; anything else is a real restore failure.
+# collisions are expected and psql runs WITHOUT ON_ERROR_STOP. Three independent checks must all
+# pass before the next stage (review B2):
+#   1. psql's exit status: without ON_ERROR_STOP it is non-zero only for a fatal psql error or a
+#      lost / failed connection, so any non-zero status is a failed restore;
+#   2. the error classification: only plain "ERROR: ... already exists" is tolerated; any other
+#      ERROR and any FATAL / PANIC / connection-loss line fails;
+#   3. the result: a numeric public-table count of at least the baseline's recorded count.
 set +e
 run_psql "$DB_URL" -q -f "$BASELINE" > /dev/null 2> "$RUN_DIR/restore.err"
+RESTORE_EXIT=$?
 set -e
-"${PLAN[@]}" classify-restore "$RUN_DIR/restore.err" || fail "baseline restore produced unexpected errors"
+if [ "$RESTORE_EXIT" != "0" ]; then
+  "${PLAN[@]}" classify-restore "$RUN_DIR/restore.err" >&2 || true
+  fail "baseline restore: psql exited with status $RESTORE_EXIT (fatal error or lost connection); the restore is incomplete"
+fi
+"${PLAN[@]}" classify-restore "$RUN_DIR/restore.err" || fail "baseline restore produced unexpected errors (anything but a plain 'already exists')"
 TABLES="$(run_psql "$DB_URL" -tAc "select count(*) from pg_class c join pg_namespace n on n.oid=c.relnamespace where n.nspname='public' and c.relkind='r'" | tr -d '[:space:]')"
 MIN_TABLES="$("${PLAN[@]}" min-tables)"
-[ "$TABLES" -ge "$MIN_TABLES" ] || fail "expected >= $MIN_TABLES public tables after restore, got $TABLES"
+case "$TABLES" in ''|*[!0-9]*) fail "could not read the public table count after the restore" ;; esac
+case "$MIN_TABLES" in ''|*[!0-9]*) fail "could not read the baseline's expected table count" ;; esac
+[ "$TABLES" -ge "$MIN_TABLES" ] || fail "expected >= $MIN_TABLES public tables after restore, got $TABLES (partial restore)"
 
 STAGE="migration-replay"
 if [ "$SCHEMA_MODE" = "full" ]; then

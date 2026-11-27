@@ -188,3 +188,38 @@ test('C1 v3.1 CONTROL R3 without the strict rule, the multi-host DB URL is ACCEP
     fsMod.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ---------------- Review B2: restore classification (unit) ----------------
+import { redactConnectionText } from './localStackPlan';
+
+test('C1 B2 only a plain "ERROR: ... already exists" is tolerated; FATAL, PANIC and connection loss are not', () => {
+  const ok = classifyRestoreErrors('psql:b.sql:9: ERROR:  relation "a" already exists\nNOTICE:  something\n');
+  assert.deepEqual(ok, { total: 1, unexpected: [] });
+  for (const line of [
+    'psql:b.sql:10: FATAL:  terminating connection due to administrator command',
+    'FATAL:  the database system is shutting down',
+    'PANIC:  could not write to file "pg_wal/xlogtemp.1"',
+    'server closed the connection unexpectedly',
+    'psql: error: connection to server at "127.0.0.1", port 54322 failed: Connection refused',
+    'connection to server was lost',
+    'no connection to the server',
+    'could not receive data from server: Connection reset by peer',
+    'SSL SYSCALL error: EOF detected',
+    'lost synchronization with server: got message type "x"',
+    'FATAL:  role "x" already exists',
+    'psql:b.sql:77: ERROR:  function public.f() does not exist',
+  ]) {
+    const r = classifyRestoreErrors(`psql:b.sql:9: ERROR:  relation "a" already exists\n${line}\n`);
+    assert.equal(r.unexpected.length, 1, `must be unexpected: ${line}`);
+    assert.equal(r.unexpected[0], line);
+  }
+  assert.deepEqual(classifyRestoreErrors(''), { total: 0, unexpected: [] });
+});
+
+test('C1 B2 restore diagnostics are shown without URL credentials', () => {
+  assert.equal(
+    redactConnectionText('FATAL: via postgresql://postgres:secret-pw@127.0.0.1:54322/postgres failed'),
+    'FATAL: via postgresql://[REDACTED]@127.0.0.1:54322/postgres failed',
+  );
+  assert.equal(redactConnectionText('plain line'), 'plain line');
+});

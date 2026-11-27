@@ -65,7 +65,7 @@ function makeSandbox(mutations: readonly Mutation[] = []): Sim {
   }
   fs.writeFileSync(log, '');
   fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ name: 'omnivyra-admin-ui', private: true }));
-  fs.writeFileSync(path.join(root, 'supabase/_schema/baseline.json'), JSON.stringify({ ledgerMax: '20260916000000', tables: 1 }));
+  fs.writeFileSync(path.join(root, 'supabase/_schema/baseline.json'), JSON.stringify({ ledgerMax: '20260916000000', tables: 823 }));
   fs.writeFileSync(path.join(root, 'supabase/_schema/baseline.sql'), '-- simulated baseline\n');
   for (const m of ['20260101000000_before_ledger.sql', '20260917000000_sim_a.sql', '20260918000000_sim_b.sql']) {
     fs.writeFileSync(path.join(root, 'supabase/migrations', m), '-- simulated\n');
@@ -122,6 +122,15 @@ function makeSandbox(mutations: readonly Mutation[] = []): Sim {
     `LOG=${JSON.stringify(posix(log))}`,
     `FAIL_FILE="$(cat ${JSON.stringify(posix(path.join(root, 'psql-fail-file')))} 2>/dev/null)"`,
     `printf 'psql %s | canary=%s\\n' "$*" "\${SIM_CANARY:-absent}" >> "$LOG"`,
+    // Baseline restore behaviour (review B2) is read from files: stderr text, exit status, table count.
+    `CTL=${JSON.stringify(posix(root))}`,
+    'for a in "$@"; do',
+    '  if [[ "$a" == *baseline.sql ]]; then',
+    '    [ -f "$CTL/restore-stderr" ] && cat "$CTL/restore-stderr" >&2',
+    '    exit "$(cat "$CTL/restore-exit" 2>/dev/null || echo 0)"',
+    '  fi',
+    '  if [ "$a" = "-tAc" ]; then cat "$CTL/tables-count" 2>/dev/null || echo 900; exit 0; fi',
+    'done',
     'for a in "$@"; do',
     '  if [ -n "$FAIL_FILE" ] && [[ "$a" == *"$FAIL_FILE" ]]; then echo "ERROR:  simulated migration failure" >&2; exit 3; fi',
     '  if [ "$a" = "-tAc" ]; then echo 900; exit 0; fi',
@@ -374,4 +383,91 @@ test('SIM R1 on GitHub the teed log carries ::add-mask:: values, and redact-logs
     assert.ok(!after.includes('postgres:postgres@'), 'the DB URL user-info must be gone');
     assert.match(after, /BOOTSTRAP_RESULT \{"status":"ok"/, 'the result line is kept');
   });
+});
+
+// ---------------- Review B2: baseline restore failure detection ----------------
+type Restore = { stderr?: string; exit?: number; tables?: string };
+
+function writeRestoreControls(sim: Sim, r: Restore): void {
+  if (r.stderr !== undefined) fs.writeFileSync(path.join(sim.root, 'restore-stderr'), r.stderr);
+  if (r.exit !== undefined) fs.writeFileSync(path.join(sim.root, 'restore-exit'), String(r.exit));
+  if (r.tables !== undefined) fs.writeFileSync(path.join(sim.root, 'tables-count'), r.tables);
+}
+
+/** Runs the REAL CI check on the bootstrap output; returns its exit status and whether it printed the success marker. */
+function ciVerify(sim: Sim, out: string): { status: number | null; verified: boolean } {
+  const log = path.join(sim.root, 'bootstrap-up.log');
+  fs.writeFileSync(log, out);
+  const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, TEMP: process.env.TEMP, TMP: process.env.TMP };
+  const r = spawnSync(process.execPath, [REAL_TSX_CLI, path.join(REPO, 'tests/supabase-local/ciAssertions.ts'), 'assert-bootstrap-result', log, '2'], { env, encoding: 'utf8', cwd: REPO });
+  return { status: r.status, verified: /BOOTSTRAP_VERIFIED/.test(`${r.stdout}${r.stderr}`) };
+}
+
+function restoreRun(r: Restore, mutations: readonly Mutation[] = []) {
+  return withSandbox((sim) => {
+    writeRestoreControls(sim, r);
+    const run = runBootstrap(sim, ['up']);
+    return { run, ci: ciVerify(sim, run.out) };
+  }, mutations);
+}
+
+function assertRestoreFailed(why: string, x: ReturnType<typeof restoreRun>): void {
+  assert.notEqual(x.run.status, 0, `${why}: the bootstrap must fail\n${x.run.out}`);
+  assert.equal(x.run.result?.status, 'failed', why);
+  assert.equal(x.run.result?.stage, 'baseline-restore', `${why}: must stop AT the restore stage`);
+  assert.equal(migrationCalls(x.run.calls).length, 0, `${why}: no migration may run after a failed restore`);
+  assert.ok(!x.run.calls.some((c) => c.startsWith('curl ')), `${why}: no health check may run after a failed restore`);
+  assert.notEqual(x.ci.status, 0, `${why}: the CI check must refuse`);
+  assert.equal(x.ci.verified, false, `${why}: BOOTSTRAP_VERIFIED must never be printed`);
+}
+
+const ALREADY_EXISTS = 'psql:/w/supabase/_schema/baseline.sql:12: ERROR:  relation "accounts" already exists\n';
+
+test('SIM B2 a successful restore (with the tolerated "already exists") completes and is verified', () => {
+  const x = restoreRun({ stderr: ALREADY_EXISTS, exit: 0, tables: '869' });
+  assert.equal(x.run.status, 0, x.run.out);
+  assert.equal(x.run.result?.stage, 'complete');
+  assert.equal(x.ci.status, 0);
+  assert.equal(x.ci.verified, true, 'the positive case must reach BOOTSTRAP_VERIFIED, otherwise the negatives prove nothing');
+});
+
+test('SIM B2 every incomplete restore fails at the restore stage, before replay and health, with no success marker', () => {
+  const cases: Array<[string, Restore]> = [
+    ['non-zero exit, empty stderr', { exit: 2, stderr: '' }],
+    ['non-zero exit 1 (psql fatal)', { exit: 1, stderr: 'psql: error: out of memory\n' }],
+    ['exit 0 with FATAL', { exit: 0, stderr: ALREADY_EXISTS + 'FATAL:  terminating connection due to administrator command\n' }],
+    ['exit 0 with PANIC', { exit: 0, stderr: 'PANIC:  could not write to file "pg_wal/xlogtemp"\n' }],
+    ['connection lost (exit 2)', { exit: 2, stderr: 'server closed the connection unexpectedly\n\tThis probably means the server terminated abnormally\nconnection to server was lost\n' }],
+    ['connection lost reported with exit 0', { exit: 0, stderr: 'psql:/w/baseline.sql:4100: server closed the connection unexpectedly\n' }],
+    ['unexpected ERROR', { exit: 0, stderr: ALREADY_EXISTS + 'psql:/w/baseline.sql:77: ERROR:  function public.f() does not exist\n' }],
+    ['"already exists" on a FATAL line is not tolerated', { exit: 0, stderr: 'FATAL:  database "postgres" already exists\n' }],
+    ['partial restore: missing tables', { exit: 0, stderr: ALREADY_EXISTS, tables: '822' }],
+    ['partial restore: unreadable table count', { exit: 0, stderr: '', tables: '' }],
+  ];
+  for (const [why, r] of cases) assertRestoreFailed(why, restoreRun(r));
+});
+
+test('SIM B2 restore diagnostics never print connection credentials', () => {
+  const x = restoreRun({ exit: 0, stderr: 'FATAL:  could not connect using postgresql://postgres:leaked-db-pw@127.0.0.1:54322/postgres\n' });
+  assertRestoreFailed('credential in a FATAL line', x);
+  assert.ok(!x.run.out.includes('leaked-db-pw'), 'the diagnostic leaked the password');
+  assert.match(x.run.out, /FATAL:  could not connect/, 'the diagnostic itself is still shown');
+});
+
+test('SIM B2 CONTROL without the exit-status check, a restore that exited 2 with no stderr is reported as success', () => {
+  const x = restoreRun({ exit: 2, stderr: '' }, [['tests/supabase-local/bootstrap.sh', 'if [ "$RESTORE_EXIT" != "0" ]; then', 'if false; then']]);
+  assert.equal(x.run.result?.status, 'ok', 'the control must observe the false success');
+  assert.equal(x.ci.verified, true, 'and the CI check would have printed BOOTSTRAP_VERIFIED');
+});
+
+test('SIM B2 CONTROL with the previous ERROR-only classifier, a FATAL with exit 0 is reported as success', () => {
+  const x = restoreRun({ exit: 0, stderr: 'FATAL:  terminating connection due to administrator command\n' }, [
+    ['tests/supabase-local/localStackPlan.ts', "  const relevant = lines.filter((l) => /\\bERROR:/.test(l) || isFailure(l));", "  const relevant = lines.filter((l) => /\\bERROR:/.test(l));"],
+  ]);
+  assert.equal(x.run.result?.status, 'ok', 'the control must observe the false success');
+});
+
+test('SIM B2 CONTROL without the table-count check, a partial restore is reported as success', () => {
+  const x = restoreRun({ exit: 0, stderr: '', tables: '822' }, [['tests/supabase-local/bootstrap.sh', '[ "$TABLES" -ge "$MIN_TABLES" ] || fail', 'true || fail']]);
+  assert.equal(x.run.result?.status, 'ok', 'the control must observe the false success');
 });

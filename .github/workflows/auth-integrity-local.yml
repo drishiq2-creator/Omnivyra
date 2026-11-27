@@ -76,7 +76,7 @@ jobs:
       - name: Guard and bootstrap unit tests (offline)
         run: |
           npm run test:auth-e2e-guard
-          node node_modules/tsx/dist/cli.mjs --test tests/supabase-local/localStackPlan.spec.ts tests/supabase-local/ciAssertions.spec.ts tests/supabase-local/authIntegrityLocalWorkflow.spec.ts tests/supabase-local/logRedaction.spec.ts tests/supabase-local/bootstrapSimulation.spec.ts
+          node node_modules/tsx/dist/cli.mjs --test tests/supabase-local/localStackPlan.spec.ts tests/supabase-local/ciAssertions.spec.ts tests/supabase-local/authIntegrityLocalWorkflow.spec.ts tests/supabase-local/logRedaction.spec.ts tests/supabase-local/bootstrapSimulation.spec.ts tests/supabase-local/resetRateLimits.spec.ts
 
       - name: Bootstrap plan (no side effects)
         run: bash tests/supabase-local/bootstrap.sh plan | tee "$RUNNER_TEMP/bootstrap-plan.log"
