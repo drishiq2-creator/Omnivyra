@@ -20,7 +20,7 @@
 
 import { randomBytes, createHmac } from 'crypto';
 import { resolveSigningSecret } from '../auth/signingSecrets';
-import { sha256Hex, storeIssueClaimCode, storeRedeemClaimCode } from './extensionHandshakeStore';
+import { sha256Hex, storeIssueClaimCode, storePeekClaimCode, storeRedeemClaimCode } from './extensionHandshakeStore';
 
 export type ClaimCode = {
   code: string;
@@ -53,6 +53,15 @@ export async function createClaimCode(userId: string, orgId: string): Promise<Cl
     ttlSeconds: CLAIM_CODE_TTL_SECONDS,
   });
   return { code, userId, orgId, createdAt, expiresAt };
+}
+
+/**
+ * Look up a claim code's (user, org) WITHOUT consuming it. null if malformed, expired, redeemed, or not found.
+ * Throws ExtensionHandshakeStoreUnavailableError when the store cannot answer (nothing was consumed).
+ */
+export async function peekClaimCode(code: string): Promise<{ userId: string; orgId: string } | null> {
+  if (!code || !CLAIM_CODE_SHAPE.test(code)) return null;
+  return storePeekClaimCode(sha256Hex(code));
 }
 
 /**

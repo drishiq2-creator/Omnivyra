@@ -36,12 +36,26 @@ import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeF
  *   - anything else      -> 400 UNSUPPORTED_PRODUCT, checked BEFORE the code is consumed (the user can retry with a
  *                           correct client without minting a new code).
  *
- * Phase E also: the claim store is shared across instances (atomic single use; 503 when unreadable), and the
- * extension membership rule is re-checked after redemption, before any token exists.
+ * PRODUCT IS A FILTER, NOT A SECURITY BOUNDARY (review N-3). The client chooses `product` at redeem time; the code is
+ * bound only to (user, organization), so the same user + org can mint a session for either product. The binding
+ * keeps one package from being handed the other package's work (the command hand-out filter); it does not stop a user
+ * from deliberately asking for another product's session for their own account.
+ *
+ * ORDER (review S-4): everything that can refuse runs BEFORE the single-use code is consumed:
+ *   1. shape + product checks (no store call);
+ *   2. non-consuming lookup of the code's (user, org) (extension_claim_code_peek): unknown/expired/used -> 400;
+ *   3. membership re-check (membership may have changed in the <= 60 s since bootstrap) -> 403 / 503 retryable;
+ *   4. session token + HMAC secret minted for that (user, org) (a missing signing secret -> 503, code NOT consumed,
+ *      so the retry is honest);
+ *   5. the atomic redeem. Only after this point can a failure have consumed the code: those answers are
+ *      non-retryable (retryable:false, repair_required:true): the user must start pairing again (a new code).
+ * A store outage at 2-4 is 503 retryable:true - nothing was consumed. The extension worker (serviceWorker.js
+ * redeemClaimCode) treats any non-2xx as REDEEM_FAILED and shows data.error; it never auto-retries, so the extra
+ * fields are additive and compatible.
  */
 
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { redeemClaimCode } from '@/backend/services/extensionClaimCodeService';
+import { peekClaimCode, redeemClaimCode } from '@/backend/services/extensionClaimCodeService';
 import {
   issueExtensionSessionToken,
   deriveExtensionHmacSecret,
@@ -78,14 +92,19 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     return res.status(400).json({ success: false, error: 'UNSUPPORTED_PRODUCT' });
   }
 
+  // 2-4: refusable checks, code NOT consumed (see ORDER above).
+  let bound: { userId: string; orgId: string } | null;
+  let sessionToken: string;
+  let hmacSecret: string;
+  let expiresAt: number;
   try {
-    const claim = await redeemClaimCode(claimCode);
-    if (!claim) {
+    bound = await peekClaimCode(claimCode);
+    if (!bound) {
       return res.status(400).json({ success: false, error: 'INVALID_OR_EXPIRED_CLAIM_CODE' });
     }
 
     // Membership may have changed in the (<= 60 s) since bootstrap: no token for a principal validate would refuse.
-    const membership = await checkExtensionMembership(claim.userId, claim.orgId);
+    const membership = await checkExtensionMembership(bound.userId, bound.orgId);
     if (membership.ok === false) {
       if ((membership as { outcome: string }).outcome === 'unavailable') {
         return res.status(503).json({ success: false, error: 'TENANT_LOOKUP_ERROR', retryable: true });
@@ -93,52 +112,76 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       return res.status(403).json({ success: false, error: 'EXTENSION_MEMBERSHIP_REQUIRED' });
     }
 
-    const expiresAt = Date.now() + 12 * 60 * 60 * 1000; // 12 h
+    expiresAt = Date.now() + 12 * 60 * 60 * 1000; // 12 h
     const hmacNonce = generateHmacNonce();
-
     // Session token carries the hmacNonce so every future request can
-    // re-derive the secret server-side without DB lookup.
-    const sessionToken = issueExtensionSessionToken({
-      userId: claim.userId,
-      orgId: claim.orgId,
+    // re-derive the secret server-side without DB lookup. Minted BEFORE the
+    // redeem so a missing signing secret never burns the code.
+    sessionToken = issueExtensionSessionToken({
+      userId: bound.userId,
+      orgId: bound.orgId,
       expiresAt,
       hmacNonce,
       ...(product ? { product } : {}),
     });
-
-    const hmacSecret = deriveExtensionHmacSecret({
-      userId: claim.userId,
-      orgId: claim.orgId,
+    hmacSecret = deriveExtensionHmacSecret({
+      userId: bound.userId,
+      orgId: bound.orgId,
       expiresAt,
       nonce: hmacNonce,
-    });
-
-    return res.status(200).json({
-      success: true,
-      data: {
-        session_token: sessionToken,
-        hmac_secret: hmacSecret,
-        user_id: claim.userId,
-        org_id: claim.orgId,
-        expires_at: expiresAt,
-        polling_interval: 60,
-        sync_mode: 'batch',
-        capability_map_version: CAPABILITY_MAP_VERSION,
-        product: product ?? null,
-      },
     });
   } catch (error) {
     console.error('[extension/redeem]', error);
     // SEC91-W2B-5: a missing signing secret is a service condition (503) with a plain
-    // code; never echo the error text (it names configuration variables).
+    // code; never echo the error text (it names configuration variables). Nothing consumed.
     if (isSigningSecretUnavailable(error)) {
-      return res.status(503).json({ success: false, error: 'SIGNING_SECRET_UNAVAILABLE' });
+      return res.status(503).json({ success: false, error: 'SIGNING_SECRET_UNAVAILABLE', retryable: true });
     }
     if (isExtensionHandshakeStoreUnavailable(error)) {
       return res.status(503).json({ success: false, error: 'CLAIM_STORE_UNAVAILABLE', retryable: true });
     }
-    return res.status(500).json({ success: false, error: 'redeem failed' });
+    return res.status(500).json({ success: false, error: 'redeem failed', retryable: true });
   }
+
+  // 5: the atomic, single-use redeem. From here a failure may have consumed the code.
+  let claim: { userId: string; orgId: string } | null;
+  try {
+    claim = await redeemClaimCode(claimCode);
+  } catch (error) {
+    console.error('[extension/redeem] redeem step', error);
+    // The UPDATE may have committed with its answer lost: a retry would most likely get
+    // INVALID_OR_EXPIRED_CLAIM_CODE. Say so: not retryable, pair again.
+    return res.status(503).json({
+      success: false,
+      error: 'CLAIM_REDEEM_UNCONFIRMED',
+      retryable: false,
+      repair_required: true,
+    });
+  }
+  if (!claim) {
+    // Redeemed or expired between the lookup and the redeem (a concurrent redeem won).
+    return res.status(400).json({ success: false, error: 'INVALID_OR_EXPIRED_CLAIM_CODE' });
+  }
+  if (claim.userId !== bound.userId || claim.orgId !== bound.orgId) {
+    // Cannot happen (a code's binding is immutable); refuse rather than hand out a token minted for someone else.
+    console.error('[extension/redeem] binding changed between lookup and redeem');
+    return res.status(409).json({ success: false, error: 'CLAIM_BINDING_MISMATCH', retryable: false, repair_required: true });
+  }
+
+  return res.status(200).json({
+    success: true,
+    data: {
+      session_token: sessionToken,
+      hmac_secret: hmacSecret,
+      user_id: claim.userId,
+      org_id: claim.orgId,
+      expires_at: expiresAt,
+      polling_interval: 60,
+      sync_mode: 'batch',
+      capability_map_version: CAPABILITY_MAP_VERSION,
+      product: product ?? null,
+    },
+  });
 }
 
 // W0-1 (Gate A): canonical route pipeline — pass-through observability + request context.

@@ -21,6 +21,8 @@ const issue = (c: Client | typeof db, h: string, ttl = 60) =>
   c.query('SELECT * FROM public.extension_claim_code_issue($1, $2::uuid, $3::uuid, $4)', [h, USER, ORG_A, ttl]);
 const redeem = (c: Client | typeof db, h: string) =>
   c.query('SELECT * FROM public.extension_claim_code_redeem($1)', [h]);
+const peek = (c: Client | typeof db, h: string) =>
+  c.query('SELECT * FROM public.extension_claim_code_peek($1)', [h]);
 const nonce = (c: Client | typeof db, k: string, ttl = 900) =>
   c.query('SELECT public.extension_request_nonce_record($1, $2) AS recorded', [k, ttl]);
 
@@ -124,6 +126,33 @@ describe('claim codes', () => {
   });
 });
 
+describe('S-4: peek reads a code WITHOUT consuming it', () => {
+  it('peek returns the binding and writes nothing; redeem then still succeeds once (control: after redeem, peek is empty)', async () => {
+    const h = freshHash();
+    await issue(db, h);
+    expect((await peek(db, h)).rows).toEqual([{ peek_user_id: USER, peek_organization_id: ORG_A }]);
+    expect((await peek(db, h)).rows).toEqual([{ peek_user_id: USER, peek_organization_id: ORG_A }]);
+    expect((await db.query('SELECT redeemed_at FROM public.extension_claim_codes WHERE code_hash = $1', [h])).rows[0].redeemed_at).toBeNull();
+    expect((await redeem(db, h)).rows).toEqual([{ redeemed_user_id: USER, redeemed_organization_id: ORG_A }]);
+    expect((await peek(db, h)).rows).toEqual([]);
+  });
+
+  it('an expired, unknown or malformed code peeks nothing', async () => {
+    const h = freshHash();
+    await issue(db, h);
+    await db.query("UPDATE public.extension_claim_codes SET created_at = now() - interval '2 minutes', expires_at = now() - interval '1 minute' WHERE code_hash = $1", [h]);
+    expect((await peek(db, h)).rows).toEqual([]);
+    expect((await peek(db, freshHash())).rows).toEqual([]);
+    expect((await peek(db, 'not-a-digest')).rows).toEqual([]);
+  });
+
+  it('peek is INVOKER with the exact pinned search_path', async () => {
+    const { rows } = await db.query(
+      "SELECT prosecdef, proconfig FROM pg_proc WHERE oid = 'public.extension_claim_code_peek(text)'::regprocedure");
+    expect(rows[0]).toEqual({ prosecdef: false, proconfig: ['search_path=pg_catalog, public, pg_temp'] });
+  });
+});
+
 describe('request nonces', () => {
   it('first use true, replay false', async () => {
     const k = freshHash();
@@ -184,6 +213,7 @@ describe('access: service_role only', () => {
 
   it.each(['anon', 'authenticated'])('%s cannot execute any function or read either table', async (role) => {
     expect(await asRole(role, 'SELECT * FROM public.extension_claim_code_redeem($1)', [freshHash()])).toBe('42501');
+    expect(await asRole(role, 'SELECT * FROM public.extension_claim_code_peek($1)', [freshHash()])).toBe('42501');
     expect(await asRole(role, 'SELECT * FROM public.extension_claim_code_issue($1, $2::uuid, $3::uuid, 60)', [freshHash(), USER, ORG_A])).toBe('42501');
     expect(await asRole(role, 'SELECT public.extension_request_nonce_record($1, 900)', [freshHash()])).toBe('42501');
     expect(await asRole(role, 'SELECT 1 FROM public.extension_claim_codes')).toBe('42501');
@@ -193,6 +223,7 @@ describe('access: service_role only', () => {
   it('control: service_role executes all three', async () => {
     expect(await asRole('service_role', 'SELECT * FROM public.extension_claim_code_issue($1, $2::uuid, $3::uuid, 60)', [freshHash(), USER, ORG_A])).toBe('ok');
     expect(await asRole('service_role', 'SELECT * FROM public.extension_claim_code_redeem($1)', [freshHash()])).toBe('ok');
+    expect(await asRole('service_role', 'SELECT * FROM public.extension_claim_code_peek($1)', [freshHash()])).toBe('ok');
     expect(await asRole('service_role', 'SELECT public.extension_request_nonce_record($1, 900)', [freshHash()])).toBe('ok');
   });
 });

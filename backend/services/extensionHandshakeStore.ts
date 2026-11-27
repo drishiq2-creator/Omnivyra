@@ -78,6 +78,22 @@ export async function storeIssueClaimCode(input: {
   return { createdAt, expiresAt };
 }
 
+/**
+ * Look up a claim-code digest WITHOUT redeeming it (review S-4). null = unknown, expired or already redeemed.
+ * Read only: the redeem route uses it to refuse a principal before the single-use code is consumed.
+ */
+export async function storePeekClaimCode(codeHash: string): Promise<{ userId: string; orgId: string } | null> {
+  const data = await rpc('peek', 'extension_claim_code_peek', { p_code_hash: codeHash });
+  if (!Array.isArray(data)) throw new ExtensionHandshakeStoreUnavailableError('peek', 'unexpected response shape');
+  if (data.length === 0) return null;
+  if (data.length > 1) throw new ExtensionHandshakeStoreUnavailableError('peek', 'more than one row');
+  const row = data[0] as { peek_user_id?: unknown; peek_organization_id?: unknown };
+  if (typeof row?.peek_user_id !== 'string' || typeof row?.peek_organization_id !== 'string') {
+    throw new ExtensionHandshakeStoreUnavailableError('peek', 'unexpected row shape');
+  }
+  return { userId: row.peek_user_id, orgId: row.peek_organization_id };
+}
+
 /** Atomically redeem a claim-code digest. null = unknown, expired or already redeemed (a definite answer). */
 export async function storeRedeemClaimCode(codeHash: string): Promise<{ userId: string; orgId: string } | null> {
   const data = await rpc('redeem', 'extension_claim_code_redeem', { p_code_hash: codeHash });

@@ -15,6 +15,9 @@
 --
 -- ATOMIC, DATABASE CLOCK:
 --   extension_claim_code_issue   INSERT with expires_at = now() + ttl (1..600 s; the app passes 60).
+--   extension_claim_code_peek    READ ONLY: the (user, organization) of an unredeemed, unexpired code. Lets
+--                                POST /api/extension/redeem check membership and the signing secret BEFORE the code
+--                                is consumed (review S-4); it never marks anything redeemed.
 --   extension_claim_code_redeem  ONE statement: UPDATE .. SET redeemed_at = now() WHERE code_hash = $1 AND
 --                                redeemed_at IS NULL AND expires_at > now() RETURNING user_id, organization_id.
 --                                Two concurrent redeems of one code: the second waits on the row lock, re-checks
@@ -30,6 +33,10 @@
 --
 -- ACCESS: RLS on, one service_role policy, zero client grants; the functions are SECURITY INVOKER, search_path pinned,
 -- EXECUTE for service_role only. The caller (Next.js API routes) fails CLOSED (503) on any error from these functions.
+--
+-- DEPLOY ORDER (review S-3; docs/runbooks/phase-c-browser-execution-deploy.md): apply this file BEFORE the web
+-- deploy that ships the Postgres-backed handshake. Without it every extension route (bootstrap, redeem and every
+-- signed request) answers 503 - fail closed, but a full extension outage until it is applied.
 --
 -- This version: never applied anywhere.
 -- Rollback: supabase/migrations/rollbacks/extension_handshake_store_rollback.sql
@@ -164,6 +171,35 @@ COMMENT ON FUNCTION public.extension_claim_code_issue(text, uuid, uuid, integer)
 REVOKE ALL ON FUNCTION public.extension_claim_code_issue(text, uuid, uuid, integer) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.extension_claim_code_issue(text, uuid, uuid, integer) TO service_role;
 
+CREATE OR REPLACE FUNCTION public.extension_claim_code_peek(p_code_hash text)
+RETURNS TABLE (peek_user_id uuid, peek_organization_id uuid)
+LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = pg_catalog, public, pg_temp
+AS $fn$
+BEGIN
+  IF p_code_hash IS NULL OR p_code_hash !~ '^[0-9a-f]{64}$' THEN
+    RETURN;
+  END IF;
+  -- Read only: no row lock, nothing written. The binding (user, organization) of a code never changes, so what
+  -- this returns is what a later successful redeem of the same code returns.
+  RETURN QUERY
+  SELECT c.user_id, c.organization_id
+    FROM public.extension_claim_codes c
+   WHERE c.code_hash = p_code_hash
+     AND c.redeemed_at IS NULL
+     AND c.expires_at > now();
+END
+$fn$;
+
+COMMENT ON FUNCTION public.extension_claim_code_peek(text) IS
+  'Look up an unredeemed, unexpired claim code''s (user, organization) WITHOUT redeeming it, so the redeem route can '
+  'refuse a principal (membership, signing secret) before the single-use code is consumed. No row = invalid, expired '
+  'or already redeemed.';
+
+REVOKE ALL ON FUNCTION public.extension_claim_code_peek(text) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.extension_claim_code_peek(text) TO service_role;
+
 CREATE OR REPLACE FUNCTION public.extension_claim_code_redeem(p_code_hash text)
 RETURNS TABLE (redeemed_user_id uuid, redeemed_organization_id uuid)
 LANGUAGE plpgsql
@@ -292,6 +328,7 @@ BEGIN
 
   -- functions: INVOKER, EXACT proconfig, proacl (not has_function_privilege, which is true for the owner).
   FOREACH p IN ARRAY ARRAY['public.extension_claim_code_issue(text, uuid, uuid, integer)',
+                           'public.extension_claim_code_peek(text)',
                            'public.extension_claim_code_redeem(text)',
                            'public.extension_request_nonce_record(text, integer)'] LOOP
     f := to_regprocedure(p);
@@ -313,7 +350,7 @@ BEGIN
     IF v_n <> 1 THEN RAISE EXCEPTION 'EHS postcondition: service_role must hold EXECUTE on %', p; END IF;
   END LOOP;
 
-  RAISE NOTICE 'EHS: extension_claim_codes + extension_request_nonces verified - RLS on, 1 service_role policy each, service_role S/I/U/D only, no client privilege; issue/redeem/nonce_record INVOKER, proconfig exact, EXECUTE service_role only.';
+  RAISE NOTICE 'EHS: extension_claim_codes + extension_request_nonces verified - RLS on, 1 service_role policy each, service_role S/I/U/D only, no client privilege; issue/peek/redeem/nonce_record INVOKER, proconfig exact, EXECUTE service_role only.';
 END
 $verify$;
 

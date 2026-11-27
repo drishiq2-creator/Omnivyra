@@ -28,6 +28,10 @@ type RoleRow = { user_id: string; company_id: string; status: string; role: stri
 const mockDb = {
   skewMs: 0,
   rpcDown: false,
+  /** Fail only this rpc (the others answer): models a store error at one step. */
+  failFn: null as string | null,
+  /** user_company_roles reads answer a transport error (membership lookup outage). */
+  rolesDown: false,
   claims: new Map<string, Claim>(),
   nonces: new Map<string, number>(),
   roles: [] as RoleRow[],
@@ -48,6 +52,7 @@ function mockFrom(table: string) {
     eq: (c: string, v: unknown) => { preds.push((r) => r[c] === v); return q; },
     limit: () => q,
     maybeSingle: async () => {
+      if (table === 'user_company_roles' && mockDb.rolesDown) return { data: null, error: { code: 'PGRST001', message: 'connection refused' } };
       const hit = rows().find((r) => preds.every((p) => p(r)));
       return { data: hit ? { ...hit } : null, error: null };
     },
@@ -57,13 +62,18 @@ function mockFrom(table: string) {
 
 async function mockRpc(fn: string, args: Record<string, any>) {
   mockDb.rpcCalls.push(fn);
-  if (mockDb.rpcDown) return { data: null, error: { code: 'PGRST001', message: 'connection refused' } };
+  if (mockDb.rpcDown || mockDb.failFn === fn) return { data: null, error: { code: 'PGRST001', message: 'connection refused' } };
   const now = mockDb.now();
   if (fn === 'extension_claim_code_issue') {
     if (mockDb.claims.has(args.p_code_hash)) return { data: null, error: { code: '23505', message: 'duplicate' } };
     const c = { user: args.p_user_id, org: args.p_organization_id, createdAt: now, expiresAt: now + args.p_ttl_seconds * 1000, redeemedAt: null };
     mockDb.claims.set(args.p_code_hash, c);
     return { data: [{ issued_at: new Date(c.createdAt).toISOString(), valid_until: new Date(c.expiresAt).toISOString() }], error: null };
+  }
+  if (fn === 'extension_claim_code_peek') {
+    const c = mockDb.claims.get(args.p_code_hash);
+    if (!c || c.redeemedAt !== null || !(c.expiresAt > now)) return { data: [], error: null };
+    return { data: [{ peek_user_id: c.user, peek_organization_id: c.org }], error: null };
   }
   if (fn === 'extension_claim_code_redeem') {
     const c = mockDb.claims.get(args.p_code_hash);
@@ -206,6 +216,8 @@ const decodeToken = (t: string) => JSON.parse(Buffer.from(t.split('.')[0], 'base
 beforeEach(() => {
   mockDb.skewMs = 0;
   mockDb.rpcDown = false;
+  mockDb.failFn = null;
+  mockDb.rolesDown = false;
   mockDb.claims.clear();
   mockDb.nonces.clear();
   mockDb.rpcCalls.length = 0;
@@ -296,6 +308,7 @@ describe('single use, expiry, concurrency', () => {
     const r = await redeem(B, 'cc_not-a-code');
     expect(r.statusCode).toBe(400);
     expect(mockDb.rpcCalls).not.toContain('extension_claim_code_redeem');
+    expect(mockDb.rpcCalls).not.toContain('extension_claim_code_peek');
   });
 });
 
@@ -378,6 +391,27 @@ describe('ONE membership rule at bootstrap, redeem and validate', () => {
     expect(r.body.data).toBeUndefined();
   });
 
+  it('S-4: a membership refusal does NOT consume the code (control: membership restored -> the same code redeems)', async () => {
+    const b = await bootstrap(A, MEMBER);
+    const saved = mockDb.roles;
+    mockDb.roles = mockDb.roles.filter((r) => r.company_id !== ORG);
+    expect((await redeem(B, b.body.data.claim_code)).statusCode).toBe(403);
+    expect([...mockDb.claims.values()].every((c) => c.redeemedAt === null)).toBe(true);
+    expect(mockDb.rpcCalls).not.toContain('extension_claim_code_redeem');
+    mockDb.roles = saved;
+    expect((await redeem(B, b.body.data.claim_code)).statusCode).toBe(200);
+  });
+
+  it('S-4: a membership lookup outage (503 retryable) does not consume the code; the retry redeems', async () => {
+    const b = await bootstrap(A, MEMBER);
+    mockDb.rolesDown = true;
+    const r = await redeem(B, b.body.data.claim_code);
+    mockDb.rolesDown = false;
+    expect(r.statusCode).toBe(503);
+    expect(r.body).toMatchObject({ error: 'TENANT_LOOKUP_ERROR', retryable: true });
+    expect((await redeem(B, b.body.data.claim_code)).statusCode).toBe(200);
+  });
+
   it('validate after redeem succeeds for exactly the principals bootstrap admitted', async () => {
     const { session } = await pair('linkedin_engagement');
     expect((await validate(B, session)).statusCode).toBe(200);
@@ -403,6 +437,24 @@ describe('store unreadable -> 503, never valid', () => {
     expect(JSON.stringify(r.body)).not.toMatch(/session_token|hmac_secret/);
     mockDb.rpcDown = false;
     expect((await redeem(B, b.body.data.claim_code)).statusCode).toBe(200);
+  });
+
+  it('S-4: a store failure AT the consuming redeem step is NOT retryable: repair_required (the code may be gone)', async () => {
+    const b = await bootstrap(A, MEMBER);
+    mockDb.failFn = 'extension_claim_code_redeem';
+    const r = await redeem(B, b.body.data.claim_code);
+    mockDb.failFn = null;
+    expect(r.statusCode).toBe(503);
+    expect(r.body).toMatchObject({ success: false, error: 'CLAIM_REDEEM_UNCONFIRMED', retryable: false, repair_required: true });
+    expect(JSON.stringify(r.body)).not.toMatch(/session_token|hmac_secret/);
+    // CONTROL: the lookup step failing instead is an honest retryable 503 and the code survives
+    const c = await bootstrap(A, MEMBER);
+    mockDb.failFn = 'extension_claim_code_peek';
+    const p = await redeem(B, c.body.data.claim_code);
+    mockDb.failFn = null;
+    expect(p.statusCode).toBe(503);
+    expect(p.body).toMatchObject({ error: 'CLAIM_STORE_UNAVAILABLE', retryable: true });
+    expect((await redeem(B, c.body.data.claim_code)).statusCode).toBe(200);
   });
 
   it('a signed call: 503 REPLAY_STORE_UNAVAILABLE - not a 401 the extension would sign out on (control: 200 when up)', async () => {

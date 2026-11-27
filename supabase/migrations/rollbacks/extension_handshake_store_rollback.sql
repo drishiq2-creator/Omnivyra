@@ -9,6 +9,7 @@ BEGIN;
 
 DROP FUNCTION IF EXISTS public.extension_request_nonce_record(text, integer);
 DROP FUNCTION IF EXISTS public.extension_claim_code_redeem(text);
+DROP FUNCTION IF EXISTS public.extension_claim_code_peek(text);
 DROP FUNCTION IF EXISTS public.extension_claim_code_issue(text, uuid, uuid, integer);
 DROP TABLE IF EXISTS public.extension_request_nonces;
 DROP TABLE IF EXISTS public.extension_claim_codes;
@@ -18,6 +19,7 @@ BEGIN
   IF to_regclass('public.extension_claim_codes') IS NOT NULL OR to_regclass('public.extension_request_nonces') IS NOT NULL
      OR to_regprocedure('public.extension_claim_code_issue(text, uuid, uuid, integer)') IS NOT NULL
      OR to_regprocedure('public.extension_claim_code_redeem(text)') IS NOT NULL
+     OR to_regprocedure('public.extension_claim_code_peek(text)') IS NOT NULL
      OR to_regprocedure('public.extension_request_nonce_record(text, integer)') IS NOT NULL THEN
     RAISE EXCEPTION 'EHS rollback postcondition: an extension handshake object still exists';
   END IF;

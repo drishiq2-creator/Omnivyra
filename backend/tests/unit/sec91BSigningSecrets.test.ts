@@ -28,6 +28,11 @@ jest.mock('../../db/supabaseClient', () => ({
         const now = Date.now();
         return { data: [{ issued_at: new Date(now).toISOString(), valid_until: new Date(now + a.p_ttl_seconds * 1000).toISOString() }], error: null };
       }
+      if (fn === 'extension_claim_code_peek') {
+        const c = mockClaims.get(a.p_code_hash);
+        if (!c || c.redeemed) return { data: [], error: null };
+        return { data: [{ peek_user_id: c.u, peek_organization_id: c.o }], error: null };
+      }
       if (fn === 'extension_claim_code_redeem') {
         const c = mockClaims.get(a.p_code_hash);
         if (!c || c.redeemed) return { data: [], error: null };

@@ -26,6 +26,11 @@ jest.mock('../../db/supabaseClient', () => {
       const now = Date.now();
       return { data: [{ issued_at: new Date(now).toISOString(), valid_until: new Date(now + a.p_ttl_seconds * 1000).toISOString() }], error: null };
     }
+    if (fn === 'extension_claim_code_peek') {
+      const c = claims.get(a.p_code_hash);
+      if (!c || c.redeemed) return { data: [], error: null };
+      return { data: [{ peek_user_id: c.u, peek_organization_id: c.o }], error: null };
+    }
     if (fn === 'extension_claim_code_redeem') {
       const c = claims.get(a.p_code_hash);
       if (!c || c.redeemed) return { data: [], error: null };
@@ -80,8 +85,14 @@ describe('SEC91-W2B-5 signing secret missing → 503 with a plain code, no env n
     delete process.env.AUTH_SECRET;
     const r = await invoke(route('extension/redeem'), { method: 'POST', body: { claim_code: claim.code } });
     expect(r.status).toBe(503);
-    expect(r.body).toMatchObject({ success: false, error: 'SIGNING_SECRET_UNAVAILABLE' });
+    expect(r.body).toMatchObject({ success: false, error: 'SIGNING_SECRET_UNAVAILABLE', retryable: true });
     noEnvNames(r.body);
+    // Review S-4: the code was NOT consumed, so the retry the 503 invites really works once the secret is back.
+    process.env.AUTH_SECRET = 'sec91-w2b-5-test-auth-secret';
+    const again = await invoke(route('extension/redeem'), { method: 'POST', body: { claim_code: claim.code } });
+    expect(again.status).toBe(200);
+    expect(again.body.data.session_token).toEqual(expect.any(String));
+    delete process.env.AUTH_SECRET;
   });
 });
 
