@@ -1,6 +1,7 @@
 import { createApiRoute as __createApiRoute } from '../../../../lib/platform/routeFactory';
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { requireManageConnectors } from './utils';
+import { enforceCompanyAccess } from '../../../../backend/services/userContextService';
 import { revokeToken, getConnectorConnectedByUserId } from '../../../../backend/services/platformTokenService';
 import { supabase } from '../../../../backend/db/supabaseClient';
 import { disconnectSocialAccounts, type SocialAccountRow } from '../../../../backend/services/tenantCredentialDisconnect';
@@ -20,6 +21,13 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (!tenantId || !organizationId) {
     return res.status(400).json({ error: 'tenant_id and organization_id are required' });
   }
+  // Same tenancy contract as every other community-AI route (pages/api/community-ai/utils.ts): the two ids must
+  // agree, and the caller must have access to that company BEFORE any tenant-owned read below.
+  if (tenantId !== organizationId) {
+    return res.status(400).json({ error: 'tenant_id and organization_id must match' });
+  }
+  const companyAccess = await enforceCompanyAccess({ req, res, companyId: organizationId });
+  if (!companyAccess) return;
 
   const access = await requireManageConnectors(req, res, organizationId);
   if (!access) return;

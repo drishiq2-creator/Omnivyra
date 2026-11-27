@@ -119,6 +119,16 @@ jest.mock('../../../pages/api/community-ai/connectors/utils', () => ({
     return null;
   }),
 }));
+// R28: the connector route now also enforces the standard community-AI tenancy contract (enforceCompanyAccess).
+let mockCompanyAccess = true;
+const mockEnforceCompanyAccess = jest.fn(async ({ res, companyId }: any) => {
+  if (mockCompanyAccess) return { userId: 'admin-1', companyId };
+  res.status(403).json({ error: 'COMPANY_ACCESS_DENIED' });
+  return null;
+});
+jest.mock('../../services/userContextService', () => ({
+  enforceCompanyAccess: (...a: unknown[]) => (mockEnforceCompanyAccess as any)(...a),
+}));
 const mockRevokeMetadata = jest.fn(async () => null);
 jest.mock('../../services/platformTokenService', () => ({
   revokeToken: (...a: unknown[]) => (mockRevokeMetadata as any)(...a),
@@ -152,6 +162,8 @@ beforeEach(() => {
   wipeError = null;
   mockUser = { id: 'user-1' };
   mockConnectorAccess = { userId: 'admin-1', role: 'COMPANY_ADMIN' };
+  mockCompanyAccess = true;
+  mockEnforceCompanyAccess.mockClear();
   socialStore = [];
   updateMatchesNothing = false;
   fetchMock.mockReset();
@@ -327,6 +339,29 @@ describe('DELETE /api/community-ai/connectors/[platform] (schema-faithful social
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(mockRevokeMetadata).toHaveBeenCalledWith('co-A', 'co-A', 'facebook');
     expect(res.body).toMatchObject({ credentials_deleted: true, provider_revocation: [{ platform: 'facebook', status: 'revoked' }] });
+    expect(mockEnforceCompanyAccess).toHaveBeenCalledWith(expect.objectContaining({ companyId: 'co-A' }));
+  });
+
+  it('R28: mismatched tenant_id / organization_id -> 400 before any access check, read, wipe or revoke', async () => {
+    socialStore = [socialRow({ id: 'sa-o', user_id: 'owner-user', platform: 'facebook' })];
+    const res = mockRes();
+    await connectorDisconnect({ method: 'DELETE', query: { platform: 'facebook', tenant_id: 'co-B', organization_id: 'co-A' }, headers: {} } as unknown as NextApiRequest, res);
+    expect(res.statusCode).toBe(400);
+    expect(opsOn('social_accounts', 'select')).toHaveLength(0);
+    expect(opsOn('social_accounts', 'update')).toHaveLength(0);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(mockRevokeMetadata).not.toHaveBeenCalled();
+  });
+
+  it('R28: no company access (enforceCompanyAccess refuses) -> 403 before any credential read, wipe or revoke', async () => {
+    mockCompanyAccess = false;
+    socialStore = [socialRow({ id: 'sa-o', user_id: 'owner-user', platform: 'facebook' })];
+    const res = await deleteConnector('facebook');
+    expect(res.statusCode).toBe(403);
+    expect(opsOn('social_accounts', 'select')).toHaveLength(0);
+    expect(opsOn('social_accounts', 'update')).toHaveLength(0);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(mockRevokeMetadata).not.toHaveBeenCalled();
   });
 
   it('different tenant / no connector access: refused, nothing wiped or revoked', async () => {
