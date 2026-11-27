@@ -9,8 +9,11 @@
  *   - route first: inside the scheduler's guardrail check (the last step before
  *     its claim), the route executes the row;
  *   - scheduler first: inside the scheduler's executeAction, the route tries.
- * Exactly one execution in both orders.
+ * Exactly one execution in both orders. The scheduler's claim is the dispatch
+ * lease (the real status CHECK has no 'executing'); the route's CAS requires
+ * no live lease.
  */
+import { orFilter } from '../helpers/rpaClaimQueueDouble';
 type Row = Record<string, any>;
 const db: { actions: Row[] } = { actions: [] };
 
@@ -29,6 +32,7 @@ function query(table: string) {
     update: (p: Row) => { patch = p; return q; },
     eq: (k: string, v: unknown) => { filters.push((r) => r[k] === v); return q; },
     in: (k: string, v: unknown[]) => { filters.push((r) => v.includes(r[k])); return q; },
+    or: (expr: string) => { filters.push(orFilter(expr)); return q; },
     is: (k: string, v: unknown) => { filters.push((r) => (r[k] ?? null) === v); return q; },
     gte: (k: string, v: string) => { filters.push((r) => r[k] != null && String(r[k]) >= v); return q; },
     lte: (k: string, v: string) => { filters.push((r) => r[k] != null && String(r[k]) <= v); return q; },
@@ -92,6 +96,7 @@ const row = (): Row => ({
   target_id: 'urn:li:share:1', suggested_text: 'hi', playbook_id: 'pb-1', execution_mode: 'manual',
   status: 'approved', requires_human_approval: true, approved_at: '2026-11-27T00:00:00Z', risk_level: 'low',
   scheduled_at: '2026-11-27T00:00:00Z', intent_classification: null,
+  dispatch_lease_id: null, dispatch_lease_holder_id: null, dispatch_lease_expires_at: null,
 });
 async function routeExecute() {
   const res: any = { statusCode: 0 };
@@ -127,13 +132,25 @@ describe('SF-1: scheduler and manual execute claim the same row: exactly one run
     expect(runs).toEqual(['manual']);
   });
 
-  it('scheduler claims first: the route answers 409 and does not run; one run', async () => {
+  it('scheduler claims first: the route answers 409 and does not run; one run; the scheduler lease is released after', async () => {
     let routeRes: any = null;
-    onSchedulerExecute = async () => { routeRes = await routeExecute(); };
+    let leaseDuringRun: string | null = null;
+    onSchedulerExecute = async () => { leaseDuringRun = db.actions[0].dispatch_lease_holder_id; routeRes = await routeExecute(); };
     await runCommunityAiScheduler(new Date('2026-11-28T00:00:00Z'));
+    expect(leaseDuringRun).toBe('community_ai_scheduler');
+    expect(db.actions[0].status).toBe('approved'); // claim never writes a status the CHECK refuses
     expect(routeRes.statusCode).toBe(409);
     expect(routeRes.body.error).toBe('ACTION_NOT_PENDING');
     expect(runs).toEqual(['scheduler']);
+    expect(db.actions[0].dispatch_lease_id).toBeNull();
+  });
+
+  it('an EXPIRED scheduler lease (a tick that died) does not block the route', async () => {
+    db.actions[0].dispatch_lease_id = 'dead';
+    db.actions[0].dispatch_lease_holder_id = 'community_ai_scheduler';
+    db.actions[0].dispatch_lease_expires_at = '2026-01-01T00:00:00.000Z';
+    expect((await routeExecute()).statusCode).toBe(200);
+    expect(runs).toEqual(['manual']);
   });
 
   it('the scheduler claim is tenant/org scoped: a row whose stored org differs is not claimed or run', async () => {
@@ -141,6 +158,6 @@ describe('SF-1: scheduler and manual execute claim the same row: exactly one run
     onGuardrail = async () => { db.actions[0].organization_id = 'org-2'; };
     await runCommunityAiScheduler(new Date('2026-11-28T00:00:00Z'));
     expect(runs).toEqual([]);
-    expect(db.actions[0].status).toBe('approved');
+    expect(db.actions[0]).toMatchObject({ status: 'approved', dispatch_lease_id: null });
   });
 });

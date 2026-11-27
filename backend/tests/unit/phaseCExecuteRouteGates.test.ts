@@ -6,6 +6,7 @@
  * Real validator + real mode enum; the executor is a spy. Every refusal is
  * paired with a CONTROL that differs in one input and reaches the executor.
  */
+import { orFilter } from '../helpers/rpaClaimQueueDouble';
 type Row = Record<string, any>;
 const store: { actions: Row[]; updates: Row[]; reads: number } = { actions: [], updates: [], reads: 0 };
 
@@ -16,6 +17,7 @@ function actionsQuery() {
     select: () => q,
     eq: (k: string, v: unknown) => { filters.push((r) => r[k] === v); return q; },
     in: (k: string, v: unknown[]) => { filters.push((r) => v.includes(r[k])); return q; },
+    or: (expr: string) => { filters.push(orFilter(expr)); return q; },
     is: (k: string, v: unknown) => { filters.push((r) => (r[k] ?? null) === v); return q; },
     gte: () => q,
     update: (p: Row) => { patch = p; return q; },

@@ -77,6 +77,9 @@ const loadHistoryMetrics = async (
   }
 };
 
+/** SF-1: how long the scheduler's claim on a row lives if the tick dies mid-run (then it is claimable again). */
+const SCHEDULER_CLAIM_LEASE_MS = 15 * 60 * 1000;
+
 export const runCommunityAiScheduler = async (now = new Date()): Promise<SchedulerResult> => {
   // Round 28 (review P-1): fail-closed tick gate. A missing policy row, an
   // unreadable policy or execution_enabled=false stops the scheduler before
@@ -393,39 +396,64 @@ export const runCommunityAiScheduler = async (now = new Date()): Promise<Schedul
       continue;
     }
 
-    // Review SF-1: claim the row before executing. The manual execute route
-    // (pages/api/community-ai/actions/execute.ts) takes the same row with a CAS
-    // approved/pending/scheduled -> 'executing'; without a CAS here a row the
-    // user approved and executed by hand while it also carried a due
-    // scheduled_at could run twice. Same transition, tenant/org-scoped, only
-    // from 'approved': exactly one of the two claims matches the row. 0 rows =
-    // someone else took it (or it changed state): skip, nothing executed. An
-    // error is also a skip (fail closed). The executor does not read or CAS
-    // status itself; its persistExecutionResult writes the terminal status
-    // from 'executing' (no expectedFromStatuses on this path).
-    const claimAt = new Date().toISOString();
+    // Review SF-1: claim the row before executing, so a row the user also
+    // executes by hand (B-2: refused -> approved -> execute again, while it
+    // carries a due scheduled_at) runs exactly once.
+    // The claim is the dispatch LEASE, not a status change: the real
+    // community_ai_actions_status_check (supabase/_schema/baseline.sql) admits
+    // only pending/approved/executed/failed/skipped, so 'executing' would be
+    // refused (backend/tests/realschema/r3comm_* proves it). Tenant/org scoped,
+    // only from 'approved', only when no live lease exists (same expiry rule as
+    // /api/extension/commands). The manual execute route's CAS requires the
+    // same "no live lease" condition, so exactly one side gets the row. 0 rows
+    // or an error = skip, nothing executed.
+    const leaseId = randomUUID();
+    const claimAtMs = Date.now();
     const { data: claimedRow, error: claimError } = await ownedDbTable('community_ai_actions')
-      .update({ status: 'executing', updated_at: claimAt })
+      .update({
+        dispatch_lease_id: leaseId,
+        dispatch_lease_holder_id: 'community_ai_scheduler',
+        dispatch_lease_expires_at: new Date(claimAtMs + SCHEDULER_CLAIM_LEASE_MS).toISOString(),
+        updated_at: new Date(claimAtMs).toISOString(),
+      })
       .eq('id', action.id)
       .eq('tenant_id', action.tenant_id)
       .eq('organization_id', action.organization_id)
       .eq('status', 'approved')
+      .or(`dispatch_lease_expires_at.is.null,dispatch_lease_expires_at.lt.${new Date(claimAtMs).toISOString()}`)
       .select('id, status')
       .maybeSingle();
     if (claimError || !claimedRow) {
       if (claimError) console.warn('COMMUNITY_AI_SCHEDULER_CLAIM_FAILED', action.id, claimError.message);
       continue;
     }
+    const releaseSchedulerLease = async () => {
+      // A terminal persist already cleared it; a non-terminal one ('pending' for
+      // the extension) must not keep the scheduler's lease. Only OUR lease.
+      try {
+        await ownedDbTable('community_ai_actions')
+          .update({ dispatch_lease_id: null, dispatch_lease_holder_id: null, dispatch_lease_expires_at: null })
+          .eq('id', action.id)
+          .eq('dispatch_lease_id', leaseId);
+      } catch (e: any) {
+        console.warn('COMMUNITY_AI_SCHEDULER_LEASE_RELEASE_FAILED', action.id, e?.message || e);
+      }
+    };
 
     // Executor owns the terminal row write (persist:true). The scheduler
     // simply observes the outcome; notify + webhook fan-out lives inside
     // the executor so every entry point emits identically.
-    const result = await executeAction(action, true, {
-      notify: true,
-      webhook: true,
-      source: 'scheduler',
-      persist: true,
-    });
+    let result: Awaited<ReturnType<typeof executeAction>>;
+    try {
+      result = await executeAction(action, true, {
+        notify: true,
+        webhook: true,
+        source: 'scheduler',
+        persist: true,
+      });
+    } finally {
+      await releaseSchedulerLease();
+    }
 
     if (result.status === 'skipped' && result.reason === 'HUMAN_APPROVAL_REQUIRED') {
       continue;

@@ -11,6 +11,7 @@
  *
  * Every refusal is paired with a CONTROL.
  */
+import { orFilter } from '../helpers/rpaClaimQueueDouble';
 type Row = Record<string, any>;
 const store: { actions: Row[]; failNextUpdate: boolean; staleRead: Row | null; onHistory: (() => void) | null } = {
   actions: [], failNextUpdate: false, staleRead: null, onHistory: null,
@@ -27,6 +28,7 @@ function actionsQuery() {
     select: () => q,
     eq: (k: string, v: unknown) => { filters.push((r) => r[k] === v); return q; },
     in: (k: string, v: unknown[]) => { filters.push((r) => v.includes(r[k])); return q; },
+    or: (expr: string) => { filters.push(orFilter(expr)); return q; },
     is: (k: string, v: unknown) => { filters.push((r) => (r[k] ?? null) === v); return q; },
     gte: () => q,
     update: (p: Row) => { patch = p; return q; },

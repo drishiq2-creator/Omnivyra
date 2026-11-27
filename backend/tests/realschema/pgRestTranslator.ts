@@ -28,7 +28,8 @@ export function makeSupabaseModule(pg: () => Queryable, savepointPrefix: string)
     | { kind: 'isnull'; col: string; not: boolean }
     | { kind: 'isbool'; col: string; val: boolean }
     | { kind: 'in'; col: string; val: unknown[] }
-    | { kind: 'contains'; col: string; val: unknown };
+    | { kind: 'contains'; col: string; val: unknown }
+    | { kind: 'or'; terms: Array<{ col: string; op: string | null; val: unknown }> };
 
   // Serialise every statement: a SAVEPOINT released out of order would also
   // release a later one, so two in-flight builders must never interleave.
@@ -113,6 +114,13 @@ export function makeSupabaseModule(pg: () => Queryable, savepointPrefix: string)
       if (!st.filters.length) return '';
       return ` WHERE ${st.filters.map((f) => {
         if (f.kind === 'isnull') return `"${f.col}" IS ${f.not ? 'NOT ' : ''}NULL`;
+        if (f.kind === 'or') {
+          return `(${f.terms.map((t) => {
+            if (t.op === null) return `"${t.col}" IS NULL`;
+            params.push(t.val);
+            return `"${t.col}" ${t.op} $${params.length}`;
+          }).join(' OR ')})`;
+        }
         if (f.kind === 'isbool') return `"${f.col}" IS ${f.val ? 'TRUE' : 'FALSE'}`;
         if (f.kind === 'in') { params.push(f.val); return `"${f.col}" = ANY($${params.length})`; }
         if (f.kind === 'contains') {
@@ -195,6 +203,22 @@ export function makeSupabaseModule(pg: () => Queryable, savepointPrefix: string)
         throw new Error(`translator: not(${c}, ${op}) unsupported`);
       },
       in: (c: string, v: unknown[]) => { st.filters.push({ kind: 'in', col: c, val: v }); return b; },
+      // SF-1 (additive): PostgREST or() with col.is.null / col.(eq|lt|lte|gt|gte).value terms, as the scheduler's
+      // and the execute route's lease conditions use it. Anything else throws (never a silent pass).
+      or: (expr: string) => {
+        const ops: Record<string, string> = { eq: '=', lt: '<', lte: '<=', gt: '>', gte: '>=' };
+        const terms = String(expr).split(/,(?=[a-z_]+\.(?:is|eq|lt|lte|gt|gte)\.)/).map((t) => {
+          const m = /^([a-z_]+)\.(is|eq|lt|lte|gt|gte)\.(.*)$/.exec(t);
+          if (!m) throw new Error(`translator: or term ${t} unsupported`);
+          if (m[2] === 'is') {
+            if (m[3] !== 'null') throw new Error(`translator: or term ${t} unsupported`);
+            return { col: m[1], op: null, val: null };
+          }
+          return { col: m[1], op: ops[m[2]], val: m[3] };
+        });
+        st.filters.push({ kind: 'or', terms });
+        return b;
+      },
       contains: (c: string, v: unknown) => { st.filters.push({ kind: 'contains', col: c, val: v }); return b; },
       order: (c: string, o?: { ascending?: boolean }) => { st.order.push({ col: c, asc: o?.ascending !== false }); return b; },
       limit: (n: number) => { st.limit = n; return b; },

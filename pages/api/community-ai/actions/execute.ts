@@ -260,11 +260,15 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   };
   if (idempotencyKey) transitionPayload.idempotency_key = idempotencyKey;
 
+  // Review SF-1: a row another executor holds under a live dispatch lease (the
+  // scheduler's claim, or the extension's) is not taken here: 0 rows -> 409.
+  // Same expiry rule as /api/extension/commands; an expired lease is free.
   const { data: claimed, error: claimError } = await supabase
     .from('community_ai_actions')
     .update(transitionPayload)
     .eq('id', actionId)
     .in('status', Array.from(EXECUTABLE_FROM_STATUSES))
+    .or(`dispatch_lease_expires_at.is.null,dispatch_lease_expires_at.lt.${transitionAt}`)
     .select('id, status')
     .maybeSingle();
 

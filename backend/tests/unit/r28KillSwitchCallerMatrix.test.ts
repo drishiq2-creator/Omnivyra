@@ -54,7 +54,7 @@ function mockBuilder(table: string) {
     return { data: rows, error: null, count: rows.length };
   };
   Object.assign(b, {
-    select: chain, order: chain, gte: chain, lte: chain, lt: chain, gt: chain, neq: chain, not: chain, is: chain, limit: chain,
+    select: chain, order: chain, gte: chain, lte: chain, lt: chain, gt: chain, neq: chain, not: chain, is: chain, limit: chain, or: chain,
     eq: (c: string, v: unknown) => { rows = rows.filter((r) => r[c] === undefined || r[c] === v); return b; },
     in: chain,
     insert: (row: Row) => { op = 'insert'; mockDb.inserts.push({ table, row }); return b; },
