@@ -64,6 +64,16 @@ RUN apt-get update \
  && fc-cache -f \
  && rm -rf /var/lib/apt/lists/*
 
+# GI-07: an init process as PID 1. Node as PID 1 never reaps orphaned
+# descendants, so every Chromium launch/close left defunct helper processes
+# behind (Linux CI run 46031764526: ~2 per launch, 56 after one test run).
+# tini reaps them. Without -g it forwards SIGTERM/SIGINT to its direct child
+# only, so the graceful drain in backend/workers/main.ts sees the same single
+# signal it does today, and tini exits with that child's exit status.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends tini \
+ && rm -rf /var/lib/apt/lists/*
+
 # Copy compiled output from builder
 COPY --from=builder /app/dist ./dist
 
@@ -82,4 +92,8 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
 
 EXPOSE 8080
 
+# tini runs the base image's own entrypoint (docker-entrypoint.sh, which execs
+# the command), so the process chain under PID 1 is unchanged: node runs as
+# tini's direct child. Covered by .github/workflows/worker-init-reaper.yml.
+ENTRYPOINT ["/usr/bin/tini", "--", "docker-entrypoint.sh"]
 CMD ["node", "dist/backend/workers/main.js"]
