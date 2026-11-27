@@ -16,6 +16,9 @@ import type { RpaTask, RpaResult } from './rpaWorkerService';
  * Off unless RPA_SYNTHETIC_HANDLER_ENABLED=true: when off it refuses (terminal,
  * nothing attempted). The loopback GET is a tiny SSRF surface on whatever host
  * runs the worker, so it must be switched on deliberately for a pipeline check.
+ * NEVER in production (review N-4): with NODE_ENV=production it refuses even when
+ * the flag is set (a leaked flag must not open the loopback GET on the
+ * production worker, whose image sets NODE_ENV=production).
  */
 export const SYNTHETIC_PAGE_CHECK_PLATFORM = 'synthetic_page_check';
 export const SYNTHETIC_HANDLER_ENV = 'RPA_SYNTHETIC_HANDLER_ENABLED';
@@ -60,6 +63,9 @@ export function createSyntheticPageCheckHandler(deps?: {
 }): (task: RpaTask) => Promise<RpaResult> {
   return async (task: RpaTask): Promise<RpaResult> => {
     const env = deps?.env ?? process.env;
+    if (env.NODE_ENV === 'production') {
+      return { success: false, terminal: true, error: 'SYNTHETIC_HANDLER_REFUSED_IN_PRODUCTION' };
+    }
     if (env[SYNTHETIC_HANDLER_ENV] !== 'true') {
       return { success: false, terminal: true, error: 'SYNTHETIC_HANDLER_DISABLED' };
     }

@@ -376,6 +376,19 @@ describe('synthetic_page_check handler (no real platform)', () => {
     expect(fetchImpl).toHaveBeenCalledWith('http://127.0.0.1/', expect.objectContaining({ method: 'GET', redirect: 'error' }));
   });
 
+  it('N-4: NODE_ENV=production refuses even with the flag set (terminal, nothing fetched); CONTROL: same flag outside production succeeds', async () => {
+    const fetchImpl = jest.fn(async () => ({ status: 200 }));
+    const t = task(1, { platform: SYNTHETIC_PAGE_CHECK_PLATFORM, target_url: 'http://127.0.0.1/' });
+    const prod = createSyntheticPageCheckHandler({ env: { RPA_SYNTHETIC_HANDLER_ENABLED: 'true', NODE_ENV: 'production' }, fetchImpl });
+    expect(await prod(t)).toEqual({ success: false, terminal: true, error: 'SYNTHETIC_HANDLER_REFUSED_IN_PRODUCTION' });
+    const prodData = await prod(task(1, { platform: SYNTHETIC_PAGE_CHECK_PLATFORM, target_url: 'data:text/plain,x' }));
+    expect(prodData).toMatchObject({ success: false, error: 'SYNTHETIC_HANDLER_REFUSED_IN_PRODUCTION' });
+    expect(fetchImpl).not.toHaveBeenCalled();
+    const dev = createSyntheticPageCheckHandler({ env: { RPA_SYNTHETIC_HANDLER_ENABLED: 'true', NODE_ENV: 'development' }, fetchImpl });
+    expect((await dev(t)).success).toBe(true);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
   it('a non-loopback target never reaches fetch even when enabled', async () => {
     const fetchImpl = jest.fn(async () => ({ status: 200 }));
     const on = createSyntheticPageCheckHandler({ env: { RPA_SYNTHETIC_HANDLER_ENABLED: 'true' }, fetchImpl });
