@@ -1,6 +1,11 @@
 /** Part of the external-apis API (Agent-B split — backend module, not a route). */
 // Remediation: reject secrets pasted into the env-var-name field (server-side).
 import { describeRejectedEnvVarName, isEnvVarName } from '../../security/credentialSafety';
+import {
+  findNewSecretShapedEntries,
+  redactSourceCredentialFields,
+  secretInMapError,
+} from '../../services/externalApi/credentialReference';
 import { requireExternalApiAccess, requirePlatformAdmin, parseUsageUserId } from './indexShared';
 import { NextApiRequest, NextApiResponse } from 'next';
 import { supabase } from '../../db/supabaseClient';
@@ -143,6 +148,22 @@ export async function handleExternalApisPost(req: NextApiRequest, res: NextApiRe
       return res.status(400).json({ error: validation.message || 'Invalid platform config' });
     }
 
+    // Round 26 (H-2): headers / query_params are stored in plaintext and served by the catalog
+    // reads; they must not carry a literal credential (use an {{ENV_VAR_NAME}} template and the
+    // provider account's encrypted Credentials form). Key NAMES only in the error, never values.
+    for (const [field, value] of [['headers', headers], ['query_params', query_params]] as const) {
+      const badKeys = findNewSecretShapedEntries(value, {});
+      if (badKeys.length > 0) return res.status(400).json(secretInMapError(field, badKeys));
+    }
+
+    // Round 26 (H-5): is_preset rows are listed in every tenant's preset picker, so only the
+    // Super Admin may create one. A tenant row is always created for the caller's own,
+    // role-checked company (`companyId`); a body `company_id` is never read.
+    const callerIsSuperAdmin = access.role === 'SUPER_ADMIN';
+    if (!callerIsSuperAdmin && is_preset !== undefined && is_preset !== null && Boolean(is_preset)) {
+      return res.status(403).json({ error: 'Only a Super Admin can mark an API source as a preset.' });
+    }
+
     // ── Category validation (SuperAdmin paths only — tenant path is forced below) ──
     const resolvedCategory: string | null = (() => {
       if (platformScopeRequested && !companyId) {
@@ -234,7 +255,7 @@ export async function handleExternalApisPost(req: NextApiRequest, res: NextApiRe
         created_at: new Date().toISOString(),
       });
       const { oauth_client_id_encrypted: _oid, oauth_client_secret_encrypted: _osec, ...apiSafe } = api as any;
-      return res.status(201).json({ api: { ...apiSafe, has_oauth_credentials: !!(_oid && _osec) } });
+      return res.status(201).json({ api: { ...redactSourceCredentialFields(apiSafe), has_oauth_credentials: !!(_oid && _osec) } });
     }
 
     // Tenant-created API: force category='others', is_whitelisted=false, is_enabled_global=true
@@ -256,7 +277,7 @@ export async function handleExternalApisPost(req: NextApiRequest, res: NextApiRe
         oauth_client_secret_encrypted: oauthClientSecretEncrypted,
         headers: headers || {},
         query_params: query_params || {},
-        is_preset: is_preset ?? false,
+        is_preset: callerIsSuperAdmin ? Boolean(is_preset ?? false) : false,
         retry_count: retry_count ?? 2,
         timeout_ms: timeout_ms ?? 8000,
         rate_limit_per_min: rate_limit_per_min ?? 60,
@@ -278,7 +299,9 @@ export async function handleExternalApisPost(req: NextApiRequest, res: NextApiRe
         detail: error.message,
       });
     }
-    const { oauth_client_id_encrypted: _oid, oauth_client_secret_encrypted: _osec, ...apiSafe } = (data || {}) as any;
+    const { oauth_client_id_encrypted: _oid, oauth_client_secret_encrypted: _osec, ...apiSafeRaw } = (data || {}) as any;
+    // Round 26 (H-2): the created row is served back through the same redaction as the reads.
+    const apiSafe = redactSourceCredentialFields(apiSafeRaw);
 
     // Mark external_api_connected in setup progress and check earn credits (fire-and-forget)
     if (companyId && access?.userId) {

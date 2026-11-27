@@ -22,6 +22,13 @@ import {
   isSuperAdmin,
   Role,
 } from '../../../backend/services/rbacService';
+import { isEnvVarName, describeRejectedEnvVarName } from '../../../backend/security/credentialSafety';
+import {
+  findNewSecretShapedEntries,
+  redactSourceCredentialFields,
+  restoreRedactedMapValues,
+  secretInMapError,
+} from '../../../backend/services/externalApi/credentialReference';
 
 const normalizeRecord = (value: any): Record<string, any> => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
@@ -326,10 +333,13 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       return res
         .status(200)
         .json({
-          apis,
-          availableApis: available,
+          // Round 23 B/C: this GET is open to any company role and lists platform rows
+          // (global presets) with select('*'). A secret pasted into api_key_env_name /
+          // api_key_name (or a per-user override) must never be served.
+          apis: redactSourceCredentialFields(apis),
+          availableApis: redactSourceCredentialFields(available),
           companyDefaultApis: companyDefaultApiIds,
-          global_presets: globalPresets,
+          global_presets: redactSourceCredentialFields(globalPresets),
           permissions: { canManageExternalApis },
         });
     } catch (error) {
@@ -360,6 +370,26 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
 
     if (scope && scope !== 'company') {
       return res.status(400).json({ error: 'scope must be company' });
+    }
+    // Round 23 B/C: the per-company override is an env-var NAME (it replaces the source's
+    // api_key_env_name at execution time). Never accept a secret here; never echo it.
+    if (
+      api_key_env_name !== undefined && api_key_env_name !== null && String(api_key_env_name).trim() !== ''
+      && !isEnvVarName(api_key_env_name)
+    ) {
+      return res.status(400).json({
+        error: 'INVALID_ENV_VAR_NAME',
+        field: 'api_key_env_name',
+        detail: describeRejectedEnvVarName(api_key_env_name),
+      });
+    }
+    // Round 26 (H-2): the overrides are merged into the source's headers / query params at
+    // execution time. A literal credential pasted here would be stored in plaintext and
+    // served back; only {{ENV_VAR_NAME}} templates and non-secret values are accepted. A
+    // redaction marker echoed back by a read is dropped (nothing secret is re-stored).
+    for (const [field, value] of [['headers_override', headers_override], ['query_params_override', query_params_override]] as const) {
+      const badKeys = findNewSecretShapedEntries(restoreRedactedMapValues(normalizeRecord(value), {}), {});
+      if (badKeys.length > 0) return res.status(400).json(secretInMapError(field, badKeys));
     }
     const scopedUserId = buildCompanyAccessUserId(companyId);
     const nowIso = new Date().toISOString();
@@ -541,8 +571,8 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
         api_source_id,
         user_id: scopedUserId,
         api_key_env_name: api_key_env_name ? String(api_key_env_name).trim() : null,
-        headers_override: normalizeRecord(headers_override),
-        query_params_override: normalizeRecord(query_params_override),
+        headers_override: restoreRedactedMapValues(normalizeRecord(headers_override), {}),
+        query_params_override: restoreRedactedMapValues(normalizeRecord(query_params_override), {}),
         rate_limit_per_min: typeof rate_limit_per_min === 'number' ? rate_limit_per_min : null,
         updated_at: nowIso,
       };
@@ -560,7 +590,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
           detail: error.message,
         });
       }
-      return res.status(200).json({ access: data });
+      return res.status(200).json({ access: redactSourceCredentialFields(data) });
     }
 
     return res.status(200).json({

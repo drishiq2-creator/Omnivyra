@@ -175,10 +175,15 @@ export const resolveEnvValue = (envName?: string | null): string | undefined => 
   // working credential. That behaviour is exactly why four live provider keys ended up in
   // `external_api_sources.api_key_env_name` and were served by the catalog API.
   //
-  // Retiring it was gated on three checks, all now satisfied:
-  //   1. every affected credential was relocated into encrypted account storage;
-  //   2. write paths reject secret-shaped input (`isEnvVarName`);
-  //   3. read paths redact anything that fails that validation.
+  // Retiring it was gated on three checks:
+  //   1. every affected credential was relocated into encrypted account storage —
+  //      NOT true for every row: round 21/23 found the production "NewsAPI" row still
+  //      holding a plaintext key in api_key_env_name (an operator fix + key rotation are
+  //      pending; see round23/23BC-NEWSAPI-EXPOSURE-MAP-AND-FIX.md);
+  //   2. write paths reject secret-shaped input (`isEnvVarName`) — POST and, since round
+  //      23, PUT /api/external-apis/[id], /access and /requests;
+  //   3. read paths redact anything that fails that validation, and `missingEnv` reports
+  //      such a value only as `<invalid credential reference on source <id>>`.
   // Callers needing a real secret get it from `resolveAccountCredentials`, which takes
   // precedence over this function at every call site in `execution.ts`.
   //
