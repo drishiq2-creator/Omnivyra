@@ -77,20 +77,23 @@ test('RESET both production hosts are refused in every form and in both variable
 });
 
 test('RESET malformed, blank or ambiguous targets fail closed', () => {
-  for (const [why, env] of [
-    ['nothing set', {}],
-    ['blank', { REDIS_URL: '   ' }],
-    ['blank E2E', { E2E_REDIS_URL: '', REDIS_URL: LOOPBACK }],
-    ['different values', { E2E_REDIS_URL: 'redis://127.0.0.1:6380', REDIS_URL: LOOPBACK }],
-    ['unparseable', { REDIS_URL: 'not a url' }],
-    ['wrong scheme', { REDIS_URL: 'http://127.0.0.1:6379' }],
-    ['no host', { REDIS_URL: 'redis://' }],
-    ['tab', { REDIS_URL: 'redis://127.0.0.1:6379\t' }],
-    ['backslash', { REDIS_URL: 'redis://127.0.0.1:6379\\@evil.example' }],
-    ['two @', { REDIS_URL: 'redis://a@evil.example:6379@127.0.0.1:6379' }],
-    ['query', { REDIS_URL: 'redis://127.0.0.1:6379/0?host=evil.example' }],
+  // Independent review F-1 (2026-11-27): every case carries a VALID run token and names the rule that must fire,
+  // so a case cannot pass merely because the token is missing (R-APPROVAL-MISSING would otherwise refuse all).
+  for (const [why, env, rule] of [
+    ['nothing set', {}, /R-APPROVAL-MISSING/],
+    ['blank', { REDIS_URL: '   ' }, /R-APPROVAL-MISSING|R-MALFORMED/],
+    ['blank E2E', { E2E_REDIS_URL: '', REDIS_URL: LOOPBACK }, /R-AMBIGUOUS|R-MALFORMED|R-APPROVAL-MISSING/],
+    ['different values', { E2E_REDIS_URL: 'redis://127.0.0.1:6380', REDIS_URL: LOOPBACK }, /R-AMBIGUOUS/],
+    ['unparseable', { REDIS_URL: 'not a url' }, /R-MALFORMED/],
+    ['wrong scheme', { REDIS_URL: 'http://127.0.0.1:6379' }, /R-MALFORMED/],
+    ['no host', { REDIS_URL: 'redis://' }, /R-MALFORMED/],
+    ['tab', { REDIS_URL: 'redis://127.0.0.1:6379\t' }, /R-MALFORMED/],
+    ['backslash', { REDIS_URL: 'redis://127.0.0.1:6379\\@evil.example' }, /R-MALFORMED/],
+    ['two @', { REDIS_URL: 'redis://a@evil.example:6379@127.0.0.1:6379' }, /R-MALFORMED/],
+    ['query', { REDIS_URL: 'redis://127.0.0.1:6379/0?host=evil.example' }, /R-MALFORMED/],
+    ['fragment', { REDIS_URL: 'redis://127.0.0.1:6379/0#evil.example' }, /R-MALFORMED/],
   ] as const) {
-    refused(env as Record<string, string>, why);
+    refused({ ...(env as Record<string, string>), E2E_REDIS_IDENTITY_TOKEN: RUN_TOKEN }, why, rule);
   }
 });
 

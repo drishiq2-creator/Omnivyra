@@ -221,6 +221,21 @@ test('C3 C2 SEED a NON-EMPTY Redis is never seeded (Production is never empty)',
   assert.ok(!r.calls.some((c) => c.startsWith('set ')), r.calls.join(' | '));
 });
 
+test('C3 review F-3 SEED a database other than 0 is refused before any client exists (DBSIZE is per database)', () => {
+  for (const db of ['/15', '/1', '/00']) {
+    const r = seedRun({ REDIS_URL: `redis://127.0.0.1:6379${db}`, E2E_REDIS_IDENTITY_TOKEN: TOKEN }, { dbsize: '0' });
+    assert.equal(r.status, 1, `${db}: ${r.out}`);
+    assert.match(r.out, /database other than 0/);
+    assert.deepEqual(r.calls, [], `${db}: no client may be created`);
+  }
+  // CONTROL: database 0, explicit or implied, is still seeded.
+  for (const db of ['/0', '']) {
+    const ok = seedRun({ REDIS_URL: `redis://127.0.0.1:6379${db}`, E2E_REDIS_IDENTITY_TOKEN: TOKEN }, { dbsize: '0' });
+    assert.equal(ok.status, 0, `${db}: ${ok.out}`);
+    assert.ok(ok.calls.includes('set omnivyra:e2e:identity NX'), ok.calls.join(' | '));
+  }
+});
+
 test('C3 C2 SEED production in any form is refused before any client exists', () => {
   for (const url of [`rediss://default:${PW}@${LIVE}:6379`, `rediss://default:${PW}@right-treefrog-90757.evil.example:6379`]) {
     const r = seedRun({ REDIS_URL: url, E2E_REDIS_IDENTITY_TOKEN: TOKEN });

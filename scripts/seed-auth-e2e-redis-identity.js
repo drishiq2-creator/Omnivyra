@@ -77,6 +77,11 @@ async function seed({ env = process.env, argv = [], createRedis = defaultCreateR
     throw asRefusal(error);
   }
 
+  // Independent review F-3 (2026-11-27): emptiness is proven with DBSIZE, which counts only the SELECTED
+  // database. Seeding is therefore allowed only into database 0 (the one a fresh service container and every
+  // real deployment use), so an empty high-numbered database of a populated server can never be seeded.
+  const dbPath = new URL(target.url).pathname;
+  if (!['', '/', '/0'].includes(dbPath)) throw new SeedRefusedError('the target selects a Redis database other than 0; only database 0 of a fresh disposable Redis is ever seeded (rule R-SEED-NOT-EMPTY).');
   const redis = createRedis(target.url);
   let outcome;
   try {

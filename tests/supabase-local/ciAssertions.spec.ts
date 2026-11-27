@@ -213,7 +213,7 @@ test('CI v3.1 R5 passwords containing "@" or "/" and encoded secret forms are fu
     'postgres://user:fake/pw@h/db',
     `encoded ${encodeURIComponent(secret)} and json ${JSON.stringify({ k: 'x"' + secret }).slice(0, 0)}${JSON.stringify(secret).slice(1, -1)}`,
   ].join('\n'), [secret]);
-  for (const s of ['ss@127', 'p@ss', 'fake/pw', encodeURIComponent(secret), secret]) assert.ok(!r.text.includes(s), `left ${s}`);
+  for (const s of ['ss@127', 'p@ss', 'fake/pw', 'fake', encodeURIComponent(secret), secret]) assert.ok(!r.text.includes(s), `left ${s}`);
   assert.match(r.text, /redis:\/\/\[REDACTED\]@127\.0\.0\.1:6379/);
 });
 

@@ -157,6 +157,10 @@ function checkWorkflow(text: string): string[] {
     const seed = stepIndex(steps, /npm run seed:auth-e2e-redis-identity -- --env-out "\$GITHUB_ENV"/);
     const resetStep = stepIndex(steps, /npm run reset:auth-e2e-rate-limits/);
     if (!(seed >= 0 && resetStep > seed && server > resetStep)) add('the Redis identity marker must be seeded before the rate-limit reset, which must precede the app server');
+    // Independent review F-2 (2026-11-27): the seed must also come after the hosted-target refusal and the
+    // Redis health check (the deleted hosted checker required this; the local rule now does too).
+    const health = steps.findIndex((s) => /Verify ephemeral Redis is healthy/.test(String(s.name ?? '')));
+    if (!(seed > target && target >= 0 && seed > health && health >= 0)) add('the Redis identity marker must be seeded after the hosted-target refusal and the Redis health check');
   }
   return problems;
 }
@@ -259,4 +263,17 @@ test('C3 CONTROL v3.1 R2 an upload that ignores the redaction outcome is detecte
 
 test('C3 CONTROL review C2 a missing identity-marker seed step is detected', () => {
   expectDetected('no seed', 'run: npm run seed:auth-e2e-redis-identity -- --env-out "$GITHUB_ENV"', 'run: echo skipped-seed', /identity marker must be seeded/);
+});
+
+test('C3 CONTROL review F-2 a seed step moved after the rate-limit reset is detected', () => {
+  const seedRun = 'run: npm run seed:auth-e2e-redis-identity -- --env-out "$GITHUB_ENV"';
+  const resetRun = 'run: npm run reset:auth-e2e-rate-limits';
+  assert.equal(SOURCE.split(seedRun).length - 1, 1);
+  assert.equal(SOURCE.split(resetRun).length - 1, 1);
+  const swapped = SOURCE.replace(seedRun, '@@SEED@@').replace(resetRun, seedRun).replace('@@SEED@@', resetRun);
+  assert.ok(checkWorkflow(swapped).some((p) => /seeded before the rate-limit reset/.test(p)), JSON.stringify(checkWorkflow(swapped)));
+});
+
+test('C3 CONTROL review F-2 a seed step before the Redis health check is detected', () => {
+  expectDetected('health renamed away', '- name: Verify ephemeral Redis is healthy', '- name: Ping Redis', /after the hosted-target refusal and the Redis health check/);
 });
