@@ -97,6 +97,14 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     return res.status(401).json({ success: false, error: 'INVALID_SESSION', reason: 'SESSION_MISSING_HMAC_NONCE' });
   }
 
+  // Phase E product filter. A session redeemed for the Sales Navigator package (product bound into the signed
+  // token by /api/extension/redeem) is handed NO command: everything this route offers is engagement work, and that
+  // package polls here only because redeem echoed product 'salesnav' ("this server filters by product"). Nothing
+  // is read or claimed. Legacy (no product) and 'linkedin_engagement' sessions are unchanged.
+  if (session.product === 'salesnav') {
+    return res.status(200).json({ success: true, commands: [] });
+  }
+
   const clientCapabilityVersion = String(req.headers['x-omnivyra-capability-version'] || '').trim();
   if (!clientCapabilityVersion) {
     return res.status(400).json({ success: false, error: 'MISSING_CAPABILITY_VERSION' });

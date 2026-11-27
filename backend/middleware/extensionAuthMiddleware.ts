@@ -17,10 +17,23 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 import {
   verifyExtensionSessionToken,
   verifyExtensionRequestSignature,
+  type ExtensionSessionPayload,
 } from '@/backend/services/extensionSessionService';
 import { supabase } from '@/backend/db/supabaseClient';
+import { capturedRawBody } from './extensionRawBody';
 
 function take(h: string | string[] | undefined) { return (Array.isArray(h) ? h[0] : h) || ''; }
+
+/** The bytes to hash for the signature, or null when they cannot be known exactly. */
+function signedBodyBytes(req: NextApiRequest): Buffer | null {
+  const raw = capturedRawBody(req);
+  if (raw) return raw;
+  // No capture. A GET/HEAD carries no body (fetch forbids one; the extension signs ''): hash the empty string, as
+  // before. Anything else would need a re-serialisation - refuse.
+  const method = String(req.method || 'GET').toUpperCase();
+  if (method === 'GET' || method === 'HEAD') return Buffer.alloc(0);
+  return null;
+}
 
 async function inferDevBypassOrgId(req: NextApiRequest): Promise<string | null> {
   const path = (req.url || '').split('?')[0] || '';
@@ -54,7 +67,7 @@ async function inferDevBypassOrgId(req: NextApiRequest): Promise<string | null> 
   return null;
 }
 
-export async function requireExtensionAuth(req: NextApiRequest, res: NextApiResponse) {
+export async function requireExtensionAuth(req: NextApiRequest, res: NextApiResponse): Promise<{ session: ExtensionSessionPayload } | null> {
   // Dev bypass — short-circuit the entire HMAC/session chain when the
   // operator opts in via env. Refuses to run in production no matter what
   // the env says, so a stray flag in a deployed env can't disable auth.
@@ -101,16 +114,25 @@ export async function requireExtensionAuth(req: NextApiRequest, res: NextApiResp
     return null;
   }
 
-  // Reconstruct raw body for signature verification. Next.js has already
-  // parsed JSON into req.body; re-serialize with stable formatting. The
-  // extension also serializes via JSON.stringify, so this matches for POST.
-  // For GET the body is empty.
-  const rawBody = req.method && req.method.toUpperCase() !== 'GET'
-    ? (req.body ? JSON.stringify(req.body) : '')
-    : '';
+  // The signature covers the EXACT bytes received (see withExtensionRawBody above).
+  // A request that cannot be signed at all (no signature headers, or a session without an HMAC nonce) is refused
+  // 401 by the verifier before any body is hashed; only a request that WOULD be hashed needs the captured bytes.
+  let rawBody = signedBodyBytes(req);
+  if (!rawBody) {
+    const signable = Boolean(take(req.headers['x-omnivyra-timestamp']) && take(req.headers['x-omnivyra-nonce'])
+      && take(req.headers['x-omnivyra-signature']) && session.hmacNonce);
+    if (signable) {
+      console.error('[extensionAuth] raw request body was not captured - route is missing withExtensionRawBody / bodyParser:false', req.url);
+      res.status(500).json({ success: false, error: 'RAW_BODY_UNAVAILABLE' });
+      return null;
+    }
+    rawBody = Buffer.alloc(0); // never hashed: the verifier refuses on the missing header / nonce first
+  }
 
+  // PATH = pathname only. The extension signs the endpoint path; its service worker appends ?organization_id= to
+  // GETs after signing. The query string is therefore unauthenticated: routes take the tenant from the session.
   const path = (req.url || '').split('?')[0] || '';
-  const verify = verifyExtensionRequestSignature({
+  const verify = await verifyExtensionRequestSignature({
     method: req.method || 'GET',
     path,
     rawBody,
@@ -121,7 +143,13 @@ export async function requireExtensionAuth(req: NextApiRequest, res: NextApiResp
   });
 
   if (!verify.ok) {
-    res.status(401).json({ success: false, error: 'SIGNATURE_INVALID', reason: verify.reason });
+    if ((verify as { status?: number }).status === 503) {
+      // The shared replay store could not answer: a transient service condition, never a signature verdict (the
+      // extension keeps its session on a 503; a 401 SIGNATURE_INVALID would sign it out).
+      res.status(503).json({ success: false, error: 'REPLAY_STORE_UNAVAILABLE', retryable: true });
+      return null;
+    }
+    res.status(401).json({ success: false, error: 'SIGNATURE_INVALID', reason: (verify as { reason?: string }).reason });
     return null;
   }
 

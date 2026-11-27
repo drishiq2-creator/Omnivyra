@@ -11,10 +11,32 @@
  * generic 500 without the internal message. Production resolves AUTH_SECRET (it has no
  * EXTENSION_SESSION_SECRET / RPA_AUTH_SECRET), so the success path is unchanged (COMPAT).
  */
-import { seed, invoke, CO_A } from '../helpers/routeAuthHarness';
+import { seed, invoke, CO_A, USER_A } from '../helpers/routeAuthHarness';
 
 jest.mock('@/config', () => ({ config: { DEV_USER_ID: '', NODE_ENV: 'production' } }));
-jest.mock('../../db/supabaseClient', () => require('../helpers/routeAuthHarness').supabaseModule());
+// Phase E: claim codes live in the shared handshake store (extension_claim_code_* rpc). The harness rpc answers
+// { data: null } for every function, which the store reads as unavailable (503) - so those two functions get a
+// minimal faithful fake here; every other rpc still goes to the harness.
+jest.mock('../../db/supabaseClient', () => {
+  const h = require('../helpers/routeAuthHarness');
+  const claims = new Map<string, { u: string; o: string; redeemed: boolean }>();
+  const rpc = async (fn: string, a: any) => {
+    if (fn === 'extension_claim_code_issue') {
+      claims.set(a.p_code_hash, { u: a.p_user_id, o: a.p_organization_id, redeemed: false });
+      const now = Date.now();
+      return { data: [{ issued_at: new Date(now).toISOString(), valid_until: new Date(now + a.p_ttl_seconds * 1000).toISOString() }], error: null };
+    }
+    if (fn === 'extension_claim_code_redeem') {
+      const c = claims.get(a.p_code_hash);
+      if (!c || c.redeemed) return { data: [], error: null };
+      c.redeemed = true;
+      return { data: [{ redeemed_user_id: c.u, redeemed_organization_id: c.o }], error: null };
+    }
+    return h.fakeSupabase.rpc(fn, a);
+  };
+  const supabase = { ...h.fakeSupabase, rpc };
+  return { ...h.supabaseModule(), supabase, default: supabase };
+});
 jest.mock('../../db/writeOwner', () => require('../helpers/routeAuthHarness').writeOwnerModule());
 jest.mock('../../services/supabaseAuthService', () => require('../helpers/routeAuthHarness').authModule());
 jest.mock('../../security/IdentityResolver', () => require('../helpers/routeAuthHarness').identityModule());
@@ -54,7 +76,7 @@ describe('SEC91-W2B-5 signing secret missing → 503 with a plain code, no env n
 
   it('extension/redeem: a claim minted before the secret went away → 503, no env names', async () => {
     process.env.AUTH_SECRET = 'sec91-w2b-5-test-auth-secret';
-    const claim = createClaimCode('user-x', CO_A);
+    const claim = await createClaimCode(USER_A, CO_A); // a member: redeem reaches token issuance
     delete process.env.AUTH_SECRET;
     const r = await invoke(route('extension/redeem'), { method: 'POST', body: { claim_code: claim.code } });
     expect(r.status).toBe(503);
@@ -73,7 +95,7 @@ describe('COMPAT: with AUTH_SECRET configured (production) the routes issue toke
   });
 
   it('extension/redeem → 200 with a session token', async () => {
-    const claim = createClaimCode('user-x', CO_A);
+    const claim = await createClaimCode(USER_A, CO_A);
     const r = await invoke(route('extension/redeem'), { method: 'POST', body: { claim_code: claim.code } });
     expect(r.status).toBe(200);
     expect(typeof r.body.data.session_token).toBe('string');

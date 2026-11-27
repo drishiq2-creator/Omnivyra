@@ -32,8 +32,16 @@ function rolesBuilder() {
   };
   return api;
 }
-jest.mock('../../db/supabaseClient', () => ({ supabase: { from: () => rolesBuilder() } }));
-jest.mock('@/backend/db/supabaseClient', () => ({ supabase: { from: () => rolesBuilder() } }));
+// Phase E: the shared replay store (extension_request_nonce_record), first-use semantics.
+const mockSeenNonces = new Set<string>();
+const mockRpc = async (fn: string, a: any) => {
+  if (fn !== 'extension_request_nonce_record') return { data: null, error: { message: 'unexpected rpc' } };
+  if (mockSeenNonces.has(a.p_nonce_key)) return { data: false, error: null };
+  mockSeenNonces.add(a.p_nonce_key);
+  return { data: true, error: null };
+};
+jest.mock('../../db/supabaseClient', () => ({ supabase: { from: () => rolesBuilder(), rpc: (f: string, a: any) => mockRpc(f, a) } }));
+jest.mock('@/backend/db/supabaseClient', () => ({ supabase: { from: () => rolesBuilder(), rpc: (f: string, a: any) => mockRpc(f, a) } }));
 jest.mock('../../../lib/platform/routeFactory', () => ({ createApiRoute: (h: unknown) => h }));
 // R-3 suspends ingestion on these routes; this suite proves the signature
 // layer underneath, which still guards them if ingestion is ever re-enabled.
@@ -86,9 +94,15 @@ const event = (over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
+// Phase E: a real request stream carrying JSON.stringify(body) - the bytes the extension sends; the route reads
+// and hashes them itself (bodyParser off + withExtensionRawBody).
 async function post(body: Record<string, unknown>, headers: Record<string, string>) {
   const res = mockRes();
-  await (handler as any)({ method: 'POST', url: '/api/extension/events', body, headers, query: {} }, res);
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { Readable } = require('stream');
+  const req: any = Readable.from([Buffer.from(JSON.stringify(body), 'utf8')]);
+  Object.assign(req, { method: 'POST', url: '/api/extension/events', headers: { 'content-type': 'application/json', ...headers }, query: {} });
+  await (handler as any)(req, res);
   return res;
 }
 

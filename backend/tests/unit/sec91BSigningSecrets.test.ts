@@ -18,7 +18,26 @@ import { createHmac } from 'crypto';
 jest.mock('@/config', () => ({
   config: new Proxy({}, { get: (_t, k: string) => process.env[k] }),
 }));
-jest.mock('../../db/supabaseClient', () => ({ supabase: {} }));
+// Phase E: claim codes live in the shared handshake store (extension_claim_code_* rpc); a minimal faithful fake.
+const mockClaims = new Map<string, { u: string; o: string; redeemed: boolean }>();
+jest.mock('../../db/supabaseClient', () => ({
+  supabase: {
+    rpc: async (fn: string, a: any) => {
+      if (fn === 'extension_claim_code_issue') {
+        mockClaims.set(a.p_code_hash, { u: a.p_user_id, o: a.p_organization_id, redeemed: false });
+        const now = Date.now();
+        return { data: [{ issued_at: new Date(now).toISOString(), valid_until: new Date(now + a.p_ttl_seconds * 1000).toISOString() }], error: null };
+      }
+      if (fn === 'extension_claim_code_redeem') {
+        const c = mockClaims.get(a.p_code_hash);
+        if (!c || c.redeemed) return { data: [], error: null };
+        c.redeemed = true;
+        return { data: [{ redeemed_user_id: c.u, redeemed_organization_id: c.o }], error: null };
+      }
+      return { data: null, error: { message: 'unexpected rpc ' + fn } };
+    },
+  },
+}));
 jest.mock('../../db/writeOwner', () => ({ ownedDbTable: () => ({}) }));
 jest.mock('../../services/emailJobsService', () => ({ enqueueEmailJob: jest.fn() }));
 jest.mock('../../services/logger', () => ({ logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn() } }));
@@ -91,8 +110,8 @@ describe('extension session tokens', () => {
     }
   });
 
-  it('request-signature verification fails closed (no throw) when no secret is configured', () => {
-    const r = ext().verifyExtensionRequestSignature({
+  it('request-signature verification fails closed (no throw) when no secret is configured', async () => {
+    const r = await ext().verifyExtensionRequestSignature({
       method: 'POST', path: '/api/x', rawBody: '{}',
       timestampHeader: String(Math.floor(Date.now() / 1000)), nonceHeader: 'nonce-1', signatureHeader: 'deadbeef',
       session: { userId: 'u', orgId: 'o', expiresAt: Date.now() + 1000, hmacNonce: 'h' },
@@ -118,15 +137,17 @@ describe('extension session tokens', () => {
 });
 
 describe('extension claim codes', () => {
-  it('creating a claim code fails closed with no secret (no committed literal)', () => {
-    expect(() => claim().createClaimCode('u', 'o')).toThrow(/SIGNING_SECRET_UNAVAILABLE/);
+  it('creating a claim code fails closed with no secret (no committed literal) - and stores nothing', async () => {
+    mockClaims.clear();
+    await expect(claim().createClaimCode('u', 'o')).rejects.toThrow(/SIGNING_SECRET_UNAVAILABLE/);
+    expect(mockClaims.size).toBe(0);
   });
 
-  it('COMPAT: works with AUTH_SECRET and is single-use', () => {
+  it('COMPAT: works with AUTH_SECRET and is single-use', async () => {
     process.env.AUTH_SECRET = AUTH;
-    const c = claim().createClaimCode('u', 'o');
-    expect(claim().redeemClaimCode(c.code)).toEqual({ userId: 'u', orgId: 'o' });
-    expect(claim().redeemClaimCode(c.code)).toBeNull();
+    const c = await claim().createClaimCode('u', 'o');
+    expect(await claim().redeemClaimCode(c.code)).toEqual({ userId: 'u', orgId: 'o' });
+    expect(await claim().redeemClaimCode(c.code)).toBeNull();
   });
 });
 

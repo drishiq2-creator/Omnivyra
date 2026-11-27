@@ -1,13 +1,27 @@
 import { createHmac, timingSafeEqual, randomBytes, createHash } from 'crypto';
 import { resolveSigningSecret, isSigningSecretUnavailable } from '../auth/signingSecrets';
+import { isExtensionHandshakeStoreUnavailable, sha256Hex, storeRecordRequestNonce } from './extensionHandshakeStore';
 
-type ExtensionSessionPayload = {
+/**
+ * The products a session can be redeemed for (the extension's shared/product.js PRODUCTS). A session with no
+ * product is a LEGACY session (combined source build, or a build older than the product split): it keeps the
+ * pre-split behaviour everywhere.
+ */
+export const EXTENSION_PRODUCTS = ['salesnav', 'linkedin_engagement'] as const;
+export type ExtensionProduct = (typeof EXTENSION_PRODUCTS)[number];
+export const isExtensionProduct = (v: unknown): v is ExtensionProduct =>
+  typeof v === 'string' && (EXTENSION_PRODUCTS as readonly string[]).includes(v);
+
+export type ExtensionSessionPayload = {
   userId: string;
   orgId: string;
   expiresAt: number;
   // Nonce bound into the session token so the server can re-derive the
   // extension's HMAC secret on every request without persisting raw secrets.
   hmacNonce?: string;
+  // Phase E: the product the session was redeemed for, bound into the SIGNED token (so a route can trust it).
+  // Absent = legacy session. Not part of the HMAC-secret derivation (unchanged).
+  product?: ExtensionProduct;
 };
 
 /**
@@ -67,6 +81,10 @@ export function verifyExtensionSessionToken(token: string | null | undefined): E
     if (!payload.userId || !payload.orgId || !payload.expiresAt) {
       return null;
     }
+    // A product we do not know cannot have been issued by this server: refuse rather than guess.
+    if (payload.product !== undefined && !isExtensionProduct(payload.product)) {
+      return null;
+    }
     if (Date.now() > payload.expiresAt) {
       return null;
     }
@@ -98,43 +116,49 @@ export function generateHmacNonce() {
  *
  * Headers expected on inbound requests:
  *   X-Omnivyra-Timestamp (unix seconds; must be within ±5 min)
- *   X-Omnivyra-Nonce     (per-request nonce; reject repeats within a window)
+ *   X-Omnivyra-Nonce     (per-request nonce; reject repeats)
  *   X-Omnivyra-Signature (hex HMAC-SHA256 over METHOD\nPATH\nTIMESTAMP\nNONCE\nSHA256(body))
+ *
+ * rawBody is the EXACT request body bytes as received (the extension's shared/requestSigner.js hashes the string it
+ * sends; UTF-8 on the wire), never a re-serialisation of a parsed body. PATH is the pathname only: the extension
+ * signs the endpoint path and the service worker appends `?organization_id=` to GETs AFTER signing, so the query
+ * string is NOT covered by the signature and no route may authorise on it (the session token is authoritative).
+ *
+ * Replay (Phase E): the nonce is recorded in the shared store (extension_request_nonces) only AFTER the signature
+ * verifies - an unsigned caller cannot fill the store - in one atomic first-use statement, keyed by
+ * sha256(session hmac nonce : request nonce) and kept for REQUEST_NONCE_RETENTION_SECONDS. Any timestamp the
+ * window accepts is at most 5 min from the server clock, so a replay later than 10 min after first use is already
+ * refused by the window; 15 min retention covers that with margin. Store unreadable -> status 503, never ok.
  */
-const seenRequestNonces = new Map<string, number>(); // nonce -> expiresAt (epoch ms)
-const REQUEST_NONCE_WINDOW_MS = 10 * 60 * 1000;
+export const REQUEST_NONCE_RETENTION_SECONDS = 15 * 60;
+const TIMESTAMP_WINDOW_SECONDS = 5 * 60;
 
-function gcRequestNonces() {
-  const now = Date.now();
-  for (const [nonce, expiresAt] of seenRequestNonces) {
-    if (expiresAt < now) seenRequestNonces.delete(nonce);
-  }
-}
+export type ExtensionSignatureResult =
+  | { ok: true }
+  | { ok: false; reason: string; status: 401 | 503 };
 
-export function verifyExtensionRequestSignature(params: {
+export async function verifyExtensionRequestSignature(params: {
   method: string;
   path: string;
-  rawBody: string;
+  rawBody: Buffer | string;
   timestampHeader: string | string[] | undefined;
   nonceHeader: string | string[] | undefined;
   signatureHeader: string | string[] | undefined;
   session: ExtensionSessionPayload;
-}): { ok: boolean; reason?: string } {
+}): Promise<ExtensionSignatureResult> {
   const take = (h: string | string[] | undefined) => (Array.isArray(h) ? h[0] : h) || '';
   const timestamp = take(params.timestampHeader).trim();
   const nonce = take(params.nonceHeader).trim();
   const signature = take(params.signatureHeader).trim();
+  const refuse = (reason: string): ExtensionSignatureResult => ({ ok: false, reason, status: 401 });
 
-  if (!timestamp || !nonce || !signature) return { ok: false, reason: 'MISSING_SIGNATURE_HEADER' };
-  if (!params.session.hmacNonce) return { ok: false, reason: 'SESSION_MISSING_HMAC_NONCE' };
+  if (!timestamp || !nonce || !signature) return refuse('MISSING_SIGNATURE_HEADER');
+  if (!params.session.hmacNonce) return refuse('SESSION_MISSING_HMAC_NONCE');
 
   const ts = Number(timestamp);
-  if (!Number.isFinite(ts)) return { ok: false, reason: 'BAD_TIMESTAMP' };
+  if (!Number.isFinite(ts)) return refuse('BAD_TIMESTAMP');
   const nowSeconds = Math.floor(Date.now() / 1000);
-  if (Math.abs(nowSeconds - ts) > 5 * 60) return { ok: false, reason: 'TIMESTAMP_OUT_OF_WINDOW' };
-
-  gcRequestNonces();
-  if (seenRequestNonces.has(nonce)) return { ok: false, reason: 'NONCE_REPLAYED' };
+  if (Math.abs(nowSeconds - ts) > TIMESTAMP_WINDOW_SECONDS) return refuse('TIMESTAMP_OUT_OF_WINDOW');
 
   let secret: string;
   try {
@@ -145,11 +169,12 @@ export function verifyExtensionRequestSignature(params: {
       nonce: params.session.hmacNonce,
     });
   } catch (err) {
-    if (isSigningSecretUnavailable(err)) return { ok: false, reason: 'SIGNING_SECRET_UNAVAILABLE' };
+    if (isSigningSecretUnavailable(err)) return refuse('SIGNING_SECRET_UNAVAILABLE');
     throw err;
   }
 
-  const bodyHash = createHash('sha256').update(params.rawBody || '').digest('hex');
+  const raw = params.rawBody ?? '';
+  const bodyHash = createHash('sha256').update(typeof raw === 'string' ? Buffer.from(raw, 'utf8') : raw).digest('hex');
   const canonical = [
     String(params.method || 'GET').toUpperCase(),
     params.path,
@@ -161,8 +186,17 @@ export function verifyExtensionRequestSignature(params: {
 
   const a = Buffer.from(signature);
   const b = Buffer.from(expected);
-  if (a.length !== b.length || !timingSafeEqual(a, b)) return { ok: false, reason: 'SIGNATURE_MISMATCH' };
+  if (a.length !== b.length || !timingSafeEqual(a, b)) return refuse('SIGNATURE_MISMATCH');
 
-  seenRequestNonces.set(nonce, Date.now() + REQUEST_NONCE_WINDOW_MS);
+  try {
+    const recorded = await storeRecordRequestNonce(
+      sha256Hex(`${params.session.hmacNonce}:${nonce}`),
+      REQUEST_NONCE_RETENTION_SECONDS,
+    );
+    if (recorded === 'replayed') return refuse('NONCE_REPLAYED');
+  } catch (err) {
+    if (isExtensionHandshakeStoreUnavailable(err)) return { ok: false, reason: 'REPLAY_STORE_UNAVAILABLE', status: 503 };
+    throw err;
+  }
   return { ok: true };
 }

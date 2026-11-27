@@ -36,21 +36,35 @@ const ingested: Record<string, unknown>[] = [];
 jest.mock('../../services/extensionEventIngestionService', () => ({
   ingestExtensionEvent: async (input: Record<string, unknown>) => { ingested.push(input); return { id: `evt-${ingested.length}` }; },
 }));
-function rolesBuilder() {
+function rolesBuilder(table: string) {
   const preds: Array<[string, unknown]> = [];
   const api: any = {
     select() { return api; },
     eq(c: string, v: unknown) { preds.push([c, v]); return api; },
+    limit() { return api; },
     maybeSingle() {
+      // Phase E: validate reads the membership through TenantGuard (role row, then the company's status).
+      if (table === 'companies') {
+        const ok = preds.some(([c, v]) => c === 'id' && v === ORG);
+        return Promise.resolve({ data: ok ? { id: ORG, status: 'active' } : null, error: null });
+      }
       const ok = preds.some(([c, v]) => c === 'user_id' && v === USER) && preds.some(([c, v]) => c === 'company_id' && v === ORG);
-      return Promise.resolve({ data: ok ? { company_id: ORG, role: 'COMPANY_ADMIN' } : null, error: null });
+      return Promise.resolve({ data: ok ? { company_id: ORG, role: 'COMPANY_ADMIN', status: 'active' } : null, error: null });
     },
     then(res: (v: unknown) => unknown) { return Promise.resolve({ data: [], error: null }).then(res); },
   };
   return api;
 }
-jest.mock('../../db/supabaseClient', () => ({ supabase: { from: () => rolesBuilder() } }));
-jest.mock('@/backend/db/supabaseClient', () => ({ supabase: { from: () => rolesBuilder() } }));
+// Phase E: the shared replay store (extension_request_nonce_record), first-use semantics.
+const mockSeenNonces = new Set<string>();
+const mockRpc = async (fn: string, a: any) => {
+  if (fn !== 'extension_request_nonce_record') return { data: null, error: { message: 'unexpected rpc' } };
+  if (mockSeenNonces.has(a.p_nonce_key)) return { data: false, error: null };
+  mockSeenNonces.add(a.p_nonce_key);
+  return { data: true, error: null };
+};
+jest.mock('../../db/supabaseClient', () => ({ supabase: { from: (t: string) => rolesBuilder(t), rpc: (f: string, a: any) => mockRpc(f, a) } }));
+jest.mock('@/backend/db/supabaseClient', () => ({ supabase: { from: (t: string) => rolesBuilder(t), rpc: (f: string, a: any) => mockRpc(f, a) } }));
 jest.mock('../../../lib/platform/routeFactory', () => ({ createApiRoute: (h: unknown) => h }));
 // R-3 suspends ingestion on these routes; this suite proves the signature
 // layer underneath, which still guards them if ingestion is ever re-enabled.
@@ -74,7 +88,12 @@ async function callHandler(handler: any, rec: { method: string; path: string; he
   res.json = (b: unknown) => { res.body = b; return res; };
   res.setHeader = () => res;
   const query = Object.fromEntries(new URL(rec.url).searchParams.entries());
-  await handler({ method: rec.method, url: new URL(rec.url).pathname + new URL(rec.url).search, headers: rec.headers, body: rec.body ? JSON.parse(rec.body) : undefined, query }, res);
+  // Phase E: the exact bytes the extension sent, as a stream (the signed routes read the raw body themselves).
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { Readable } = require('stream');
+  const req: any = Readable.from(rec.body ? [Buffer.from(rec.body, 'utf8')] : []);
+  Object.assign(req, { method: rec.method, url: new URL(rec.url).pathname + new URL(rec.url).search, headers: rec.headers, query });
+  await handler(req, res);
   return { status: res.statusCode, body: res.body };
 }
 

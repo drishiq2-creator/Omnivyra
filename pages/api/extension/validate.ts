@@ -1,8 +1,8 @@
 import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeFactory';
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { supabase } from '@/backend/db/supabaseClient';
 import { requireExtensionAuth } from '@/backend/middleware/extensionAuthMiddleware';
 import { withExtensionRawBody } from '@/backend/middleware/extensionRawBody';
+import { checkExtensionMembership } from '@/backend/services/extensionMembershipService';
 
 type SuccessResponse = {
   success: true;
@@ -55,20 +55,15 @@ async function handler(
   const isBypassSession = session.userId === '00000000-0000-4000-8000-000000000001';
 
   if (!isBypassSession) {
-    const { data: roleRow, error: roleError } = await supabase
-      .from('user_company_roles')
-      .select('company_id, status')
-      .eq('user_id', session.userId)
-      .eq('company_id', effectiveOrgId)
-      .eq('status', 'active')
-      .maybeSingle();
-
-    if (roleError) {
-      console.error('[api/extension/validate] role lookup failed:', roleError);
-      return res.status(500).json({ success: false, error: 'Failed to validate organization access', timestamp: Date.now() });
-    }
-
-    if (!roleRow?.company_id) {
+    // Phase E: the ONE extension membership rule (also applied at bootstrap and redeem): an active
+    // user_company_roles row AND an active company. The 403 body text is load-bearing: the extension's
+    // core/authBridge.js VALIDATE_DEAD_403 maps exactly 'Access denied to organization' to ORG_ACCESS_REVOKED.
+    const membership = await checkExtensionMembership(session.userId, effectiveOrgId);
+    if (membership.ok === false) {
+      if ((membership as { outcome: string }).outcome === 'unavailable') {
+        // Transient: never a denial (the extension keeps its session on a non-403 failure).
+        return res.status(503).json({ success: false, error: 'Failed to validate organization access', timestamp: Date.now() });
+      }
       return res.status(403).json({ success: false, error: 'Access denied to organization', timestamp: Date.now() });
     }
   }
