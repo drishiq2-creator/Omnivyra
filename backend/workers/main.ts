@@ -231,6 +231,12 @@ const onSignal = once(shutdown);
 
 process.on('SIGTERM', () => { void onSignal('SIGTERM'); });
 process.on('SIGINT',  () => { void onSignal('SIGINT'); });
+// GI-NEW-1: Playwright launches pass handleSIGHUP:false (playwrightLaunchOptions.ts),
+// so nothing else listens for SIGHUP. Without this, Node's default SIGHUP action
+// kills the process WITHOUT running 'exit' listeners, and Playwright's exit
+// listener (the one that SIGKILLs each detached browser process group) never
+// runs: the browsers would be orphaned. SIGHUP takes the same drain + hard exit.
+process.on('SIGHUP',  () => { void onSignal('SIGHUP'); });
 
 /** True — and says so — when a shutdown signal arrived while main() was booting. */
 function bootAbortedByShutdown(step: string): boolean {

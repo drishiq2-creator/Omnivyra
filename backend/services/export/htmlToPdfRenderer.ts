@@ -42,12 +42,17 @@ async function renderPdfWithPlaywright(html: string): Promise<Buffer> {
   const chromePath = resolveChromePath();
   let browser;
   try {
+    // signal-ownership-exempt: web-only. This renderer's only callers are
+    // pages/api/reports/[reportId].ts and backend/apiHandlers/reports/reportIdShared.ts (via
+    // canonicalReportPipeline); the worker never imports it, so there is no worker drain for
+    // Playwright's default SIGTERM/SIGINT/SIGHUP handling to cut short (GI-NEW-1, register T-4).
     browser = await chromium.launch({
       headless: true,
       args: launchArgs,
     });
   } catch (error) {
     if (!chromePath) throw error;
+    // signal-ownership-exempt: web-only (see the note on the launch above).
     browser = await chromium.launch({
       executablePath: chromePath,
       headless: true,
@@ -161,6 +166,8 @@ async function renderPdfWithServerlessChromium(html: string): Promise<Buffer> {
     childEnv.FONTCONFIG_PATH = path.dirname(fonts.configPath);
   }
 
+  // signal-ownership-exempt: serverless only (isServerlessRuntime: VERCEL / AWS Lambda env), never the
+  // Railway worker, so no drain exists for Puppeteer's default SIGTERM handler to cut short.
   const browser = await puppeteer.launch({
     args: [...chromium.args, '--no-sandbox', '--disable-dev-shm-usage'],
     executablePath: await chromium.executablePath(),

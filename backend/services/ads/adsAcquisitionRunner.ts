@@ -19,6 +19,7 @@
  * thing that can disagree with the first.
  */
 import { runAdsAcquisitionCycle } from './adsAcquisitionScheduler';
+import { withWorkerSignalOwnership } from '../playwrightLaunchOptions';
 
 /**
  * Run exactly one production acquisition cycle.
@@ -37,7 +38,7 @@ export async function runProductionAdsAcquisitionCycle(): Promise<Record<string,
         // `runAdsAcquisitionCycle` returns before opening a session, and a disabled worker
         // should not pay to load a browser driver it will never use.
         const { chromium } = await import('playwright');
-        const browser = await chromium.launch({ headless: true });
+        const browser = await chromium.launch(withWorkerSignalOwnership({ headless: true }));
         return {
           session: {
             async withPage(fn) {

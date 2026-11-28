@@ -7,6 +7,7 @@ import { recordCreatorRenderMetric } from './creatorRenderObservability';
 import { persistCreatorRenderJobState } from './creatorRenderPersistence';
 import { config, envIsExplicit } from '@/config';
 import { withSanctionedEnvAccess } from '@/lib/config/enforcer';
+import { withWorkerSignalOwnership } from './playwrightLaunchOptions';
 
 export type CreatorDurableRenderJobName = 'infographic' | 'carousel' | 'pdf' | 'slider' | 'multi_slide_export' | 'user_template_preview';
 
@@ -206,7 +207,7 @@ async function runCreatorRenderSoak(job: Job<unknown>): Promise<{ soak: true; ch
   const { chromium } = await import('playwright');
   let browser: Awaited<ReturnType<typeof chromium.launch>> | null = null;
   try {
-    browser = await chromium.launch({ headless: true });
+    browser = await chromium.launch(withWorkerSignalOwnership({ headless: true }));
     const page = await browser.newPage();
     await page.goto('about:blank');
     await new Promise((r) => setTimeout(r, 800));
