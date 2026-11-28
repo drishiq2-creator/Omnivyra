@@ -51,7 +51,9 @@ const ALIAS_PATTERNS: Array<[string, RegExp]> = [
  * is fine: the call scan still sees `chromium.launch(`.
  */
 const RECEIVER_ALIAS_PATTERNS: Array<[string, RegExp]> = [
-  ['receiver-alias', /\b(?:const|let|var)\s+([\w$]+)\s*(?::[^=;\n]+)?=\s*[^;\n]*?\b(chromium|firefox|webkit)\s*;?[ \t]*$/gm],
+  // Value ends in the type by dot access (`pw.chromium`, `<BrowserType>pw.chromium`) or by
+  // quoted bracket access (`pw['chromium']`, any quote style), optionally with `as <Type>`.
+  ['receiver-alias', /\b(?:const|let|var)\s+([\w$]+)\s*(?::[^=;\n]+)?=\s*[^;\n]*?(?:\b(chromium|firefox|webkit)|\[\s*['"`](chromium|firefox|webkit)['"`]\s*\])(?:\s+as\s+[^;\n]+?)?\s*;?[ \t]*$/gm],
   ['renamed-destructure', /\{[^{}]*?\b(chromium|firefox|webkit)\s*:\s*([\w$]+)[^{}]*\}\s*=/g],
 ];
 
@@ -67,7 +69,7 @@ function scanAliases(file: string, src: string): string[] {
     re.lastIndex = 0;
     let m: RegExpExecArray | null;
     while ((m = re.exec(src)) !== null) {
-      const [alias, type] = kind === 'receiver-alias' ? [m[1], m[2]] : [m[2], m[1]];
+      const [alias, type] = kind === 'receiver-alias' ? [m[1], m[2] ?? m[3]] : [m[2], m[1]];
       if (alias !== type) hits.push(`${file}:${lineOf(m.index)} ${kind}`);
     }
   }
@@ -141,6 +143,13 @@ describe('planted controls — the alias scanner catches indirect launches', () 
     ['const bt = pw.chromium;\nawait bt.launch({});', 'receiver-alias'],
     ['let c = chromium\nc.launch();', 'receiver-alias'],
     ['const ff: BrowserType = playwright.firefox;', 'receiver-alias'],
+    ["const bt = pw['chromium'];", 'receiver-alias'],
+    ['const bt = pw["webkit"];', 'receiver-alias'],
+    ['const bt = pw[`firefox`]', 'receiver-alias'],
+    ["const bt = pw?.[ 'chromium' ];", 'receiver-alias'],
+    ['const bt = pw.chromium as BrowserType;', 'receiver-alias'],
+    ["const bt = pw['chromium'] as BrowserType<{}>;", 'receiver-alias'],
+    ['const bt = <BrowserType>pw.chromium;', 'receiver-alias'],
     ["const { chromium: c } = require('playwright');\nc.launch();", 'renamed-destructure'],
     ["const { webkit: wk, devices } = await import('playwright');", 'renamed-destructure'],
   ])('flags a receiver alias: %s', (src, kind) => {
@@ -153,6 +162,9 @@ describe('planted controls — the alias scanner catches indirect launches', () 
     "const { chromium, type Browser } = await import('playwright');",
     "const chromium = (await import('@sparticuz/chromium')).default;",
     'const usesChromium = true;',
+    "const chromium = pw['chromium'] as BrowserType;",
+    "const engine = 'chromium';",
+    'const n = pw.chromium.name();',
   ])('does not flag a same-name binding or unrelated line: %s', (src) => {
     expect(scanAliases('fixture.ts', src)).toEqual([]);
   });
