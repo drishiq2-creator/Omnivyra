@@ -1,6 +1,11 @@
 /**
- * PlatformTabs — platform tabs with activity indicators.
- * Displays actionable_threads badge, high_priority_threads indicator.
+ * PlatformTabs — platform tabs with activity badges.
+ *
+ * E4: every badge is a SERVER count (engagement-portal-counts.v1, served by
+ * /api/engagement/platform-counts) — actionable items per platform, computed
+ * for all platforms at once, so the badges do not depend on the selected tab.
+ *  - counts unavailable → "—" on every tab plus one alert (unknown, never 0);
+ *  - a connected platform with no engagement support → "n/a" with its reason.
  * Color: high_priority > 0 → red; actionable > 0 → amber.
  * Uses dynamic platforms from company integrations when provided; otherwise shows All only.
  */
@@ -9,9 +14,8 @@ import React from 'react';
 import PlatformIcon from '@/components/ui/PlatformIcon';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { getPlatformLabel } from '@/utils/platformIcons';
-import type { PlatformCounts } from '@/hooks/usePlatformCounts';
-import type { PlatformWorkItem } from '@/hooks/useWorkQueue';
 import { VERIFIED_ENGAGEMENT_PLATFORMS } from '@/lib/engagementCapabilities';
+import type { PortalTabCount } from './portalCounts';
 
 /** Canonical order for known platforms when displayed dynamically. */
 const PLATFORM_ORDER = [
@@ -53,41 +57,11 @@ function buildTabItems(integratedPlatforms: string[]): Array<{ slug: string; lab
   return [allTab, ...ordered.map((slug) => ({ slug, label: getPlatformLabel(slug) || slug }))];
 }
 
-function getTierColor(tier: 'high' | 'medium' | 'low'): string {
-  if (tier === 'high') return 'border-l-red-500';
-  if (tier === 'medium') return 'border-l-amber-500';
+function getBadgeAccent(count: PortalTabCount | null): string {
+  if (!count) return 'border-l-transparent';
+  if (count.high_priority > 0) return 'border-l-red-500';
+  if (count.actionable_items > 0) return 'border-l-amber-500';
   return 'border-l-transparent';
-}
-
-function getBadgeAccent(work?: PlatformWorkItem): string {
-  if (!work) return 'border-l-transparent';
-  if (work.high_priority_threads > 0) return 'border-l-red-500';
-  if (work.actionable_threads > 0) return 'border-l-amber-500';
-  return 'border-l-transparent';
-}
-
-function getAggregateCounts(counts: PlatformCounts, workPlatforms?: PlatformWorkItem[]): {
-  thread_count: number;
-  unread_count: number;
-  max_priority_tier: 'high' | 'medium' | 'low';
-  actionable_threads: number;
-  high_priority_threads: number;
-} {
-  const list = Object.values(counts);
-  const threadCount = list.reduce((s, x) => s + (x?.thread_count ?? 0), 0);
-  const unreadCount = list.reduce((s, x) => s + (x?.unread_count ?? 0), 0);
-  const hasHigh = list.some((x) => x?.max_priority_tier === 'high');
-  const hasMedium = list.some((x) => x?.max_priority_tier === 'medium');
-  const maxTier: 'high' | 'medium' | 'low' = hasHigh ? 'high' : hasMedium ? 'medium' : 'low';
-  const actionableTotal = (workPlatforms ?? []).reduce((s, w) => s + (w.actionable_threads ?? 0), 0);
-  const highPriTotal = (workPlatforms ?? []).reduce((s, w) => s + (w.high_priority_threads ?? 0), 0);
-  return {
-    thread_count: threadCount,
-    unread_count: unreadCount,
-    max_priority_tier: maxTier,
-    actionable_threads: actionableTotal,
-    high_priority_threads: highPriTotal,
-  };
 }
 
 /** Fallback when no integrations prop is passed: only platforms that have at
@@ -95,10 +69,18 @@ function getAggregateCounts(counts: PlatformCounts, workPlatforms?: PlatformWork
 const FALLBACK_PLATFORM_SLUGS = [...VERIFIED_ENGAGEMENT_PLATFORMS];
 
 export interface PlatformTabsProps {
-  counts: PlatformCounts;
+  /**
+   * Server count per tab slug ('all' = totals). null = unknown (failed read)
+   * or not loaded yet; see `countsUnavailable`.
+   */
+  getCount: (slug: string) => PortalTabCount | null;
+  /** True when the server count read failed: show "—" and an alert. */
+  countsUnavailable?: boolean;
+  onRetryCounts?: () => void;
+  /** slug → reason, for connected platforms without engagement support. */
+  unsupportedReasons?: Record<string, string>;
   selectedPlatform: string;
   onSelectPlatform: (platform: string) => void;
-  workQueue?: { platforms: PlatformWorkItem[] };
   /** Configured platform slugs for company. When provided, only these + All shown. When empty [], only All. */
   platforms?: string[];
   loading?: boolean;
@@ -106,15 +88,16 @@ export interface PlatformTabsProps {
 }
 
 export const PlatformTabs = React.memo(function PlatformTabs({
-  counts,
+  getCount,
+  countsUnavailable = false,
+  onRetryCounts,
+  unsupportedReasons = {},
   selectedPlatform,
   onSelectPlatform,
-  workQueue,
   platforms: integratedPlatforms,
   loading = false,
   className = '',
 }: PlatformTabsProps) {
-  const workByPlatform = new Map((workQueue?.platforms ?? []).map((p) => [p.platform, p]));
   const platformsToShow =
     integratedPlatforms !== undefined ? integratedPlatforms : FALLBACK_PLATFORM_SLUGS;
   const tabItems = buildTabItems(platformsToShow);
@@ -124,41 +107,68 @@ export const PlatformTabs = React.memo(function PlatformTabs({
       <Tabs value={selectedPlatform} onValueChange={onSelectPlatform}>
         <TabsList className="flex flex-wrap gap-1 h-auto p-1">
           {tabItems.map(({ slug, label }) => {
-            const c = slug && slug !== 'all'
-              ? (counts[slug] ?? { thread_count: 0, unread_count: 0, max_priority_tier: 'low' as const })
-              : getAggregateCounts(counts, workQueue?.platforms);
-            const work = slug && slug !== 'all' ? workByPlatform.get(slug) : undefined;
-            const agg = slug === 'all' ? getAggregateCounts(counts, workQueue?.platforms) : null;
-            const workItem = work ?? (agg ? { actionable_threads: agg.actionable_threads, high_priority_threads: agg.high_priority_threads } : undefined);
-            const accentColor = workItem ? getBadgeAccent(workItem as PlatformWorkItem) : getTierColor(c.max_priority_tier);
+            const unsupportedReason = slug !== 'all' ? unsupportedReasons[slug] ?? null : null;
+            const count = countsUnavailable ? null : getCount(slug);
+            const accentColor = getBadgeAccent(count);
             const isActive = selectedPlatform === slug;
-            const actionable = (workItem as { actionable_threads?: number })?.actionable_threads ?? 0;
+            const actionable = count?.actionable_items ?? 0;
             return (
               <TabsTrigger
                 key={slug}
                 value={slug}
                 className={`flex items-center gap-2 px-3 py-2 border-l-2 ${isActive ? accentColor : 'border-l-transparent'}`}
               >
+                <span
+                  data-testid={`platform-tab-${slug}`}
+                  title={unsupportedReason
+                    ? `Not supported: ${unsupportedReason}`
+                    : count
+                      ? `${count.needs_response} need response · ${count.people_reaction} reactions`
+                      : countsUnavailable ? 'Count unavailable' : undefined}
+                  className="flex items-center gap-2"
+                >
                 {slug && slug !== 'all' ? <PlatformIcon platform={slug} size={14} /> : null}
                 <span>{label}</span>
-                {c.thread_count > 0 && (
-                  <span className="text-xs text-slate-500">({c.thread_count})</span>
-                )}
-                {actionable > 0 && (
-                  <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] text-[10px] font-bold text-white bg-amber-500 rounded-full px-1">
+                {unsupportedReason ? (
+                  <span data-testid={`platform-tab-badge-${slug}`} className="text-[10px] font-semibold uppercase text-slate-400">
+                    n/a
+                  </span>
+                ) : countsUnavailable ? (
+                  <span
+                    data-testid={`platform-tab-badge-${slug}`}
+                    aria-label="Count unavailable"
+                    className="inline-flex items-center justify-center min-w-[18px] h-[18px] text-[10px] font-bold text-slate-600 bg-slate-200 rounded-full px-1"
+                  >
+                    —
+                  </span>
+                ) : actionable > 0 ? (
+                  <span
+                    data-testid={`platform-tab-badge-${slug}`}
+                    className="inline-flex items-center justify-center min-w-[18px] h-[18px] text-[10px] font-bold text-white bg-amber-500 rounded-full px-1"
+                  >
                     {actionable > 99 ? '99+' : actionable}
                   </span>
-                )}
-                {c.unread_count > 0 && actionable === 0 && (
-                  <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] text-[10px] font-bold text-white bg-blue-500 rounded-full px-1">
-                    {c.unread_count > 99 ? '99+' : c.unread_count}
-                  </span>
-                )}
+                ) : null}
+                </span>
               </TabsTrigger>
             );
           })}
         </TabsList>
       </Tabs>
+      {countsUnavailable && (
+        <div
+          role="alert"
+          data-testid="platform-counts-unavailable"
+          className="mt-2 flex flex-wrap items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900"
+        >
+          <span>Activity counts could not be loaded. A "—" means unknown, not zero.</span>
+          {onRetryCounts ? (
+            <button type="button" onClick={onRetryCounts} className="font-semibold underline">
+              Retry
+            </button>
+          ) : null}
+        </div>
+      )}
       {loading && <div className="h-1 bg-slate-100 rounded animate-pulse mt-2" />}
     </div>
   );

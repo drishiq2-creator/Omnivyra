@@ -135,21 +135,35 @@ function coerceOptionalCount(value: unknown): number | null {
  * have to re-implement the identity join and would drift from the canonical
  * predicate — which is the failure mode D2/F5 were built to remove.
  */
-export async function getOrgAuthorIds(organizationId: string): Promise<Set<string>> {
-  const { data: roleUsers } = await supabase
+export async function getOrgAuthorIds(
+  organizationId: string,
+  options: { strict?: boolean } = {},
+): Promise<Set<string>> {
+  // E4: `strict` callers (the portal count definition) need a failed read to
+  // surface as a failure, not as "the company has no accounts" — the latter
+  // silently turns company replies into external work. Default (non-strict)
+  // behaviour is unchanged for every existing caller.
+  const failIfStrict = (label: string, error: { message?: string } | null | undefined, data: unknown) => {
+    if (!options.strict) return;
+    if (error) throw new Error(`${label}: ${error.message ?? 'read failed'}`);
+    if (!Array.isArray(data)) throw new Error(`${label}: no rows array in response`);
+  };
+  const { data: roleUsers, error: roleUsersError } = await supabase
     .from('user_company_roles')
     .select('user_id')
     .eq('company_id', organizationId)
     .eq('status', 'active');
+  failIfStrict('user_company_roles', roleUsersError, roleUsers);
 
   const userIds = (roleUsers ?? []).map((row: { user_id: string }) => row.user_id);
   if (userIds.length === 0) return new Set();
 
-  const { data: accounts } = await supabase
+  const { data: accounts, error: accountsError } = await supabase
     .from('social_accounts')
     .select('platform, platform_user_id')
     .in('user_id', userIds)
     .eq('is_active', true);
+  failIfStrict('social_accounts', accountsError, accounts);
 
   if (!accounts?.length) return new Set();
 
@@ -175,7 +189,7 @@ export async function getOrgAuthorIds(organizationId: string): Promise<Set<strin
   );
   if (platformUserPairs.size === 0) return new Set();
 
-  const { data: authors } = await supabase
+  const { data: authors, error: authorsError } = await supabase
     .from('engagement_authors')
     .select('id, platform, platform_user_id')
     .in(
@@ -188,6 +202,7 @@ export async function getOrgAuthorIds(organizationId: string): Promise<Set<strin
         )
       )
     );
+  failIfStrict('engagement_authors', authorsError, authors);
 
   const orgAuthorIds = new Set<string>();
   (authors ?? []).forEach((author: { id: string; platform: string; platform_user_id: string }) => {

@@ -2,8 +2,22 @@ import { createApiRoute as __createApiRoute } from '../../../../lib/platform/rou
 
 /**
  * POST /api/engagement/thread/bulk-resolve
- * Resolve opportunities for selected threads.
+ * Mark selected threads resolved ("Mark resolved").
  * Body: thread_ids, organization_id
+ *
+ * E4 — resolve semantics (current persisted model, no schema change):
+ *   The durable resolve marker is an `engagement_thread_events` row with
+ *   event_type 'resolved' (created_at = when). The portal count definition
+ *   (engagementPortalCountsService) and the Needs Response / People Reaction
+ *   lists treat every inbound item at or before that time as handled; a newer
+ *   inbound item re-opens the thread. There is no thread- or message-level
+ *   status column to write instead (engagement_threads has only `ignored`,
+ *   which is Ignore, a different decision).
+ *
+ *   The marker is therefore written FIRST and its failure fails the request —
+ *   previously it was best-effort after the opportunity update, so a "resolved"
+ *   thread could silently stay in Needs Response. The thread's open
+ *   engagement_opportunities are still closed (resolved, resolved_at) as before.
  */
 
 import type { NextApiRequest, NextApiResponse } from 'next';
@@ -42,17 +56,35 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
 
     const threadIds = rawThreadIds.slice(0, MAX_BATCH);
 
-    const { data: threads } = await supabase
+    const { data: threads, error: threadsErr } = await supabase
       .from('engagement_threads')
       .select('id')
       .eq('organization_id', organizationId)
       .in('id', threadIds);
+
+    // A failed ownership read is not "none of these threads are yours".
+    if (threadsErr || !Array.isArray(threads)) {
+      console.warn('[engagement/thread/bulk-resolve] thread read failed:', threadsErr?.message);
+      return res.status(500).json({ error: 'Failed to resolve threads', code: 'THREAD_READ_FAILED' });
+    }
 
     const validIds = new Set((threads ?? []).map((t: { id: string }) => t.id));
     const toResolve = threadIds.filter((id) => validIds.has(id));
 
     if (toResolve.length === 0) {
       return res.status(200).json({ success: true, resolved: 0 });
+    }
+
+    try {
+      await recordThreadEvents({
+        organizationId,
+        threadIds: toResolve,
+        actorUserId: access.userId,
+        eventType: 'resolved',
+      });
+    } catch (eventErr) {
+      console.warn('[engagement/thread/bulk-resolve] resolve marker write failed:', (eventErr as Error)?.message);
+      return res.status(500).json({ error: 'Failed to resolve threads', code: 'RESOLVE_NOT_RECORDED' });
     }
 
     const { error: updateErr } = await supabase
@@ -65,19 +97,15 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       .in('source_thread_id', toResolve);
 
     if (updateErr) {
+      // The threads ARE resolved (marker written); only the opportunity
+      // bookkeeping failed. Say exactly that instead of claiming nothing happened.
       console.warn('[engagement/thread/bulk-resolve]', updateErr.message);
-      return res.status(500).json({ error: 'Failed to resolve opportunities' });
-    }
-
-    try {
-      await recordThreadEvents({
-        organizationId,
-        threadIds: toResolve,
-        actorUserId: access.userId,
-        eventType: 'resolved',
+      return res.status(500).json({
+        error: 'Threads were resolved but their opportunities could not be closed',
+        code: 'OPPORTUNITY_UPDATE_FAILED',
+        resolved: toResolve.length,
+        resolve_recorded: true,
       });
-    } catch (eventErr) {
-      console.warn('[engagement/thread/bulk-resolve] thread-event log failed:', (eventErr as Error)?.message);
     }
 
     return res.status(200).json({ success: true, resolved: toResolve.length });
