@@ -5,7 +5,6 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { config } from '@/config';
 import { ensureRenderFonts } from '../creatorRenderFonts';
-import { withWorkerSignalOwnership } from '../playwrightLaunchOptions';
 
 const execFileAsync = promisify(execFile);
 
@@ -43,17 +42,22 @@ async function renderPdfWithPlaywright(html: string): Promise<Buffer> {
   const chromePath = resolveChromePath();
   let browser;
   try {
-    browser = await chromium.launch(withWorkerSignalOwnership({
+    // signal-ownership-exempt: web-only. This renderer's only callers are
+    // pages/api/reports/[reportId].ts and backend/apiHandlers/reports/reportIdShared.ts (via
+    // canonicalReportPipeline); the worker never imports it, so there is no worker drain for
+    // Playwright's default SIGTERM/SIGINT/SIGHUP handling to cut short (GI-NEW-1, register T-4).
+    browser = await chromium.launch({
       headless: true,
       args: launchArgs,
-    }));
+    });
   } catch (error) {
     if (!chromePath) throw error;
-    browser = await chromium.launch(withWorkerSignalOwnership({
+    // signal-ownership-exempt: web-only (see the note on the launch above).
+    browser = await chromium.launch({
       executablePath: chromePath,
       headless: true,
       args: launchArgs,
-    }));
+    });
   }
 
   try {

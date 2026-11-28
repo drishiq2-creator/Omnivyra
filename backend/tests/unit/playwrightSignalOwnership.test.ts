@@ -8,8 +8,12 @@
  * .launch / .launchPersistentContext / .launchServer), never from a file list,
  * so a new launch site anywhere under backend/, lib/ or pages/ is covered the
  * day it is written. A site passes only when its argument is
- * `withWorkerSignalOwnership(...)` or the three lines above it carry a
- * `signal-ownership-exempt: <reason>` marker.
+ * `withWorkerSignalOwnership(...)`, or (register T-4) it is in a file on
+ * EXEMPT_FILE_ALLOWLIST and the comment block directly above it carries a
+ * `signal-ownership-exempt: <reason>` marker with a real reason. Every
+ * allowlisted file must be unreachable from the worker entry
+ * (backend/workers/main.ts) through the static import graph, so an exemption
+ * can never hide a worker-side launch.
  *
  * The planted controls run the SAME scanner over fixture strings and prove it
  * flags a missing option — so a green repo scan is not a scanner that matches
@@ -25,7 +29,16 @@ const SOURCE_EXT = /\.(ts|tsx|js|mjs|cjs)$/;
 const TEST_FILE = /\.(test|spec)\.[cm]?[jt]sx?$/;
 
 const LAUNCH_CALL = /\b(chromium|firefox|webkit|puppeteer)\s*\??\.\s*(launch|launchPersistentContext|launchServer)\s*\(/g;
-const EXEMPT_MARKER = /signal-ownership-exempt:\s*\S/;
+/** `signal-ownership-exempt: <reason>`; the reason is everything after the colon on that line. */
+const EXEMPT_MARKER = /signal-ownership-exempt:([^\n]*)/;
+/** A reason is at least this many non-space characters ("web-only" alone is not a reason). */
+const MIN_REASON_CHARS = 12;
+/**
+ * The ONLY files whose launches may be exempted (register T-4). Each must be
+ * unreachable from WORKER_ENTRY (asserted below on the real import graph).
+ */
+const EXEMPT_FILE_ALLOWLIST = new Set(['backend/services/export/htmlToPdfRenderer.ts']);
+const WORKER_ENTRY = 'backend/workers/main.ts';
 
 /**
  * Indirect launches the call scan cannot see. Any of these in server code fails
@@ -76,23 +89,100 @@ function scanAliases(file: string, src: string): string[] {
   return hits;
 }
 
-type Site = { file: string; line: number; call: string; ok: boolean; exempt: boolean };
+type Site = {
+  file: string; line: number; call: string; ok: boolean; exempt: boolean;
+  /** Why a marker present above the site was NOT honoured, if one was. */
+  markerRejected?: 'file-not-allowlisted' | 'no-reason';
+};
+
+/** The contiguous comment block (//, /*, *) directly above 1-based `line`. */
+function commentBlockAbove(lines: string[], line: number): string {
+  const out: string[] = [];
+  for (let i = line - 2; i >= 0; i -= 1) {
+    if (!/^\s*(\/\/|\/\*|\*)/.test(lines[i])) break;
+    out.unshift(lines[i]);
+  }
+  return out.join('\n');
+}
 
 /** Scans one source text. The repo scan and the planted controls share it. */
 function scanSource(file: string, src: string): Site[] {
   const sites: Site[] = [];
+  const lines = src.split('\n');
   LAUNCH_CALL.lastIndex = 0;
   let m: RegExpExecArray | null;
   while ((m = LAUNCH_CALL.exec(src)) !== null) {
     const argStart = m.index + m[0].length;
     const arg = src.slice(argStart).trimStart();
     const line = src.slice(0, m.index).split('\n').length;
-    const above = src.split('\n').slice(Math.max(0, line - 4), line - 1).join('\n');
     const wrapped = arg.startsWith('withWorkerSignalOwnership(');
-    const exempt = !wrapped && EXEMPT_MARKER.test(above);
-    sites.push({ file, line, call: `${m[1]}.${m[2]}`, ok: wrapped || exempt, exempt });
+    const marker = EXEMPT_MARKER.exec(commentBlockAbove(lines, line));
+    let exempt = false;
+    let markerRejected: Site['markerRejected'];
+    if (!wrapped && marker) {
+      if (!EXEMPT_FILE_ALLOWLIST.has(file)) markerRejected = 'file-not-allowlisted';
+      else if (marker[1].replace(/\s/g, '').length < MIN_REASON_CHARS) markerRejected = 'no-reason';
+      else exempt = true;
+    }
+    sites.push({ file, line, call: `${m[1]}.${m[2]}`, ok: wrapped || exempt, exempt, ...(markerRejected ? { markerRejected } : {}) });
   }
   return sites;
+}
+
+/**
+ * Static import graph walk from `entry`: `... from '<spec>'`, `import('<spec>')`,
+ * `require('<spec>')` and `import '<spec>'`, for relative and `@/` (tsconfig
+ * `@/*` -> `./*`) specifiers. Over-approximates (type-only imports and specifiers
+ * inside comments count as edges), which can only make the check stricter. It
+ * cannot see a specifier computed at runtime (e.g. `new Function(...)('playwright')`
+ * in rpaEnv), which is used only for external packages.
+ * Returns reachable file -> the file that first imported it.
+ */
+function workerReachable(
+  entry: string,
+  read: (file: string) => string | null,
+  isFile: (file: string) => boolean,
+): Map<string, string | null> {
+  const SPECS = [
+    /\bfrom\s+['"]([^'"]+)['"]/g,
+    /\bimport\s*\(\s*['"]([^'"]+)['"]\s*\)/g,
+    /\brequire\s*\(\s*['"]([^'"]+)['"]\s*\)/g,
+    /\bimport\s+['"]([^'"]+)['"]/g,
+  ];
+  const EXTS = ['', '.ts', '.tsx', '.js', '/index.ts', '/index.tsx', '/index.js'];
+  const resolve = (from: string, spec: string): string | null => {
+    let base: string;
+    if (spec.startsWith('.')) base = path.posix.join(path.posix.dirname(from), spec);
+    else if (spec.startsWith('@/')) base = spec.slice(2);
+    else return null;
+    for (const e of EXTS) {
+      const p = path.posix.normalize(base + e);
+      if (isFile(p)) return p;
+    }
+    return null;
+  };
+  const seen = new Map<string, string | null>([[entry, null]]);
+  const queue = [entry];
+  while (queue.length) {
+    const f = queue.shift() as string;
+    const src = read(f);
+    if (src === null) continue;
+    for (const re of SPECS) {
+      re.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(src)) !== null) {
+        const r = resolve(f, m[1]);
+        if (r && !seen.has(r)) { seen.set(r, f); queue.push(r); }
+      }
+    }
+  }
+  return seen;
+}
+
+function chainTo(seen: Map<string, string | null>, target: string): string {
+  const chain: string[] = [];
+  for (let c: string | null | undefined = target; c; c = seen.get(c)) chain.unshift(c);
+  return chain.join(' -> ');
 }
 
 function walk(dir: string, out: string[]): void {
@@ -213,24 +303,82 @@ describe('planted controls — the scanner catches a missing option', () => {
     expect(sites.filter((s) => s.ok)).toHaveLength(0);
   });
 
-  it('passes a wrapped launch (single- and multi-line) and an exempt-marked one', () => {
+  it('passes a wrapped launch (single- and multi-line) and an exempt-marked one in an allowlisted file', () => {
     const src = [
       'await chromium.launch(withWorkerSignalOwnership({ headless: true }));',
       'await pw.chromium.launch(',
       '  withWorkerSignalOwnership({ headless: true }),',
       ');',
-      '// signal-ownership-exempt: serverless only',
+      '// signal-ownership-exempt: serverless only (Vercel / Lambda)',
       'await puppeteer.launch({});',
     ].join('\n');
-    const sites = scanSource('fixture.ts', src);
+    const sites = scanSource('backend/services/export/htmlToPdfRenderer.ts', src);
     expect(sites).toHaveLength(3);
     expect(sites.every((s) => s.ok)).toBe(true);
     expect(sites[2].exempt).toBe(true);
   });
 
-  it('an empty marker (no reason) is not an exemption', () => {
-    const [s] = scanSource('fixture.ts', '// signal-ownership-exempt:\nawait chromium.launch({});');
-    expect(s.ok).toBe(false);
+  it('a marker at the top of a multi-line comment block directly above the launch counts', () => {
+    const src = [
+      '// signal-ownership-exempt: web-only. Only the report API routes call this.',
+      '// (second line of the same note)',
+      '// (third line of the same note)',
+      'browser = await chromium.launch({ headless: true });',
+    ].join('\n');
+    expect(scanSource('backend/services/export/htmlToPdfRenderer.ts', src)[0]).toMatchObject({ ok: true, exempt: true });
+    // ...but not one separated from the launch by code.
+    const separated = src.replace('// (third line of the same note)', 'const x = 1;');
+    expect(scanSource('backend/services/export/htmlToPdfRenderer.ts', separated)[0].ok).toBe(false);
+  });
+
+  it('(T-4 a) the same web-only marker on a launch in a worker-reachable file still FAILS', () => {
+    const src = '// signal-ownership-exempt: web-only, only the report API routes call this\nawait pw.chromium.launch({ headless: true });';
+    const [s] = scanSource('backend/services/rpaWorker/rpaPlaywrightRunner.ts', src);
+    expect(s).toMatchObject({ ok: false, exempt: false, markerRejected: 'file-not-allowlisted' });
+  });
+
+  it('(T-4 b) a marker with no reason, or a bare label, FAILS even in an allowlisted file', () => {
+    const file = 'backend/services/export/htmlToPdfRenderer.ts';
+    for (const marker of ['// signal-ownership-exempt:', '// signal-ownership-exempt:   ', '// signal-ownership-exempt: web-only']) {
+      const [s] = scanSource(file, `${marker}\nawait chromium.launch({});`);
+      expect(s).toMatchObject({ ok: false, markerRejected: 'no-reason' });
+    }
+  });
+
+  it('(T-4 c) the real htmlToPdfRenderer passes: every site exempt with a reason, none wrapped', () => {
+    const file = 'backend/services/export/htmlToPdfRenderer.ts';
+    const sites = scanSource(file, fs.readFileSync(path.join(REPO, file), 'utf8').replace(/\r\n/g, '\n'));
+    expect(sites.map((s) => s.call)).toEqual(['chromium.launch', 'chromium.launch', 'puppeteer.launch']);
+    expect(sites.every((s) => s.ok && s.exempt)).toBe(true);
+  });
+});
+
+describe('planted controls — worker reachability walk', () => {
+  const graph: Record<string, string> = {
+    'backend/workers/main.ts': "import { a } from '../services/a';\nconst b = await import('@/backend/services/b');",
+    'backend/services/a.ts': "export * from './deep/c';",
+    'backend/services/b/index.ts': "const r = require('../export/htmlToPdfRenderer');",
+    'backend/services/deep/c.ts': "import 'playwright';\nexport const c = 1;",
+    'backend/services/export/htmlToPdfRenderer.ts': 'export const x = 1;',
+    'backend/services/unrelated.ts': "import { x } from './export/htmlToPdfRenderer';",
+  };
+  const read = (f: string) => (f in graph ? graph[f] : null);
+  const isFile = (f: string) => f in graph;
+
+  it('follows from / import() / require / re-export and the @/ alias, and reports the chain', () => {
+    const seen = workerReachable('backend/workers/main.ts', read, isFile);
+    expect(seen.has('backend/services/deep/c.ts')).toBe(true);
+    expect(seen.has('backend/services/export/htmlToPdfRenderer.ts')).toBe(true);
+    expect(chainTo(seen, 'backend/services/export/htmlToPdfRenderer.ts')).toBe(
+      'backend/workers/main.ts -> backend/services/b/index.ts -> backend/services/export/htmlToPdfRenderer.ts',
+    );
+  });
+
+  it('a file only imported by a non-worker module is not reachable', () => {
+    const g = { ...graph, 'backend/services/b/index.ts': 'export const b = 2;' };
+    const seen = workerReachable('backend/workers/main.ts', (f) => (f in g ? g[f as keyof typeof g] : null), (f) => f in g);
+    expect(seen.has('backend/services/export/htmlToPdfRenderer.ts')).toBe(false);
+    expect(seen.has('backend/services/unrelated.ts')).toBe(false);
   });
 
   it('a type reference (typeof chromium.launch) is not a call site', () => {
@@ -257,8 +405,28 @@ describe('repo scan — every server-code browser launch defers shutdown signals
     expect(repoSources().flatMap(([f, src]) => scanAliases(f, src))).toEqual([]);
   });
 
-  it('exemptions are reserved for the serverless Puppeteer path — no Playwright site is exempt', () => {
+  it('exemptions exist only in allowlisted files: the web-only PDF renderer (2 Playwright + 1 Puppeteer)', () => {
     const exempt = sites.filter((s) => s.exempt).map((s) => `${s.file} ${s.call}`);
-    expect(exempt).toEqual(['backend/services/export/htmlToPdfRenderer.ts puppeteer.launch']);
+    expect(exempt).toEqual([
+      'backend/services/export/htmlToPdfRenderer.ts chromium.launch',
+      'backend/services/export/htmlToPdfRenderer.ts chromium.launch',
+      'backend/services/export/htmlToPdfRenderer.ts puppeteer.launch',
+    ]);
+    expect(sites.filter((s) => s.markerRejected)).toEqual([]);
+  });
+
+  it('no allowlisted (exempt) file is reachable from the worker entry through the static import graph', () => {
+    const isFile = (f: string) => {
+      try { return fs.statSync(path.join(REPO, f)).isFile(); } catch { return false; }
+    };
+    const read = (f: string) => {
+      try { return fs.readFileSync(path.join(REPO, f), 'utf8'); } catch { return null; }
+    };
+    const seen = workerReachable(WORKER_ENTRY, read, isFile);
+    // Non-vacuous: the walk really reaches the worker's own browser code (main -> cron -> RPA).
+    expect(seen.has('backend/services/rpaWorker/rpaPlaywrightRunner.ts')).toBe(true);
+    expect(seen.size).toBeGreaterThan(500);
+    const reached = [...EXEMPT_FILE_ALLOWLIST].filter((f) => seen.has(f)).map((f) => chainTo(seen, f));
+    expect(reached).toEqual([]);
   });
 });
