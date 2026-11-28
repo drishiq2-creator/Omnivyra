@@ -205,10 +205,15 @@ const errorText = (error: unknown): string =>
 
 /**
  * After a failed claim write: the write may still have committed (lost DB
- * response). Only a successful read showing NO row with the key confirms that
- * nothing was recorded; any row found is answered like a 23505 winner.
+ * response). Any row found is answered like a 23505 winner.
+ *  - serverAnswered: the DB returned an error object, so the statement ended
+ *    without committing; a successful read showing NO row then confirms nothing
+ *    was recorded (retryable "not sent").
+ *  - otherwise (the insert THREW: transport timeout / network error) the INSERT
+ *    may still be running server-side and commit after this read, so an empty
+ *    read proves nothing: outcome unknown, never retryable.
  */
-async function resolveAfterFailedClaimWrite(organizationId: string, idempotencyKey: string, writeError: string): Promise<ClaimOutcome> {
+async function resolveAfterFailedClaimWrite(organizationId: string, idempotencyKey: string, writeError: string, serverAnswered: boolean): Promise<ClaimOutcome> {
   let check: LookupOutcome;
   try {
     check = await findReplyActionByKey(organizationId, idempotencyKey);
@@ -217,6 +222,7 @@ async function resolveAfterFailedClaimWrite(organizationId: string, idempotencyK
   }
   if (check.ok === false) return { kind: 'unknown', error: `${writeError}; re-read failed: ${check.error}` };
   if (check.row) return { kind: 'lost', existing: check.row };
+  if (!serverAnswered) return { kind: 'unknown', error: `${writeError}; row not visible yet (the insert may still commit)` };
   return { kind: 'error', error: writeError };
 }
 
@@ -278,12 +284,12 @@ export async function claimReplyAction(input: {
   }));
   } catch (thrown) {
     // A thrown insert (network / timeout) is a lost response: the row may exist.
-    return resolveAfterFailedClaimWrite(input.row.organization_id, input.idempotencyKey, `claim insert threw: ${errorText(thrown)}`);
+    return resolveAfterFailedClaimWrite(input.row.organization_id, input.idempotencyKey, `claim insert threw: ${errorText(thrown)}`, false);
   }
   if (!error) return { kind: 'claimed', actionId: input.actionId };
   if (!isUniqueViolation(error)) {
     // Not provably "nothing written": the commit may have happened and only the response was lost.
-    return resolveAfterFailedClaimWrite(input.row.organization_id, input.idempotencyKey, errorText(error));
+    return resolveAfterFailedClaimWrite(input.row.organization_id, input.idempotencyKey, errorText(error), true);
   }
   let winner: LookupOutcome;
   try {

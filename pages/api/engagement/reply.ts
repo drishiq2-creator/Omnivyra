@@ -895,8 +895,9 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
           },
         });
     if (claim.kind === 'error') {
-      // The claim write failed AND a read confirmed no row carries the key: nothing was
-      // recorded and no send was attempted — the only case that may answer retryable.
+      // The DB RETURNED an error for the claim (the statement ended without committing) AND a
+      // read confirmed no row carries the key: nothing was recorded and no send was attempted —
+      // the only case that may answer retryable. A THROWN insert never reaches here (unknown).
       return res.status(503).json({ error: 'reply could not be recorded before sending; it was not sent', code: 'REPLY_CLAIM_FAILED', retryable: true, outcome: 'not_sent' });
     }
     if (claim.kind === 'unknown') {

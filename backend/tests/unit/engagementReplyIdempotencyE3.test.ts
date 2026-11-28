@@ -32,7 +32,7 @@ const db: Record<string, Row[]> = {};
 /** When > 0, that many idempotency-key lookups on community_ai_actions answer "no row" (a read that raced the winner's insert). */
 let staleKeyLookups = 0;
 /** Fault injection for the claim insert on community_ai_actions (one-shot). */
-let claimInsertFault: null | 'commit-then-error' | 'commit-then-throw' | 'no-commit-error' = null;
+let claimInsertFault: null | 'commit-then-error' | 'commit-then-throw' | 'no-commit-error' | 'no-commit-throw' = null;
 /** Per idempotency-key read, in order: 'ok' or 'fail' (a DB error). Empty = all ok. */
 let keyReadPlan: Array<'ok' | 'fail'> = [];
 
@@ -64,8 +64,9 @@ function builder(table: string) {
     if (table === 'community_ai_actions' && claimInsertFault) {
       const fault = claimInsertFault;
       claimInsertFault = null;
-      if (fault !== 'no-commit-error') (db[table] ??= []).push({ ...row }); // the commit happened
-      if (fault === 'commit-then-throw') throw new TypeError('fetch failed: socket hang up');
+      if (fault === 'commit-then-error' || fault === 'commit-then-throw') (db[table] ??= []).push({ ...row }); // the commit happened
+      // no-commit-throw: a transport timeout while the INSERT is still in flight — not visible to the re-read yet
+      if (fault === 'commit-then-throw' || fault === 'no-commit-throw') throw new TypeError('fetch failed: socket hang up');
       return { data: null, error: { code: '08006', message: 'connection failure during commit acknowledgement' } };
     }
     if ((db[table] ?? []).some((r) => r.id != null && r.id === row.id) || keyCollides(table, row)) {
@@ -578,7 +579,18 @@ describe('E3 claim write with a lost DB response', () => {
     expect(executeActionMock).not.toHaveBeenCalled();
   });
 
-  it('CONTROL: the insert fails WITHOUT committing and the re-read confirms no row → retryable 503; the retry then sends once', async () => {
+  it('a THROWN insert whose row is not (yet) visible to the re-read → 409 REPLY_OUTCOME_UNKNOWN, not retryable, never executed', async () => {
+    claimInsertFault = 'no-commit-throw';
+    const first = await post({ client_reply_key: KEY_1 });
+    expect(first.statusCode).toBe(409);
+    expect(first.body.code).toBe('REPLY_OUTCOME_UNKNOWN');
+    expect(first.body.retryable).toBe(false);
+    expect(String(first.body.error)).toMatch(/^Sending status unknown/);
+    expect(keepsKey(first)).toBe(true);
+    expect(executeActionMock).not.toHaveBeenCalled();
+  });
+
+  it('CONTROL: the DB RETURNS a non-23505 error (no commit) and the re-read confirms no row → retryable 503; the retry then sends once', async () => {
     claimInsertFault = 'no-commit-error';
     const first = await post({ client_reply_key: KEY_1 });
     expect(first.statusCode).toBe(503);
