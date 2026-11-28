@@ -193,6 +193,37 @@ describe('#1 list surfaces and count share the company-only identity set', () =>
   });
 });
 
+describe('#1b a legacy account with company_id NULL is not the company (non-strict and strict paths)', () => {
+  function seed(accountCompany: string | null) {
+    // user_a1 is an active member of A; the account row carries accountCompany.
+    db.social_accounts.push({ id: 'sa-legacy', user_id: 'user_a1', company_id: accountCompany, platform: 'linkedin', platform_user_id: 'li-legacy', is_active: true });
+    author('auth_legacy', 'li-legacy');
+    thread('post1');
+    comment('post1', 'ext1', ago(20 * MIN));
+    comment('post1', 'auth_legacy', ago(10 * MIN)); // the legacy account replies last
+  }
+  async function surfaces() {
+    const canonical = (await getThreads({ organization_id: A, limit: 100, exclude_ignored: true }))
+      .find((t) => t.thread_id === 'post1')?.actionable;
+    const c = await counts();
+    return { canonical, count: c.body.totals.people_reaction as number };
+  }
+
+  it("a member's company_id NULL account reply leaves the thread open in getThreads and the count", async () => {
+    seed(null);
+    const s = await surfaces();
+    expect(s.canonical).toBe(true);
+    expect(s.count).toBe(2);
+  });
+
+  it("CONTROL: the same account carrying company A's company_id answers it in both", async () => {
+    seed(A);
+    const s = await surfaces();
+    expect(s.canonical).toBe(false);
+    expect(s.count).toBe(0);
+  });
+});
+
 describe('#2 paged reads have a unique tiebreaker', () => {
   function seed(withCompanyReply: boolean) {
     // 1,200 accounts of one member that ALL share platform_user_id 'same-id'
