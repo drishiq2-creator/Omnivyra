@@ -32,6 +32,20 @@ import { isDmMessageType } from '../../../lib/engagement/messageRoles';
 import { recordThreadEvent } from '../../../backend/services/engagementThreadEventService';
 import { isThreadActionable } from '../../../backend/services/engagementThreadService';
 import { resolveEngagementAuthorIdentity, personIdentityMetadata, type PersonIdentity } from '../../../backend/services/communityAiContactGovernanceGate';
+import { toPersistedCommunityActionStatus } from '../../../backend/services/communityAiPersistedStatus';
+import {
+  parseClientReplyKey,
+  deriveEngagementReplyIdempotencyKey,
+  findReplyActionByKey,
+  classifyExistingReplyAction,
+  claimReplyAction,
+  reclaimNotSentReplyAction,
+  REPLY_OUTCOME_UNKNOWN_MESSAGE,
+  REPLY_PRIOR_FAILED_MESSAGE,
+  unknownOutcomeMessage,
+  type ExistingReplyAction,
+  type ExistingReplyDisposition,
+} from '../../../backend/services/engagement/replyIdempotency';
 
 type ReplyBody = {
   organization_id?: string;
@@ -66,7 +80,65 @@ type ReplyBody = {
    * intelligence layer a single join key across the full chain.
    */
   correlation_id?: string;
+  /**
+   * E3 — the composer's key for ONE logical reply (per target + draft), reused
+   * on every retry of that reply. Optional: absent → a server-derived key over
+   * the same values (identical text to the same target dedups). Present but
+   * malformed → 400 INVALID_CLIENT_REPLY_KEY. See replyIdempotency.ts.
+   */
+  client_reply_key?: string;
 };
+
+/**
+ * E3 — answer a request whose logical reply already has a stored attempt.
+ * Never calls the executor. The row was read scoped to the authorized
+ * organization, so nothing of another tenant can be returned here.
+ */
+function respondToExistingReply(
+  res: NextApiResponse,
+  row: ExistingReplyAction,
+  disposition: ExistingReplyDisposition,
+  ctx: { platform: string; isDm: boolean; signalId: string | null },
+) {
+  const result = (row.execution_result ?? {}) as Record<string, unknown>;
+  const platformId = typeof result.platform_id === 'string' && result.platform_id ? result.platform_id : null;
+  const base = { action_id: row.id, deduplicated: true, signal_id: ctx.signalId };
+  switch (disposition) {
+    case 'executed':
+      return res.status(200).json({
+        ...base,
+        success: true,
+        status: 'executed',
+        already_sent: true,
+        confirmed: Boolean(platformId),
+        platform_id: platformId,
+        message: 'This reply was already sent; it was not sent again.',
+      });
+    case 'queued':
+      return res.status(202).json({
+        ...base,
+        success: true,
+        status: 'queued',
+        mode: 'browser',
+        execution_mode: 'browser',
+        confirmed: false,
+        platform_id: null,
+        message: ctx.isDm
+          ? `Reply already queued — open the ${ctx.platform} tab so the Omnivyra extension can deliver the DM. It was not queued again.`
+          : 'Reply already queued for the Omnivyra extension. It was not queued again.',
+      });
+    case 'in_progress':
+      return res.status(409).json({ ...base, success: false, error: unknownOutcomeMessage('in_progress', row), code: 'REPLY_IN_PROGRESS', outcome: 'unknown', retryable: false, execution_mode: row.execution_mode ?? null });
+    case 'failed_ambiguous':
+      return res.status(409).json({ ...base, success: false, error: REPLY_PRIOR_FAILED_MESSAGE, code: 'REPLY_PRIOR_ATTEMPT_FAILED', outcome: 'unknown', retryable: false, status: row.status ?? null });
+    case 'not_sent':
+      // Only reachable when a concurrent retry re-claimed the row and it was refused before any send again.
+      return res.status(409).json({ ...base, success: false, error: 'This reply was not sent (refused before reaching the platform). You can send it again.', code: 'REPLY_NOT_SENT', outcome: 'not_sent', retryable: true, status: row.status ?? null });
+    case 'outcome_unknown':
+    default:
+      return res.status(409).json({ ...base, success: false, error: unknownOutcomeMessage('outcome_unknown', row), code: 'REPLY_OUTCOME_UNKNOWN', outcome: 'unknown', retryable: false, status: row.status ?? null, execution_mode: row.execution_mode ?? null });
+  }
+}
 
 /**
  * Normalize `x` → `twitter` on entry so downstream code never has to
@@ -315,6 +387,13 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     if (!replyText) {
       return res.status(400).json({ error: 'reply_text required' });
     }
+    const clientReplyKey = parseClientReplyKey(body.client_reply_key);
+    if (clientReplyKey.ok === false) {
+      return res.status(400).json({
+        error: 'client_reply_key must be 16-128 characters of A-Z, a-z, 0-9, "-" or "_"',
+        code: 'INVALID_CLIENT_REPLY_KEY',
+      });
+    }
 
     const access = await enforceCompanyAccess({ req, res, companyId: organizationId });
     if (!access) return;
@@ -467,6 +546,44 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
         return res.status(503).json({ error: 'CONTACT_GOVERNANCE_UNAVAILABLE', reason: 'person_identity_lookup_failed_failclosed', retryable: true });
       }
       contactPerson = authorLookup.value;
+    }
+
+    // ── Branch: DM reply vs comment reply ─────────────────────────────
+    // DMs do NOT have an API path on LinkedIn — send dispatches through
+    // the extension's continue_thread handler via the browser-mode
+    // execution route. Comments continue through the API connector with
+    // the POST URN. The 'dm' vs 'direct_message' value normalisation
+    // lives in lib/engagement/messageRoles so every layer sees the same
+    // truth.
+    const isDm = isDmMessageType(message?.message_type);
+
+    // ── E3: stable logical-reply identity ───────────────────────────────
+    //    One key per (authorized organization, server-resolved target,
+    //    platform, action type, client key, normalised text). A retry of the
+    //    same reply finds its stored attempt here and is answered from it —
+    //    BEFORE any draft promotion or send. Only a confirmed-not-sent attempt
+    //    is re-claimed (CAS) for one re-execution under the same key.
+    const replyTargetRef = message ? `message:${message.id}` : `signal:${resolvedSignalId}`;
+    const replyIdempotencyKey = deriveEngagementReplyIdempotencyKey({
+      organizationId,
+      targetRef: replyTargetRef,
+      platform,
+      actionType: isDm ? 'dm' : 'reply',
+      clientKey: clientReplyKey.key,
+      replyText,
+    });
+    const priorAttempt = await findReplyActionByKey(organizationId, replyIdempotencyKey);
+    if (priorAttempt.ok === false) {
+      // Nothing has been sent by this request: an honest retryable refusal.
+      return res.status(503).json({ error: 'reply de-duplication check is temporarily unavailable', code: 'REPLY_DEDUP_UNAVAILABLE', retryable: true });
+    }
+    let reclaimableAttempt: ExistingReplyAction | null = null;
+    if (priorAttempt.row) {
+      const disposition = classifyExistingReplyAction(priorAttempt.row);
+      if (disposition !== 'not_sent') {
+        return respondToExistingReply(res, priorAttempt.row, disposition, { platform, isDm, signalId: resolvedSignalId });
+      }
+      reclaimableAttempt = priorAttempt.row;
     }
 
     // ── AI safety hard guard ─────────────────────────────────────────────
@@ -631,17 +748,6 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     // a persistent "pending" row on platform failure orphans state that no
     // consumer cleans up. The row is inserted only after the platform confirms.
 
-    const actionId = crypto.randomUUID();
-
-    // ── Branch: DM reply vs comment reply ─────────────────────────────
-    // DMs do NOT have an API path on LinkedIn — send dispatches through
-    // the extension's continue_thread handler via the browser-mode
-    // execution route. Comments continue through the API connector with
-    // the POST URN. The 'dm' vs 'direct_message' value normalisation
-    // lives in lib/engagement/messageRoles so every layer sees the same
-    // truth.
-    const isDm = isDmMessageType(message?.message_type);
-
     // Reject replies targeting placeholder seed rows — their platform
     // message ids are synthetic (urn:li:activity:.../#demo-comment-N) and
     // can't be threaded under a real comment. Without this guard the
@@ -761,8 +867,64 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     const parentCommentUrn = isLinkedInReplyToComment ? message.platform_message_id : null;
 
     const callerCorrelationId = (body.correlation_id || '').toString().trim() || undefined;
+    const executionCorrelationId = callerCorrelationId ?? crypto.randomUUID();
+    const executionMode = capability.mode ?? (isDm ? 'browser' : 'api');
 
-    const result = await executeAction(
+    // ── E3: claim the logical reply BEFORE any send ─────────────────────
+    //    The executor stamps the idempotency key only after the provider
+    //    call, so its unique-index dedup cannot stop a second send. The row
+    //    is inserted here WITH the key (the executor's auto_insert then finds
+    //    it by id and inserts nothing); of two concurrent requests exactly one
+    //    insert wins on idx_community_ai_actions_org_idempotency_key, and the
+    //    loser (23505) answers from the winner's row without executing.
+    const claim = reclaimableAttempt
+      ? await reclaimNotSentReplyAction(organizationId, replyIdempotencyKey, reclaimableAttempt)
+      : await claimReplyAction({
+          actionId: crypto.randomUUID(),
+          idempotencyKey: replyIdempotencyKey,
+          correlationId: executionCorrelationId,
+          row: {
+            organization_id: organizationId,
+            tenant_id: organizationId,
+            platform,
+            action_type: isDm ? 'dm' : 'reply',
+            target_id: targetId,
+            suggested_text: replyText,
+            execution_mode: executionMode,
+            acting_user_id: roleGate.userId ?? null,
+          },
+        });
+    if (claim.kind === 'error') {
+      // The DB RETURNED an error for the claim (the statement ended without committing) AND a
+      // read confirmed no row carries the key: nothing was recorded and no send was attempted —
+      // the only case that may answer retryable. A THROWN insert never reaches here (unknown).
+      return res.status(503).json({ error: 'reply could not be recorded before sending; it was not sent', code: 'REPLY_CLAIM_FAILED', retryable: true, outcome: 'not_sent' });
+    }
+    if (claim.kind === 'unknown') {
+      // The claim write may have committed (lost DB response) and nothing proves otherwise:
+      // never execute, never invite a resend, keep the key.
+      console.error('[engagement/reply] claim outcome unknown:', claim.error);
+      return res.status(409).json({
+        success: false,
+        error: unknownOutcomeMessage('outcome_unknown', { execution_mode: executionMode, status: 'pending' }),
+        code: 'REPLY_OUTCOME_UNKNOWN',
+        outcome: 'unknown',
+        retryable: false,
+        execution_mode: executionMode,
+      });
+    }
+    if (claim.kind === 'lost') {
+      if (!claim.existing) {
+        // The key is taken but the winner is not readable: never guess, never send.
+        return res.status(409).json({ success: false, error: unknownOutcomeMessage('in_progress', { execution_mode: executionMode, status: 'pending' }), code: 'REPLY_IN_PROGRESS', outcome: 'unknown', retryable: false, deduplicated: true });
+      }
+      return respondToExistingReply(res, claim.existing, classifyExistingReplyAction(claim.existing), { platform, isDm, signalId: resolvedSignalId });
+    }
+    const actionId = claim.actionId;
+
+    let result: Awaited<ReturnType<typeof executeAction>>;
+    try {
+      result = await executeAction(
       {
         id: actionId,
         tenant_id: organizationId,
@@ -779,7 +941,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
         // for DMs. The executor respects this and either calls the
         // connector or persists a community_ai_actions row with
         // execution_mode='browser' for the extension to claim.
-        execution_mode: capability.mode ?? (isDm ? 'browser' : 'api'),
+        execution_mode: executionMode,
         metadata: (() => {
           const base: Record<string, unknown> | null = isDm && isLinkedIn
             ? {
@@ -802,11 +964,18 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
         source: 'manual',
         persist: true,
         auto_insert: true,
-        idempotency_key: `engagement-reply:${actionId}`,
+        idempotency_key: replyIdempotencyKey,
         final_text: replyText,
-        correlation_id: callerCorrelationId,
+        correlation_id: executionCorrelationId,
       }
     );
+    } catch (executeErr) {
+      // The claim exists and the executor may have reached the provider before
+      // throwing: the outcome is unknown. The key stays claimed (pending row),
+      // so a retry answers "in progress / unknown" and never resends.
+      console.error('[engagement/reply] executeAction threw after claim:', (executeErr as Error)?.message);
+      return res.status(409).json({ success: false, error: unknownOutcomeMessage('outcome_unknown', { execution_mode: executionMode, status: 'pending' }), code: 'REPLY_OUTCOME_UNKNOWN', outcome: 'unknown', retryable: false, action_id: actionId, execution_mode: executionMode });
+    }
 
     // Collaboration timeline: record who replied / DM'd. Attribution is
     // server-derived from the session.
@@ -859,8 +1028,47 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     if (!result.ok && refusalReason === 'CONTACT_GOVERNANCE_UNAVAILABLE') {
       return res.status(503).json({ error: refusalReason, code: refusalReason, status: result.status, retryable: true });
     }
+    // E3: classify the fresh result exactly as a stored attempt would be
+    // classified on a retry, so the first answer and every retry agree. A
+    // result that may have reached the platform (sent_unverified,
+    // OUTCOME_UNKNOWN, a persist failure after the provider call, a failure
+    // carrying an execution mode) is "outcome unknown" — never "failed, try
+    // again" — and the claimed key is kept so no retry resends it.
+    const persistedFresh = toPersistedCommunityActionStatus(result);
+    const freshResponse = (result.response && typeof result.response === 'object' ? result.response : {}) as Record<string, unknown>;
+    const freshDisposition: ExistingReplyDisposition = freshResponse.persist_error
+      ? 'outcome_unknown'
+      : classifyExistingReplyAction({
+          id: actionId,
+          status: persistedFresh.status,
+          skip_reason: persistedFresh.skip_reason,
+          execution_mode: result.execution_mode ?? executionMode,
+          execution_result: { ...result, execution_mode: result.execution_mode ?? null } as Record<string, unknown>,
+        });
+    if (!isQueuedForExtension && !resultDeduplicated && result.status !== 'executed'
+      && (freshDisposition === 'outcome_unknown' || freshDisposition === 'failed_ambiguous' || freshDisposition === 'in_progress')) {
+      return res.status(409).json({
+        success: false,
+        // A persist failure leaves the claimed row pending: for a browser row the extension may still deliver it.
+        error: freshResponse.persist_error
+          ? unknownOutcomeMessage('outcome_unknown', { execution_mode: result.execution_mode ?? executionMode, status: 'pending' })
+          : REPLY_OUTCOME_UNKNOWN_MESSAGE,
+        code: 'REPLY_OUTCOME_UNKNOWN',
+        execution_mode: result.execution_mode ?? executionMode,
+        outcome: 'unknown',
+        retryable: false,
+        status: result.status,
+        action_id: actionId,
+      });
+    }
     if (!isQueuedForExtension && (!result.ok || result.status !== 'executed')) {
       return res.status(502).json({
+        // E3: reaching here means the executor refused before any provider call
+        // (or an executor dedup reported a non-success prior row); a retry with
+        // the same client key may re-execute only in the confirmed-pre-send case.
+        outcome: freshDisposition === 'not_sent' ? 'not_sent' : 'unknown',
+        retryable: freshDisposition === 'not_sent',
+        action_id: actionId,
         error: typeof result.error === 'string' ? result.error : (result.error as any)?.code ?? 'Execution failed',
         code: 'PLATFORM_EXECUTION_FAILED',
         status: result.status,
@@ -1006,6 +1214,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       confirmed,
       platform_id: result.platform_id ?? null,
       correlation_id: result.correlation_id ?? null,
+      action_id: actionId,
       signal_id: resolvedSignalId,
       response: result.response,
     });

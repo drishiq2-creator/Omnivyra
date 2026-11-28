@@ -4,11 +4,12 @@
  * Data source: GET /api/engagement/campaign-signals
  */
 
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import ChatVoiceButton from '../components/ChatVoiceButton';
 import Head from 'next/head';
 import { useCompanyContext } from '@/components/CompanyContext';
 import PlatformIcon from '@/components/ui/PlatformIcon';
+import { ReplyKeyHolder, replyFailureMessage } from '@/lib/engagement/replySendOutcome';
 import {
   Bookmark,
   ExternalLink,
@@ -101,6 +102,10 @@ export default function EngagementInboxPage() {
   const [intelligence, setIntelligence] = useState<IntelligenceState>(null);
   const [intelligenceBusy, setIntelligenceBusy] = useState(false);
 
+  // E3: one client key per composed reply (signal + draft), reused on every retry until it succeeds.
+  const replyKeyRef = useRef<ReplyKeyHolder | null>(null);
+  if (!replyKeyRef.current) replyKeyRef.current = new ReplyKeyHolder();
+
   const sendReply = async () => {
     if (!selectedSignal || !replyText.trim() || !companyId) return;
     setReplying(true);
@@ -122,6 +127,12 @@ export default function EngagementInboxPage() {
         signal_id: selectedSignal.id,
         reply_text: replyText.trim(),
         platform: selectedSignal.platform,
+        client_reply_key: replyKeyRef.current!.keyFor({
+          threadId: '',
+          messageId: `signal:${selectedSignal.id}`,
+          platform: selectedSignal.platform,
+          text: replyText,
+        }),
       };
       if (verbatim && suggestionId) body.suggestion_id = suggestionId;
       if (suggestionCorrelationId) body.correlation_id = suggestionCorrelationId;
@@ -147,14 +158,21 @@ export default function EngagementInboxPage() {
         body.ai_draft_id = aiDraftId;
       }
 
-      const res = await fetch('/api/engagement/reply', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify(body),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? 'Reply failed');
+      let res: Response;
+      try {
+        res = await fetch('/api/engagement/reply', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify(body),
+        });
+      } catch {
+        // No response (network error / timeout): the server may have sent it. Keep the key.
+        throw new Error(replyFailureMessage({ networkError: true, platform: selectedSignal.platform }).message);
+      }
+      const data = (await res.json().catch(() => null)) as Record<string, unknown> | null;
+      if (!res.ok) throw new Error(replyFailureMessage({ httpStatus: res.status, json: data, platform: selectedSignal.platform }).message);
+      replyKeyRef.current!.reset();
       setReplyText('');
       setReplySuccess(true);
       setSuggestionUsed(true);
