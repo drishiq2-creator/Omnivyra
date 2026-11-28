@@ -116,7 +116,7 @@ const POST_TEXT = 'We rebuilt our export pipeline from scratch.';
 
 function seedIdentity(org = ORG) {
   db.user_company_roles = [{ user_id: USER, company_id: org, status: 'active' }];
-  db.social_accounts = [{ user_id: USER, platform: 'linkedin', platform_user_id: ACCOUNT, is_active: true }];
+  db.social_accounts = [{ user_id: USER, company_id: org, platform: 'linkedin', platform_user_id: ACCOUNT, is_active: true }];
   db.engagement_authors = [
     { id: AUTHOR_SELF, platform: 'linkedin', platform_user_id: ACCOUNT },
     { id: AUTHOR_EXT, platform: 'linkedin', platform_user_id: 'someone-else-xyz', display_name: 'Priya' },

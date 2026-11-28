@@ -15,8 +15,7 @@ import { AIEngagementAssistant } from '@/components/engagement/AIEngagementAssis
 import { InboxLayout } from '@/components/engagement/inbox/InboxLayout';
 import { InboxHeader } from '@/components/engagement/inbox/InboxHeader';
 import { useEngagementInbox } from '@/hooks/useEngagementInbox';
-import { usePlatformCounts } from '@/hooks/usePlatformCounts';
-import { useWorkQueue } from '@/hooks/useWorkQueue';
+import { getTabCount, getUnsupportedEngagementReason, usePortalCounts } from './portalCounts';
 import { useCompanyIntegrations } from '@/hooks/useCompanyIntegrations';
 import { useEngagementMessages } from '@/hooks/useEngagementMessages';
 import { useReply } from '@/hooks/useReply';
@@ -104,16 +103,22 @@ function InboxDashboardComponent({
     [selectedPlatform]
   );
 
+  // E4: ONE server-side count definition (engagement-portal-counts.v1) feeds
+  // every badge and header total. /api/engagement/work-queue serves the same
+  // numbers, so the old second fetch is gone; `refreshWorkQueue` stays a
+  // no-op for the hooks that still accept it (counts refresh covers it).
   const {
-    counts,
+    state: portalCounts,
     loading: countsLoading,
     refresh: refreshCounts,
-  } = usePlatformCounts(organizationId);
-  const {
-    workQueue,
-    loading: workQueueLoading,
-    refresh: refreshWorkQueue,
-  } = useWorkQueue(organizationId);
+  } = usePortalCounts(organizationId);
+  const refreshWorkQueue = useCallback(async () => {}, []);
+  const countsUnavailable = portalCounts.status === 'unknown';
+  // While counts are unknown (failed read) or loading, there is no handled map:
+  // threads the server would hide as resolved / company-answered may reappear
+  // in the lists until counts load. That is the deliberate safe direction —
+  // an extra item shown, never real work hidden — and the badges say "—".
+  const handledThreads = portalCounts.status === 'ready' ? portalCounts.handledThreads : null;
   const { platforms: integrations } = useCompanyIntegrations(organizationId);
   const connectedPlatformSlugs = useMemo(
     () => Array.from(
@@ -213,9 +218,12 @@ function InboxDashboardComponent({
   // row exists), the thread drops out of the queue until the counterparty
   // sends something new — otherwise the operator sees their own replies
   // sitting in the inbox waiting for action that's already been taken.
+  // E4: a thread the server reports handled (persisted "Mark resolved", or a
+  // company turn found via the connected-account map) at/after its latest
+  // message leaves the list, exactly as it leaves the server count.
   const dmThreads = useMemo(
-    () => selectNeedsResponseThreads(filteredItems),
-    [filteredItems]
+    () => selectNeedsResponseThreads(filteredItems, undefined, handledThreads),
+    [filteredItems, handledThreads]
   );
   // People Reaction visibility rules (operator-defined):
   //   1. Only comment threads where someone else wrote the latest comment.
@@ -230,8 +238,8 @@ function InboxDashboardComponent({
   // invalidate visibleQueueItems, fire the recommendation useEffect, and
   // trigger an infinite re-render loop ("Maximum update depth exceeded").
   const postThreads = useMemo(
-    () => selectPeopleReactionThreads(filteredItems),
-    [filteredItems]
+    () => selectPeopleReactionThreads(filteredItems, undefined, handledThreads),
+    [filteredItems, handledThreads]
   );
 
   const needsResponseQueueItems = useMemo(
@@ -248,7 +256,22 @@ function InboxDashboardComponent({
       : filterThreadsForQueue(dmThreads, activeQueueFilter).slice(0, NEEDS_RESPONSE_VISIBLE_LIMIT);
   }, [activeQueueFilter, dmThreads, needsResponseQueueItems, postThreads]);
 
-  const peopleReactedCount = postThreads.length;
+  // E4: header badges are SERVER counts for the selected tab ('all' = totals),
+  // never the length of the (top-N, tab-scoped) visible list. null = unknown.
+  const selectedTabCount = getTabCount(portalCounts, selectedPlatform || 'all');
+  const needsResponseCount: number | null = selectedTabCount?.needs_response ?? null;
+  const peopleReactedCount: number | null = selectedTabCount?.people_reaction ?? null;
+  const unsupportedReasons = useMemo(() => {
+    const out: Record<string, string> = {};
+    for (const integration of integrations) {
+      const slug = normalizePlatform(integration.platform);
+      const reason = slug ? getUnsupportedEngagementReason(slug) : null;
+      if (slug && reason) out[slug === 'x' ? 'twitter' : slug] = reason;
+    }
+    return out;
+  }, [integrations]);
+  const selectedUnsupportedReason =
+    selectedPlatform && selectedPlatform !== 'all' ? unsupportedReasons[selectedPlatform] ?? null : null;
 
   const getBrowserActionPlatform = useCallback((platform: string) => {
     const normalized = normalizePlatform(platform);
@@ -266,71 +289,12 @@ function InboxDashboardComponent({
     [connectedPlatformSlugs, getBrowserActionPlatform]
   );
 
-  // Counts must mirror what the user actually sees in the Needs Response
-  // tab: DM threads where the other party replied last. Computing from
-  // filteredItems would inflate the badge with post threads (now under
-  // People Reaction) and self-replied DMs that we already filter out.
+  // The visible list's own length — used only for list-state decisions
+  // (empty states, recommendation), never shown as a count. E4 removed the
+  // browser-side per-platform badge recomputation that used to live here
+  // (top-10-capped, tab-scoped, per-post); badges are server counts.
   const queueCounts = useMemo(() => getThreadQueueCounts(needsResponseQueueItems), [needsResponseQueueItems]);
 
-  // Per-platform counts for the platform tabs. These are derived client-side
-  // from the same filtered universes the rest of the UI uses, so the tab
-  // badge for each platform = (DMs needing attention + posts with reactions)
-  // and matches what the user sees when they click that platform tab.
-  // Server-side `counts` is ignored here because it doesn't apply the
-  // "I-replied-last" or DM/post split filters.
-  const platformCounts = useMemo(() => {
-    type Tier = 'low' | 'medium' | 'high';
-    const tierFromScore = (score: number): Tier => {
-      if (score >= 60) return 'high';
-      if (score >= 30) return 'medium';
-      return 'low';
-    };
-    const tierRank: Record<Tier, number> = { low: 0, medium: 1, high: 2 };
-    const next: Record<string, { thread_count: number; unread_count: number; max_priority_tier: Tier }> = {};
-    const all = [...needsResponseQueueItems, ...postThreads];
-    for (const t of all) {
-      const slug = (t.platform || '').toLowerCase().trim();
-      if (!slug) continue;
-      const cell = next[slug] ?? { thread_count: 0, unread_count: 0, max_priority_tier: 'low' as Tier };
-      cell.thread_count += 1;
-      cell.unread_count += t.unread_count ?? 0;
-      const tier = tierFromScore(Number(t.priority_score ?? 0));
-      if (tierRank[tier] > tierRank[cell.max_priority_tier]) cell.max_priority_tier = tier;
-      next[slug] = cell;
-    }
-    return next;
-  }, [needsResponseQueueItems, postThreads]);
-
-  // Client-side workQueue replaces the server's stale per-platform actionable
-  // counts. Same filtered universe as platformCounts: actionable_threads =
-  // # of (DMs needing attention + posts with reactions) for that platform.
-  // The orange badge on the platform tabs reads from this.
-  const clientWorkQueue = useMemo(() => {
-    const byPlatform: Record<string, { actionable_threads: number; high_priority_threads: number }> = {};
-    for (const t of needsResponseQueueItems) {
-      const slug = (t.platform || '').toLowerCase().trim();
-      if (!slug) continue;
-      const cell = byPlatform[slug] ?? { actionable_threads: 0, high_priority_threads: 0 };
-      cell.actionable_threads += 1;
-      const isHigh = (t.triage_priority ?? 0) >= 7 || (t.priority_score ?? 0) >= 60;
-      if (isHigh) cell.high_priority_threads += 1;
-      byPlatform[slug] = cell;
-    }
-    for (const t of postThreads) {
-      const slug = (t.platform || '').toLowerCase().trim();
-      if (!slug) continue;
-      const cell = byPlatform[slug] ?? { actionable_threads: 0, high_priority_threads: 0 };
-      cell.actionable_threads += 1;
-      byPlatform[slug] = cell;
-    }
-    return {
-      platforms: Object.entries(byPlatform).map(([platform, v]) => ({
-        platform,
-        actionable_threads: v.actionable_threads,
-        high_priority_threads: v.high_priority_threads,
-      })),
-    };
-  }, [needsResponseQueueItems, postThreads]);
   const actionableThreads = queueCounts.needsResponse;
   const connectedPlatformsCount = connectedPlatformSlugs.length;
   const connectedPlatformSet = useMemo(
@@ -682,10 +646,10 @@ function InboxDashboardComponent({
       <InboxHeader
         queueStats={{
           activeQueueFilter,
-          actionableThreads,
+          actionableThreads: needsResponseCount,
           connectedPlatformsCount,
           visibleThreadCount: dmThreads.length + postThreads.length,
-          refreshDisabled: loading || countsLoading || workQueueLoading,
+          refreshDisabled: loading || countsLoading,
         }}
         browserAssist={{
           enabled: browserAssistEnabled,
@@ -744,12 +708,14 @@ function InboxDashboardComponent({
           },
         }}
         platformTabs={{
-          counts: platformCounts,
+          getCount: (slug: string) => getTabCount(portalCounts, slug),
+          countsUnavailable,
+          onRetryCounts: () => { void refreshCounts(); },
+          unsupportedReasons,
           selectedPlatform,
           onSelectPlatform: handleSelectPlatform,
-          workQueue: clientWorkQueue as typeof workQueue,
           platforms: connectedPlatformSlugs,
-          loading: countsLoading || workQueueLoading,
+          loading: countsLoading,
         }}
         platformHealth={{
           platforms: connectedPlatformHealth,
@@ -819,7 +785,7 @@ function InboxDashboardComponent({
               >
                 <span>📥 Needs Response</span>
                 <span className={`rounded-full px-2 py-0.5 text-xs ${activeQueueFilter !== 'People Reacted' ? 'bg-blue-600 text-white' : 'bg-slate-200 text-slate-700'}`}>
-                  {actionableThreads}
+                  {needsResponseCount ?? '—'}
                 </span>
               </button>
               <button
@@ -830,7 +796,7 @@ function InboxDashboardComponent({
               >
                 <span>💬 People Reaction</span>
                 <span className={`rounded-full px-2 py-0.5 text-xs ${activeQueueFilter === 'People Reacted' ? 'bg-emerald-600 text-white' : 'bg-slate-200 text-slate-700'}`}>
-                  {peopleReactedCount}
+                  {peopleReactedCount ?? '—'}
                 </span>
               </button>
             </div>
@@ -853,6 +819,16 @@ function InboxDashboardComponent({
                 </button>
               ))}
             </div>
+            {selectedUnsupportedReason ? (
+              <div
+                role="status"
+                data-testid="platform-unsupported-state"
+                className="mx-3 mt-3 rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700"
+              >
+                <p className="font-semibold text-slate-900">Not supported on this platform</p>
+                <p className="mt-1 leading-6">Not supported: {selectedUnsupportedReason}</p>
+              </div>
+            ) : null}
             <ThreadList
               items={visibleQueueItems}
               loading={loading}
@@ -871,7 +847,7 @@ function InboxDashboardComponent({
                     ? 'No threads in inbox.'
                     : `No threads in ${activeQueueFilter.toLowerCase()} right now.`
               }
-              emptyState={queueEmptyState}
+              emptyState={selectedUnsupportedReason ? <span /> : queueEmptyState}
               authorFilter={authorFilter}
               onClearAuthorFilter={authorFilter ? () => setAuthorFilter(null) : undefined}
             />

@@ -2,8 +2,22 @@ import { createApiRoute as __createApiRoute } from '../../../../lib/platform/rou
 
 /**
  * POST /api/engagement/thread/bulk-resolve
- * Resolve opportunities for selected threads.
+ * Mark selected threads resolved ("Mark resolved").
  * Body: thread_ids, organization_id
+ *
+ * E4 — resolve semantics (current persisted model, no schema change):
+ *   The durable resolve marker is an `engagement_thread_events` row with
+ *   event_type 'resolved' (created_at = when). The portal count definition
+ *   (engagementPortalCountsService) and the Needs Response / People Reaction
+ *   lists treat every inbound item at or before that time as handled; a newer
+ *   inbound item re-opens the thread. There is no thread- or message-level
+ *   status column to write instead (engagement_threads has only `ignored`,
+ *   which is Ignore, a different decision).
+ *
+ *   The marker is therefore written FIRST and its failure fails the request —
+ *   previously it was best-effort after the opportunity update, so a "resolved"
+ *   thread could silently stay in Needs Response. The thread's open
+ *   engagement_opportunities are still closed (resolved, resolved_at) as before.
  */
 
 import type { NextApiRequest, NextApiResponse } from 'next';
@@ -25,34 +39,81 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   }
 
   try {
+    // E4 re-review #1: authenticate BEFORE any read. The thread lookup below
+    // runs with the service role, so without this an anonymous caller could use
+    // 404 / 400 / 403 as an existence and ownership oracle.
     const user = await resolveUserContext(req);
-    const body = (req.body || {}) as Body;
-    const rawThreadIds = Array.isArray(body.thread_ids) ? body.thread_ids : [];
-    const organizationId = body.organization_id ?? user?.defaultCompanyId;
-
-    if (!organizationId) {
-      return res.status(400).json({ error: 'organization_id required' });
+    if (!user || user.authenticated === false || !user.userId) {
+      return res.status(401).json({ error: 'Authentication required', code: 'UNAUTHENTICATED' });
     }
+
+    const body = (req.body || {}) as Body;
+    const rawThreadIds = Array.isArray(body.thread_ids)
+      ? body.thread_ids.filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
+      : [];
     if (rawThreadIds.length === 0) {
       return res.status(400).json({ error: 'thread_ids required' });
+    }
+    const threadIds = rawThreadIds.slice(0, MAX_BATCH);
+
+    // E4 review #4: the company is resolved on the SERVER from the persisted
+    // threads (engagement_threads.organization_id), never taken from the body.
+    // A body organization_id is accepted only as an assertion: if it differs
+    // from the resolved company the request is refused. The access check on
+    // the resolved company is kept.
+    const { data: threads, error: threadsErr } = await supabase
+      .from('engagement_threads')
+      .select('id, organization_id')
+      .in('id', threadIds);
+
+    // A failed ownership read is not "none of these threads are yours".
+    if (threadsErr || !Array.isArray(threads)) {
+      console.warn('[engagement/thread/bulk-resolve] thread read failed:', threadsErr?.message);
+      return res.status(500).json({ error: 'Failed to resolve threads', code: 'THREAD_READ_FAILED' });
+    }
+    const companies = Array.from(
+      new Set(
+        (threads as Array<{ organization_id: string | null }>)
+          .map((t) => t.organization_id)
+          .filter((id): id is string => typeof id === 'string' && id.length > 0),
+      ),
+    );
+    if (companies.length === 0) {
+      return res.status(404).json({ error: 'Thread not found', code: 'THREAD_NOT_FOUND' });
+    }
+    if (companies.length > 1) {
+      return res.status(400).json({ error: 'thread_ids span more than one company', code: 'MIXED_COMPANIES' });
+    }
+    const organizationId = companies[0];
+    const assertedOrg = typeof body.organization_id === 'string' ? body.organization_id.trim() : '';
+    if (assertedOrg && assertedOrg !== organizationId) {
+      return res.status(403).json({ error: 'Access denied', code: 'COMPANY_MISMATCH' });
     }
 
     const access = await enforceCompanyAccess({ req, res, companyId: organizationId });
     if (!access) return;
 
-    const threadIds = rawThreadIds.slice(0, MAX_BATCH);
-
-    const { data: threads } = await supabase
-      .from('engagement_threads')
-      .select('id')
-      .eq('organization_id', organizationId)
-      .in('id', threadIds);
-
-    const validIds = new Set((threads ?? []).map((t: { id: string }) => t.id));
+    const validIds = new Set(
+      (threads as Array<{ id: string; organization_id: string | null }>)
+        .filter((t) => t.organization_id === organizationId)
+        .map((t) => t.id),
+    );
     const toResolve = threadIds.filter((id) => validIds.has(id));
 
     if (toResolve.length === 0) {
       return res.status(200).json({ success: true, resolved: 0 });
+    }
+
+    try {
+      await recordThreadEvents({
+        organizationId,
+        threadIds: toResolve,
+        actorUserId: access.userId,
+        eventType: 'resolved',
+      });
+    } catch (eventErr) {
+      console.warn('[engagement/thread/bulk-resolve] resolve marker write failed:', (eventErr as Error)?.message);
+      return res.status(500).json({ error: 'Failed to resolve threads', code: 'RESOLVE_NOT_RECORDED' });
     }
 
     const { error: updateErr } = await supabase
@@ -65,19 +126,15 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       .in('source_thread_id', toResolve);
 
     if (updateErr) {
+      // The threads ARE resolved (marker written); only the opportunity
+      // bookkeeping failed. Say exactly that instead of claiming nothing happened.
       console.warn('[engagement/thread/bulk-resolve]', updateErr.message);
-      return res.status(500).json({ error: 'Failed to resolve opportunities' });
-    }
-
-    try {
-      await recordThreadEvents({
-        organizationId,
-        threadIds: toResolve,
-        actorUserId: access.userId,
-        eventType: 'resolved',
+      return res.status(500).json({
+        error: 'Threads were resolved but their opportunities could not be closed',
+        code: 'OPPORTUNITY_UPDATE_FAILED',
+        resolved: toResolve.length,
+        resolve_recorded: true,
       });
-    } catch (eventErr) {
-      console.warn('[engagement/thread/bulk-resolve] thread-event log failed:', (eventErr as Error)?.message);
     }
 
     return res.status(200).json({ success: true, resolved: toResolve.length });

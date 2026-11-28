@@ -2,12 +2,20 @@ import { createApiRoute as __createApiRoute } from '../../../lib/platform/routeF
 
 /**
  * GET /api/engagement/work-queue
- * Returns daily work queue: actionable threads per platform.
+ * Returns the daily work queue: actionable items per platform.
+ *
+ * E4: the numbers come from the same single definition as
+ * /api/engagement/platform-counts (computeEngagementPortalCounts); this route
+ * only reshapes them into the legacy work-queue envelope. A read failure is
+ * 503 ENGAGEMENT_COUNTS_UNAVAILABLE, never a zero queue.
  */
 
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { resolveUserContext, enforceCompanyAccess } from '../../../backend/services/userContextService';
-import { getDailyWorkQueue } from '../../../backend/services/engagementWorkQueueService';
+import {
+  computeEngagementPortalCounts,
+  PortalCountsUnavailableError,
+} from '../../../backend/services/engagementPortalCountsService';
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'GET') {
@@ -27,12 +35,22 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     const access = await enforceCompanyAccess({ req, res, companyId: organizationId });
     if (!access) return;
 
-    const queue = await getDailyWorkQueue(organizationId);
+    const result = await computeEngagementPortalCounts(organizationId);
     return res.status(200).json({
-      total_actionable_threads: queue.total_actionable_threads,
-      platforms: queue.platforms,
+      definition: result.definition,
+      total_actionable_threads: result.totals.actionable_items,
+      platforms: Object.entries(result.platforms).map(([platform, c]) => ({
+        platform,
+        actionable_threads: c.actionable_items,
+        high_priority_threads: c.high_priority,
+        unread_messages: c.actionable_items,
+      })),
     });
   } catch (err) {
+    if (err instanceof PortalCountsUnavailableError) {
+      console.error('[engagement/work-queue]', err.message);
+      return res.status(503).json({ error: 'Engagement work queue is unavailable right now.', code: err.code });
+    }
     const msg = (err as Error)?.message ?? 'Failed to fetch work queue';
     console.error('[engagement/work-queue]', msg);
     return res.status(500).json({ error: msg });

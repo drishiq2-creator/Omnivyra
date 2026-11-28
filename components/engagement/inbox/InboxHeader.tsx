@@ -40,7 +40,8 @@ type PlatformHealthData = React.ComponentProps<typeof PlatformHealthStrip>;
 
 export interface InboxHeaderQueueStats {
   activeQueueFilter: string | 'People Reacted';
-  actionableThreads: number;
+  /** Server "needs response" count for the selected tab; null = unknown (shown as "—"). */
+  actionableThreads: number | null;
   connectedPlatformsCount: number;
   visibleThreadCount: number;
   refreshDisabled: boolean;
@@ -118,7 +119,7 @@ export const InboxHeader = React.memo(function InboxHeader({
               className={`inline-flex items-center gap-2 rounded-full px-3 py-2 text-sm ${queueStats.activeQueueFilter === 'Needs Response' ? 'bg-blue-600 text-white' : 'bg-blue-50 text-blue-900'}`}
             >
               <span className="text-xs font-semibold uppercase tracking-[0.16em] text-blue-700">Needs response</span>
-              <span className="text-base font-semibold text-slate-900">{queueStats.actionableThreads}</span>
+              <span className="text-base font-semibold text-slate-900" title={queueStats.actionableThreads === null ? 'Count unavailable' : undefined}>{queueStats.actionableThreads ?? '—'}</span>
             </button>
             <button
               type="button"

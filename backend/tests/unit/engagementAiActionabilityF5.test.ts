@@ -99,8 +99,8 @@ const EXTERNAL_AUTHOR_ID = 'author_external';
 function seedIdentity() {
   db.user_company_roles = [{ user_id: USER, company_id: ORG, status: 'active' }];
   db.social_accounts = [
-    { user_id: USER, platform: 'linkedin', platform_user_id: ACCOUNT_A, is_active: true },
-    { user_id: USER, platform: 'linkedin', platform_user_id: ACCOUNT_B, is_active: true },
+    { user_id: USER, company_id: ORG, platform: 'linkedin', platform_user_id: ACCOUNT_A, is_active: true },
+    { user_id: USER, company_id: ORG, platform: 'linkedin', platform_user_id: ACCOUNT_B, is_active: true },
   ];
   db.engagement_authors = [
     { id: AUTHOR_A, platform: 'linkedin', platform_user_id: ACCOUNT_A },

@@ -135,21 +135,112 @@ function coerceOptionalCount(value: unknown): number | null {
  * have to re-implement the identity join and would drift from the canonical
  * predicate — which is the failure mode D2/F5 were built to remove.
  */
-export async function getOrgAuthorIds(organizationId: string): Promise<Set<string>> {
-  const { data: roleUsers } = await supabase
-    .from('user_company_roles')
-    .select('user_id')
-    .eq('company_id', organizationId)
-    .eq('status', 'active');
+/** PostgREST default max-rows; a strict read that reaches it is treated as truncated. */
+const ORG_AUTHOR_READ_ROW_CAP = 1000;
+const ORG_AUTHOR_ID_CHUNK = 200;
 
-  const userIds = (roleUsers ?? []).map((row: { user_id: string }) => row.user_id);
-  if (userIds.length === 0) return new Set();
+type StrictPage<T> = { data: T[] | null; error: { message?: string } | null };
+/** Hard ceiling per strict read; reaching it is a failure, never a truncation. */
+const ORG_AUTHOR_MAX_ROWS = 200_000;
 
-  const { data: accounts } = await supabase
-    .from('social_accounts')
-    .select('platform, platform_user_id')
-    .in('user_id', userIds)
-    .eq('is_active', true);
+async function readAllStrict<T>(
+  label: string,
+  page: (from: number, to: number) => PromiseLike<StrictPage<T>>,
+): Promise<T[]> {
+  const out: T[] = [];
+  for (let from = 0; ; from += ORG_AUTHOR_READ_ROW_CAP) {
+    const { data, error } = await page(from, from + ORG_AUTHOR_READ_ROW_CAP - 1);
+    if (error) throw new Error(`${label}: ${error.message ?? 'read failed'}`);
+    if (!Array.isArray(data)) throw new Error(`${label}: no rows array in response`);
+    out.push(...data);
+    if (data.length < ORG_AUTHOR_READ_ROW_CAP) return out;
+    if (out.length >= ORG_AUTHOR_MAX_ROWS) throw new Error(`${label}: more than ${ORG_AUTHOR_MAX_ROWS} rows`);
+  }
+}
+
+export async function getOrgAuthorIds(
+  organizationId: string,
+  options: { strict?: boolean } = {},
+): Promise<Set<string>> {
+  // E4: `strict` callers (the portal count definition) need a failed read to
+  // surface as a failure, not as "the company has no accounts" — the latter
+  // silently turns company replies into external work. Default (non-strict)
+  // behaviour is unchanged for every existing caller.
+  // Strict also verifies COMPLETENESS: a response that reaches the PostgREST
+  // row cap may have been truncated, so it is a failure, not an answer.
+  const failIfStrict = (label: string, error: { message?: string } | null | undefined, data: unknown) => {
+    if (!options.strict) return;
+    if (error) throw new Error(`${label}: ${error.message ?? 'read failed'}`);
+    if (!Array.isArray(data)) throw new Error(`${label}: no rows array in response`);
+    if (data.length >= ORG_AUTHOR_READ_ROW_CAP) {
+      throw new Error(`${label}: ${data.length} rows reached the read cap; result may be truncated`);
+    }
+  };
+  let userIds: string[];
+  let accounts: Array<{ platform: string; platform_user_id: string }> | null;
+  if (options.strict) {
+    // E4 re-review #4/#5 (strict = the portal count definition):
+    //  - members are PAGED (a company with >= 1000 members must not read as
+    //    truncated forever), with a hard ceiling that is a failure;
+    //  - the member list is CHUNKED into the social_accounts .in(user_id)
+    //    filter (URL length);
+    //  - only accounts bound to THIS company (social_accounts.company_id) are
+    //    the company's identities, so a person who is a member of A and B does
+    //    not bring B's account into A's authors (the company-only rule of the
+    //    token work, PR #479). Legacy rows with company_id NULL are therefore
+    //    not company identities here: their replies count as external, the
+    //    safe direction (an extra item shown, never real work hidden).
+    // The non-strict path below is unchanged for existing callers.
+    const roleRows = await readAllStrict<{ user_id: string }>('user_company_roles', (from, to) =>
+      supabase
+        .from('user_company_roles')
+        .select('user_id')
+        .eq('company_id', organizationId)
+        .eq('status', 'active')
+        .order('user_id', { ascending: true })
+        .order('id', { ascending: true })
+        .range(from, to) as unknown as PromiseLike<StrictPage<{ user_id: string }>>,
+    );
+    userIds = Array.from(new Set(roleRows.map((row) => row.user_id).filter(Boolean)));
+    if (userIds.length === 0) return new Set();
+    accounts = [];
+    for (let i = 0; i < userIds.length; i += ORG_AUTHOR_ID_CHUNK) {
+      const chunkIds = userIds.slice(i, i + ORG_AUTHOR_ID_CHUNK);
+      accounts.push(
+        ...(await readAllStrict<{ platform: string; platform_user_id: string }>('social_accounts', (from, to) =>
+          supabase
+            .from('social_accounts')
+            .select('platform, platform_user_id')
+            .in('user_id', chunkIds)
+            .eq('company_id', organizationId)
+            .eq('is_active', true)
+            .order('platform_user_id', { ascending: true })
+            .order('id', { ascending: true })
+            .range(from, to) as unknown as PromiseLike<StrictPage<{ platform: string; platform_user_id: string }>>,
+        )),
+      );
+    }
+  } else {
+    const { data: roleUsers } = await supabase
+      .from('user_company_roles')
+      .select('user_id')
+      .eq('company_id', organizationId)
+      .eq('status', 'active');
+    userIds = (roleUsers ?? []).map((row: { user_id: string }) => row.user_id);
+    if (userIds.length === 0) return new Set();
+    // E4 re-review #3/#1: the SAME company-only identity rule as the strict
+    // path — only accounts bound to this company (social_accounts.company_id)
+    // are its identities, so getThreads' self detection (inbox list, work
+    // queue, AI assistant labelling) agrees with the portal count. Production
+    // has no company_id NULL rows (verified read-only 2026-11-28).
+    const { data: accountRows } = await supabase
+      .from('social_accounts')
+      .select('platform, platform_user_id')
+      .in('user_id', userIds)
+      .eq('company_id', organizationId)
+      .eq('is_active', true);
+    accounts = (accountRows ?? null) as typeof accounts;
+  }
 
   if (!accounts?.length) return new Set();
 
@@ -175,22 +266,38 @@ export async function getOrgAuthorIds(organizationId: string): Promise<Set<strin
   );
   if (platformUserPairs.size === 0) return new Set();
 
-  const { data: authors } = await supabase
-    .from('engagement_authors')
-    .select('id, platform, platform_user_id')
-    .in(
-      'platform',
-      Array.from(
-        new Set(
-          (accounts as Array<{ platform: string }>).map((account) =>
-            (account.platform || '').toLowerCase()
-          )
-        )
-      )
-    );
+  // E4 review #1: engagement_authors is platform-GLOBAL (no tenant column).
+  // Reading it by platform alone pulled every tenant's authors and was cut
+  // silently at the PostgREST row cap, so other tenants' volume could drop
+  // this company's own author rows (its replies then read as external work).
+  // Read only this company's connected identities instead: per platform, by
+  // its own platform_user_ids, chunked. (platform, platform_user_id) is unique,
+  // so each chunk returns at most ORG_AUTHOR_ID_CHUNK rows — far below the cap.
+  const idsByPlatform = new Map<string, Set<string>>();
+  for (const account of accounts as Array<{ platform: string; platform_user_id: string }>) {
+    const p = (account.platform ?? '').toString().trim().toLowerCase();
+    const id = (account.platform_user_id ?? '').toString().trim();
+    if (!p || !id) continue;
+    const set = idsByPlatform.get(p) ?? new Set<string>();
+    set.add(id);
+    idsByPlatform.set(p, set);
+  }
+  const authors: Array<{ id: string; platform: string; platform_user_id: string }> = [];
+  for (const [platform, idSet] of idsByPlatform.entries()) {
+    const ids = Array.from(idSet);
+    for (let i = 0; i < ids.length; i += ORG_AUTHOR_ID_CHUNK) {
+      const { data: rows, error: authorsError } = await supabase
+        .from('engagement_authors')
+        .select('id, platform, platform_user_id')
+        .eq('platform', platform)
+        .in('platform_user_id', ids.slice(i, i + ORG_AUTHOR_ID_CHUNK));
+      failIfStrict('engagement_authors', authorsError, rows);
+      authors.push(...((rows ?? []) as typeof authors));
+    }
+  }
 
   const orgAuthorIds = new Set<string>();
-  (authors ?? []).forEach((author: { id: string; platform: string; platform_user_id: string }) => {
+  authors.forEach((author) => {
     const key = identityKey(author.platform, author.platform_user_id);
     // A null key means this author carries no usable provider identity — it can
     // never be matched to a connected account, so it stays external.

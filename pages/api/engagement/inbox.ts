@@ -19,9 +19,15 @@ import {
 import { compareMessagesDescending } from '../../../lib/engagement/messageTime';
 import {
   ACTIONABLE_INBOX_LOOKBACK_DAYS,
+  actionCoversMessage,
   isNeedsResponseThread,
   isPeopleReactionThread,
 } from '../../../lib/engagement/queueRules';
+import {
+  coverageWindowCutoffIso,
+  PortalCountsUnavailableError,
+  readExecutedCoverageActions,
+} from '../../../backend/services/engagementPortalCountsService';
 
 
 function normalizeActionTargetId(value: unknown): string | null {
@@ -40,17 +46,6 @@ function addActionTarget(
   lookup.set(normalized, existing);
 }
 
-function parseTimeMs(value: string | null | undefined): number | null {
-  if (!value) return null;
-  const parsed = new Date(value).getTime();
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
-function normalizeComparableText(value: string | null | undefined): string | null {
-  const normalized = (value ?? '').replace(/\s+/g, ' ').trim();
-  return normalized.length > 0 ? normalized : null;
-}
-
 function normalizeDisplayNameKey(value: unknown): string | null {
   if (typeof value !== 'string') return null;
   const normalized = value.replace(/\s+/g, ' ').trim().toLowerCase();
@@ -58,25 +53,15 @@ function normalizeDisplayNameKey(value: unknown): string | null {
   return normalized;
 }
 
-function actionCoversLatestMessage(
-  actionTime: string | null | undefined,
-  latestMessageTime: string | null | undefined,
-  actionText?: string | null,
-  latestMessageText?: string | null,
-): boolean {
-  const normalizedActionText = normalizeComparableText(actionText);
-  const normalizedLatestText = normalizeComparableText(latestMessageText);
-  if (normalizedActionText && normalizedLatestText && normalizedActionText === normalizedLatestText) {
-    return true;
-  }
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?(?:Z|[+-]\d{2}:\d{2})?)?$/;
 
-  const latestMs = parseTimeMs(latestMessageTime);
-  if (latestMs === null) return true;
-
-  const actionMs = parseTimeMs(actionTime);
-  if (actionMs === null) return false;
-
-  return actionMs >= latestMs;
+/** undefined = not supplied; 'invalid' = refuse; otherwise a canonical ISO string. */
+function parseIsoQueryDate(value: unknown): string | undefined | 'invalid' {
+  const v = Array.isArray(value) ? value[0] : value;
+  if (v === undefined || v === null || v === '') return undefined;
+  if (typeof v !== 'string' || !ISO_DATE_RE.test(v.trim())) return 'invalid';
+  const ms = new Date(v.trim()).getTime();
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : 'invalid';
 }
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
@@ -89,10 +74,18 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     (req.query.organization_id ?? req.query.organizationId ?? req.query.companyId) as string | undefined;
   const platform = (req.query.platform as string)?.trim() || undefined;
   const priority = (req.query.priority ?? req.query.status) as 'high' | 'medium' | 'low' | undefined;
-  const startDateParam = (req.query.start_date ?? req.query.dateFrom) as string | undefined;
+  // E4 re-review #3: dates are validated as ISO timestamps and re-serialised
+  // (toISOString) before they reach any PostgREST filter string (.or()).
+  const startDateRaw = req.query.start_date ?? req.query.dateFrom;
+  const endDateRaw = req.query.end_date ?? req.query.dateTo;
+  const startDateParsed = parseIsoQueryDate(startDateRaw);
+  const endDateParsed = parseIsoQueryDate(endDateRaw);
+  if (startDateParsed === 'invalid' || endDateParsed === 'invalid') {
+    return res.status(400).json({ error: 'start_date / end_date must be ISO-8601 timestamps', code: 'INVALID_DATE' });
+  }
   const startDate =
-    startDateParam || new Date(Date.now() - ACTIONABLE_INBOX_LOOKBACK_DAYS * 24 * 60 * 60 * 1000).toISOString();
-  const endDate = (req.query.end_date ?? req.query.dateTo) as string | undefined;
+    startDateParsed ?? new Date(Date.now() - ACTIONABLE_INBOX_LOOKBACK_DAYS * 24 * 60 * 60 * 1000).toISOString();
+  const endDate = endDateParsed ?? undefined;
   const limit = Math.min(500, Math.max(1, parseInt(String(req.query.limit ?? 50), 10) || 50));
 
   const companyId = organizationId?.trim();
@@ -401,14 +394,15 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     );
     const respondedThreadIds = new Set<string>();
     if (threadIdsByActionTarget.size > 0) {
-      const targetIds = Array.from(threadIdsByActionTarget.keys());
-      const { data: actionRows } = await supabase
-        .from('community_ai_actions')
-        .select('target_id, status, action_type, created_at, updated_at, final_text, suggested_text')
-        .eq('organization_id', companyId)
-        .in('target_id', targetIds)
-        .in('action_type', ['dm', 'reply']);
-      for (const row of actionRows ?? []) {
+      // E4 review #2: ONE coverage source with the portal count
+      // (readExecutedCoverageActions): same executed-only filter, same window,
+      // paged, and a read failure fails this request (503) instead of silently
+      // rendering answered threads as open. The window reaches back to the
+      // earlier of the requested start date and the actionable window.
+      const defaultCutoff = coverageWindowCutoffIso();
+      const cutoff = startDate && startDate < defaultCutoff ? startDate : defaultCutoff;
+      const actionRows = await readExecutedCoverageActions(companyId, cutoff);
+      for (const row of actionRows) {
         const action = row as {
           target_id: string;
           status?: string | null;
@@ -427,7 +421,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
           const actionTime = action.updated_at ?? action.created_at ?? null;
           const actionText = action.final_text ?? action.suggested_text ?? null;
           if (
-            !actionCoversLatestMessage(
+            !actionCoversMessage(
               actionTime,
               latestMessageTimeByThread.get(matchedThreadId),
               actionText,
@@ -585,6 +579,10 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
 
     return res.status(200).json({ items });
   } catch (err) {
+    if (err instanceof PortalCountsUnavailableError) {
+      console.error('[engagement/inbox]', err.message);
+      return res.status(503).json({ error: 'Inbox is unavailable right now.', code: err.code });
+    }
     console.error('[engagement/inbox]', err);
     return res.status(500).json({
       error: (err as Error)?.message ?? 'Failed to fetch inbox',
