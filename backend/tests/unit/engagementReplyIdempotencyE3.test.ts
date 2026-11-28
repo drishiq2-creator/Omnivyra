@@ -23,6 +23,7 @@
  */
 
 import { toPersistedCommunityActionStatus } from '../../services/communityAiPersistedStatus';
+import { classifyReplySendResponse } from '../../../lib/engagement/replySendOutcome';
 
 type Row = Record<string, any>;
 
@@ -30,6 +31,10 @@ type Row = Record<string, any>;
 const db: Record<string, Row[]> = {};
 /** When > 0, that many idempotency-key lookups on community_ai_actions answer "no row" (a read that raced the winner's insert). */
 let staleKeyLookups = 0;
+/** Fault injection for the claim insert on community_ai_actions (one-shot). */
+let claimInsertFault: null | 'commit-then-error' | 'commit-then-throw' | 'no-commit-error' = null;
+/** Per idempotency-key read, in order: 'ok' or 'fail' (a DB error). Empty = all ok. */
+let keyReadPlan: Array<'ok' | 'fail'> = [];
 
 const UNIQUE_VIOLATION = {
   code: '23505',
@@ -56,6 +61,13 @@ function builder(table: string) {
 
   const runInsert = (): { data: Row | null; error: unknown } => {
     const row = insertRow as Row;
+    if (table === 'community_ai_actions' && claimInsertFault) {
+      const fault = claimInsertFault;
+      claimInsertFault = null;
+      if (fault !== 'no-commit-error') (db[table] ??= []).push({ ...row }); // the commit happened
+      if (fault === 'commit-then-throw') throw new TypeError('fetch failed: socket hang up');
+      return { data: null, error: { code: '08006', message: 'connection failure during commit acknowledgement' } };
+    }
     if ((db[table] ?? []).some((r) => r.id != null && r.id === row.id) || keyCollides(table, row)) {
       return { data: null, error: UNIQUE_VIOLATION };
     }
@@ -71,6 +83,9 @@ function builder(table: string) {
     return { data: hits.map((r) => ({ ...r })), error: null };
   };
   const runSelect = (): { data: Row[]; error: unknown } => {
+    if (table === 'community_ai_actions' && filterCols.includes('idempotency_key') && keyReadPlan.length > 0) {
+      if (keyReadPlan.shift() === 'fail') return { data: [], error: { code: '57014', message: 'canceling statement due to statement timeout' } };
+    }
     if (table === 'community_ai_actions' && filterCols.includes('idempotency_key') && staleKeyLookups > 0) {
       staleKeyLookups -= 1;
       return { data: [], error: null };
@@ -213,6 +228,8 @@ beforeEach(() => {
   scripted.length = 0;
   providerSends = 0;
   staleKeyLookups = 0;
+  claimInsertFault = null;
+  keyReadPlan = [];
   gate = null;
   currentOrg = ORG_A;
   executeActionMock.mockClear();
@@ -524,5 +541,54 @@ describe('E3 §7 edited text is a new logical reply', () => {
     expect(same.statusCode).toBe(200);
     expect(same.body.deduplicated).toBe(true);
     expect(executeActionMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('E3 claim write with a lost DB response', () => {
+  const keepsKey = (r: any) => classifyReplySendResponse({ httpStatus: r.statusCode, json: r.body, platform: 'linkedin' }).kind === 'unknown';
+
+  it.each([
+    ['the insert returns an error after committing', 'commit-then-error'],
+    ['the insert throws after committing', 'commit-then-throw'],
+  ] as const)('%s: the row exists → answered in progress, never executed, the client keeps its key', async (_n, fault) => {
+    claimInsertFault = fault;
+    const first = await post({ client_reply_key: KEY_1 });
+    expect(first.statusCode).toBe(409);
+    expect(first.body.code).toBe('REPLY_IN_PROGRESS');
+    expect(first.body.retryable).toBe(false);
+    expect(keepsKey(first)).toBe(true);
+    expect(executeActionMock).not.toHaveBeenCalled();
+    expect(actionRows()).toHaveLength(1);
+    const retry = await post({ client_reply_key: KEY_1 });
+    expect(retry.statusCode).toBe(409);
+    expect(retry.body.code).toBe('REPLY_IN_PROGRESS');
+    expect(executeActionMock).not.toHaveBeenCalled();
+    expect(actionRows()).toHaveLength(1);
+  });
+
+  it('the insert errors after committing AND the re-read fails → 409 REPLY_OUTCOME_UNKNOWN, not retryable, never executed', async () => {
+    claimInsertFault = 'commit-then-error';
+    keyReadPlan = ['ok', 'fail']; // the pre-check reads fine; the post-failure re-read fails
+    const first = await post({ client_reply_key: KEY_1 });
+    expect(first.statusCode).toBe(409);
+    expect(first.body.code).toBe('REPLY_OUTCOME_UNKNOWN');
+    expect(first.body.retryable).toBe(false);
+    expect(String(first.body.error)).toMatch(/^Sending status unknown/);
+    expect(keepsKey(first)).toBe(true);
+    expect(executeActionMock).not.toHaveBeenCalled();
+  });
+
+  it('CONTROL: the insert fails WITHOUT committing and the re-read confirms no row → retryable 503; the retry then sends once', async () => {
+    claimInsertFault = 'no-commit-error';
+    const first = await post({ client_reply_key: KEY_1 });
+    expect(first.statusCode).toBe(503);
+    expect(first.body.code).toBe('REPLY_CLAIM_FAILED');
+    expect(first.body.retryable).toBe(true);
+    expect(actionRows()).toHaveLength(0);
+    expect(executeActionMock).not.toHaveBeenCalled();
+    const retry = await post({ client_reply_key: KEY_1 });
+    expect(retry.statusCode).toBe(200);
+    expect(executeActionMock).toHaveBeenCalledTimes(1);
+    expect(actionRows()).toHaveLength(1);
   });
 });

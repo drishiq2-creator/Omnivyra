@@ -895,8 +895,22 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
           },
         });
     if (claim.kind === 'error') {
-      // The claim write failed; no send was attempted.
-      return res.status(503).json({ error: 'reply could not be recorded before sending; it was not sent', code: 'REPLY_CLAIM_FAILED', retryable: true });
+      // The claim write failed AND a read confirmed no row carries the key: nothing was
+      // recorded and no send was attempted — the only case that may answer retryable.
+      return res.status(503).json({ error: 'reply could not be recorded before sending; it was not sent', code: 'REPLY_CLAIM_FAILED', retryable: true, outcome: 'not_sent' });
+    }
+    if (claim.kind === 'unknown') {
+      // The claim write may have committed (lost DB response) and nothing proves otherwise:
+      // never execute, never invite a resend, keep the key.
+      console.error('[engagement/reply] claim outcome unknown:', claim.error);
+      return res.status(409).json({
+        success: false,
+        error: unknownOutcomeMessage('outcome_unknown', { execution_mode: executionMode, status: 'pending' }),
+        code: 'REPLY_OUTCOME_UNKNOWN',
+        outcome: 'unknown',
+        retryable: false,
+        execution_mode: executionMode,
+      });
     }
     if (claim.kind === 'lost') {
       if (!claim.existing) {

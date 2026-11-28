@@ -185,10 +185,40 @@ export async function findReplyActionByKey(organizationId: string, idempotencyKe
   return { ok: true, row };
 }
 
+/**
+ * - claimed: this request owns the row and may execute;
+ * - lost: a row with this key exists (another request, or OUR insert whose
+ *   response was lost) — answer from it, never execute;
+ * - unknown: the write may have committed and the follow-up read could not
+ *   prove otherwise — answer "outcome unknown", keep the key, never execute;
+ * - error: the write failed AND a read CONFIRMED no row carries the key —
+ *   nothing was recorded, so a retryable "not sent" answer is honest.
+ */
 export type ClaimOutcome =
   | { kind: 'claimed'; actionId: string }
   | { kind: 'lost'; existing: ExistingReplyAction | null }
+  | { kind: 'unknown'; error: string }
   | { kind: 'error'; error: string };
+
+const errorText = (error: unknown): string =>
+  String((error as { message?: unknown } | null)?.message ?? error);
+
+/**
+ * After a failed claim write: the write may still have committed (lost DB
+ * response). Only a successful read showing NO row with the key confirms that
+ * nothing was recorded; any row found is answered like a 23505 winner.
+ */
+async function resolveAfterFailedClaimWrite(organizationId: string, idempotencyKey: string, writeError: string): Promise<ClaimOutcome> {
+  let check: LookupOutcome;
+  try {
+    check = await findReplyActionByKey(organizationId, idempotencyKey);
+  } catch (readErr) {
+    return { kind: 'unknown', error: `${writeError}; re-read threw: ${errorText(readErr)}` };
+  }
+  if (check.ok === false) return { kind: 'unknown', error: `${writeError}; re-read failed: ${check.error}` };
+  if (check.row) return { kind: 'lost', existing: check.row };
+  return { kind: 'error', error: writeError };
+}
 
 const isUniqueViolation = (error: unknown): boolean =>
   String((error as { code?: unknown } | null)?.code ?? '') === '23505';
@@ -216,7 +246,9 @@ export async function claimReplyAction(input: {
   };
 }): Promise<ClaimOutcome> {
   const now = new Date().toISOString();
-  const { error } = await ownedDbTable('community_ai_actions').insert({
+  let error: unknown = null;
+  try {
+    ({ error } = await ownedDbTable('community_ai_actions').insert({
     id: input.actionId,
     tenant_id: input.row.tenant_id,
     organization_id: input.row.organization_id,
@@ -243,11 +275,24 @@ export async function claimReplyAction(input: {
     approved_at: now,
     created_at: now,
     updated_at: now,
-  });
+  }));
+  } catch (thrown) {
+    // A thrown insert (network / timeout) is a lost response: the row may exist.
+    return resolveAfterFailedClaimWrite(input.row.organization_id, input.idempotencyKey, `claim insert threw: ${errorText(thrown)}`);
+  }
   if (!error) return { kind: 'claimed', actionId: input.actionId };
-  if (!isUniqueViolation(error)) return { kind: 'error', error: String((error as { message?: unknown }).message ?? error) };
-  const winner = await findReplyActionByKey(input.row.organization_id, input.idempotencyKey);
-  if (winner.ok === false) return { kind: 'error', error: winner.error };
+  if (!isUniqueViolation(error)) {
+    // Not provably "nothing written": the commit may have happened and only the response was lost.
+    return resolveAfterFailedClaimWrite(input.row.organization_id, input.idempotencyKey, errorText(error));
+  }
+  let winner: LookupOutcome;
+  try {
+    winner = await findReplyActionByKey(input.row.organization_id, input.idempotencyKey);
+  } catch (readErr) {
+    return { kind: 'unknown', error: `key taken; winner read threw: ${errorText(readErr)}` };
+  }
+  // The key IS taken (23505): an unreadable winner is unknown, never "not sent".
+  if (winner.ok === false) return { kind: 'unknown', error: winner.error };
   return { kind: 'lost', existing: winner.row };
 }
 
@@ -265,11 +310,26 @@ export async function reclaimNotSentReplyAction(organizationId: string, idempote
     .eq('idempotency_key', idempotencyKey)
     .eq('status', String(prior.status ?? ''));
   q = prior.skip_reason == null ? q.is('skip_reason', null) : q.eq('skip_reason', prior.skip_reason);
-  const { data, error } = await q.select('id, status').maybeSingle();
-  if (error) return { kind: 'error', error: String((error as { message?: unknown }).message ?? error) };
-  if (data && (data as { id?: string }).id) return { kind: 'claimed', actionId: String((data as { id: string }).id) };
-  const current = await findReplyActionByKey(organizationId, idempotencyKey);
-  if (current.ok === false) return { kind: 'error', error: current.error };
+  let data: unknown = null;
+  let error: unknown = null;
+  try {
+    ({ data, error } = await q.select('id, status').maybeSingle());
+  } catch (thrown) {
+    error = thrown;
+  }
+  if (!error && data && (data as { id?: string }).id) return { kind: 'claimed', actionId: String((data as { id: string }).id) };
+  // Zero rows matched, or the CAS write failed (it may still have committed): answer from the
+  // row as it stands now. The row always exists here (it is the prior attempt), so a read that
+  // shows it still refused-before-send means the reclaim did not commit (REPLY_NOT_SENT, retryable);
+  // pending means a reclaim (ours or another) owns it (in progress, never executed here).
+  let current: LookupOutcome;
+  try {
+    current = await findReplyActionByKey(organizationId, idempotencyKey);
+  } catch (readErr) {
+    return { kind: 'unknown', error: errorText(readErr) };
+  }
+  if (current.ok === false) return { kind: 'unknown', error: current.error };
+  if (!current.row) return { kind: 'unknown', error: error ? errorText(error) : 'reclaimed row not readable' };
   return { kind: 'lost', existing: current.row };
 }
 
