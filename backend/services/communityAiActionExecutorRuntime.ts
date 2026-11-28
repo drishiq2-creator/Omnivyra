@@ -8,6 +8,7 @@ import { supabase } from '../db/supabaseClient';
 import { getPlaybookById } from './playbooks/playbookService';
 import { validateActionAgainstPlaybook } from './playbooks/playbookValidator';
 import { getToken } from './platformTokenService';
+import { platformAccountResolutionCode } from './platformAccountResolution';
 import { executeRpaTask } from './rpaWorker/rpaWorkerService';
 import { logCommunityAiActionEvent } from './communityAiActionLogService';
 import {
@@ -674,7 +675,9 @@ const runExecution = async (
     case 'api':
     default:
       result = await runApiExecution(action);
-      if (!result.ok) {
+      // Tenant isolation: an ambiguous or unreadable account resolution is a
+      // refusal, not "API unavailable" — never fall back to a browser send.
+      if (!result.ok && !platformAccountResolutionCode({ code: result.error })) {
         // Single fallback: API → Browser. No second retry, no infinite loop.
         await recordExecutionMetric({
           organization_id: action.organization_id,

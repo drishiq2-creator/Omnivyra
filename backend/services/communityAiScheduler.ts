@@ -8,6 +8,7 @@ import { persistExecutionResult } from './communityAiActionExecutor';
 import { getPlaybookById } from './playbooks/playbookService';
 import { validateActionAgainstPlaybook } from './playbooks/playbookValidator';
 import { getToken } from './platformTokenService';
+import { platformAccountResolutionCode } from './platformAccountResolution';
 import { resolveCommunityAiPlatformPolicy, decideCommunityAiAutomatedTick } from './communityAiPlatformPolicyService';
 import { canExecuteAction } from './executionGuardrailService';
 import { ownedDbTable } from '../db/writeOwner';
@@ -311,6 +312,7 @@ export const runCommunityAiScheduler = async (now = new Date()): Promise<Schedul
     const executionMode = (action.execution_mode || 'manual').toString().trim().toLowerCase();
     if (executionMode === 'api') {
       let tokenRow: { access_token?: string | null } | null = null;
+      let accountRefusal: string | null = null;
       try {
         tokenRow = await getToken(
           action.tenant_id,
@@ -318,6 +320,9 @@ export const runCommunityAiScheduler = async (now = new Date()): Promise<Schedul
           (action.platform || '').toString().trim().toLowerCase()
         );
       } catch (error: any) {
+        // Ambiguous / unreadable account resolution keeps its distinct code
+        // (never "Platform not connected"); the action is not executed.
+        accountRefusal = platformAccountResolutionCode(error);
         tokenRow = null;
       }
       if (!tokenRow?.access_token) {
@@ -325,7 +330,7 @@ export const runCommunityAiScheduler = async (now = new Date()): Promise<Schedul
         const failure = {
           ok: false,
           status: 'failed' as const,
-          error: 'Platform not connected',
+          error: accountRefusal ?? 'Platform not connected',
           response: { source: 'scheduler' },
         };
         await persistExecutionResult({
