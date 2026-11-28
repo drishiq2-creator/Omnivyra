@@ -174,7 +174,16 @@ export default function WhatsAppInboxPage() {
         throw new Error(replyFailureMessage({ networkError: true, platform: 'whatsapp' }).message);
       }
       const data = (await res.json().catch(() => null)) as Record<string, unknown> | null;
-      if (!res.ok) throw new Error(replyFailureMessage({ httpStatus: res.status, json: data, platform: 'whatsapp' }).message);
+      if (!res.ok) {
+        const failure = replyFailureMessage({ httpStatus: res.status, json: data, platform: 'whatsapp' });
+        if (!failure.unknown) {
+          // A definite refusal: nothing was sent, so a resend is a fresh attempt that answers the
+          // latest inbound. Uncertain outcomes keep the key AND the pinned target.
+          replyKeyRef.current!.reset();
+          pinnedTargetRef.current = null;
+        }
+        throw new Error(failure.message);
+      }
       replyKeyRef.current!.reset();
       pinnedTargetRef.current = null;
       setReplyText('');

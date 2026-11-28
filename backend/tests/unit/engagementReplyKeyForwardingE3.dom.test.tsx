@@ -308,3 +308,40 @@ describe('E3 LOW-2 inbox pages show the shared "status unknown" copy', () => {
     expect(screen.queryByText(/Sending status unknown/)).toBeNull();
   });
 });
+
+describe('E3 final: whatsapp pin is released only by a DEFINITE refusal', () => {
+  const box = () => screen.getByPlaceholderText(/Type a reply/);
+  const type = (t: string) => fireEvent.change(box(), { target: { value: t } });
+  const send = async () => { await act(async () => { fireEvent.keyDown(box(), { key: 'Enter' }); }); };
+  async function openThread() {
+    await act(async () => { fireEvent.click(screen.getAllByText('WA-THREAD-1')[0]); });
+    await waitFor(() => expect(screen.getByPlaceholderText(/Type a reply/)).toBeTruthy());
+    await act(async () => { await Promise.resolve(); });
+  }
+  async function scenario(first: Answer | 'lost-response') {
+    render(<WhatsAppInboxPage />);
+    await waitFor(() => expect(screen.getAllByText('WA-THREAD-1').length).toBeGreaterThan(0));
+    await openThread();
+    type('On my way');
+    replyAnswers.push(first);
+    await send();
+    waMessages = [...waMessages, { id: 'in2', thread_id: 'wt1', platform_message_id: 'wamid.2', direction: 'inbound', content: 'Hello?', created_at: '2026-11-27T10:05:00Z' }];
+    await openThread();
+    await waitFor(() => expect(screen.getByText('Hello?')).toBeTruthy());
+    type('On my way');
+    await send();
+  }
+
+  it('a definite 400 refusal, then a new inbound: the retry of the same draft answers the NEW inbound (fresh attempt)', async () => {
+    await scenario({ status: 400, body: { error: 'Template required outside the 24h window.', code: 'WA_TEMPLATE_REQUIRED' } });
+    expect(replyBodies[0].message_id).toBe('in1');
+    expect(replyBodies[1].message_id).toBe('in2');
+    expectRealKey(keyAt(1));
+  });
+
+  it('CONTROL: a lost response, then a new inbound: the retry keeps the FIRST target and the same key', async () => {
+    await scenario('lost-response');
+    expect(replyBodies[1].message_id).toBe('in1');
+    expect(keyAt(1)).toBe(keyAt(0));
+  });
+});
