@@ -135,6 +135,10 @@ function coerceOptionalCount(value: unknown): number | null {
  * have to re-implement the identity join and would drift from the canonical
  * predicate — which is the failure mode D2/F5 were built to remove.
  */
+/** PostgREST default max-rows; a strict read that reaches it is treated as truncated. */
+const ORG_AUTHOR_READ_ROW_CAP = 1000;
+const ORG_AUTHOR_ID_CHUNK = 200;
+
 export async function getOrgAuthorIds(
   organizationId: string,
   options: { strict?: boolean } = {},
@@ -143,10 +147,15 @@ export async function getOrgAuthorIds(
   // surface as a failure, not as "the company has no accounts" — the latter
   // silently turns company replies into external work. Default (non-strict)
   // behaviour is unchanged for every existing caller.
+  // Strict also verifies COMPLETENESS: a response that reaches the PostgREST
+  // row cap may have been truncated, so it is a failure, not an answer.
   const failIfStrict = (label: string, error: { message?: string } | null | undefined, data: unknown) => {
     if (!options.strict) return;
     if (error) throw new Error(`${label}: ${error.message ?? 'read failed'}`);
     if (!Array.isArray(data)) throw new Error(`${label}: no rows array in response`);
+    if (data.length >= ORG_AUTHOR_READ_ROW_CAP) {
+      throw new Error(`${label}: ${data.length} rows reached the read cap; result may be truncated`);
+    }
   };
   const { data: roleUsers, error: roleUsersError } = await supabase
     .from('user_company_roles')
@@ -189,23 +198,38 @@ export async function getOrgAuthorIds(
   );
   if (platformUserPairs.size === 0) return new Set();
 
-  const { data: authors, error: authorsError } = await supabase
-    .from('engagement_authors')
-    .select('id, platform, platform_user_id')
-    .in(
-      'platform',
-      Array.from(
-        new Set(
-          (accounts as Array<{ platform: string }>).map((account) =>
-            (account.platform || '').toLowerCase()
-          )
-        )
-      )
-    );
-  failIfStrict('engagement_authors', authorsError, authors);
+  // E4 review #1: engagement_authors is platform-GLOBAL (no tenant column).
+  // Reading it by platform alone pulled every tenant's authors and was cut
+  // silently at the PostgREST row cap, so other tenants' volume could drop
+  // this company's own author rows (its replies then read as external work).
+  // Read only this company's connected identities instead: per platform, by
+  // its own platform_user_ids, chunked. (platform, platform_user_id) is unique,
+  // so each chunk returns at most ORG_AUTHOR_ID_CHUNK rows — far below the cap.
+  const idsByPlatform = new Map<string, Set<string>>();
+  for (const account of accounts as Array<{ platform: string; platform_user_id: string }>) {
+    const p = (account.platform ?? '').toString().trim().toLowerCase();
+    const id = (account.platform_user_id ?? '').toString().trim();
+    if (!p || !id) continue;
+    const set = idsByPlatform.get(p) ?? new Set<string>();
+    set.add(id);
+    idsByPlatform.set(p, set);
+  }
+  const authors: Array<{ id: string; platform: string; platform_user_id: string }> = [];
+  for (const [platform, idSet] of idsByPlatform.entries()) {
+    const ids = Array.from(idSet);
+    for (let i = 0; i < ids.length; i += ORG_AUTHOR_ID_CHUNK) {
+      const { data: rows, error: authorsError } = await supabase
+        .from('engagement_authors')
+        .select('id, platform, platform_user_id')
+        .eq('platform', platform)
+        .in('platform_user_id', ids.slice(i, i + ORG_AUTHOR_ID_CHUNK));
+      failIfStrict('engagement_authors', authorsError, rows);
+      authors.push(...((rows ?? []) as typeof authors));
+    }
+  }
 
   const orgAuthorIds = new Set<string>();
-  (authors ?? []).forEach((author: { id: string; platform: string; platform_user_id: string }) => {
+  authors.forEach((author) => {
     const key = identityKey(author.platform, author.platform_user_id);
     // A null key means this author carries no usable provider identity — it can
     // never be matched to a connected account, so it stays external.

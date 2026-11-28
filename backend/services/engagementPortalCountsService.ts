@@ -39,13 +39,17 @@
  *   of these exists for its thread (for DMs: for any sibling of its
  *   conversation, matching the inbox route's legacy-split DM grouping):
  *   1. a company turn at time >= t;
- *   2. an EXECUTED `community_ai_actions` row with action_type 'reply'|'dm'
+ *   2. an EXECUTED `community_ai_actions` row (read by
+ *      readExecutedCoverageActions, shared with the inbox list) with action_type 'reply'|'dm'
  *      whose target_id maps to the thread and that covers the item
  *      (actionCoversMessage: same text, or action time >= t). 'dispatched',
  *      'sent_unverified' and every other status do NOT cover — the stated
  *      design (an unconfirmed send must not hide work);
  *   3. a persisted resolve: an `engagement_thread_events` row with
- *      event_type 'resolved' and created_at >= t (written by
+ *      event_type 'resolved' and created_at >= the item's INGESTION time
+ *      (engagement_messages.created_at, not the provider time — an item that
+ *      arrived after the resolve re-opens even if its platform time is
+ *      earlier) (written by
  *      POST /api/engagement/thread/bulk-resolve, i.e. "Mark resolved").
  *      A new inbound item after the resolve re-opens the thread.
  *
@@ -194,6 +198,13 @@ type Turn = {
   timeMs: number | null;
   time: string | null;
   text: string | null;
+  /**
+   * When Omnivyra received the turn (engagement_messages.created_at; a list
+   * preview has only its own time). Resolve is compared against THIS, not the
+   * provider time: an item ingested after the resolve was never seen by the
+   * person who resolved, so it re-opens even if its platform time is earlier.
+   */
+  ingestMs: number | null;
   orgAuthorOnly: boolean;
 };
 
@@ -283,6 +294,7 @@ export function derivePortalCounts(input: PortalCountsInput): EngagementPortalCo
         timeMs: latestMs,
         time: latestTime,
         text: latest.content ?? null,
+        ingestMs: parseMessageDateMs(latest.created_at ?? null) ?? latestMs,
         orgAuthorOnly: orgAuthor && !flagsSelf && !threadSaysSelf,
       });
     } else if ((previewWins || !latest) && looksLikeDmThread && previewMs !== null) {
@@ -292,6 +304,7 @@ export function derivePortalCounts(input: PortalCountsInput): EngagementPortalCo
         timeMs: previewMs,
         time: previewTime,
         text: preview || null,
+        ingestMs: previewMs,
         orgAuthorOnly: false,
       });
     }
@@ -434,7 +447,11 @@ export function derivePortalCounts(input: PortalCountsInput): EngagementPortalCo
     }
     const turn = latestTurnByThread.get(newestId)!;
     const resolvedMs = Math.max(...siblingIds.map((id) => resolvedAtMsByThread.get(id) ?? -Infinity));
-    if (Number.isFinite(resolvedMs)) markHandled(siblingIds, resolvedMs);
+    const resolveCoversLatest =
+      Number.isFinite(resolvedMs) && (turn.ingestMs === null || resolvedMs >= turn.ingestMs);
+    // handled_threads value must be >= the list's latest_message_time (provider
+    // time) so the list hides exactly what the count treats as resolved.
+    if (resolveCoversLatest) markHandled(siblingIds, Math.max(resolvedMs, turn.timeMs ?? -Infinity));
     if (turn.orgAuthorOnly) markHandled(siblingIds, turn.timeMs);
     if (turn.self) continue;
     if (!inWindow(turn.timeMs)) continue;
@@ -444,7 +461,7 @@ export function derivePortalCounts(input: PortalCountsInput): EngagementPortalCo
       return actionCovers(id, own.time, own.text);
     });
     if (covered) continue;
-    if (Number.isFinite(resolvedMs) && (turn.timeMs === null || resolvedMs >= turn.timeMs)) continue;
+    if (resolveCoversLatest) continue;
     const c = cell(threadById.get(newestId)!.platform);
     c.needs_response += 1;
     c.actionable_items += 1;
@@ -456,7 +473,9 @@ export function derivePortalCounts(input: PortalCountsInput): EngagementPortalCo
     const turn = latestTurnByThread.get(t.id);
     if (!turn || turn.kind !== 'comment') continue;
     const resolvedMs = resolvedAtMsByThread.get(t.id) ?? -Infinity;
-    if (Number.isFinite(resolvedMs)) markHandled([t.id], resolvedMs);
+    if (Number.isFinite(resolvedMs) && (turn.ingestMs === null || resolvedMs >= turn.ingestMs)) {
+      markHandled([t.id], Math.max(resolvedMs, turn.timeMs ?? -Infinity));
+    }
     if (turn.orgAuthorOnly) markHandled([t.id], turn.timeMs);
     if (turn.self) continue;
     const msgs = messagesByThread.get(t.id) ?? [];
@@ -474,9 +493,12 @@ export function derivePortalCounts(input: PortalCountsInput): EngagementPortalCo
       const time = getEffectiveMessageTimestamp(m);
       const ms = parseMessageDateMs(time);
       if (!inWindow(ms)) continue;
-      const handledAfter = ms === null
-        ? Number.isFinite(lastCompanyMs) || Number.isFinite(resolvedMs)
-        : lastCompanyMs >= ms || resolvedMs >= ms;
+      // Company turns compare on provider time (conversation order); resolve
+      // compares on ingestion time (what the resolver could have seen).
+      const ingestMs = parseMessageDateMs(m.created_at ?? null) ?? ms;
+      const resolvedAfter = ingestMs === null ? Number.isFinite(resolvedMs) : resolvedMs >= ingestMs;
+      const companyAfter = ms === null ? Number.isFinite(lastCompanyMs) : lastCompanyMs >= ms;
+      const handledAfter = resolvedAfter || companyAfter;
       if (handledAfter) continue;
       if (actionCovers(t.id, time, m.content ?? null)) continue;
       pending += 1;
@@ -551,6 +573,37 @@ function chunk<T>(items: T[], size: number): T[][] {
 }
 
 /**
+ * THE executed-action read behind "an executed reply covers this item", shared
+ * by this count and the inbox list (/api/engagement/inbox) so both use the same
+ * window, the same paging and the same failure semantics (E4 review #2).
+ * Executed reply/dm actions of the company with updated_at or created_at on or
+ * after `cutoffIso`; paged to exhaustion; throws PortalCountsUnavailableError
+ * on any read failure — never "no actions" (which would show answered work as
+ * open).
+ */
+export async function readExecutedCoverageActions(
+  organizationId: string,
+  cutoffIso: string,
+): Promise<PortalActionRow[]> {
+  return readAllPages<PortalActionRow>('community_ai_actions', (from, to) =>
+    supabase
+      .from('community_ai_actions')
+      .select('target_id, status, action_type, created_at, updated_at, final_text, suggested_text')
+      .eq('organization_id', organizationId)
+      .eq('status', 'executed')
+      .in('action_type', ['dm', 'reply'])
+      .or(`updated_at.gte.${cutoffIso},created_at.gte.${cutoffIso}`)
+      .order('id', { ascending: true })
+      .range(from, to) as unknown as PromiseLike<PageResult<PortalActionRow>>,
+  );
+}
+
+/** Default lower bound of the coverage-action window (the actionable window). */
+export function coverageWindowCutoffIso(nowMs: number = Date.now()): string {
+  return new Date(nowMs - ACTIONABLE_INBOX_LOOKBACK_MS).toISOString();
+}
+
+/**
  * The single count function the portal API serves. Throws
  * PortalCountsUnavailableError when any read fails.
  */
@@ -561,7 +614,7 @@ export async function computeEngagementPortalCounts(
   const org = (organizationId ?? '').toString().trim();
   if (!org) throw new PortalCountsUnavailableError('organization id missing');
   const nowMs = options.nowMs ?? Date.now();
-  const cutoffIso = new Date(nowMs - ACTIONABLE_INBOX_LOOKBACK_MS).toISOString();
+  const cutoffIso = coverageWindowCutoffIso(nowMs);
 
   let orgAuthorIds: Set<string>;
   try {
@@ -612,17 +665,7 @@ export async function computeEngagementPortalCounts(
     }
   }
 
-  const executedActions = await readAllPages<PortalActionRow>('community_ai_actions', (from, to) =>
-    supabase
-      .from('community_ai_actions')
-      .select('target_id, status, action_type, created_at, updated_at, final_text, suggested_text')
-      .eq('organization_id', org)
-      .eq('status', 'executed')
-      .in('action_type', ['dm', 'reply'])
-      .or(`updated_at.gte.${cutoffIso},created_at.gte.${cutoffIso}`)
-      .order('id', { ascending: true })
-      .range(from, to) as unknown as PromiseLike<PageResult<PortalActionRow>>,
-  );
+  const executedActions = await readExecutedCoverageActions(org, cutoffIso);
 
   const resolveEvents = await readAllPages<PortalResolveEventRow>('engagement_thread_events', (from, to) =>
     supabase

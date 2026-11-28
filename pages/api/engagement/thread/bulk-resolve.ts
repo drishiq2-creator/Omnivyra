@@ -21,7 +21,7 @@ import { createApiRoute as __createApiRoute } from '../../../../lib/platform/rou
  */
 
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { resolveUserContext, enforceCompanyAccess } from '../../../../backend/services/userContextService';
+import { enforceCompanyAccess } from '../../../../backend/services/userContextService';
 import { supabase } from '../../../../backend/db/supabaseClient';
 import { recordThreadEvents } from '../../../../backend/services/engagementThreadEventService';
 
@@ -39,27 +39,23 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   }
 
   try {
-    const user = await resolveUserContext(req);
     const body = (req.body || {}) as Body;
-    const rawThreadIds = Array.isArray(body.thread_ids) ? body.thread_ids : [];
-    const organizationId = body.organization_id ?? user?.defaultCompanyId;
-
-    if (!organizationId) {
-      return res.status(400).json({ error: 'organization_id required' });
-    }
+    const rawThreadIds = Array.isArray(body.thread_ids)
+      ? body.thread_ids.filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
+      : [];
     if (rawThreadIds.length === 0) {
       return res.status(400).json({ error: 'thread_ids required' });
     }
-
-    const access = await enforceCompanyAccess({ req, res, companyId: organizationId });
-    if (!access) return;
-
     const threadIds = rawThreadIds.slice(0, MAX_BATCH);
 
+    // E4 review #4: the company is resolved on the SERVER from the persisted
+    // threads (engagement_threads.organization_id), never taken from the body.
+    // A body organization_id is accepted only as an assertion: if it differs
+    // from the resolved company the request is refused. The access check on
+    // the resolved company is kept.
     const { data: threads, error: threadsErr } = await supabase
       .from('engagement_threads')
-      .select('id')
-      .eq('organization_id', organizationId)
+      .select('id, organization_id')
       .in('id', threadIds);
 
     // A failed ownership read is not "none of these threads are yours".
@@ -67,8 +63,33 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       console.warn('[engagement/thread/bulk-resolve] thread read failed:', threadsErr?.message);
       return res.status(500).json({ error: 'Failed to resolve threads', code: 'THREAD_READ_FAILED' });
     }
+    const companies = Array.from(
+      new Set(
+        (threads as Array<{ organization_id: string | null }>)
+          .map((t) => t.organization_id)
+          .filter((id): id is string => typeof id === 'string' && id.length > 0),
+      ),
+    );
+    if (companies.length === 0) {
+      return res.status(404).json({ error: 'Thread not found', code: 'THREAD_NOT_FOUND' });
+    }
+    if (companies.length > 1) {
+      return res.status(400).json({ error: 'thread_ids span more than one company', code: 'MIXED_COMPANIES' });
+    }
+    const organizationId = companies[0];
+    const assertedOrg = typeof body.organization_id === 'string' ? body.organization_id.trim() : '';
+    if (assertedOrg && assertedOrg !== organizationId) {
+      return res.status(403).json({ error: 'Access denied', code: 'COMPANY_MISMATCH' });
+    }
 
-    const validIds = new Set((threads ?? []).map((t: { id: string }) => t.id));
+    const access = await enforceCompanyAccess({ req, res, companyId: organizationId });
+    if (!access) return;
+
+    const validIds = new Set(
+      (threads as Array<{ id: string; organization_id: string | null }>)
+        .filter((t) => t.organization_id === organizationId)
+        .map((t) => t.id),
+    );
     const toResolve = threadIds.filter((id) => validIds.has(id));
 
     if (toResolve.length === 0) {

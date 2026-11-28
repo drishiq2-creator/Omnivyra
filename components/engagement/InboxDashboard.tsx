@@ -114,6 +114,10 @@ function InboxDashboardComponent({
   } = usePortalCounts(organizationId);
   const refreshWorkQueue = useCallback(async () => {}, []);
   const countsUnavailable = portalCounts.status === 'unknown';
+  // While counts are unknown (failed read) or loading, there is no handled map:
+  // threads the server would hide as resolved / company-answered may reappear
+  // in the lists until counts load. That is the deliberate safe direction —
+  // an extra item shown, never real work hidden — and the badges say "—".
   const handledThreads = portalCounts.status === 'ready' ? portalCounts.handledThreads : null;
   const { platforms: integrations } = useCompanyIntegrations(organizationId);
   const connectedPlatformSlugs = useMemo(
