@@ -35,10 +35,21 @@ const EXEMPT_MARKER = /signal-ownership-exempt:([^\n]*)/;
 const MIN_REASON_CHARS = 12;
 /**
  * The ONLY files whose launches may be exempted (register T-4). Each must be
- * unreachable from WORKER_ENTRY (asserted below on the real import graph).
+ * unreachable from EVERY worker entry (EXPECTED_WORKER_ENTRIES; asserted below on
+ * the real import graph).
  */
 const EXEMPT_FILE_ALLOWLIST = new Set(['backend/services/export/htmlToPdfRenderer.ts']);
-const WORKER_ENTRY = 'backend/workers/main.ts';
+/**
+ * Every separately launched worker-side entry, DERIVED from what is actually
+ * launched (deriveWorkerEntries) and pinned here, so a new entry fails until it
+ * is added (and therefore walked).
+ */
+const EXPECTED_WORKER_ENTRIES = [
+  'backend/queue/startWorkers.ts', // package.json worker:bolt / start:workers
+  'backend/scheduler/cron.ts', // Dockerfile.cron CMD, package.json worker:cron / start:cron
+  'backend/workers/campaignPlanningWorker.ts', // top-level start() in backend/workers/
+  'backend/workers/main.ts', // Dockerfile.worker CMD (railway.json), package.json worker:all
+];
 
 /**
  * Indirect launches the call scan cannot see. Any of these in server code fails
@@ -183,6 +194,113 @@ function chainTo(seen: Map<string, string | null>, target: string): string {
   const chain: string[] = [];
   for (let c: string | null | undefined = target; c; c = seen.get(c)) chain.unshift(c);
   return chain.join(' -> ');
+}
+
+type RepoView = {
+  read: (file: string) => string | null;
+  isFile: (file: string) => boolean;
+  /** File names (not paths) directly inside `dir`, or [] when it does not exist. */
+  list: (dir: string) => string[];
+};
+
+/** A backend source path from a launch command token: dist/x.js -> x.ts. */
+function toSourceEntry(token: string, view: RepoView): string {
+  const p = token.replace(/^\.\//, '').replace(/^dist\//, '');
+  const ts = p.replace(/\.js$/, '.ts');
+  return view.isFile(ts) ? ts : p;
+}
+const BACKEND_PATH = /(?:^|[\s"'=])((?:\.\/)?(?:dist\/)?backend\/[\w/.-]+\.(?:js|ts))/g;
+function backendPaths(text: string): string[] {
+  BACKEND_PATH.lastIndex = 0;
+  return [...text.matchAll(BACKEND_PATH)].map((m) => m[1]);
+}
+/** A statement at column 0 that CALLS something (`start().catch(...)`, `main();`, `void run()`). */
+const TOP_LEVEL_CALL = /^(?:void\s+|await\s+)?(?!(?:if|for|while|switch|return|function|class|export|import|const|let|var|type|interface|describe|it)\b)[A-Za-z_$][\w$]*\s*\(/m;
+
+/**
+ * Worker-side entries, derived from what is actually launched:
+ *   - every root Dockerfile* CMD / ENTRYPOINT (Dockerfile.worker = the Railway image via railway.json);
+ *   - railway.json deploy.startCommand, if any;
+ *   - Procfile* lines;
+ *   - package.json scripts whose NAME contains "worker" or "cron";
+ *   - every backend/workers/*.ts with a top-level call or `require.main === module`.
+ * Returns entry -> the sources that named it.
+ */
+function deriveWorkerEntries(view: RepoView): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  const add = (token: string, source: string) => {
+    const e = toSourceEntry(token, view);
+    out.set(e, [...(out.get(e) ?? []), source]);
+  };
+  for (const name of view.list('.')) {
+    if (/^Dockerfile/.test(name)) {
+      for (const line of (view.read(name) ?? '').split('\n')) {
+        if (/^\s*(CMD|ENTRYPOINT)\b/.test(line) && !/^\s*CMD\s+node\s+-e\b/.test(line)) {
+          for (const t of backendPaths(line)) add(t, name);
+        }
+      }
+    }
+    if (/^Procfile/.test(name)) for (const t of backendPaths(view.read(name) ?? '')) add(t, name);
+  }
+  const railway = view.read('railway.json');
+  if (railway) {
+    const start = (JSON.parse(railway) as { deploy?: { startCommand?: string } }).deploy?.startCommand;
+    if (start) for (const t of backendPaths(start)) add(t, 'railway.json startCommand');
+  }
+  const pkg = view.read('package.json');
+  if (pkg) {
+    const scripts = (JSON.parse(pkg) as { scripts?: Record<string, string> }).scripts ?? {};
+    for (const [name, cmd] of Object.entries(scripts)) {
+      if (/worker|cron/i.test(name)) for (const t of backendPaths(cmd)) add(t, `package.json ${name}`);
+    }
+  }
+  for (const name of view.list('backend/workers')) {
+    if (!/\.ts$/.test(name) || /\.(test|spec)\.ts$/.test(name)) continue;
+    const f = `backend/workers/${name}`;
+    const src = view.read(f) ?? '';
+    if (TOP_LEVEL_CALL.test(src) || /require\.main\s*===\s*module/.test(src)) add(f, 'top-level start');
+  }
+  return out;
+}
+
+/** Throws (naming the constant to update) unless the derived entries are exactly `expected`. */
+function assertWorkerEntries(expected: string[], derived: Map<string, string[]>): void {
+  const entries = [...derived.keys()];
+  const added = entries.filter((e) => !expected.includes(e)).sort();
+  const removed = expected.filter((e) => !entries.includes(e)).sort();
+  if (added.length || removed.length) {
+    throw new Error(
+      'worker entry set changed: if intended, update EXPECTED_WORKER_ENTRIES in backend/tests/unit/playwrightSignalOwnership.test.ts' +
+      `\n  added:   ${JSON.stringify(added.map((e) => `${e} (${derived.get(e)?.join(', ')})`))}\n  removed: ${JSON.stringify(removed)}`,
+    );
+  }
+}
+
+/** Union walk from every entry: allowlisted file -> "<entry>: <chain>" for each entry that reaches it. */
+function allowlistedReachedFrom(entries: string[], view: RepoView): string[] {
+  const hits: string[] = [];
+  for (const entry of entries) {
+    const seen = workerReachable(entry, view.read, view.isFile);
+    for (const f of EXEMPT_FILE_ALLOWLIST) if (seen.has(f)) hits.push(`${entry}: ${chainTo(seen, f)}`);
+  }
+  return hits;
+}
+
+const realRepo: RepoView = {
+  read: (f) => { try { return fs.readFileSync(path.join(REPO, f), 'utf8').replace(/\r\n/g, '\n'); } catch { return null; } },
+  isFile: (f) => { try { return fs.statSync(path.join(REPO, f)).isFile(); } catch { return false; } },
+  list: (d) => { try { return fs.readdirSync(path.join(REPO, d)); } catch { return []; } },
+};
+
+/** An in-memory RepoView for the planted controls. */
+function fakeRepo(files: Record<string, string>): RepoView {
+  return {
+    read: (f) => (f in files ? files[f] : null),
+    isFile: (f) => f in files,
+    list: (d) => Object.keys(files)
+      .filter((f) => (d === '.' ? !f.includes('/') : f.startsWith(`${d}/`) && !f.slice(d.length + 1).includes('/')))
+      .map((f) => (d === '.' ? f : f.slice(d.length + 1))),
+  };
 }
 
 function walk(dir: string, out: string[]): void {
@@ -386,6 +504,59 @@ describe('planted controls — worker reachability walk', () => {
   });
 });
 
+describe('planted controls — worker entries are derived from what is launched', () => {
+  const files: Record<string, string> = {
+    'Dockerfile.worker': 'FROM node\nHEALTHCHECK CMD node -e "fetch(1)"\nCMD ["node", "dist/backend/workers/main.js"]\n',
+    'Dockerfile.cron': 'CMD ["node", "dist/backend/scheduler/cron.js"]\n',
+    'Procfile': 'web: next start\nbolt: node dist/backend/queue/bolt.js\n',
+    'railway.json': JSON.stringify({ deploy: { startCommand: 'node dist/backend/workers/railwayEntry.js' } }),
+    'package.json': JSON.stringify({ scripts: {
+      'worker:x': 'npx ts-node backend/queue/startWorkers.ts',
+      'intelligence:enqueue': 'npx ts-node backend/scripts/notAWorker.ts',
+    } }),
+    'backend/workers/main.ts': "import { a } from '../services/a';",
+    'backend/scheduler/cron.ts': 'export const c = 1;',
+    'backend/queue/bolt.ts': 'export const b = 1;',
+    'backend/workers/railwayEntry.ts': 'export const r = 1;',
+    'backend/queue/startWorkers.ts': 'export const s = 1;',
+    'backend/workers/sideWorker.ts': "import { x } from '../services/export/htmlToPdfRenderer';\nstart().catch(() => process.exit(1));\nasync function start() {}",
+    'backend/workers/libOnly.ts': 'export function start() {}\nexport const worker = 1;',
+    'backend/services/a.ts': 'export const a = 1;',
+    'backend/services/export/htmlToPdfRenderer.ts': 'export const x = 1;',
+  };
+  const view = fakeRepo(files);
+
+  it('collects Dockerfile CMDs (not HEALTHCHECK), Procfile, railway startCommand, worker/cron scripts and top-level starts', () => {
+    expect([...deriveWorkerEntries(view).keys()].sort()).toEqual([
+      'backend/queue/bolt.ts',
+      'backend/queue/startWorkers.ts',
+      'backend/scheduler/cron.ts',
+      'backend/workers/main.ts',
+      'backend/workers/railwayEntry.ts',
+      'backend/workers/sideWorker.ts',
+    ]);
+  });
+
+  it('a new (or removed) entry fails the expected-set check until EXPECTED_WORKER_ENTRIES is updated', () => {
+    const derived = deriveWorkerEntries(view);
+    const all = [...derived.keys()];
+    expect(() => assertWorkerEntries(all, derived)).not.toThrow();
+    expect(() => assertWorkerEntries(all.filter((e) => !e.endsWith('sideWorker.ts')), derived))
+      .toThrow(/added: +\["backend\/workers\/sideWorker\.ts \(top-level start\)"\]/);
+    expect(() => assertWorkerEntries([...all, 'backend/workers/gone.ts'], derived))
+      .toThrow(/removed: \["backend\/workers\/gone\.ts"\]/);
+  });
+
+  it('an allowlisted file imported ONLY from a non-main entry is caught', () => {
+    const entries = [...deriveWorkerEntries(view).keys()];
+    // Control: main alone does not reach it, so only the derived non-main entry can catch it.
+    expect(allowlistedReachedFrom(['backend/workers/main.ts'], view)).toEqual([]);
+    expect(allowlistedReachedFrom(entries, view)).toEqual([
+      'backend/workers/sideWorker.ts: backend/workers/sideWorker.ts -> backend/services/export/htmlToPdfRenderer.ts',
+    ]);
+  });
+});
+
 describe('repo scan — every server-code browser launch defers shutdown signals to the worker', () => {
   const sites = scanRepo();
 
@@ -415,18 +586,18 @@ describe('repo scan — every server-code browser launch defers shutdown signals
     expect(sites.filter((s) => s.markerRejected)).toEqual([]);
   });
 
-  it('no allowlisted (exempt) file is reachable from the worker entry through the static import graph', () => {
-    const isFile = (f: string) => {
-      try { return fs.statSync(path.join(REPO, f)).isFile(); } catch { return false; }
-    };
-    const read = (f: string) => {
-      try { return fs.readFileSync(path.join(REPO, f), 'utf8'); } catch { return null; }
-    };
-    const seen = workerReachable(WORKER_ENTRY, read, isFile);
-    // Non-vacuous: the walk really reaches the worker's own browser code (main -> cron -> RPA).
+  it('the derived worker entries are non-empty and exactly EXPECTED_WORKER_ENTRIES', () => {
+    const derived = deriveWorkerEntries(realRepo);
+    expect(derived.size).toBeGreaterThan(0);
+    assertWorkerEntries(EXPECTED_WORKER_ENTRIES, derived);
+    for (const e of derived.keys()) expect(realRepo.isFile(e)).toBe(true);
+  });
+
+  it('no allowlisted (exempt) file is reachable from ANY worker entry through the static import graph', () => {
+    // Non-vacuous: the walk from main really reaches the worker's own browser code (main -> cron -> RPA).
+    const seen = workerReachable('backend/workers/main.ts', realRepo.read, realRepo.isFile);
     expect(seen.has('backend/services/rpaWorker/rpaPlaywrightRunner.ts')).toBe(true);
     expect(seen.size).toBeGreaterThan(500);
-    const reached = [...EXEMPT_FILE_ALLOWLIST].filter((f) => seen.has(f)).map((f) => chainTo(seen, f));
-    expect(reached).toEqual([]);
+    expect(allowlistedReachedFrom(EXPECTED_WORKER_ENTRIES, realRepo)).toEqual([]);
   });
 });
