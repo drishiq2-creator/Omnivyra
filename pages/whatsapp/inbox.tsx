@@ -14,7 +14,7 @@ import ChatVoiceButton from '../../components/ChatVoiceButton';
 import Head from 'next/head';
 import Link from 'next/link';
 import { useCompanyContext } from '@/components/CompanyContext';
-import { ReplyKeyHolder } from '@/lib/engagement/replySendOutcome';
+import { ReplyKeyHolder, replyFailureMessage } from '@/lib/engagement/replySendOutcome';
 import {
   ArrowLeft,
   RefreshCw,
@@ -119,45 +119,64 @@ export default function WhatsAppInboxPage() {
     fetchMessages(thread.id);
   };
 
-  // E3: one client key per composed reply (thread + inbound message + draft), reused on every retry until it succeeds.
+  // E3: one client key per composed reply (conversation + draft), reused on every retry until it succeeds.
+  // It does NOT depend on which inbound message is latest: a new inbound arriving between a lost
+  // response and the retry must not turn the retry into a new logical reply. The reply target
+  // (message_id) is pinned to the key for the same reason, so the server resolves the same identity.
   const replyKeyRef = useRef<ReplyKeyHolder | null>(null);
   if (!replyKeyRef.current) replyKeyRef.current = new ReplyKeyHolder();
+  const pinnedTargetRef = useRef<{ key: string; messageId: string } | null>(null);
 
   const sendReply = async () => {
     if (!selectedThread || !replyText.trim() || !companyId) return;
 
-    // Find the latest inbound message to reply to
-    const lastInbound = [...messages].reverse().find((m) => m.direction === 'inbound');
-    if (!lastInbound) {
-      setReplyError('No inbound message found to reply to');
-      return;
+    const clientReplyKey = replyKeyRef.current!.keyFor({
+      threadId: selectedThread.id,
+      messageId: '',
+      platform: 'whatsapp',
+      text: replyText,
+    });
+    // A retry of the same composed reply keeps the message it first answered.
+    let targetMessageId: string | null =
+      pinnedTargetRef.current?.key === clientReplyKey ? pinnedTargetRef.current.messageId : null;
+    if (!targetMessageId) {
+      // Find the latest inbound message to reply to
+      const lastInbound = [...messages].reverse().find((m) => m.direction === 'inbound');
+      if (!lastInbound) {
+        setReplyError('No inbound message found to reply to');
+        return;
+      }
+      targetMessageId = lastInbound.id;
+      pinnedTargetRef.current = { key: clientReplyKey, messageId: targetMessageId };
     }
 
     setReplying(true);
     setReplyError(null);
     setReplySuccess(false);
     try {
-      const res = await fetch('/api/engagement/reply', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({
-          organization_id: companyId,
-          thread_id: selectedThread.id,
-          message_id: lastInbound.id,
-          reply_text: replyText.trim(),
-          platform: 'whatsapp',
-          client_reply_key: replyKeyRef.current!.keyFor({
-            threadId: selectedThread.id,
-            messageId: lastInbound.id,
+      let res: Response;
+      try {
+        res = await fetch('/api/engagement/reply', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({
+            organization_id: companyId,
+            thread_id: selectedThread.id,
+            message_id: targetMessageId,
+            reply_text: replyText.trim(),
             platform: 'whatsapp',
-            text: replyText,
+            client_reply_key: clientReplyKey,
           }),
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? 'Reply failed');
+        });
+      } catch {
+        // No response (network error / timeout): the server may have sent it. Keep the key.
+        throw new Error(replyFailureMessage({ networkError: true, platform: 'whatsapp' }).message);
+      }
+      const data = (await res.json().catch(() => null)) as Record<string, unknown> | null;
+      if (!res.ok) throw new Error(replyFailureMessage({ httpStatus: res.status, json: data, platform: 'whatsapp' }).message);
       replyKeyRef.current!.reset();
+      pinnedTargetRef.current = null;
       setReplyText('');
       setReplySuccess(true);
       // Reload messages to show the outbound reply

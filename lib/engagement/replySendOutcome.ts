@@ -112,6 +112,18 @@ export function classifyReplySendResponse(input: {
   return { kind: 'unknown', message: withUnknownLead(serverMessage) };
 }
 
+/**
+ * The message a reply surface shows for a NON-2xx answer (or no answer at all):
+ * the shared "status unknown" copy whenever the server could have executed,
+ * the server's explicit reason for a definite pre-send refusal.
+ */
+export function replyFailureMessage(input: { networkError?: boolean; httpStatus?: number; json?: Record<string, unknown> | null; platform: string }, fallback = 'Reply failed'): { unknown: boolean; message: string } {
+  const outcome = classifyReplySendResponse(input as Parameters<typeof classifyReplySendResponse>[0]);
+  if (outcome.kind === 'unknown') return { unknown: true, message: outcome.message };
+  const serverError = typeof input.json?.error === 'string' && input.json.error ? String(input.json.error) : null;
+  return { unknown: false, message: serverError ?? fallback };
+}
+
 /** For errors thrown by an injected executor (onExecuteReply): a fetch network failure / abort / timeout is unknown. */
 export function isUnknownOutcomeError(err: unknown): boolean {
   if (!err || typeof err !== 'object') return false;
