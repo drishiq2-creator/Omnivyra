@@ -204,25 +204,66 @@ const errorText = (error: unknown): string =>
   String((error as { message?: unknown } | null)?.message ?? error);
 
 /**
- * After a failed claim write: the write may still have committed (lost DB
- * response). Any row found is answered like a 23505 winner.
- *  - serverAnswered: the DB returned an error object, so the statement ended
- *    without committing; a successful read showing NO row then confirms nothing
- *    was recorded (retryable "not sent").
- *  - otherwise (the insert THREW: transport timeout / network error) the INSERT
- *    may still be running server-side and commit after this read, so an empty
- *    read proves nothing: outcome unknown, never retryable.
+ * postgrest-js (2.105.3, no throwOnError) does NOT throw on transport failure: a
+ * network error, an AbortError / timeout or a header overflow is RETURNED as
+ * { error: { message: 'AbortError: …' | 'FetchError: …', code: '' }, status: 0 }.
+ * Gateways answer 502/503/504 without the statement's verdict. Only a 4xx from
+ * PostgREST carrying a 5-character SQLSTATE (or a PGRST code) is the database's
+ * definitive answer for a COMPLETED statement — i.e. the write did not commit.
+ * Everything else is "the write may have committed / may still commit".
  */
-async function resolveAfterFailedClaimWrite(organizationId: string, idempotencyKey: string, writeError: string, serverAnswered: boolean): Promise<ClaimOutcome> {
-  let check: LookupOutcome;
+export function isDefinitiveDbRejection(error: unknown, status: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const code = String((error as { code?: unknown }).code ?? '');
+  const message = String((error as { message?: unknown }).message ?? '');
+  const httpStatus = typeof status === 'number' ? status : Number(status ?? 0);
+  if (!(httpStatus >= 400 && httpStatus < 500)) return false;
+  if (/^(AbortError|FetchError|TypeError)/.test(message)) return false;
+  return /^[0-9A-Z]{5}$/.test(code) || /^PGRST\d+$/.test(code);
+}
+
+type PresenceCheck =
+  | { kind: 'present'; row: ExistingReplyAction }
+  | { kind: 'absent' }
+  | { kind: 'unknown'; error: string };
+
+/**
+ * "Confirmed absent" is ONLY an HTTP 200 with an array of length 0 and no error
+ * (a plain select, never maybeSingle/single: postgrest-js can turn a blank 404
+ * into { status: 204, error: null, data: null }, which proves nothing). Any
+ * error, status 0, non-200 or null/undefined data is unknown.
+ */
+export async function checkReplyActionPresence(organizationId: string, idempotencyKey: string): Promise<PresenceCheck> {
+  let res: { data?: unknown; error?: unknown; status?: unknown };
   try {
-    check = await findReplyActionByKey(organizationId, idempotencyKey);
-  } catch (readErr) {
-    return { kind: 'unknown', error: `${writeError}; re-read threw: ${errorText(readErr)}` };
+    res = (await ownedDbTable('community_ai_actions')
+      .select(EXISTING_COLUMNS)
+      .eq('organization_id', organizationId)
+      .eq('idempotency_key', idempotencyKey)
+      .limit(2)) as { data?: unknown; error?: unknown; status?: unknown };
+  } catch (thrown) {
+    return { kind: 'unknown', error: `presence read threw: ${errorText(thrown)}` };
   }
-  if (check.ok === false) return { kind: 'unknown', error: `${writeError}; re-read failed: ${check.error}` };
-  if (check.row) return { kind: 'lost', existing: check.row };
-  if (!serverAnswered) return { kind: 'unknown', error: `${writeError}; row not visible yet (the insert may still commit)` };
+  if (res.error) return { kind: 'unknown', error: `presence read failed: ${errorText(res.error)}` };
+  if (!Array.isArray(res.data)) return { kind: 'unknown', error: `presence read returned no array (status ${String(res.status)})` };
+  const rows = (res.data as ExistingReplyAction[]).filter((r) => !r.organization_id || r.organization_id === organizationId);
+  if (rows.length > 0) return { kind: 'present', row: rows[0] };
+  if (res.status !== 200) return { kind: 'unknown', error: `presence read status ${String(res.status)}` };
+  return { kind: 'absent' };
+}
+
+/**
+ * After a failed claim write: any row found is answered like a 23505 winner.
+ * Only a DEFINITIVE database rejection (isDefinitiveDbRejection) followed by a
+ * CONFIRMED-absent read (checkReplyActionPresence) means nothing was recorded
+ * (retryable "not sent"). A thrown insert, a transport/gateway error, or any
+ * inconclusive read is outcome unknown — the INSERT may still commit.
+ */
+async function resolveAfterFailedClaimWrite(organizationId: string, idempotencyKey: string, writeError: string, definitiveRejection: boolean): Promise<ClaimOutcome> {
+  const presence = await checkReplyActionPresence(organizationId, idempotencyKey);
+  if (presence.kind === 'present') return { kind: 'lost', existing: presence.row };
+  if (presence.kind === 'unknown') return { kind: 'unknown', error: `${writeError}; ${presence.error}` };
+  if (!definitiveRejection) return { kind: 'unknown', error: `${writeError}; row not visible yet (the insert may still commit)` };
   return { kind: 'error', error: writeError };
 }
 
@@ -253,8 +294,9 @@ export async function claimReplyAction(input: {
 }): Promise<ClaimOutcome> {
   const now = new Date().toISOString();
   let error: unknown = null;
+  let insertStatus: unknown = null;
   try {
-    ({ error } = await ownedDbTable('community_ai_actions').insert({
+    ({ error, status: insertStatus } = await ownedDbTable('community_ai_actions').insert({
     id: input.actionId,
     tenant_id: input.row.tenant_id,
     organization_id: input.row.organization_id,
@@ -289,7 +331,7 @@ export async function claimReplyAction(input: {
   if (!error) return { kind: 'claimed', actionId: input.actionId };
   if (!isUniqueViolation(error)) {
     // Not provably "nothing written": the commit may have happened and only the response was lost.
-    return resolveAfterFailedClaimWrite(input.row.organization_id, input.idempotencyKey, errorText(error), true);
+    return resolveAfterFailedClaimWrite(input.row.organization_id, input.idempotencyKey, errorText(error), isDefinitiveDbRejection(error, insertStatus));
   }
   let winner: LookupOutcome;
   try {
@@ -318,12 +360,16 @@ export async function reclaimNotSentReplyAction(organizationId: string, idempote
   q = prior.skip_reason == null ? q.is('skip_reason', null) : q.eq('skip_reason', prior.skip_reason);
   let data: unknown = null;
   let error: unknown = null;
+  let casStatus: unknown = null;
   try {
-    ({ data, error } = await q.select('id, status').maybeSingle());
+    ({ data, error, status: casStatus } = await q.select('id, status').maybeSingle());
   } catch (thrown) {
     error = thrown;
   }
   if (!error && data && (data as { id?: string }).id) return { kind: 'claimed', actionId: String((data as { id: string }).id) };
+  // A CAS write that failed WITHOUT a definitive database rejection (transport error, timeout,
+  // gateway) may still commit: whatever the row shows now, its "not sent" state is not proof.
+  const casInconclusive = Boolean(error) && !isDefinitiveDbRejection(error, casStatus);
   // Zero rows matched, or the CAS write failed (it may still have committed): answer from the
   // row as it stands now. The row always exists here (it is the prior attempt), so a read that
   // shows it still refused-before-send means the reclaim did not commit (REPLY_NOT_SENT, retryable);
@@ -336,6 +382,9 @@ export async function reclaimNotSentReplyAction(organizationId: string, idempote
   }
   if (current.ok === false) return { kind: 'unknown', error: current.error };
   if (!current.row) return { kind: 'unknown', error: error ? errorText(error) : 'reclaimed row not readable' };
+  if (casInconclusive && classifyExistingReplyAction(current.row) === 'not_sent') {
+    return { kind: 'unknown', error: `reclaim write inconclusive: ${errorText(error)}` };
+  }
   return { kind: 'lost', existing: current.row };
 }
 

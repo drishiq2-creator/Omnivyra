@@ -32,9 +32,22 @@ const db: Record<string, Row[]> = {};
 /** When > 0, that many idempotency-key lookups on community_ai_actions answer "no row" (a read that raced the winner's insert). */
 let staleKeyLookups = 0;
 /** Fault injection for the claim insert on community_ai_actions (one-shot). */
-let claimInsertFault: null | 'commit-then-error' | 'commit-then-throw' | 'no-commit-error' | 'no-commit-throw' = null;
-/** Per idempotency-key read, in order: 'ok' or 'fail' (a DB error). Empty = all ok. */
-let keyReadPlan: Array<'ok' | 'fail'> = [];
+type ClaimFault =
+  | 'commit-then-error'   // committed; the response is a non-definitive error (no status)
+  | 'commit-then-throw'   // committed; the client call throws
+  | 'no-commit-throw'     // still in flight; the client call throws
+  | 'inflight-abort'      // still in flight; postgrest-js RETURNS { code:'', status:0, message:'AbortError: …' }
+  | 'inflight-504'        // still in flight; a gateway RETURNS 504 with no SQLSTATE
+  | 'rejected-42501'      // definitive: PostgREST 403 + SQLSTATE 42501, nothing committed
+  | 'rejected-23502';     // definitive: PostgREST 400 + SQLSTATE 23502, nothing committed
+let claimInsertFault: ClaimFault | null = null;
+/** A row whose INSERT was still in flight when its response failed; tests commit it "later". */
+let inflightRow: Row | null = null;
+/**
+ * Per idempotency-key read, in order: 'ok', 'fail' (a DB error) or 'blank204'
+ * (postgrest-js turning a blank 404 into { status: 204, error: null, data: null }). Empty = all ok.
+ */
+let keyReadPlan: Array<'ok' | 'fail' | 'blank204'> = [];
 
 const UNIQUE_VIOLATION = {
   code: '23505',
@@ -59,41 +72,61 @@ function builder(table: string) {
   let limitN = Infinity;
   const rows = () => (db[table] ?? []).filter((r) => filters.every((f) => f(r)));
 
-  const runInsert = (): { data: Row | null; error: unknown } => {
+  type Res = { data: Row[] | null; error: unknown; status: number };
+  const runInsert = (): Res => {
     const row = insertRow as Row;
     if (table === 'community_ai_actions' && claimInsertFault) {
       const fault = claimInsertFault;
       claimInsertFault = null;
-      if (fault === 'commit-then-error' || fault === 'commit-then-throw') (db[table] ??= []).push({ ...row }); // the commit happened
-      // no-commit-throw: a transport timeout while the INSERT is still in flight — not visible to the re-read yet
-      if (fault === 'commit-then-throw' || fault === 'no-commit-throw') throw new TypeError('fetch failed: socket hang up');
-      return { data: null, error: { code: '08006', message: 'connection failure during commit acknowledgement' } };
+      switch (fault) {
+        case 'commit-then-error':
+          (db[table] ??= []).push({ ...row });
+          return { data: null, error: { code: '08006', message: 'connection failure during commit acknowledgement' }, status: 0 };
+        case 'commit-then-throw':
+          (db[table] ??= []).push({ ...row });
+          throw new TypeError('fetch failed: socket hang up');
+        case 'no-commit-throw':
+          inflightRow = { ...row };
+          throw new TypeError('fetch failed: socket hang up');
+        case 'inflight-abort':
+          inflightRow = { ...row };
+          return { data: null, error: { message: 'AbortError: This operation was aborted', details: '', hint: '', code: '' }, status: 0 };
+        case 'inflight-504':
+          inflightRow = { ...row };
+          return { data: null, error: { message: 'upstream request timeout', code: '' }, status: 504 };
+        case 'rejected-42501':
+          return { data: null, error: { code: '42501', message: 'permission denied for table community_ai_actions' }, status: 403 };
+        case 'rejected-23502':
+          return { data: null, error: { code: '23502', message: 'null value in column "tenant_id" violates not-null constraint' }, status: 400 };
+      }
     }
     if ((db[table] ?? []).some((r) => r.id != null && r.id === row.id) || keyCollides(table, row)) {
-      return { data: null, error: UNIQUE_VIOLATION };
+      return { data: null, error: UNIQUE_VIOLATION, status: 409 };
     }
     (db[table] ??= []).push({ ...row });
-    return { data: { ...row }, error: null };
+    return { data: [{ ...row }], error: null, status: 201 };
   };
-  const runUpdate = (): { data: Row[]; error: unknown } => {
+  const runUpdate = (): Res => {
     const hits = rows();
     for (const r of hits) {
-      if (keyCollides(table, { ...r, ...patch }, r.id)) return { data: [], error: UNIQUE_VIOLATION };
+      if (keyCollides(table, { ...r, ...patch }, r.id)) return { data: null, error: UNIQUE_VIOLATION, status: 409 };
     }
     for (const r of hits) Object.assign(r, patch);
-    return { data: hits.map((r) => ({ ...r })), error: null };
+    return { data: hits.map((r) => ({ ...r })), error: null, status: 200 };
   };
-  const runSelect = (): { data: Row[]; error: unknown } => {
+  const runSelect = (): Res => {
     if (table === 'community_ai_actions' && filterCols.includes('idempotency_key') && keyReadPlan.length > 0) {
-      if (keyReadPlan.shift() === 'fail') return { data: [], error: { code: '57014', message: 'canceling statement due to statement timeout' } };
+      const step = keyReadPlan.shift();
+      if (step === 'fail') return { data: null, error: { code: '57014', message: 'canceling statement due to statement timeout' }, status: 500 };
+      if (step === 'blank204') return { data: null, error: null, status: 204 };
     }
     if (table === 'community_ai_actions' && filterCols.includes('idempotency_key') && staleKeyLookups > 0) {
       staleKeyLookups -= 1;
-      return { data: [], error: null };
+      return { data: [], error: null, status: 200 };
     }
-    return { data: rows().slice(0, limitN).map((r) => ({ ...r })), error: null };
+    return { data: rows().slice(0, limitN).map((r) => ({ ...r })), error: null, status: 200 };
   };
-  const exec = () => (insertRow ? (() => { const r = runInsert(); return { data: r.data ? [r.data] : [], error: r.error }; })() : patch ? runUpdate() : runSelect());
+  const exec = (): Res => (insertRow ? runInsert() : patch ? runUpdate() : runSelect());
 
   const api: any = {
     select() { return api; },
@@ -107,11 +140,12 @@ function builder(table: string) {
     update(p: Row) { patch = p; return api; },
     insert(row: Row) { insertRow = row; return api; },
     upsert(row: Row) { (db[table] ??= []).push({ ...row }); return Promise.resolve({ error: null }); },
-    maybeSingle() { const r = exec(); return Promise.resolve({ data: r.data[0] ?? null, error: r.error ?? null }); },
-    single() { const r = exec(); return Promise.resolve({ data: r.data[0] ?? null, error: r.error ?? null }); },
+    maybeSingle() { const r = exec(); return Promise.resolve({ data: r.data ? (r.data[0] ?? null) : null, error: r.error ?? null, status: r.status }); },
+    single() { const r = exec(); return Promise.resolve({ data: r.data ? (r.data[0] ?? null) : null, error: r.error ?? null, status: r.status }); },
     then(ok: (v: unknown) => unknown, ko?: (e: unknown) => unknown) {
-      const r = exec();
-      return Promise.resolve({ data: r.data, error: r.error ?? null }).then(ok, ko);
+      let r: Res;
+      try { r = exec(); } catch (e) { return Promise.reject(e).then(ok, ko); }
+      return Promise.resolve({ data: r.data ?? null, error: r.error ?? null, status: r.status }).then(ok, ko);
     },
   };
   return api;
@@ -230,6 +264,7 @@ beforeEach(() => {
   providerSends = 0;
   staleKeyLookups = 0;
   claimInsertFault = null;
+  inflightRow = null;
   keyReadPlan = [];
   gate = null;
   currentOrg = ORG_A;
@@ -590,8 +625,42 @@ describe('E3 claim write with a lost DB response', () => {
     expect(executeActionMock).not.toHaveBeenCalled();
   });
 
-  it('CONTROL: the DB RETURNS a non-23505 error (no commit) and the re-read confirms no row → retryable 503; the retry then sends once', async () => {
-    claimInsertFault = 'no-commit-error';
+  it.each([
+    ['postgrest-js RETURNS an AbortError (status 0, empty code)', 'inflight-abort'],
+    ['a gateway RETURNS 504 without a SQLSTATE', 'inflight-504'],
+  ] as const)('%s while the INSERT is still in flight → 409 REPLY_OUTCOME_UNKNOWN, not retryable, key kept, never executed', async (_n, fault) => {
+    claimInsertFault = fault;
+    const first = await post({ client_reply_key: KEY_1 });
+    expect(first.statusCode).toBe(409);
+    expect(first.body.code).toBe('REPLY_OUTCOME_UNKNOWN');
+    expect(first.body.retryable).toBe(false);
+    expect(String(first.body.error)).toMatch(/^Sending status unknown/);
+    expect(keepsKey(first)).toBe(true);
+    expect(executeActionMock).not.toHaveBeenCalled();
+    // The in-flight INSERT commits afterwards: a retry with the kept key is answered in progress, still no execution.
+    (db.community_ai_actions ??= []).push(inflightRow!);
+    const retry = await post({ client_reply_key: KEY_1 });
+    expect(retry.statusCode).toBe(409);
+    expect(retry.body.code).toBe('REPLY_IN_PROGRESS');
+    expect(executeActionMock).not.toHaveBeenCalled();
+    expect(actionRows()).toHaveLength(1);
+  });
+
+  it('a definitive rejection but the presence re-read is a blank 204 (status 204, error null, data null) → unknown, not retryable', async () => {
+    claimInsertFault = 'rejected-42501';
+    keyReadPlan = ['ok', 'blank204']; // the pre-check reads fine; the presence re-read is the blank 204
+    const first = await post({ client_reply_key: KEY_1 });
+    expect(first.statusCode).toBe(409);
+    expect(first.body.code).toBe('REPLY_OUTCOME_UNKNOWN');
+    expect(first.body.retryable).toBe(false);
+    expect(executeActionMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['403 + SQLSTATE 42501', 'rejected-42501'],
+    ['400 + SQLSTATE 23502', 'rejected-23502'],
+  ] as const)('CONTROL: a definitive PostgREST %s and a confirmed-absent re-read (200, []) → retryable 503; the retry then sends once', async (_n, fault) => {
+    claimInsertFault = fault;
     const first = await post({ client_reply_key: KEY_1 });
     expect(first.statusCode).toBe(503);
     expect(first.body.code).toBe('REPLY_CLAIM_FAILED');
