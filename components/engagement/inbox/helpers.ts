@@ -167,3 +167,19 @@ export async function cancelUnclaimedQueuedAction(
     body: JSON.stringify({ organization_id: organizationId, action_id: actionId }),
   }).catch(() => {});
 }
+
+/**
+ * Health rows shown in the inbox strip. Normally only the connected
+ * platforms; when the connected-platform list is UNKNOWN (its read failed)
+ * every health row is shown instead of filtering to an empty set, which
+ * would read as "nothing connected".
+ */
+export function selectVisiblePlatformHealth<T extends { platform: string }>(
+  rows: T[],
+  connected: Set<string>,
+  connectedUnknown: boolean,
+  normalize: (platform: string) => string,
+): T[] {
+  if (connectedUnknown) return rows;
+  return rows.filter((row) => connected.has(normalize(row.platform)));
+}

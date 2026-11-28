@@ -64,6 +64,8 @@ export interface PlatformHealthStripProps {
   onHealthRefresh?: () => void;
   className?: string;
   loading?: boolean;
+  /** Health read failed: render "status unknown", never an empty / stale strip. */
+  error?: string | null;
 }
 
 /**
@@ -144,7 +146,20 @@ export function PlatformHealthStrip({
   onHealthRefresh,
   className = '',
   loading = false,
+  error = null,
 }: PlatformHealthStripProps) {
+  if (error) {
+    return (
+      <div role="alert" title={error} className={`flex items-center gap-2 px-3 py-2 text-xs text-amber-800 bg-amber-50 border-b border-amber-200 ${className}`}>
+        <span>Couldn&apos;t check platform status. Status is unknown.</span>
+        {onHealthRefresh ? (
+          <button type="button" onClick={onHealthRefresh} className="underline hover:no-underline">
+            Retry
+          </button>
+        ) : null}
+      </div>
+    );
+  }
   if (!platforms || platforms.length === 0) {
     if (loading) {
       return (

@@ -28,6 +28,7 @@ import type {
   RawSignal,
 } from '../../types/listeningConnector';
 import { getToken } from '../platformTokenService';
+import { platformAccountResolutionCode } from '../platformAccountResolution';
 
 const REDDIT_API = 'https://oauth.reddit.com';
 const USER_AGENT = 'omnivyra-listening/1.0 (by /u/omnivyra-bot)';
@@ -122,10 +123,25 @@ function keywordMatches(text: string, keywords: string[]): boolean {
   return keywords.some((kw) => lower.includes(kw.toLowerCase()));
 }
 
-async function fetchOAuthToken(organizationId: string): Promise<string | null> {
-  // tenant_id == organization_id in the consolidated token model.
-  const token = await getToken(organizationId, organizationId, 'reddit');
-  return token?.access_token ?? null;
+type OAuthTokenRead = { token: string | null; unavailableReason: string | null };
+
+/**
+ * Read the org's Reddit OAuth token. An ambiguous or unreadable account
+ * resolution becomes a distinct, non-crashing reason (never
+ * `oauth_token_unavailable`, never a throw escaping into the pipeline).
+ */
+async function fetchOAuthToken(organizationId: string): Promise<OAuthTokenRead> {
+  try {
+    // tenant_id == organization_id in the consolidated token model.
+    const token = await getToken(organizationId, organizationId, 'reddit');
+    const access = token?.access_token ?? null;
+    return { token: access, unavailableReason: access ? null : 'oauth_token_unavailable' };
+  } catch (error) {
+    const code = platformAccountResolutionCode(error);
+    if (code === 'PLATFORM_ACCOUNT_AMBIGUOUS') return { token: null, unavailableReason: 'oauth_account_ambiguous' };
+    if (code === 'PLATFORM_ACCOUNT_LOOKUP_FAILED') return { token: null, unavailableReason: 'oauth_account_lookup_failed' };
+    throw error;
+  }
 }
 
 /**
@@ -190,8 +206,8 @@ export const redditListeningConnector: ListeningConnector = {
     if (!SUBREDDIT_RE.test(input.sourceIdentifier)) {
       reasons.push('source_identifier_invalid_subreddit_name');
     }
-    const token = await fetchOAuthToken(input.organizationId);
-    if (!token) reasons.push('oauth_token_unavailable');
+    const { token, unavailableReason } = await fetchOAuthToken(input.organizationId);
+    if (!token) reasons.push(unavailableReason ?? 'oauth_token_unavailable');
     return { eligible: reasons.length === 0, reasons };
   },
 
@@ -207,7 +223,7 @@ export const redditListeningConnector: ListeningConnector = {
   },
 
   async validateScopes(input): Promise<ConnectorScopeValidation> {
-    const token = await fetchOAuthToken(input.organizationId);
+    const { token } = await fetchOAuthToken(input.organizationId);
     if (!token) {
       return { sufficient: false, granted: [], required: REQUIRED_SCOPES, missing: REQUIRED_SCOPES };
     }
@@ -223,8 +239,11 @@ export const redditListeningConnector: ListeningConnector = {
   async validateRateLimits(input): Promise<ConnectorRateLimit> {
     // Cheap probe: HEAD-ish call against /api/v1/me to inspect headers.
     // If unauthorised, we surface this as a transient `available=false`.
-    const token = await fetchOAuthToken(input.organizationId);
-    if (!token) return { available: false, reset_at: null, remaining: null, detail: 'no_oauth_token' };
+    const { token, unavailableReason } = await fetchOAuthToken(input.organizationId);
+    if (!token) {
+      const detail = unavailableReason && unavailableReason !== 'oauth_token_unavailable' ? unavailableReason : 'no_oauth_token';
+      return { available: false, reset_at: null, remaining: null, detail };
+    }
     try {
       const resp = await fetch(`${REDDIT_API}/api/v1/me`, {
         method: 'GET',
@@ -243,7 +262,7 @@ export const redditListeningConnector: ListeningConnector = {
   },
 
   async fetchMetadata(input): Promise<ConnectorSourceMetadata> {
-    const token = await fetchOAuthToken(input.organizationId);
+    const { token } = await fetchOAuthToken(input.organizationId);
     if (!token) {
       return {
         source_identifier: input.sourceIdentifier,
@@ -288,8 +307,8 @@ export const redditListeningConnector: ListeningConnector = {
       throw new Error('source_identifier_invalid_subreddit_name');
     }
 
-    const token = await fetchOAuthToken(input.organizationId);
-    if (!token) throw new Error('oauth_token_unavailable');
+    const { token, unavailableReason } = await fetchOAuthToken(input.organizationId);
+    if (!token) throw new Error(unavailableReason ?? 'oauth_token_unavailable');
 
     const signals: RawSignal[] = [];
     let postsFetched = 0;

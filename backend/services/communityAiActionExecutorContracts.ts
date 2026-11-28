@@ -8,6 +8,7 @@ import { supabase } from '../db/supabaseClient';
 import { getPlaybookById } from './playbooks/playbookService';
 import { validateActionAgainstPlaybook } from './playbooks/playbookValidator';
 import { getToken } from './platformTokenService';
+import { platformAccountResolutionCode } from './platformAccountResolution';
 import { executeRpaTask } from './rpaWorker/rpaWorkerService';
 import { logCommunityAiActionEvent } from './communityAiActionLogService';
 import { getCommunityAiPlatformPolicy } from './communityAiPlatformPolicyService';
@@ -407,8 +408,12 @@ export const resolveExecutionMode = async (
       normalizePlatform(action.platform)
     );
     if (tokenRow?.access_token) return 'api';
-  } catch {
-    /* token lookup failure is treated as "no API available" */
+  } catch (error) {
+    // Tenant isolation: an ambiguous or unreadable account resolution must not
+    // be read as "no API available" and routed to the browser. Route to 'api'
+    // so runApiExecution refuses with the distinct code (and the runtime does
+    // not fall back). Any other lookup failure keeps the old handling.
+    if (platformAccountResolutionCode(error)) return 'api';
   }
   // Browser is a safe fallback when API is unavailable; the extension layer
   // will itself refuse unsupported (platform, action) pairs.
@@ -515,7 +520,11 @@ export const runApiExecution = async (action: CommunityAiAction): Promise<Execut
       action.organization_id,
       normalizePlatform(action.platform)
     );
-  } catch {
+  } catch (error) {
+    // Ambiguous / unreadable account: refuse with the distinct code. The
+    // runtime treats these codes as non-fallback (no browser dispatch).
+    const refusal = platformAccountResolutionCode(error);
+    if (refusal) return { ok: false, status: 'failed', error: refusal, execution_mode: 'api' };
     tokenRow = null;
   }
   if (!tokenRow?.access_token) {

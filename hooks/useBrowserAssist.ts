@@ -116,6 +116,7 @@ export function useBrowserAssistData(deps: UseBrowserAssistDataDeps) {
   const {
     platforms: platformHealth,
     loading: platformHealthLoading,
+    error: platformHealthError,
     refresh: refreshPlatformHealth,
   } = useEngagementPlatformHealth(organizationId);
   const {
@@ -153,6 +154,7 @@ export function useBrowserAssistData(deps: UseBrowserAssistDataDeps) {
   return {
     platformHealth,
     platformHealthLoading,
+    platformHealthError,
     refreshPlatformHealth,
 
     extensionStatus,

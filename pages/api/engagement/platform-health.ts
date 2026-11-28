@@ -29,6 +29,8 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 
 import { resolveUserContext, enforceCompanyAccess } from '../../../backend/services/userContextService';
 import { getPlatformHealth } from '../../../backend/services/platformHealth/platformHealthService';
+import { platformAccountResolutionCode } from '../../../backend/services/platformAccountResolution';
+import { describeProviderError } from '../../../backend/auth/safeErrorLog';
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'GET') {
@@ -61,6 +63,12 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       platforms,
     });
   } catch (err) {
+    const code = platformAccountResolutionCode(err);
+    if (code) {
+      // Stable code to the client; the database detail stays in the (redacted) server log.
+      console.error('[engagement/platform-health]', code, describeProviderError(err));
+      return res.status(500).json({ error: code });
+    }
     console.error('[engagement/platform-health]', err);
     return res
       .status(500)

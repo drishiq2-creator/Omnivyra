@@ -19,6 +19,13 @@ import { supabase } from '../db/supabaseClient';
 import { getToken as getTokenFromStore, isTokenExpiringSoon } from '../auth/tokenStore';
 import { refreshPlatformToken } from '../auth/tokenRefresh';
 import { normalizePlatform } from '../constants/platforms';
+import { PlatformAccountResolutionError } from './platformAccountResolution';
+
+export {
+  PlatformAccountResolutionError,
+  platformAccountResolutionCode,
+  type PlatformAccountResolutionCode,
+} from './platformAccountResolution';
 
 type TokenInput = {
   /** Accepted for back-compat with OAuth callbacks but no longer persisted
@@ -38,33 +45,80 @@ const PLATFORM_ALIASES: Record<string, string[]> = {
 };
 
 /**
- * Resolve the canonical social_accounts row id for an (organization, platform)
- * pair. Returns the most recently updated active row (handles legacy
- * duplicates). Used by every token-read entry point in this module.
+ * Outcome of resolving the ONE social_accounts row an organization sends
+ * through on a platform. Tenant-safe by construction:
+ *   - only rows with company_id = the organization (never a company_id NULL
+ *     legacy/personal row, never another company's row);
+ *   - only rows connected by an active member of that organization;
+ *   - more than one matching active row is AMBIGUOUS — never picked by recency;
+ *   - a failed read is LOOKUP_FAILED — never rendered as "not connected".
  */
-async function resolveSocialAccountIdForOrg(
+export type SocialAccountResolution =
+  | { status: 'resolved'; socialAccountId: string }
+  | { status: 'not_connected' }
+  | { status: 'ambiguous' }
+  | { status: 'lookup_failed'; stage: 'user_company_roles' | 'social_accounts'; message: string };
+
+export async function resolveSocialAccountForOrg(
   organizationId: string,
   platform: string,
-): Promise<string | null> {
+): Promise<SocialAccountResolution> {
   const platformsToMatch = PLATFORM_ALIASES[platform] ?? [platform];
 
-  const { data: roleRows } = await ownedDbTable('user_company_roles')
+  const { data: roleRows, error: roleError } = await ownedDbTable('user_company_roles')
     .select('user_id')
     .eq('company_id', organizationId)
     .eq('status', 'active');
+  if (roleError) {
+    return { status: 'lookup_failed', stage: 'user_company_roles', message: roleError.message ?? 'read failed' };
+  }
   const userIds = (roleRows ?? []).map((r: { user_id: string }) => r.user_id).filter(Boolean);
-  if (userIds.length === 0) return null;
+  if (userIds.length === 0) return { status: 'not_connected' };
 
-  const { data: rows } = await ownedDbTable('social_accounts')
-    .select('id')
+  // Only rows that can serve an API token count as an account: a token-less
+  // (extension / cookie-backed) row is not a candidate.
+  const { data: rows, error: accountError } = await ownedDbTable('social_accounts')
+    .select('id, platform_user_id, updated_at')
+    .eq('company_id', organizationId)
     .in('user_id', userIds)
     .eq('is_active', true)
     .in('platform', platformsToMatch)
-    .or(`company_id.eq.${organizationId},company_id.is.null`)
-    .order('updated_at', { ascending: false })
-    .limit(1);
+    .not('access_token', 'is', null);
+  if (accountError) {
+    return { status: 'lookup_failed', stage: 'social_accounts', message: accountError.message ?? 'read failed' };
+  }
 
-  return (rows ?? [])[0]?.id ?? null;
+  // One external account per platform_user_id (the same account stored under
+  // both x and twitter is one account; its latest row is used). planning_%
+  // placeholders are not accounts. Rows without a platform_user_id each count.
+  type CandidateRow = { id: string; platform_user_id?: string | null; updated_at?: string | null };
+  const accounts = new Map<string, CandidateRow>();
+  for (const row of (rows ?? []) as CandidateRow[]) {
+    if (!row?.id) continue;
+    const puid = typeof row.platform_user_id === 'string' && row.platform_user_id ? row.platform_user_id : null;
+    if (puid && puid.startsWith('planning_')) continue;
+    const key = puid ? `puid:${puid}` : `row:${row.id}`;
+    const prev = accounts.get(key);
+    if (!prev || String(row.updated_at ?? '') > String(prev.updated_at ?? '')) accounts.set(key, row);
+  }
+  if (accounts.size === 0) return { status: 'not_connected' };
+  if (accounts.size > 1) return { status: 'ambiguous' };
+  return { status: 'resolved', socialAccountId: Array.from(accounts.values())[0].id };
+}
+
+/** Active member user ids of a company; a read error throws LOOKUP_FAILED (never "no members"). */
+async function listActiveMemberIdsOrThrow(organizationId: string): Promise<string[]> {
+  const { data: roleRows, error } = await ownedDbTable('user_company_roles')
+    .select('user_id')
+    .eq('company_id', organizationId)
+    .eq('status', 'active');
+  if (error) {
+    throw new PlatformAccountResolutionError(
+      'PLATFORM_ACCOUNT_LOOKUP_FAILED',
+      `Could not read user_company_roles while listing platforms: ${error.message ?? 'read failed'}`,
+    );
+  }
+  return (roleRows ?? []).map((r: { user_id: string }) => r.user_id).filter(Boolean);
 }
 
 /**
@@ -145,8 +199,21 @@ export const getToken = async (
 ) => {
   const normalized = normalizePlatform(platform);
 
-  const accountId = await resolveSocialAccountIdForOrg(organization_id, normalized);
-  if (!accountId) return null;
+  const resolution = await resolveSocialAccountForOrg(organization_id, normalized);
+  if (resolution.status === 'not_connected') return null;
+  if (resolution.status === 'ambiguous') {
+    throw new PlatformAccountResolutionError(
+      'PLATFORM_ACCOUNT_AMBIGUOUS',
+      `More than one active ${normalized} account is connected for this organization; refusing to choose one`,
+    );
+  }
+  if (resolution.status === 'lookup_failed') {
+    throw new PlatformAccountResolutionError(
+      'PLATFORM_ACCOUNT_LOOKUP_FAILED',
+      `Could not read ${resolution.stage} while resolving the ${normalized} account: ${resolution.message}`,
+    );
+  }
+  const accountId = resolution.socialAccountId;
 
   let tokenObj = await getTokenFromStore(accountId);
   if (!tokenObj?.access_token) return null;
@@ -178,19 +245,23 @@ export async function getPlatformsWithTokensForOrg(
 ): Promise<string[]> {
   const platforms = new Set<string>();
 
-  const { data: roleRows } = await ownedDbTable('user_company_roles')
-    .select('user_id')
-    .eq('company_id', organization_id)
-    .eq('status', 'active');
-  const userIds = (roleRows ?? []).map((r: { user_id: string }) => r.user_id).filter(Boolean);
+  const userIds = await listActiveMemberIdsOrThrow(organization_id);
   if (userIds.length === 0) return [];
 
-  const { data: saRows } = await ownedDbTable('social_accounts')
+  // Company-only (never a company_id NULL legacy/personal row), matching
+  // resolveSocialAccountForOrg. A read error throws LOOKUP_FAILED, never [].
+  const { data: saRows, error } = await ownedDbTable('social_accounts')
     .select('platform')
+    .eq('company_id', organization_id)
     .in('user_id', userIds)
     .eq('is_active', true)
-    .or(`company_id.eq.${organization_id},company_id.is.null`)
     .not('access_token', 'is', null);
+  if (error) {
+    throw new PlatformAccountResolutionError(
+      'PLATFORM_ACCOUNT_LOOKUP_FAILED',
+      `Could not read social_accounts while listing platforms: ${error.message ?? 'read failed'}`,
+    );
+  }
   for (const r of saRows ?? []) {
     if (r.platform) platforms.add(normalizePlatform(r.platform));
   }
@@ -209,19 +280,23 @@ export async function getPlatformsWithActiveSocialAccountsForOrg(
 ): Promise<string[]> {
   const platforms = new Set<string>();
 
-  const { data: roleRows } = await ownedDbTable('user_company_roles')
-    .select('user_id')
-    .eq('company_id', organization_id)
-    .eq('status', 'active');
-  const userIds = (roleRows ?? []).map((r: { user_id: string }) => r.user_id).filter(Boolean);
+  const userIds = await listActiveMemberIdsOrThrow(organization_id);
   if (userIds.length === 0) return [];
 
-  const { data: saRows } = await ownedDbTable('social_accounts')
+  // Company-only, matching resolveSocialAccountForOrg. A read error throws
+  // LOOKUP_FAILED, never [].
+  const { data: saRows, error } = await ownedDbTable('social_accounts')
     .select('platform')
+    .eq('company_id', organization_id)
     .in('user_id', userIds)
     .eq('is_active', true)
-    .or(`company_id.eq.${organization_id},company_id.is.null`)
     .not('platform_user_id', 'like', 'planning_%');
+  if (error) {
+    throw new PlatformAccountResolutionError(
+      'PLATFORM_ACCOUNT_LOOKUP_FAILED',
+      `Could not read social_accounts while listing platforms: ${error.message ?? 'read failed'}`,
+    );
+  }
 
   for (const r of saRows ?? []) {
     if (r.platform) platforms.add(normalizePlatform(r.platform));

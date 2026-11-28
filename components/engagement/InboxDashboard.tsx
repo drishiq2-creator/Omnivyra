@@ -14,6 +14,7 @@ import { ThreadView } from '@/components/engagement/ThreadView';
 import { AIEngagementAssistant } from '@/components/engagement/AIEngagementAssistant';
 import { InboxLayout } from '@/components/engagement/inbox/InboxLayout';
 import { InboxHeader } from '@/components/engagement/inbox/InboxHeader';
+import { selectVisiblePlatformHealth } from '@/components/engagement/inbox/helpers';
 import { useEngagementInbox } from '@/hooks/useEngagementInbox';
 import { usePlatformCounts } from '@/hooks/usePlatformCounts';
 import { useWorkQueue } from '@/hooks/useWorkQueue';
@@ -114,7 +115,7 @@ function InboxDashboardComponent({
     loading: workQueueLoading,
     refresh: refreshWorkQueue,
   } = useWorkQueue(organizationId);
-  const { platforms: integrations } = useCompanyIntegrations(organizationId);
+  const { platforms: integrations, error: integrationsError } = useCompanyIntegrations(organizationId);
   const connectedPlatformSlugs = useMemo(
     () => Array.from(
       new Set(
@@ -136,6 +137,7 @@ function InboxDashboardComponent({
   const {
     platformHealth,
     platformHealthLoading,
+    platformHealthError,
     refreshPlatformHealth,
     extensionStatus,
     extensionAuth,
@@ -332,14 +334,16 @@ function InboxDashboardComponent({
     };
   }, [needsResponseQueueItems, postThreads]);
   const actionableThreads = queueCounts.needsResponse;
-  const connectedPlatformsCount = connectedPlatformSlugs.length;
+  // Unknown (null), not 0, when the connected-platforms read failed.
+  const connectedPlatformsCount = integrationsError ? null : connectedPlatformSlugs.length;
   const connectedPlatformSet = useMemo(
     () => new Set(connectedPlatformSlugs),
     [connectedPlatformSlugs]
   );
+  // Unfiltered when the connected-platform list is unknown (its read failed).
   const connectedPlatformHealth = useMemo(
-    () => platformHealth.filter((platform) => connectedPlatformSet.has(normalizePlatform(platform.platform))),
-    [connectedPlatformSet, platformHealth]
+    () => selectVisiblePlatformHealth(platformHealth, connectedPlatformSet, Boolean(integrationsError), normalizePlatform),
+    [connectedPlatformSet, platformHealth, integrationsError]
   );
   const extensionPanelPlatforms = useMemo(() => {
     return connectedPlatformSlugs.map((platform) => {
@@ -690,6 +694,7 @@ function InboxDashboardComponent({
         browserAssist={{
           enabled: browserAssistEnabled,
           hasLinkedInConnection,
+          linkedInConnectionUnknown: Boolean(integrationsError),
           extensionPanel: {
             loading: extensionLoading || workspacePreferencesLoading || extensionAuthenticating,
             error: extensionError,
@@ -749,6 +754,7 @@ function InboxDashboardComponent({
           onSelectPlatform: handleSelectPlatform,
           workQueue: clientWorkQueue as typeof workQueue,
           platforms: connectedPlatformSlugs,
+          error: integrationsError,
           loading: countsLoading || workQueueLoading,
         }}
         platformHealth={{
@@ -757,6 +763,7 @@ function InboxDashboardComponent({
           organizationId,
           onSelectPlatform: handleSelectPlatform,
           onHealthRefresh: refreshPlatformHealth,
+          error: platformHealthError,
           loading: platformHealthLoading,
         }}
         onRefreshWorkspace={handleRefresh}
