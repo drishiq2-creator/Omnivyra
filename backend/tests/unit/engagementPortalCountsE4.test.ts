@@ -122,8 +122,8 @@ function seedIdentity() {
     { user_id: 'user_b1', company_id: COMPANY_B, status: 'active' },
   ];
   db.social_accounts = [
-    { user_id: 'user_a1', platform: 'linkedin', platform_user_id: 'li-A1', is_active: true },
-    { user_id: 'user_b1', platform: 'linkedin', platform_user_id: 'li-B1', is_active: true },
+    { user_id: 'user_a1', company_id: 'company_a', platform: 'linkedin', platform_user_id: 'li-A1', is_active: true },
+    { user_id: 'user_b1', company_id: 'company_b', platform: 'linkedin', platform_user_id: 'li-B1', is_active: true },
   ];
   db.engagement_authors = [
     { id: 'auth_a1', platform: 'linkedin', platform_user_id: 'li-A1', display_name: 'Company A' },

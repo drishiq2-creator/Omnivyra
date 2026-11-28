@@ -53,6 +53,17 @@ function normalizeDisplayNameKey(value: unknown): string | null {
   return normalized;
 }
 
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?(?:Z|[+-]\d{2}:\d{2})?)?$/;
+
+/** undefined = not supplied; 'invalid' = refuse; otherwise a canonical ISO string. */
+function parseIsoQueryDate(value: unknown): string | undefined | 'invalid' {
+  const v = Array.isArray(value) ? value[0] : value;
+  if (v === undefined || v === null || v === '') return undefined;
+  if (typeof v !== 'string' || !ISO_DATE_RE.test(v.trim())) return 'invalid';
+  const ms = new Date(v.trim()).getTime();
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : 'invalid';
+}
+
 async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'GET') {
     res.setHeader('Allow', 'GET');
@@ -63,10 +74,18 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     (req.query.organization_id ?? req.query.organizationId ?? req.query.companyId) as string | undefined;
   const platform = (req.query.platform as string)?.trim() || undefined;
   const priority = (req.query.priority ?? req.query.status) as 'high' | 'medium' | 'low' | undefined;
-  const startDateParam = (req.query.start_date ?? req.query.dateFrom) as string | undefined;
+  // E4 re-review #3: dates are validated as ISO timestamps and re-serialised
+  // (toISOString) before they reach any PostgREST filter string (.or()).
+  const startDateRaw = req.query.start_date ?? req.query.dateFrom;
+  const endDateRaw = req.query.end_date ?? req.query.dateTo;
+  const startDateParsed = parseIsoQueryDate(startDateRaw);
+  const endDateParsed = parseIsoQueryDate(endDateRaw);
+  if (startDateParsed === 'invalid' || endDateParsed === 'invalid') {
+    return res.status(400).json({ error: 'start_date / end_date must be ISO-8601 timestamps', code: 'INVALID_DATE' });
+  }
   const startDate =
-    startDateParam || new Date(Date.now() - ACTIONABLE_INBOX_LOOKBACK_DAYS * 24 * 60 * 60 * 1000).toISOString();
-  const endDate = (req.query.end_date ?? req.query.dateTo) as string | undefined;
+    startDateParsed ?? new Date(Date.now() - ACTIONABLE_INBOX_LOOKBACK_DAYS * 24 * 60 * 60 * 1000).toISOString();
+  const endDate = endDateParsed ?? undefined;
   const limit = Math.min(500, Math.max(1, parseInt(String(req.query.limit ?? 50), 10) || 50));
 
   const companyId = organizationId?.trim();

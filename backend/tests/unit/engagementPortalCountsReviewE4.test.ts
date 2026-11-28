@@ -114,8 +114,8 @@ function seedIdentity() {
     { user_id: 'user_b1', company_id: B, status: 'active' },
   ];
   db.social_accounts = [
-    { user_id: 'user_a1', platform: 'linkedin', platform_user_id: 'li-A1', is_active: true },
-    { user_id: 'user_b1', platform: 'linkedin', platform_user_id: 'li-B1', is_active: true },
+    { user_id: 'user_a1', company_id: 'company_a', platform: 'linkedin', platform_user_id: 'li-A1', is_active: true },
+    { user_id: 'user_b1', company_id: 'company_b', platform: 'linkedin', platform_user_id: 'li-B1', is_active: true },
   ];
 }
 function author(id: string, platformUserId: string) {
@@ -168,16 +168,23 @@ describe('#1 company author identities survive other tenants\' author volume', (
     expect((await counts()).body.totals.people_reaction).toBe(1);
   });
 
-  it('strict mode fails closed on a cap-sized (possibly truncated) identity read', async () => {
-    for (let i = 0; i < 1000; i += 1) db.social_accounts.push({ user_id: 'user_a1', platform: 'linkedin', platform_user_id: `li-A-extra-${i}`, is_active: true });
+  // Re-review #5 superseded "fail closed on a full page" with PAGING: a
+  // cap-sized identity read is now read to the end, not refused.
+  it('more than a page of company accounts is read completely (paged), not truncated', async () => {
+    seed(0);
+    // 1,001 accounts BEFORE the replying one in read order: a single capped read would miss it.
+    db.social_accounts = db.social_accounts.filter((a) => a.platform_user_id !== 'li-A1');
+    for (let i = 0; i < 1001; i += 1) db.social_accounts.push({ user_id: 'user_a1', company_id: A, platform: 'linkedin', platform_user_id: `li-A-0-extra-${String(i).padStart(4, '0')}`, is_active: true });
+    db.social_accounts.push({ user_id: 'user_a1', company_id: A, platform: 'linkedin', platform_user_id: 'li-A1', is_active: true });
     const res = await counts();
-    expect(res.statusCode).toBe(503);
-    expect(res.body.totals).toBeUndefined();
+    expect(res.statusCode).toBe(200);
+    expect(res.body.totals.people_reaction).toBe(0);
   });
 
-  it('CONTROL: 998 account rows (below the cap) still answer', async () => {
-    for (let i = 0; i < 997; i += 1) db.social_accounts.push({ user_id: 'user_a1', platform: 'linkedin', platform_user_id: `li-A-extra-${i}`, is_active: true });
-    expect((await counts()).statusCode).toBe(200);
+  it('CONTROL: an identity read error fails closed (503), never "no company authors"', async () => {
+    seed(0);
+    failReads.add('social_accounts');
+    expect((await counts()).statusCode).toBe(503);
   });
 });
 

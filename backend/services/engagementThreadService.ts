@@ -139,6 +139,25 @@ function coerceOptionalCount(value: unknown): number | null {
 const ORG_AUTHOR_READ_ROW_CAP = 1000;
 const ORG_AUTHOR_ID_CHUNK = 200;
 
+type StrictPage<T> = { data: T[] | null; error: { message?: string } | null };
+/** Hard ceiling per strict read; reaching it is a failure, never a truncation. */
+const ORG_AUTHOR_MAX_ROWS = 200_000;
+
+async function readAllStrict<T>(
+  label: string,
+  page: (from: number, to: number) => PromiseLike<StrictPage<T>>,
+): Promise<T[]> {
+  const out: T[] = [];
+  for (let from = 0; ; from += ORG_AUTHOR_READ_ROW_CAP) {
+    const { data, error } = await page(from, from + ORG_AUTHOR_READ_ROW_CAP - 1);
+    if (error) throw new Error(`${label}: ${error.message ?? 'read failed'}`);
+    if (!Array.isArray(data)) throw new Error(`${label}: no rows array in response`);
+    out.push(...data);
+    if (data.length < ORG_AUTHOR_READ_ROW_CAP) return out;
+    if (out.length >= ORG_AUTHOR_MAX_ROWS) throw new Error(`${label}: more than ${ORG_AUTHOR_MAX_ROWS} rows`);
+  }
+}
+
 export async function getOrgAuthorIds(
   organizationId: string,
   options: { strict?: boolean } = {},
@@ -157,22 +176,63 @@ export async function getOrgAuthorIds(
       throw new Error(`${label}: ${data.length} rows reached the read cap; result may be truncated`);
     }
   };
-  const { data: roleUsers, error: roleUsersError } = await supabase
-    .from('user_company_roles')
-    .select('user_id')
-    .eq('company_id', organizationId)
-    .eq('status', 'active');
-  failIfStrict('user_company_roles', roleUsersError, roleUsers);
-
-  const userIds = (roleUsers ?? []).map((row: { user_id: string }) => row.user_id);
-  if (userIds.length === 0) return new Set();
-
-  const { data: accounts, error: accountsError } = await supabase
-    .from('social_accounts')
-    .select('platform, platform_user_id')
-    .in('user_id', userIds)
-    .eq('is_active', true);
-  failIfStrict('social_accounts', accountsError, accounts);
+  let userIds: string[];
+  let accounts: Array<{ platform: string; platform_user_id: string }> | null;
+  if (options.strict) {
+    // E4 re-review #4/#5 (strict = the portal count definition):
+    //  - members are PAGED (a company with >= 1000 members must not read as
+    //    truncated forever), with a hard ceiling that is a failure;
+    //  - the member list is CHUNKED into the social_accounts .in(user_id)
+    //    filter (URL length);
+    //  - only accounts bound to THIS company (social_accounts.company_id) are
+    //    the company's identities, so a person who is a member of A and B does
+    //    not bring B's account into A's authors (the company-only rule of the
+    //    token work, PR #479). Legacy rows with company_id NULL are therefore
+    //    not company identities here: their replies count as external, the
+    //    safe direction (an extra item shown, never real work hidden).
+    // The non-strict path below is unchanged for existing callers.
+    const roleRows = await readAllStrict<{ user_id: string }>('user_company_roles', (from, to) =>
+      supabase
+        .from('user_company_roles')
+        .select('user_id')
+        .eq('company_id', organizationId)
+        .eq('status', 'active')
+        .order('user_id', { ascending: true })
+        .range(from, to) as unknown as PromiseLike<StrictPage<{ user_id: string }>>,
+    );
+    userIds = Array.from(new Set(roleRows.map((row) => row.user_id).filter(Boolean)));
+    if (userIds.length === 0) return new Set();
+    accounts = [];
+    for (let i = 0; i < userIds.length; i += ORG_AUTHOR_ID_CHUNK) {
+      const chunkIds = userIds.slice(i, i + ORG_AUTHOR_ID_CHUNK);
+      accounts.push(
+        ...(await readAllStrict<{ platform: string; platform_user_id: string }>('social_accounts', (from, to) =>
+          supabase
+            .from('social_accounts')
+            .select('platform, platform_user_id')
+            .in('user_id', chunkIds)
+            .eq('company_id', organizationId)
+            .eq('is_active', true)
+            .order('platform_user_id', { ascending: true })
+            .range(from, to) as unknown as PromiseLike<StrictPage<{ platform: string; platform_user_id: string }>>,
+        )),
+      );
+    }
+  } else {
+    const { data: roleUsers } = await supabase
+      .from('user_company_roles')
+      .select('user_id')
+      .eq('company_id', organizationId)
+      .eq('status', 'active');
+    userIds = (roleUsers ?? []).map((row: { user_id: string }) => row.user_id);
+    if (userIds.length === 0) return new Set();
+    const { data: accountRows } = await supabase
+      .from('social_accounts')
+      .select('platform, platform_user_id')
+      .in('user_id', userIds)
+      .eq('is_active', true);
+    accounts = (accountRows ?? null) as typeof accounts;
+  }
 
   if (!accounts?.length) return new Set();
 

@@ -447,8 +447,24 @@ export function derivePortalCounts(input: PortalCountsInput): EngagementPortalCo
     }
     const turn = latestTurnByThread.get(newestId)!;
     const resolvedMs = Math.max(...siblingIds.map((id) => resolvedAtMsByThread.get(id) ?? -Infinity));
+    // E4 re-review #2: the resolve covers the conversation only if it came
+    // after EVERY inbound DM we had received (max ingestion time across the
+    // siblings), so an older-dated message that arrived after the resolve
+    // re-opens it — in the count AND (no handled entry) in the list.
+    let lastInboundIngestMs: number | null = null;
+    for (const id of siblingIds) {
+      for (const m of messagesByThread.get(id) ?? []) {
+        if (!isDmMessageType(m.message_type) || isCompanyMessage(m)) continue;
+        const ms = parseMessageDateMs(m.created_at ?? null) ?? parseMessageDateMs(getEffectiveMessageTimestamp(m));
+        if (ms !== null && (lastInboundIngestMs === null || ms > lastInboundIngestMs)) lastInboundIngestMs = ms;
+      }
+      const own = latestTurnByThread.get(id);
+      if (own && !own.self && own.ingestMs !== null && (lastInboundIngestMs === null || own.ingestMs > lastInboundIngestMs)) {
+        lastInboundIngestMs = own.ingestMs;
+      }
+    }
     const resolveCoversLatest =
-      Number.isFinite(resolvedMs) && (turn.ingestMs === null || resolvedMs >= turn.ingestMs);
+      Number.isFinite(resolvedMs) && (lastInboundIngestMs === null || resolvedMs >= lastInboundIngestMs);
     // handled_threads value must be >= the list's latest_message_time (provider
     // time) so the list hides exactly what the count treats as resolved.
     if (resolveCoversLatest) markHandled(siblingIds, Math.max(resolvedMs, turn.timeMs ?? -Infinity));
@@ -473,9 +489,6 @@ export function derivePortalCounts(input: PortalCountsInput): EngagementPortalCo
     const turn = latestTurnByThread.get(t.id);
     if (!turn || turn.kind !== 'comment') continue;
     const resolvedMs = resolvedAtMsByThread.get(t.id) ?? -Infinity;
-    if (Number.isFinite(resolvedMs) && (turn.ingestMs === null || resolvedMs >= turn.ingestMs)) {
-      markHandled([t.id], Math.max(resolvedMs, turn.timeMs ?? -Infinity));
-    }
     if (turn.orgAuthorOnly) markHandled([t.id], turn.timeMs);
     if (turn.self) continue;
     const msgs = messagesByThread.get(t.id) ?? [];
@@ -503,7 +516,14 @@ export function derivePortalCounts(input: PortalCountsInput): EngagementPortalCo
       if (actionCovers(t.id, time, m.content ?? null)) continue;
       pending += 1;
     }
-    if (pending === 0) continue;
+    // E4 re-review #2: a resolve hides the thread from the list ONLY when it
+    // leaves nothing pending. If any item re-opened (ingested after the
+    // resolve, whatever its provider time), no handled entry is emitted, so
+    // the list shows the thread exactly when the count does.
+    if (pending === 0) {
+      if (Number.isFinite(resolvedMs)) markHandled([t.id], Math.max(resolvedMs, turn.timeMs ?? -Infinity));
+      continue;
+    }
     const c = cell(t.platform);
     c.people_reaction += pending;
     c.actionable_items += pending;
@@ -585,6 +605,11 @@ export async function readExecutedCoverageActions(
   organizationId: string,
   cutoffIso: string,
 ): Promise<PortalActionRow[]> {
+  // E4 re-review #3: the cutoff is interpolated into a PostgREST .or() filter
+  // string, so only a canonical toISOString() value is accepted here.
+  if (typeof cutoffIso !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(cutoffIso)) {
+    throw new Error('readExecutedCoverageActions: cutoff must be a canonical ISO timestamp');
+  }
   return readAllPages<PortalActionRow>('community_ai_actions', (from, to) =>
     supabase
       .from('community_ai_actions')

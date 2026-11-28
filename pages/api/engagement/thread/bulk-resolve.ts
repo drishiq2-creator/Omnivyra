@@ -21,7 +21,7 @@ import { createApiRoute as __createApiRoute } from '../../../../lib/platform/rou
  */
 
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { enforceCompanyAccess } from '../../../../backend/services/userContextService';
+import { resolveUserContext, enforceCompanyAccess } from '../../../../backend/services/userContextService';
 import { supabase } from '../../../../backend/db/supabaseClient';
 import { recordThreadEvents } from '../../../../backend/services/engagementThreadEventService';
 
@@ -39,6 +39,14 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
   }
 
   try {
+    // E4 re-review #1: authenticate BEFORE any read. The thread lookup below
+    // runs with the service role, so without this an anonymous caller could use
+    // 404 / 400 / 403 as an existence and ownership oracle.
+    const user = await resolveUserContext(req);
+    if (!user || user.authenticated === false || !user.userId) {
+      return res.status(401).json({ error: 'Authentication required', code: 'UNAUTHENTICATED' });
+    }
+
     const body = (req.body || {}) as Body;
     const rawThreadIds = Array.isArray(body.thread_ids)
       ? body.thread_ids.filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
