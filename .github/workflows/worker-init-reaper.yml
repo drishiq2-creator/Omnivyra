@@ -1,5 +1,9 @@
 name: Worker init reaper (GI-07)
 
+# CI-ONLY / DO NOT MERGE: branch ci-only/gi-new1-worker-image-20261128 = #480 (GI-NEW-1)
+# + #476 (GI-07) merged, with GI-NEW-1 scenarios S3c / S3h / S6c added to run.sh,
+# run against the real worker image. Not for main.
+
 # GI-07: the worker image runs tini as PID 1 so orphaned Chromium processes are
 # reaped. This builds the REAL image from Dockerfile.worker and runs
 # scripts/ci/worker-init-reaper/run.sh against it: repeated Chromium
@@ -14,7 +18,7 @@ on:
       - scripts/ci/worker-init-reaper/**
       - .github/workflows/worker-init-reaper.yml
   push:
-    branches: [fix/gi07-worker-init-reaper-20261128]
+    branches: [fix/gi07-worker-init-reaper-20261128, ci-only/gi-new1-worker-image-20261128]
   workflow_dispatch: {}
 
 permissions:

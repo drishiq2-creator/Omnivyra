@@ -11,7 +11,10 @@
 //   node harness.js wait <jobId> <timeoutMs>
 //
 // Job kinds: cycle (launch, load page, close), hold (same, holding the browser
-// open for holdMs), crash (SIGKILL the browser's main process, then close).
+// open for holdMs), crash (SIGKILL the browser's main process, then close),
+// holdnohandler (hold with the three handle flags spelled inline), holdshipped
+// (hold, launched with the SHIPPED GI-NEW-1 helper compiled into this image:
+// /app/dist/backend/services/playwrightLaunchOptions.js -> withWorkerSignalOwnership).
 //
 // The worker's signal handling mirrors backend/workers/main.ts: handlers are
 // installed before the consumer starts, the first SIGTERM/SIGINT drains the
@@ -40,16 +43,22 @@ async function runWorker() {
     log(`HARNESS_SIGNAL ${sig} n=${signals.length} pid=${process.pid}`);
     if (shuttingDown) return;
     shuttingDown = true;
-    const hardExit = setTimeout(() => { log('HARNESS_HARD_EXIT'); process.exit(0); }, 20000);
+    // liveChrome: this process's live Chromium descendants at that moment (a hard
+    // exit with a job still holding its browser shows >= 1; Playwright's always-on
+    // 'exit' listener then SIGKILLs them, and the container's PID namespace ends).
+    const hardExit = setTimeout(() => { log(`HARNESS_HARD_EXIT liveChrome=${liveChrome()}`); process.exit(0); }, 20000);
     hardExit.unref();
     if (worker) await worker.close();
     log('HARNESS_DRAINED');
     server.close();
     clearTimeout(hardExit);
+    log(`HARNESS_PRE_EXIT liveChrome=${liveChrome()}`);
     process.exit(0);
   };
   process.on('SIGTERM', () => { void shutdown('SIGTERM'); });
   process.on('SIGINT', () => { void shutdown('SIGINT'); });
+  // Mirrors backend/workers/main.ts after GI-NEW-1: SIGHUP takes the same drain.
+  process.on('SIGHUP', () => { void shutdown('SIGHUP'); });
 
   worker = new Worker(QUEUE, async (job) => {
     const { kind, holdMs = 0 } = job.data;
@@ -57,9 +66,18 @@ async function runWorker() {
     // 'hold' uses Playwright's defaults, as production's chromium.launch() calls
     // do (handleSIGTERM: true closes every browser on SIGTERM). 'holdnohandler'
     // opts out, so the worker's own drain decides when the browser closes.
-    const launchOpts = kind === 'holdnohandler'
-      ? { headless: true, handleSIGTERM: false, handleSIGINT: false, handleSIGHUP: false }
-      : { headless: true };
+    // 'holdshipped' launches with the helper production ships (GI-NEW-1), loaded
+    // from the image's compiled dist, so the test exercises the real module.
+    let launchOpts;
+    if (kind === 'holdshipped') {
+      const { withWorkerSignalOwnership } = require('/app/dist/backend/services/playwrightLaunchOptions.js');
+      launchOpts = withWorkerSignalOwnership({ headless: true });
+      log(`HARNESS_SHIPPED_OPTS ${JSON.stringify(launchOpts)}`);
+    } else if (kind === 'holdnohandler') {
+      launchOpts = { headless: true, handleSIGTERM: false, handleSIGINT: false, handleSIGHUP: false };
+    } else {
+      launchOpts = { headless: true };
+    }
     const browser = await chromium.launch(launchOpts);
     try {
       const context = await browser.newContext();
@@ -95,6 +113,9 @@ async function runWorker() {
   worker.on('failed', (job, err) => log(`HARNESS_JOB_FAILED ${job ? job.id : '?'} ${err ? (err.stack || err.message).split('\n').slice(0, 4).join(' | ') : '?'}`));
 }
 
+function liveChrome() {
+  return procs().filter((p) => /chrom|headless_shell/i.test(p.comm) && p.state !== 'Z').length;
+}
 function comm(pid) { try { return fs.readFileSync(`/proc/${pid}/comm`, 'utf8').trim(); } catch { return '?'; } }
 function procs() {
   const out = [];

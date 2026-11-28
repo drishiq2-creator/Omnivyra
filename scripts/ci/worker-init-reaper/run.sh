@@ -111,6 +111,54 @@ scenarios() {
   R[$m.S3bexit]=$(exitcode gi07w)
   R[$m.S3bjobState]=$(hp state "$jid" | awk '/^STATE/{print $3}')
 
+  # GI-NEW-1 (CI-ONLY): the same in-flight shutdowns, launched with the SHIPPED
+  # helper compiled into this image (dist/backend/services/playwrightLaunchOptions.js).
+  # Each segment's log lines are counted from its own start (docker logs keeps
+  # every run of the container), via the line count taken before it.
+  local base
+  # S3c SIGTERM, shipped helper: the drain finishes the job.
+  docker start gi07w >/dev/null; wait_ready 5 || return
+  base=$(docker logs gi07w 2>&1 | wc -l)
+  out=$(hp produce holdshipped 1 8000 active); echo "$out"; jid=$(jobid "$out")
+  wait_log "HARNESS_HOLDING $jid"
+  docker stop -t 30 gi07w >/dev/null
+  R[$m.S3cexit]=$(exitcode gi07w)
+  R[$m.S3cshippedOpts]=$(docker logs gi07w 2>&1 | tail -n +$((base + 1)) | grep -c 'HARNESS_SHIPPED_OPTS .*"handleSIGINT":false,"handleSIGTERM":false,"handleSIGHUP":false')
+  R[$m.S3cdrained]=$(docker logs gi07w 2>&1 | tail -n +$((base + 1)) | grep -c HARNESS_DRAINED)
+  R[$m.S3chardExit]=$(docker logs gi07w 2>&1 | tail -n +$((base + 1)) | grep -c HARNESS_HARD_EXIT)
+  R[$m.S3cpreExitLiveChrome]=$(docker logs gi07w 2>&1 | tail -n +$((base + 1)) | awk -F'liveChrome=' '/HARNESS_PRE_EXIT/{print $2}' | tail -1)
+  R[$m.S3cjobState]=$(hp state "$jid" | awk '/^STATE/{print $3}')
+
+  # S3h SIGHUP, shipped helper: Playwright no longer listens for SIGHUP, so the
+  # worker's own handler must drain (as main.ts does after GI-NEW-1).
+  docker start gi07w >/dev/null; wait_ready 6 || return
+  base=$(docker logs gi07w 2>&1 | wc -l)
+  out=$(hp produce holdshipped 1 8000 active); echo "$out"; jid=$(jobid "$out")
+  wait_log "HARNESS_HOLDING $jid"
+  docker kill -s HUP gi07w >/dev/null; timeout 60 docker wait gi07w >/dev/null || fail "container did not stop within 60s"
+  R[$m.S3hexit]=$(exitcode gi07w)
+  R[$m.S3hsighups]=$(docker logs gi07w 2>&1 | tail -n +$((base + 1)) | grep -c 'HARNESS_SIGNAL SIGHUP')
+  R[$m.S3hdrained]=$(docker logs gi07w 2>&1 | tail -n +$((base + 1)) | grep -c HARNESS_DRAINED)
+  R[$m.S3hpreExitLiveChrome]=$(docker logs gi07w 2>&1 | tail -n +$((base + 1)) | awk -F'liveChrome=' '/HARNESS_PRE_EXIT/{print $2}' | tail -1)
+  R[$m.S3hjobState]=$(hp state "$jid" | awk '/^STATE/{print $3}')
+  R[$m.S3hhostChromeAfter]=$(ps -eo comm= | grep -Eci 'chrom|headless_shell')
+
+  # S6c a job that outlives the harness's 20 s hard-exit backstop (docker stop
+  # -t 30 leaves room for it): the drain cannot finish, the backstop exits 0,
+  # the job is NOT completed, and no Chromium survives the container. Last in
+  # the mode: the abandoned job would otherwise be re-run by a restarted worker.
+  docker start gi07w >/dev/null; wait_ready 7 || return
+  base=$(docker logs gi07w 2>&1 | wc -l)
+  out=$(hp produce holdshipped 1 40000 active); echo "$out"; jid=$(jobid "$out")
+  wait_log "HARNESS_HOLDING $jid"
+  docker stop -t 30 gi07w >/dev/null
+  R[$m.S6cexit]=$(exitcode gi07w)
+  R[$m.S6cdrained]=$(docker logs gi07w 2>&1 | tail -n +$((base + 1)) | grep -c HARNESS_DRAINED)
+  R[$m.S6chardExit]=$(docker logs gi07w 2>&1 | tail -n +$((base + 1)) | grep -c HARNESS_HARD_EXIT)
+  R[$m.S6chardExitLiveChrome]=$(docker logs gi07w 2>&1 | tail -n +$((base + 1)) | awk -F'liveChrome=' '/HARNESS_HARD_EXIT/{print $2}' | tail -1)
+  R[$m.S6cjobState]=$(hp state "$jid" | awk '/^STATE/{print $3}')
+  R[$m.S6chostChromeAfter]=$(ps -eo comm= | grep -Eci 'chrom|headless_shell')
+
   docker logs gi07w >"$OUT/worker-$m.log" 2>&1
   docker rm -f gi07w >/dev/null
 }
@@ -233,6 +281,32 @@ expect_eq "tini S3 in-flight job (Playwright default closes the browser on SIGTE
 expect_eq "tini S3b in-flight job, handleSIGTERM false" "${R[tini.S3bjobState]:-}" completed
 expect_eq "control S3b in-flight job, handleSIGTERM false" "${R[control.S3bjobState]:-}" completed
 expect_eq "tini S3b exit" "${R[tini.S3bexit]:-}" 0
+
+# GI-NEW-1 (CI-ONLY): the shipped helper, in BOTH modes.
+for m in tini control; do
+  expect_eq "$m S3c shipped helper set all three flags false" "${R[$m.S3cshippedOpts]:-}" 1
+  expect_eq "$m S3c in-flight job, SIGTERM, shipped helper" "${R[$m.S3cjobState]:-}" completed
+  expect_eq "$m S3c exit" "${R[$m.S3cexit]:-}" 0
+  expect_eq "$m S3c drained" "${R[$m.S3cdrained]:-}" 1
+  expect_eq "$m S3c no hard exit" "${R[$m.S3chardExit]:-}" 0
+  expect_eq "$m S3c live Chromium before exit" "${R[$m.S3cpreExitLiveChrome]:-}" 0
+  expect_eq "$m S3h SIGHUP delivered once" "${R[$m.S3hsighups]:-}" 1
+  expect_eq "$m S3h in-flight job, SIGHUP, shipped helper" "${R[$m.S3hjobState]:-}" completed
+  expect_eq "$m S3h exit" "${R[$m.S3hexit]:-}" 0
+  expect_eq "$m S3h drained" "${R[$m.S3hdrained]:-}" 1
+  expect_eq "$m S3h live Chromium before exit" "${R[$m.S3hpreExitLiveChrome]:-}" 0
+  expect_eq "$m S3h host Chromium after exit" "${R[$m.S3hhostChromeAfter]:-}" 0
+  expect_eq "$m S6c exit (hard-exit backstop)" "${R[$m.S6cexit]:-}" 0
+  expect_eq "$m S6c not drained" "${R[$m.S6cdrained]:-}" 0
+  expect_eq "$m S6c hard exit fired" "${R[$m.S6chardExit]:-}" 1
+  expect_eq "$m S6c job abandoned, not completed" "${R[$m.S6cjobState]:-}" active
+  expect_eq "$m S6c host Chromium after exit" "${R[$m.S6chostChromeAfter]:-}" 0
+  if [ "${R[$m.S6chardExitLiveChrome]:-0}" -ge 1 ]; then
+    pass "$m S6c browser still alive at the hard exit (liveChrome=${R[$m.S6chardExitLiveChrome]}): the kill above is real"
+  else
+    fail "$m S6c no live Chromium at the hard exit (liveChrome=${R[$m.S6chardExitLiveChrome]:-?}): host-after=0 proves nothing"
+  fi
+done
 expect_eq "tini S4 SIGKILL exit" "${R[tini.S4exit]:-}" 137
 expect_eq "tini S4 interrupted job after restart" "${R[tini.S4jobState]:-}" completed
 expect_eq "tini S4 new jobs after restart" "${R[tini.S4newJobs]:-}" ok
