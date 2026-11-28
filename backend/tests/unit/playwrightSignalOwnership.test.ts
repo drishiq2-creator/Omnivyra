@@ -42,13 +42,33 @@ const ALIAS_PATTERNS: Array<[string, RegExp]> = [
   ['destructured-method', /\{[^{}]*\blaunch(?:PersistentContext|Server)?\b[^{}]*\}\s*=\s*[\w$.?]*\b(?:chromium|firefox|webkit|puppeteer)\b/g],
 ];
 
+/**
+ * Receiver aliases: the browser TYPE itself bound to another name, after which
+ * `<alias>.launch(...)` is invisible to the call scan:
+ *   - `const bt = pw.chromium;` / `let c = chromium;` (a declaration whose value ends in the type);
+ *   - `const { chromium: c } = require('playwright');` (a renamed destructure).
+ * Binding under the SAME name (`const chromium = pw.chromium`, `const { chromium } = ...`)
+ * is fine: the call scan still sees `chromium.launch(`.
+ */
+const RECEIVER_ALIAS_PATTERNS: Array<[string, RegExp]> = [
+  ['receiver-alias', /\b(?:const|let|var)\s+([\w$]+)\s*(?::[^=;\n]+)?=\s*[^;\n]*?\b(chromium|firefox|webkit)\s*;?[ \t]*$/gm],
+  ['renamed-destructure', /\{[^{}]*?\b(chromium|firefox|webkit)\s*:\s*([\w$]+)[^{}]*\}\s*=/g],
+];
+
 function scanAliases(file: string, src: string): string[] {
   const hits: string[] = [];
+  const lineOf = (i: number) => src.slice(0, i).split('\n').length;
   for (const [kind, re] of ALIAS_PATTERNS) {
     re.lastIndex = 0;
     let m: RegExpExecArray | null;
+    while ((m = re.exec(src)) !== null) hits.push(`${file}:${lineOf(m.index)} ${kind}`);
+  }
+  for (const [kind, re] of RECEIVER_ALIAS_PATTERNS) {
+    re.lastIndex = 0;
+    let m: RegExpExecArray | null;
     while ((m = re.exec(src)) !== null) {
-      hits.push(`${file}:${src.slice(0, m.index).split('\n').length} ${kind}`);
+      const [alias, type] = kind === 'receiver-alias' ? [m[1], m[2]] : [m[2], m[1]];
+      if (alias !== type) hits.push(`${file}:${lineOf(m.index)} ${kind}`);
     }
   }
   return hits;
@@ -114,6 +134,26 @@ describe('planted controls — the alias scanner catches indirect launches', () 
     'let b: Awaited<ReturnType<typeof chromium.launch>> | null = null;',
     'browser = await pw.chromium.launch(withWorkerSignalOwnership({ headless: true }));',
   ])('does not flag a guard, type or direct call: %s', (src) => {
+    expect(scanAliases('fixture.ts', src)).toEqual([]);
+  });
+
+  it.each([
+    ['const bt = pw.chromium;\nawait bt.launch({});', 'receiver-alias'],
+    ['let c = chromium\nc.launch();', 'receiver-alias'],
+    ['const ff: BrowserType = playwright.firefox;', 'receiver-alias'],
+    ["const { chromium: c } = require('playwright');\nc.launch();", 'renamed-destructure'],
+    ["const { webkit: wk, devices } = await import('playwright');", 'renamed-destructure'],
+  ])('flags a receiver alias: %s', (src, kind) => {
+    expect(scanAliases('fixture.ts', src)).toEqual([`fixture.ts:1 ${kind}`]);
+  });
+
+  it.each([
+    "const { chromium } = require('playwright');\nawait chromium.launch(withWorkerSignalOwnership({}));",
+    'const chromium = pw.chromium;',
+    "const { chromium, type Browser } = await import('playwright');",
+    "const chromium = (await import('@sparticuz/chromium')).default;",
+    'const usesChromium = true;',
+  ])('does not flag a same-name binding or unrelated line: %s', (src) => {
     expect(scanAliases('fixture.ts', src)).toEqual([]);
   });
 
