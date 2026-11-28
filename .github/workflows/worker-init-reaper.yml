@@ -1,0 +1,64 @@
+name: Worker init reaper (GI-07)
+
+# GI-07: the worker image runs tini as PID 1 so orphaned Chromium processes are
+# reaped. This builds the REAL image from Dockerfile.worker and runs
+# scripts/ci/worker-init-reaper/run.sh against it: repeated Chromium
+# launch/close through BullMQ, forced crash, SIGTERM drain, SIGKILL + restart
+# recovery, SIGINT, and the real main.js entrypoint, each compared with a
+# pre-fix control run of the same image. Local Redis and 127.0.0.1 pages only;
+# no secrets, no production services, nothing is pushed or deployed.
+on:
+  pull_request:
+    paths:
+      - Dockerfile.worker
+      - scripts/ci/worker-init-reaper/**
+      - .github/workflows/worker-init-reaper.yml
+  push:
+    branches: [fix/gi07-worker-init-reaper-20261128]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  reaper:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build the real worker image (Dockerfile.worker)
+        run: docker build -f Dockerfile.worker -t omnivyra-worker:gi07 .
+
+      - name: Image facts
+        run: |
+          docker run --rm --entrypoint sh omnivyra-worker:gi07 -c \
+            'echo "node $(node --version)"; tini --version; echo "playwright $(node -p "require(\"/app/node_modules/playwright/package.json\").version")"; echo "bullmq $(node -p "require(\"/app/node_modules/bullmq/package.json\").version")"' \
+            | tee image-facts.txt
+          docker image inspect omnivyra-worker:gi07 --format '{{json .Config.Entrypoint}} {{json .Config.Cmd}}' | tee -a image-facts.txt
+
+      - name: Scenarios (control vs tini)
+        run: bash scripts/ci/worker-init-reaper/run.sh omnivyra-worker:gi07 "$RUNNER_TEMP/gi07-out" 2>&1 | tee gi07.log; exit "${PIPESTATUS[0]}"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Worker init reaper (GI-07)"
+            echo '```'
+            cat image-facts.txt 2>/dev/null || true
+            grep -E "^(IMAGE|CENSUS|RESULT|PASS|FAIL|GI07_VERDICT)" gi07.log || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: worker-init-reaper-logs
+          path: |
+            image-facts.txt
+            gi07.log
+            ${{ runner.temp }}/gi07-out/
+          retention-days: 14
