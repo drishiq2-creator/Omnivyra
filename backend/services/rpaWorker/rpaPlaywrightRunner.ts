@@ -6,6 +6,7 @@ import { makeCancellationChecker, RpaCancelledError, type CancellationChecker } 
 import { saveRpaArtifact } from './rpaArtifactStore';
 import { isProbeFailure, rpaEnvReady, loadPlaywrightModule } from './rpaEnv';
 import type { RpaTask, RpaResult } from './rpaWorkerService';
+import { withWorkerSignalOwnership } from '../playwrightLaunchOptions';
 
 /**
  * Playwright-backed RPA runner. Single place that knows how to drive a
@@ -163,7 +164,7 @@ export async function runRpaScript(task: RpaTask, script: RpaScript): Promise<Rp
   });
   try {
     await checkpoint(cancelled);
-    browser = await pw.chromium.launch({ headless: true });
+    browser = await pw.chromium.launch(withWorkerSignalOwnership({ headless: true }));
     context = await browser.newContext({ storageState });
     page = await context.newPage();
 

@@ -18,6 +18,8 @@
  *   - Concurrent callers share one in-flight probe (one browser launch).
  */
 
+import { withWorkerSignalOwnership } from '../playwrightLaunchOptions';
+
 export type ProbeResult = { ok: true } | { ok: false; reason: string };
 
 const SUCCESS_TTL_MS = 5 * 60 * 1000;
@@ -93,7 +95,7 @@ async function runProbe(): Promise<ProbeResult> {
     }
     let browser: any = null;
     try {
-      browser = await pw.chromium.launch({ headless: true });
+      browser = await pw.chromium.launch(withWorkerSignalOwnership({ headless: true }));
       return { ok: true };
     } catch (err: any) {
       const msg = (err?.message || '').toString();

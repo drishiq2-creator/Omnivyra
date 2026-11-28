@@ -1,4 +1,5 @@
 import { chromium, type Browser } from 'playwright';
+import { withWorkerSignalOwnership } from '../../playwrightLaunchOptions';
 
 type RedditRpaDiscoveryInput = {
   tenant_id: string;
@@ -46,7 +47,7 @@ export const discoverUsersFromRedditRpa = async (
   let browser: Browser | null = null;
   try {
     const max = typeof input.limit === 'number' && input.limit > 0 ? input.limit : 50;
-    browser = await chromium.launch({ headless: true });
+    browser = await chromium.launch(withWorkerSignalOwnership({ headless: true }));
     const context = await browser.newContext();
     const page = await context.newPage();
 

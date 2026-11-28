@@ -1,3 +1,5 @@
+import { withWorkerSignalOwnership } from '../playwrightLaunchOptions';
+
 type RedditRpaTask = {
   tenant_id: string;
   organization_id: string;
@@ -39,7 +41,7 @@ export const executeRedditRpaTask = async (task: RedditRpaTask): Promise<RedditR
       return { success: false, error: 'PLAYWRIGHT_NOT_INSTALLED' };
     }
 
-    browser = await pw.chromium.launch({ headless: true });
+    browser = await pw.chromium.launch(withWorkerSignalOwnership({ headless: true }));
     const context = await browser.newContext();
     const page = await context.newPage();
 

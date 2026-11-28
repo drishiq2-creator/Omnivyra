@@ -5,6 +5,7 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { config } from '@/config';
 import { ensureRenderFonts } from '../creatorRenderFonts';
+import { withWorkerSignalOwnership } from '../playwrightLaunchOptions';
 
 const execFileAsync = promisify(execFile);
 
@@ -42,17 +43,17 @@ async function renderPdfWithPlaywright(html: string): Promise<Buffer> {
   const chromePath = resolveChromePath();
   let browser;
   try {
-    browser = await chromium.launch({
+    browser = await chromium.launch(withWorkerSignalOwnership({
       headless: true,
       args: launchArgs,
-    });
+    }));
   } catch (error) {
     if (!chromePath) throw error;
-    browser = await chromium.launch({
+    browser = await chromium.launch(withWorkerSignalOwnership({
       executablePath: chromePath,
       headless: true,
       args: launchArgs,
-    });
+    }));
   }
 
   try {
@@ -161,6 +162,8 @@ async function renderPdfWithServerlessChromium(html: string): Promise<Buffer> {
     childEnv.FONTCONFIG_PATH = path.dirname(fonts.configPath);
   }
 
+  // signal-ownership-exempt: serverless only (isServerlessRuntime: VERCEL / AWS Lambda env), never the
+  // Railway worker, so no drain exists for Puppeteer's default SIGTERM handler to cut short.
   const browser = await puppeteer.launch({
     args: [...chromium.args, '--no-sandbox', '--disable-dev-shm-usage'],
     executablePath: await chromium.executablePath(),
