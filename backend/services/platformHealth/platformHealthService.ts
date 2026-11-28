@@ -322,8 +322,10 @@ function scoreOverall(
  */
 export async function getPlatformHealth(organizationId: string): Promise<PlatformHealth[]> {
   const [connectedApi, activeSocialPlatforms, rpaSessions, extLiveness] = await Promise.all([
-    getPlatformsWithTokensForOrg(organizationId).catch(() => [] as string[]),
-    getPlatformsWithActiveSocialAccountsForOrg(organizationId).catch(() => [] as string[]),
+    // A list read failure rejects (route answers 500) rather than reporting
+    // every platform as not connected.
+    getPlatformsWithTokensForOrg(organizationId),
+    getPlatformsWithActiveSocialAccountsForOrg(organizationId),
     loadRpaSessionPlatforms(organizationId),
     loadExtensionLivenessPlatforms(organizationId),
   ]);

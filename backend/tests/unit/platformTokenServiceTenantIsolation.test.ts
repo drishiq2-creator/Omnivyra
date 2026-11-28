@@ -47,6 +47,16 @@ function buildQuery(table: keyof typeof store) {
       return q;
     },
     or: (clause: string) => { preds.push((r) => matchOrClause(r, clause)); return q; },
+    // SQL semantics: NOT (col IS NULL); NOT (col LIKE p) is NULL -> excluded when col is NULL.
+    not: (col: string, op: string, val: unknown) => {
+      if (op === 'is' && val === null) { preds.push((r) => r[col] !== null && r[col] !== undefined); return q; }
+      if (op === 'like' && typeof val === 'string') {
+        const re = new RegExp('^' + val.split('%').map((x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*') + '$');
+        preds.push((r) => r[col] !== null && r[col] !== undefined && !re.test(String(r[col])));
+        return q;
+      }
+      throw new Error(`fake builder: unmodelled not() ${op}`);
+    },
     order: (col: string, opts?: { ascending?: boolean }) => { orderBy = { col, asc: opts?.ascending !== false }; return q; },
     limit: (n: number) => { limitN = n; return q; },
     then: (resolve: (v: unknown) => unknown, reject?: (e: unknown) => unknown) => {
@@ -84,10 +94,15 @@ jest.mock('../../auth/tokenStore', () => ({
 }));
 jest.mock('../../auth/tokenRefresh', () => ({ refreshPlatformToken: jest.fn(async () => null) }));
 
-import { getToken } from '../../services/platformTokenService';
+import {
+  getToken,
+  getPlatformsWithTokensForOrg,
+  getPlatformsWithActiveSocialAccountsForOrg,
+} from '../../services/platformTokenService';
 
 const A = 'company-a';
 const B = 'company-b';
+const C = 'company-c';
 
 function seed() {
   store.user_company_roles = [
@@ -96,21 +111,39 @@ function seed() {
     { user_id: 'user-ab', company_id: A, status: 'active' },
     { user_id: 'user-ab', company_id: B, status: 'active' },
     { user_id: 'user-b1', company_id: B, status: 'active' },
+    { user_id: 'user-c1', company_id: C, status: 'active' },
+    { user_id: 'user-c2', company_id: C, status: 'active' },
   ];
   store.social_accounts = [
     // A's own single linkedin account (positive control), oldest.
-    { id: 'sa-a-linkedin', user_id: 'user-a1', company_id: A, platform: 'linkedin', is_active: true, updated_at: '2026-01-01T00:00:00Z' },
+    { id: 'sa-a-linkedin', user_id: 'user-a1', company_id: A, platform: 'linkedin', platform_user_id: 'puid-sa-a-linkedin', is_active: true, access_token: 'enc', updated_at: '2026-01-01T00:00:00Z' },
     // B's own linkedin account, connected by the member shared with A.
-    { id: 'sa-b-linkedin', user_id: 'user-ab', company_id: B, platform: 'linkedin', is_active: true, updated_at: '2026-02-01T00:00:00Z' },
+    { id: 'sa-b-linkedin', user_id: 'user-ab', company_id: B, platform: 'linkedin', platform_user_id: 'puid-sa-b-linkedin', is_active: true, access_token: 'enc', updated_at: '2026-02-01T00:00:00Z' },
     // Legacy NULL-company row of the shared member, the MOST recent linkedin row.
-    { id: 'sa-null-linkedin', user_id: 'user-ab', company_id: null, platform: 'linkedin', is_active: true, updated_at: '2026-06-01T00:00:00Z' },
+    { id: 'sa-null-linkedin', user_id: 'user-ab', company_id: null, platform: 'linkedin', platform_user_id: 'puid-sa-null-linkedin', is_active: true, access_token: 'enc', updated_at: '2026-06-01T00:00:00Z' },
     // Another member's personal row on a platform A never connected as a company.
-    { id: 'sa-null-x-a2', user_id: 'user-a2', company_id: null, platform: 'twitter', is_active: true, updated_at: '2026-03-01T00:00:00Z' },
+    { id: 'sa-null-x-a2', user_id: 'user-a2', company_id: null, platform: 'twitter', platform_user_id: 'puid-sa-null-x-a2', is_active: true, access_token: 'enc', updated_at: '2026-03-01T00:00:00Z' },
     // Two active company-A rows on one platform.
-    { id: 'sa-a-fb-1', user_id: 'user-a1', company_id: A, platform: 'facebook', is_active: true, updated_at: '2026-04-01T00:00:00Z' },
-    { id: 'sa-a-fb-2', user_id: 'user-a2', company_id: A, platform: 'facebook', is_active: true, updated_at: '2026-05-01T00:00:00Z' },
+    { id: 'sa-a-fb-1', user_id: 'user-a1', company_id: A, platform: 'facebook', platform_user_id: 'puid-sa-a-fb-1', is_active: true, access_token: 'enc', updated_at: '2026-04-01T00:00:00Z' },
+    { id: 'sa-a-fb-2', user_id: 'user-a2', company_id: A, platform: 'facebook', platform_user_id: 'puid-sa-a-fb-2', is_active: true, access_token: 'enc', updated_at: '2026-05-01T00:00:00Z' },
     // B's youtube account only.
-    { id: 'sa-b-youtube', user_id: 'user-b1', company_id: B, platform: 'youtube', is_active: true, updated_at: '2026-01-15T00:00:00Z' },
+    { id: 'sa-b-youtube', user_id: 'user-b1', company_id: B, platform: 'youtube', platform_user_id: 'puid-sa-b-youtube', is_active: true, access_token: 'enc', updated_at: '2026-01-15T00:00:00Z' },
+    // Shared member's NULL-company instagram row: neither A nor B connected instagram as a company.
+    { id: 'sa-null-ig-ab', user_id: 'user-ab', company_id: null, platform: 'instagram', platform_user_id: 'puid-sa-null-ig-ab', is_active: true, access_token: 'enc', updated_at: '2026-03-01T00:00:00Z' },
+
+    // ---- company C: rows that must NOT count as a second account ----
+    // linkedin: one API row + one token-less extension/cookie-backed row (newer).
+    { id: 'sa-c-li-api', user_id: 'user-c1', company_id: C, platform: 'linkedin', platform_user_id: 'li-c-1', is_active: true, access_token: 'enc', updated_at: '2026-01-01T00:00:00Z' },
+    { id: 'sa-c-li-ext', user_id: 'user-c2', company_id: C, platform: 'linkedin', platform_user_id: 'li-c-2', is_active: true, access_token: null, updated_at: '2026-06-01T00:00:00Z' },
+    // facebook: one real row + one planning_% placeholder (newer, even carrying a value).
+    { id: 'sa-c-fb', user_id: 'user-c1', company_id: C, platform: 'facebook', platform_user_id: 'fb-c-1', is_active: true, access_token: 'enc', updated_at: '2026-01-01T00:00:00Z' },
+    { id: 'sa-c-fb-plan', user_id: 'user-c2', company_id: C, platform: 'facebook', platform_user_id: 'planning_facebook_c', is_active: true, access_token: 'enc', updated_at: '2026-06-01T00:00:00Z' },
+    // x: ONE account stored under both aliases (same platform_user_id).
+    { id: 'sa-c-x-old', user_id: 'user-c1', company_id: C, platform: 'twitter', platform_user_id: 'x-c-1', is_active: true, access_token: 'enc', updated_at: '2026-01-01T00:00:00Z' },
+    { id: 'sa-c-x-new', user_id: 'user-c1', company_id: C, platform: 'x', platform_user_id: 'x-c-1', is_active: true, access_token: 'enc', updated_at: '2026-05-01T00:00:00Z' },
+    // youtube: two DISTINCT token-bearing accounts (genuine ambiguity, control).
+    { id: 'sa-c-yt-1', user_id: 'user-c1', company_id: C, platform: 'youtube', platform_user_id: 'yt-c-1', is_active: true, access_token: 'enc', updated_at: '2026-01-01T00:00:00Z' },
+    { id: 'sa-c-yt-2', user_id: 'user-c2', company_id: C, platform: 'youtube', platform_user_id: 'yt-c-2', is_active: true, access_token: 'enc', updated_at: '2026-02-01T00:00:00Z' },
   ];
   for (const k of Object.keys(injectedErrors)) delete injectedErrors[k];
 }
@@ -176,4 +209,66 @@ describe('platformTokenService.getToken — two-tenant isolation', () => {
   it('control: with no injected error the same call resolves (the error test is not passing on fixture absence)', async () => {
     await expect(getToken(A, A, 'linkedin')).resolves.toMatchObject({ access_token: 'tok:sa-a-linkedin' });
   });
+});
+
+describe('platformTokenService.getToken — what counts as a second account', () => {
+  it('fixture: company C has 2 active rows on each of linkedin, facebook, x(+twitter), youtube', () => {
+    for (const plats of [['linkedin'], ['facebook'], ['x', 'twitter'], ['youtube']]) {
+      expect(store.social_accounts.filter((r) => r.company_id === C && r.is_active && plats.includes(r.platform))).toHaveLength(2);
+    }
+  });
+
+  it('a token-less extension/cookie row does not make the API account ambiguous', async () => {
+    await expect(getToken(C, C, 'linkedin')).resolves.toMatchObject({ access_token: 'tok:sa-c-li-api' });
+  });
+
+  it('a planning_% placeholder does not make the real account ambiguous', async () => {
+    await expect(getToken(C, C, 'facebook')).resolves.toMatchObject({ access_token: 'tok:sa-c-fb' });
+  });
+
+  it('one account stored under both x and twitter is one account (latest row used)', async () => {
+    await expect(getToken(C, C, 'x')).resolves.toMatchObject({ access_token: 'tok:sa-c-x-new' });
+    await expect(getToken(C, C, 'twitter')).resolves.toMatchObject({ access_token: 'tok:sa-c-x-new' });
+  });
+
+  it('control: two distinct token-bearing accounts are still refused as ambiguous', async () => {
+    await expect(getToken(C, C, 'youtube')).rejects.toMatchObject({ code: 'PLATFORM_ACCOUNT_AMBIGUOUS' });
+    await expect(getToken(A, A, 'facebook')).rejects.toMatchObject({ code: 'PLATFORM_ACCOUNT_AMBIGUOUS' });
+  });
+});
+
+describe('platform list readers — company-only, read error distinct from none', () => {
+  const listers = [
+    ['getPlatformsWithTokensForOrg', getPlatformsWithTokensForOrg],
+    ['getPlatformsWithActiveSocialAccountsForOrg', getPlatformsWithActiveSocialAccountsForOrg],
+  ] as const;
+
+  for (const [name, list] of listers) {
+    it(`${name}: positive control - each tenant lists its own company platforms`, async () => {
+      expect(await list(A)).toEqual(expect.arrayContaining(['facebook', 'linkedin']));
+      expect(await list(B)).toEqual(expect.arrayContaining(['linkedin', 'youtube']));
+    });
+
+    it(`${name}: a NULL-company row of a member is listed for neither tenant`, async () => {
+      expect(store.social_accounts.some((r) => r.id === 'sa-null-ig-ab' && r.company_id === null)).toBe(true);
+      expect(await list(A)).not.toContain('instagram');
+      expect(await list(B)).not.toContain('instagram');
+      // another member's personal twitter row is not A's platform
+      expect(await list(A)).not.toContain('x');
+    });
+
+    it(`${name}: A never lists B-only platforms`, async () => {
+      expect(await list(A)).not.toContain('youtube');
+    });
+
+    it(`${name}: a membership read error rejects with LOOKUP_FAILED, never []`, async () => {
+      injectedErrors.user_company_roles = { message: 'connection reset' };
+      await expect(list(A)).rejects.toMatchObject({ code: 'PLATFORM_ACCOUNT_LOOKUP_FAILED' });
+    });
+
+    it(`${name}: a social_accounts read error rejects with LOOKUP_FAILED, never []`, async () => {
+      injectedErrors.social_accounts = { message: 'statement timeout' };
+      await expect(list(A)).rejects.toMatchObject({ code: 'PLATFORM_ACCOUNT_LOOKUP_FAILED' });
+    });
+  }
 });

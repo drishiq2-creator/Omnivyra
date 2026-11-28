@@ -37,9 +37,11 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     });
     if (!access) return;
 
+    // A list read failure must not render as "not connected": let it reach
+    // the 500 below instead of collapsing to [].
     const [tokenPlatforms, activeSocialPlatforms] = await Promise.all([
-      getPlatformsWithTokensForOrg(companyId).catch(() => [] as string[]),
-      getPlatformsWithActiveSocialAccountsForOrg(companyId).catch(() => [] as string[]),
+      getPlatformsWithTokensForOrg(companyId),
+      getPlatformsWithActiveSocialAccountsForOrg(companyId),
     ]);
 
     const platforms = Array.from(
