@@ -9,11 +9,12 @@
  *   POST /api/engagement/reply  { organization_id, message_id, reply_text, platform }
  */
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import ChatVoiceButton from '../../components/ChatVoiceButton';
 import Head from 'next/head';
 import Link from 'next/link';
 import { useCompanyContext } from '@/components/CompanyContext';
+import { ReplyKeyHolder } from '@/lib/engagement/replySendOutcome';
 import {
   ArrowLeft,
   RefreshCw,
@@ -118,6 +119,10 @@ export default function WhatsAppInboxPage() {
     fetchMessages(thread.id);
   };
 
+  // E3: one client key per composed reply (thread + inbound message + draft), reused on every retry until it succeeds.
+  const replyKeyRef = useRef<ReplyKeyHolder | null>(null);
+  if (!replyKeyRef.current) replyKeyRef.current = new ReplyKeyHolder();
+
   const sendReply = async () => {
     if (!selectedThread || !replyText.trim() || !companyId) return;
 
@@ -142,10 +147,17 @@ export default function WhatsAppInboxPage() {
           message_id: lastInbound.id,
           reply_text: replyText.trim(),
           platform: 'whatsapp',
+          client_reply_key: replyKeyRef.current!.keyFor({
+            threadId: selectedThread.id,
+            messageId: lastInbound.id,
+            platform: 'whatsapp',
+            text: replyText,
+          }),
         }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? 'Reply failed');
+      replyKeyRef.current!.reset();
       setReplyText('');
       setReplySuccess(true);
       // Reload messages to show the outbound reply

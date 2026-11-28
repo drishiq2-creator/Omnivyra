@@ -41,8 +41,8 @@ import {
   claimReplyAction,
   reclaimNotSentReplyAction,
   REPLY_OUTCOME_UNKNOWN_MESSAGE,
-  REPLY_IN_PROGRESS_MESSAGE,
   REPLY_PRIOR_FAILED_MESSAGE,
+  unknownOutcomeMessage,
   type ExistingReplyAction,
   type ExistingReplyDisposition,
 } from '../../../backend/services/engagement/replyIdempotency';
@@ -128,7 +128,7 @@ function respondToExistingReply(
           : 'Reply already queued for the Omnivyra extension. It was not queued again.',
       });
     case 'in_progress':
-      return res.status(409).json({ ...base, success: false, error: REPLY_IN_PROGRESS_MESSAGE, code: 'REPLY_IN_PROGRESS', outcome: 'unknown', retryable: false });
+      return res.status(409).json({ ...base, success: false, error: unknownOutcomeMessage('in_progress', row), code: 'REPLY_IN_PROGRESS', outcome: 'unknown', retryable: false, execution_mode: row.execution_mode ?? null });
     case 'failed_ambiguous':
       return res.status(409).json({ ...base, success: false, error: REPLY_PRIOR_FAILED_MESSAGE, code: 'REPLY_PRIOR_ATTEMPT_FAILED', outcome: 'unknown', retryable: false, status: row.status ?? null });
     case 'not_sent':
@@ -136,7 +136,7 @@ function respondToExistingReply(
       return res.status(409).json({ ...base, success: false, error: 'This reply was not sent (refused before reaching the platform). You can send it again.', code: 'REPLY_NOT_SENT', outcome: 'not_sent', retryable: true, status: row.status ?? null });
     case 'outcome_unknown':
     default:
-      return res.status(409).json({ ...base, success: false, error: REPLY_OUTCOME_UNKNOWN_MESSAGE, code: 'REPLY_OUTCOME_UNKNOWN', outcome: 'unknown', retryable: false, status: row.status ?? null });
+      return res.status(409).json({ ...base, success: false, error: unknownOutcomeMessage('outcome_unknown', row), code: 'REPLY_OUTCOME_UNKNOWN', outcome: 'unknown', retryable: false, status: row.status ?? null, execution_mode: row.execution_mode ?? null });
   }
 }
 
@@ -901,7 +901,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     if (claim.kind === 'lost') {
       if (!claim.existing) {
         // The key is taken but the winner is not readable: never guess, never send.
-        return res.status(409).json({ success: false, error: REPLY_IN_PROGRESS_MESSAGE, code: 'REPLY_IN_PROGRESS', outcome: 'unknown', retryable: false, deduplicated: true });
+        return res.status(409).json({ success: false, error: unknownOutcomeMessage('in_progress', { execution_mode: executionMode, status: 'pending' }), code: 'REPLY_IN_PROGRESS', outcome: 'unknown', retryable: false, deduplicated: true });
       }
       return respondToExistingReply(res, claim.existing, classifyExistingReplyAction(claim.existing), { platform, isDm, signalId: resolvedSignalId });
     }
@@ -959,7 +959,7 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       // throwing: the outcome is unknown. The key stays claimed (pending row),
       // so a retry answers "in progress / unknown" and never resends.
       console.error('[engagement/reply] executeAction threw after claim:', (executeErr as Error)?.message);
-      return res.status(409).json({ success: false, error: REPLY_OUTCOME_UNKNOWN_MESSAGE, code: 'REPLY_OUTCOME_UNKNOWN', outcome: 'unknown', retryable: false, action_id: actionId });
+      return res.status(409).json({ success: false, error: unknownOutcomeMessage('outcome_unknown', { execution_mode: executionMode, status: 'pending' }), code: 'REPLY_OUTCOME_UNKNOWN', outcome: 'unknown', retryable: false, action_id: actionId, execution_mode: executionMode });
     }
 
     // Collaboration timeline: record who replied / DM'd. Attribution is
@@ -1034,8 +1034,12 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
       && (freshDisposition === 'outcome_unknown' || freshDisposition === 'failed_ambiguous' || freshDisposition === 'in_progress')) {
       return res.status(409).json({
         success: false,
-        error: REPLY_OUTCOME_UNKNOWN_MESSAGE,
+        // A persist failure leaves the claimed row pending: for a browser row the extension may still deliver it.
+        error: freshResponse.persist_error
+          ? unknownOutcomeMessage('outcome_unknown', { execution_mode: result.execution_mode ?? executionMode, status: 'pending' })
+          : REPLY_OUTCOME_UNKNOWN_MESSAGE,
         code: 'REPLY_OUTCOME_UNKNOWN',
+        execution_mode: result.execution_mode ?? executionMode,
         outcome: 'unknown',
         retryable: false,
         status: result.status,

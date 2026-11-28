@@ -461,6 +461,53 @@ describe('E3 §6b company B can never read company A action through the dedup pa
   });
 });
 
+describe('E3 §4b outcome-unknown copy by execution mode (row left pending)', () => {
+  const seedDm = () => {
+    db.engagement_messages.push({
+      organization_id: ORG_A, id: 'mDm', thread_id: 'tDm', platform: 'linkedin',
+      platform_message_id: 'dm-msg-1', post_comment_id: null, message_type: 'dm', author_id: null,
+      raw_payload: { sender_name: 'Ana Lima' },
+    });
+    db.engagement_threads.push({ id: 'tDm', organization_id: ORG_A, platform_thread_id: '2-AbCdEfGhIjKlMnOp', raw_payload: { participant_name: 'Ana Lima' } });
+  };
+  const throwOnce = () => executeActionMock.mockImplementationOnce(async () => { throw new Error('socket hang up'); });
+
+  it('browser (LinkedIn DM): says it may still be delivered by the extension and not to resend — on the first answer and on the retry', async () => {
+    seedDm();
+    throwOnce();
+    const first = await post({ client_reply_key: KEY_1, message_id: 'mDm' });
+    expect(first.statusCode).toBe(409);
+    expect(first.body.code).toBe('REPLY_OUTCOME_UNKNOWN');
+    expect(first.body.execution_mode).toBe('browser');
+    const retry = await post({ client_reply_key: KEY_1, message_id: 'mDm' });
+    expect(retry.statusCode).toBe(409);
+    expect(retry.body.code).toBe('REPLY_IN_PROGRESS');
+    for (const r of [first, retry]) {
+      const text = String(r.body.error);
+      expect(text).toMatch(/^Sending status unknown/);
+      expect(text).toMatch(/may still be delivered/i);
+      expect(text).toMatch(/do not resend/i);
+      expect(text).not.toMatch(/not sent again|was not sent|will not be delivered|try again/i);
+    }
+    expect(executeActionMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('CONTROL api (comment): the api copy, which does not mention the extension', async () => {
+    throwOnce();
+    const first = await post({ client_reply_key: KEY_1 });
+    const retry = await post({ client_reply_key: KEY_1 });
+    expect(first.body.code).toBe('REPLY_OUTCOME_UNKNOWN');
+    expect(retry.body.code).toBe('REPLY_IN_PROGRESS');
+    for (const r of [first, retry]) {
+      const text = String(r.body.error);
+      expect(text).toMatch(/^(Sending status unknown|This reply is already being sent)/);
+      expect(text).not.toMatch(/extension|may still be delivered/i);
+      expect(text).not.toMatch(/try again/i);
+    }
+    expect(executeActionMock).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('E3 §7 edited text is a new logical reply', () => {
   it('same key, edited text → a new action and a new execution', async () => {
     await post({ client_reply_key: KEY_1, reply_text: 'Thanks for the comment!' });

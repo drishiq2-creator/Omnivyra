@@ -232,6 +232,12 @@ export async function claimReplyAction(input: {
     tone_used: null,
     acting_user_id: input.row.acting_user_id,
     status: 'pending',
+    // The dispatch lease belongs to the hand-out / manual-route claim (a CAS on
+    // dispatch_lease_id IS NULL, terminal persist fenced on it). This claim never
+    // takes a lease, so the two claims cannot block each other.
+    dispatch_lease_id: null,
+    dispatch_lease_expires_at: null,
+    dispatch_lease_holder_id: null,
     idempotency_key: input.idempotencyKey,
     execution_correlation_id: input.correlationId,
     approved_at: now,
@@ -271,5 +277,20 @@ export const REPLY_OUTCOME_UNKNOWN_MESSAGE =
   'Sending status unknown — this reply may already have reached the platform. Check the conversation before resending; it was not sent again.';
 export const REPLY_IN_PROGRESS_MESSAGE =
   'This reply is already being sent, or its outcome is not yet known. Check the conversation before resending; it was not sent again.';
+/**
+ * A BROWSER-mode attempt still pending was handed (or is about to be handed) to
+ * the Omnivyra extension: it may yet be delivered. Say so — never imply it will
+ * not arrive — and say not to resend.
+ */
+export const REPLY_BROWSER_PENDING_MESSAGE =
+  'Sending status unknown — this reply was handed to the Omnivyra extension and may still be delivered. Do not resend it; keep the platform tab open and check the conversation.';
+
+/** The unknown/in-progress copy for a stored attempt, by its execution mode and status. */
+export function unknownOutcomeMessage(kind: 'in_progress' | 'outcome_unknown', row: { execution_mode?: string | null; status?: string | null }): string {
+  const pending = row.status === 'pending' || row.status === 'approved' || row.status == null;
+  if (row.execution_mode === 'browser' && pending) return REPLY_BROWSER_PENDING_MESSAGE;
+  return kind === 'in_progress' ? REPLY_IN_PROGRESS_MESSAGE : REPLY_OUTCOME_UNKNOWN_MESSAGE;
+}
+
 export const REPLY_PRIOR_FAILED_MESSAGE =
   'An earlier attempt of this exact reply failed and may have reached the platform, so it was not sent again. Check the conversation; to send it anyway, edit the reply first.';

@@ -36,6 +36,12 @@ export interface ExecuteReplyArgs {
   platform: string;
   replyText: string;
   messageType?: string | null;
+  /**
+   * E3: the composer's stable key for this logical reply. Forwarded as
+   * client_reply_key so a retry of the same reply is answered from the stored
+   * action instead of sending again. Absent → the server derives a key.
+   */
+  clientReplyKey?: string;
 }
 
 export interface ExecuteReplyResult {
@@ -76,6 +82,7 @@ export function useReply(deps: UseReplyDeps) {
       platform,
       replyText,
       messageType,
+      clientReplyKey,
     }: ExecuteReplyArgs): Promise<ExecuteReplyResult> => {
       // DMs and comment-replies route through the same /api/engagement/reply
       // endpoint, but the capability key differs: 'dm' vs 'reply'. The
@@ -104,6 +111,7 @@ export function useReply(deps: UseReplyDeps) {
           message_id: messageId,
           reply_text: replyText,
           platform,
+          ...(typeof clientReplyKey === 'string' && clientReplyKey ? { client_reply_key: clientReplyKey } : {}),
         }),
       });
 
