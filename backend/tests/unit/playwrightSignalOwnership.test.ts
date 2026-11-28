@@ -24,8 +24,35 @@ const SKIP_DIRS = new Set(['node_modules', '.next', 'dist', 'tests', '__tests__'
 const SOURCE_EXT = /\.(ts|tsx|js|mjs|cjs)$/;
 const TEST_FILE = /\.(test|spec)\.[cm]?[jt]sx?$/;
 
-const LAUNCH_CALL = /\b(chromium|firefox|webkit|puppeteer)\s*\.\s*(launch|launchPersistentContext|launchServer)\s*\(/g;
+const LAUNCH_CALL = /\b(chromium|firefox|webkit|puppeteer)\s*\??\.\s*(launch|launchPersistentContext|launchServer)\s*\(/g;
 const EXEMPT_MARKER = /signal-ownership-exempt:\s*\S/;
+
+/**
+ * Indirect launches the call scan cannot see. Any of these in server code fails
+ * the repo scan outright (route the launch through a direct, wrapped call instead):
+ *   - a launch method taken as a VALUE: `const l = chromium.launch`, `fn(pw.chromium.launch)`,
+ *     `chromium.launch.bind(...)` (an assignment / argument / return position, not a call);
+ *   - a COMPUTED receiver: `pw[name].launch(...)`;
+ *   - DESTRUCTURING the method: `const { launch } = chromium`.
+ * Guards and types (`if (!pw?.chromium?.launch)`, `typeof chromium.launch`) are not aliases.
+ */
+const ALIAS_PATTERNS: Array<[string, RegExp]> = [
+  ['method-as-value', /(?:=|:|\(|,|\breturn)\s*[\w$.?]*\b(?:chromium|firefox|webkit|puppeteer)\s*\??\.\s*launch\w*\b(?!\s*\()/g],
+  ['computed-receiver', /\]\s*\??\.\s*launch(?:PersistentContext|Server)?\s*\(/g],
+  ['destructured-method', /\{[^{}]*\blaunch(?:PersistentContext|Server)?\b[^{}]*\}\s*=\s*[\w$.?]*\b(?:chromium|firefox|webkit|puppeteer)\b/g],
+];
+
+function scanAliases(file: string, src: string): string[] {
+  const hits: string[] = [];
+  for (const [kind, re] of ALIAS_PATTERNS) {
+    re.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(src)) !== null) {
+      hits.push(`${file}:${src.slice(0, m.index).split('\n').length} ${kind}`);
+    }
+  }
+  return hits;
+}
 
 type Site = { file: string; line: number; call: string; ok: boolean; exempt: boolean };
 
@@ -56,15 +83,48 @@ function walk(dir: string, out: string[]): void {
   }
 }
 
-function scanRepo(): Site[] {
+function repoSources(): Array<[string, string]> {
   const files: string[] = [];
   for (const root of SCAN_ROOTS) {
     const abs = path.join(REPO, root);
     if (fs.existsSync(abs)) walk(abs, files);
   }
-  return files.flatMap((f) =>
-    scanSource(path.relative(REPO, f).replace(/\\/g, '/'), fs.readFileSync(f, 'utf8').replace(/\r\n/g, '\n')),
-  );
+  return files.map((f) => [
+    path.relative(REPO, f).replace(/\\/g, '/'),
+    fs.readFileSync(f, 'utf8').replace(/\r\n/g, '\n'),
+  ]);
+}
+
+describe('planted controls — the alias scanner catches indirect launches', () => {
+  it.each([
+    ['const l = chromium.launch;', 'method-as-value'],
+    ['const l = pw.chromium.launch.bind(pw.chromium);', 'method-as-value'],
+    ['run(pw?.chromium?.launchPersistentContext, dir);', 'method-as-value'],
+    ['return chromium.launch', 'method-as-value'],
+    ["const b = await pw[name].launch({ headless: true });", 'computed-receiver'],
+    ['const { launch } = chromium;', 'destructured-method'],
+    ['const { launchPersistentContext: lpc } = pw.chromium;', 'destructured-method'],
+  ])('flags %s', (src, kind) => {
+    expect(scanAliases('fixture.ts', src)).toEqual([`fixture.ts:1 ${kind}`]);
+  });
+
+  it.each([
+    'if (!pw?.chromium?.launch) return null;',
+    "if (!chromium || typeof chromium.launch !== 'function') throw new Error('x');",
+    'let b: Awaited<ReturnType<typeof chromium.launch>> | null = null;',
+    'browser = await pw.chromium.launch(withWorkerSignalOwnership({ headless: true }));',
+  ])('does not flag a guard, type or direct call: %s', (src) => {
+    expect(scanAliases('fixture.ts', src)).toEqual([]);
+  });
+
+  it('the call scan also sees optional-chained calls', () => {
+    const [s] = scanSource('fixture.ts', 'await pw?.chromium?.launch({ headless: true });');
+    expect(s).toMatchObject({ call: 'chromium.launch', ok: false });
+  });
+});
+
+function scanRepo(): Site[] {
+  return repoSources().flatMap(([f, src]) => scanSource(f, src));
 }
 
 describe('planted controls — the scanner catches a missing option', () => {
@@ -139,6 +199,10 @@ describe('repo scan — every server-code browser launch defers shutdown signals
   it('no launch site lacks withWorkerSignalOwnership() or a reasoned exemption', () => {
     const offenders = sites.filter((s) => !s.ok).map((s) => `${s.file}:${s.line} ${s.call}`);
     expect(offenders).toEqual([]);
+  });
+
+  it('no indirect (aliased / computed / destructured) launch exists in server code', () => {
+    expect(repoSources().flatMap(([f, src]) => scanAliases(f, src))).toEqual([]);
   });
 
   it('exemptions are reserved for the serverless Puppeteer path — no Playwright site is exempt', () => {

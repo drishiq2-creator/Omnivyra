@@ -162,7 +162,7 @@ function loadMain(): void {
     require('../../workers/main');
   });
 }
-const signal = (name: 'SIGTERM' | 'SIGINT') => {
+const signal = (name: 'SIGTERM' | 'SIGINT' | 'SIGHUP' | 'SIGUSR2') => {
   for (const handler of mockH.handlers.get(name) ?? []) handler(name);
 };
 /** Let queued promise callbacks run (fake timers do not fake setImmediate/nextTick). */
@@ -305,6 +305,52 @@ describe('SIGTERM during worker startup', () => {
     expect(late.close).toHaveBeenCalledTimes(1);
     expect(closeQueues).toHaveBeenCalledTimes(1);
     expect(mockH.events).not.toContain('startCron');
+  });
+});
+
+describe('SIGHUP takes the same drain (GI-NEW-1: Playwright no longer listens for it)', () => {
+  it('a SIGHUP handler is registered BEFORE the first Worker, exactly once', async () => {
+    await bootFully();
+    const firstWorker = mockH.events.findIndex((e) => e.startsWith('worker:'));
+    expect(firstWorker).toBeGreaterThan(-1);
+    expect(mockH.events.indexOf('on:SIGHUP')).toBeGreaterThan(-1);
+    expect(mockH.events.indexOf('on:SIGHUP')).toBeLessThan(firstWorker);
+    expect(mockH.handlers.get('SIGHUP')).toHaveLength(1);
+  });
+
+  it('control: a signal main.ts does NOT handle starts no drain and no exit', async () => {
+    await bootFully();
+    expect(mockH.handlers.get('SIGUSR2')).toBeUndefined();
+    signal('SIGUSR2');
+    await settle();
+    await jest.advanceTimersByTimeAsync(60_000);
+    expect(exits()).toEqual([]);
+    expect(mockH.events.filter((e) => e.startsWith('close:'))).toHaveLength(0);
+  });
+
+  it('SIGHUP waits for an ACTIVE publish job, closes every consumer once, exits once', async () => {
+    await bootFully();
+    const publishJob = deferred();
+    mockH.closeFor.set('publish', () => publishJob.promise);
+
+    signal('SIGHUP');
+    await settle();
+    await jest.advanceTimersByTimeAsync(900);
+    expect(exits()).toEqual([]);              // still draining, not killed outright
+
+    publishJob.resolve();
+    await settle();
+    for (const name of INLINE_WORKERS) expect(closeCount(name)).toBe(1);
+    expect(exits()).toEqual([0]);
+  });
+
+  it('SIGHUP then SIGTERM run ONE shutdown', async () => {
+    await bootFully();
+    signal('SIGHUP');
+    signal('SIGTERM');
+    await settle();
+    for (const name of INLINE_WORKERS) expect(closeCount(name)).toBe(1);
+    expect(exits()).toEqual([0]);
   });
 });
 
