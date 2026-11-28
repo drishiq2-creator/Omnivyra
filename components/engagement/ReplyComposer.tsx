@@ -7,6 +7,12 @@ import ChatVoiceButton from '../ChatVoiceButton';
 import { recordEngagementEvent } from '@/lib/engagementTelemetry';
 import { resolveEngagementCapability } from '@/lib/engagementCapabilities';
 import { isDmMessageType } from '@/lib/engagement/messageRoles';
+import {
+  ReplyKeyHolder,
+  classifyReplySendResponse,
+  isUnknownOutcomeError,
+  REPLY_STATUS_UNKNOWN_MESSAGE,
+} from '@/lib/engagement/replySendOutcome';
 
 export interface ReplyComposerProps {
   threadId: string;
@@ -24,6 +30,12 @@ export interface ReplyComposerProps {
     platform: string;
     replyText: string;
     messageType?: string | null;
+    /**
+     * E3: the stable key of this logical reply (same target + same draft →
+     * same key on every retry). Executors that POST /api/engagement/reply
+     * should forward it as `client_reply_key`.
+     */
+    clientReplyKey?: string;
   }) => Promise<{ mode?: string; platform?: string; message?: string } | void>;
   onRequestSuggestions?: () => void;
   disabled?: boolean;
@@ -49,6 +61,12 @@ export const ReplyComposer = React.memo(function ReplyComposer({
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  /** E3: true when the last attempt may have reached the platform — the UI must not invite a blind resend. */
+  const [statusUnknown, setStatusUnknown] = useState(false);
+  // E3: one client key per composed reply; kept across retries (network error,
+  // timeout, unknown outcome) and replaced only on success or a changed draft/target.
+  const replyKeyRef = useRef<ReplyKeyHolder | null>(null);
+  if (!replyKeyRef.current) replyKeyRef.current = new ReplyKeyHolder();
 
   useEffect(() => {
     const handler = () => textareaRef.current?.focus();
@@ -89,7 +107,10 @@ export const ReplyComposer = React.memo(function ReplyComposer({
 
     setSending(true);
     setError(null);
+    setStatusUnknown(false);
     setSuccessMessage(null);
+
+    const clientReplyKey = replyKeyRef.current!.keyFor({ threadId, messageId, platform, text: trimmed });
 
     try {
       let executionMessage: string | null = null;
@@ -101,6 +122,7 @@ export const ReplyComposer = React.memo(function ReplyComposer({
           platform,
           replyText: trimmed,
           messageType,
+          clientReplyKey,
         });
         if (
           executionResult
@@ -113,43 +135,45 @@ export const ReplyComposer = React.memo(function ReplyComposer({
           executionMessage = executionResult.message;
         }
       } else {
-        const res = await fetch('/api/engagement/reply', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          credentials: 'include',
-          body: JSON.stringify({
-            organization_id: organizationId,
-            thread_id: threadId,
-            message_id: messageId,
-            reply_text: trimmed,
-            platform,
-          }),
-        });
+        let res: Response;
+        try {
+          res = await fetch('/api/engagement/reply', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({
+              organization_id: organizationId,
+              thread_id: threadId,
+              message_id: messageId,
+              reply_text: trimmed,
+              platform,
+              client_reply_key: clientReplyKey,
+            }),
+          });
+        } catch {
+          // No response: the server may have sent it. Keep the key; never say "try again".
+          setStatusUnknown(true);
+          setError(REPLY_STATUS_UNKNOWN_MESSAGE);
+          return;
+        }
 
-        const json = (await res.json().catch(() => ({}))) as {
-          error?: string;
-          status?: string;
-          confirmed?: boolean;
-          platform_id?: string | null;
-          success?: boolean;
-        };
-        if (!res.ok) {
-          throw new Error(json.error || res.statusText || 'Failed to send reply');
+        const json = (await res.json().catch(() => null)) as Record<string, unknown> | null;
+        const outcome = classifyReplySendResponse({ httpStatus: res.status, json, platform });
+        if (outcome.kind === 'unknown') {
+          setStatusUnknown(true);
+          setError(outcome.message);
+          return;
         }
-        if (json.status !== 'executed' || json.success !== true) {
-          throw new Error(json.error || 'Platform did not confirm the reply was sent');
+        if (outcome.kind === 'not_sent') {
+          throw new Error(outcome.message);
         }
-        // Three visible states:
-        //   confirmed=true  → "Confirmed by X (id: ...)" — platform returned a verifiable id.
-        //   confirmed=false → "Sent to X" — platform ack'd the write but no id to verify against.
+        // Three visible states: confirmed (platform id), sent (no id to verify
+        // against), already sent (a retry of a reply the platform already has).
         // We never say "confirmed" without a platform_id.
-        if (json.confirmed && json.platform_id) {
-          executionMessage = `Reply confirmed by ${platform} (id: ${json.platform_id}).`;
-        } else {
-          executionMessage = `Reply sent to ${platform}. Awaiting platform confirmation.`;
-        }
+        executionMessage = outcome.message;
       }
 
+      replyKeyRef.current!.reset();
       setText('');
       if (!isControlled) setInternalValue('');
       void recordEngagementEvent('reply_sent', {
@@ -160,7 +184,20 @@ export const ReplyComposer = React.memo(function ReplyComposer({
       setSuccessMessage(executionMessage || 'Reply confirmed by the platform.');
       onReplySent?.();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to send reply');
+      if (isUnknownOutcomeError(err)) {
+        setStatusUnknown(true);
+        const message = err instanceof Error ? err.message : '';
+        const isNetworkLevel = !message || (err instanceof Error && (err.name === 'TypeError' || err.name === 'AbortError' || err.name === 'TimeoutError'));
+        // A server message that already says "Sending status unknown" is shown as is; any other
+        // unknown-class message is prefixed so the first words never invite a blind resend.
+        setError(
+          isNetworkLevel
+            ? REPLY_STATUS_UNKNOWN_MESSAGE
+            : /^Sending status unknown/i.test(message) ? message : `${REPLY_STATUS_UNKNOWN_MESSAGE} ${message}`,
+        );
+      } else {
+        setError(err instanceof Error ? err.message : 'Failed to send reply');
+      }
     } finally {
       setSending(false);
     }
@@ -212,7 +249,7 @@ export const ReplyComposer = React.memo(function ReplyComposer({
         </p>
       )}
       {error && (
-        <p className="text-sm text-red-600" role="alert">
+        <p className={`text-sm ${statusUnknown ? 'text-amber-700' : 'text-red-600'}`} role="alert" data-status-unknown={statusUnknown ? 'true' : undefined}>
           {error}
         </p>
       )}

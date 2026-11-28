@@ -138,6 +138,9 @@ function seed() {
     id: DRAFT, thread_id: THREAD, platform: 'linkedin', status: 'draft', generated_text: 'hi',
   }];
   db.comment_replies = [];
+  // E3: the route now claims a community_ai_actions row (keyed by the logical reply) before sending;
+  // each test starts from an empty action table so one test's send is not another test's retry.
+  db.community_ai_actions = [];
 }
 
 async function send(body: Record<string, unknown>) {
@@ -262,9 +265,19 @@ describe('AI send boundary', () => {
     expect((await send(AI_SEND)).statusCode).toBe(200);
     expect(db.ai_message_drafts[0].status).toBe('sent');
 
+    // E3: the executor double does not persist; stamp what the real persist writes.
+    for (const r of db.community_ai_actions) Object.assign(r, { status: 'executed', execution_result: { status: 'executed', platform_id: 'urn:li:comment:999' } });
+
+    // An identical retry is the SAME logical reply: answered "already sent" from the stored action.
     const second = await send(AI_SEND);
-    expect(second.statusCode).toBe(400);
-    expect(second.body.code).toBe('AI_DRAFT_TERMINAL');
+    expect(second.statusCode).toBe(200);
+    expect(second.body).toMatchObject({ already_sent: true, deduplicated: true });
+    expect(executeActionMock).toHaveBeenCalledTimes(1);      // still one dispatch
+
+    // A different text on the same (now sent) draft is a new logical reply and still hits the draft guard.
+    const edited = await send({ ...AI_SEND, reply_text: 'Sounds good — Wednesday works instead.' });
+    expect(edited.statusCode).toBe(400);
+    expect(edited.body.code).toBe('AI_DRAFT_TERMINAL');
     expect(executeActionMock).toHaveBeenCalledTimes(1);      // still one dispatch
   });
 
