@@ -47,7 +47,7 @@ let inflightRow: Row | null = null;
  * Per idempotency-key read, in order: 'ok', 'fail' (a DB error) or 'blank204'
  * (postgrest-js turning a blank 404 into { status: 204, error: null, data: null }). Empty = all ok.
  */
-let keyReadPlan: Array<'ok' | 'fail' | 'blank204'> = [];
+let keyReadPlan: Array<'ok' | 'fail' | 'blank204' | 'proxy404array'> = [];
 
 const UNIQUE_VIOLATION = {
   code: '23505',
@@ -72,7 +72,8 @@ function builder(table: string) {
   let limitN = Infinity;
   const rows = () => (db[table] ?? []).filter((r) => filters.every((f) => f(r)));
 
-  type Res = { data: Row[] | null; error: unknown; status: number };
+  type Res = { data: Row[] | null; error: unknown; status: number; count?: number | null };
+  let wantCount = false;
   const runInsert = (): Res => {
     const row = insertRow as Row;
     if (table === 'community_ai_actions' && claimInsertFault) {
@@ -119,17 +120,20 @@ function builder(table: string) {
       const step = keyReadPlan.shift();
       if (step === 'fail') return { data: null, error: { code: '57014', message: 'canceling statement due to statement timeout' }, status: 500 };
       if (step === 'blank204') return { data: null, error: null, status: 204 };
+      // a misrouting proxy's 404 with a JSON-array body: postgrest-js reports 200/[] with no Content-Range (count null)
+      if (step === 'proxy404array') return { data: [], error: null, status: 200, count: null };
     }
     if (table === 'community_ai_actions' && filterCols.includes('idempotency_key') && staleKeyLookups > 0) {
       staleKeyLookups -= 1;
-      return { data: [], error: null, status: 200 };
+      return { data: [], error: null, status: 200, count: wantCount ? 0 : null };
     }
-    return { data: rows().slice(0, limitN).map((r) => ({ ...r })), error: null, status: 200 };
+    const all = rows();
+    return { data: all.slice(0, limitN).map((r) => ({ ...r })), error: null, status: 200, count: wantCount ? all.length : null };
   };
   const exec = (): Res => (insertRow ? runInsert() : patch ? runUpdate() : runSelect());
 
   const api: any = {
-    select() { return api; },
+    select(_cols?: string, opts?: { count?: string }) { if (opts?.count === 'exact') wantCount = true; return api; },
     eq(c: string, v: unknown) { filterCols.push(c); filters.push((r) => r[c] === v); return api; },
     is(c: string, v: unknown) { filterCols.push(c); filters.push((r) => (r[c] ?? null) === v); return api; },
     in(c: string, v: unknown[]) { filterCols.push(c); filters.push((r) => v.includes(r[c])); return api; },
@@ -145,7 +149,7 @@ function builder(table: string) {
     then(ok: (v: unknown) => unknown, ko?: (e: unknown) => unknown) {
       let r: Res;
       try { r = exec(); } catch (e) { return Promise.reject(e).then(ok, ko); }
-      return Promise.resolve({ data: r.data ?? null, error: r.error ?? null, status: r.status }).then(ok, ko);
+      return Promise.resolve({ data: r.data ?? null, error: r.error ?? null, status: r.status, count: r.count ?? null }).then(ok, ko);
     },
   };
   return api;
@@ -656,10 +660,20 @@ describe('E3 claim write with a lost DB response', () => {
     expect(executeActionMock).not.toHaveBeenCalled();
   });
 
+  it('a definitive rejection but the presence re-read is 200/[] WITHOUT an exact count (proxy 404 array) → unknown, not retryable', async () => {
+    claimInsertFault = 'rejected-42501';
+    keyReadPlan = ['ok', 'proxy404array'];
+    const first = await post({ client_reply_key: KEY_1 });
+    expect(first.statusCode).toBe(409);
+    expect(first.body.code).toBe('REPLY_OUTCOME_UNKNOWN');
+    expect(first.body.retryable).toBe(false);
+    expect(executeActionMock).not.toHaveBeenCalled();
+  });
+
   it.each([
     ['403 + SQLSTATE 42501', 'rejected-42501'],
     ['400 + SQLSTATE 23502', 'rejected-23502'],
-  ] as const)('CONTROL: a definitive PostgREST %s and a confirmed-absent re-read (200, []) → retryable 503; the retry then sends once', async (_n, fault) => {
+  ] as const)('CONTROL: a definitive PostgREST %s and a confirmed-absent re-read (200, [], count 0) → retryable 503; the retry then sends once', async (_n, fault) => {
     claimInsertFault = fault;
     const first = await post({ client_reply_key: KEY_1 });
     expect(first.statusCode).toBe(503);

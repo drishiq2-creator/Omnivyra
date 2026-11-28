@@ -228,19 +228,23 @@ type PresenceCheck =
   | { kind: 'unknown'; error: string };
 
 /**
- * "Confirmed absent" is ONLY an HTTP 200 with an array of length 0 and no error
- * (a plain select, never maybeSingle/single: postgrest-js can turn a blank 404
- * into { status: 204, error: null, data: null }, which proves nothing). Any
- * error, status 0, non-200 or null/undefined data is unknown.
+ * "Confirmed absent" is ONLY an HTTP 200 with an array of length 0, no error,
+ * AND an exact server count of 0 (a plain select with { count: 'exact' }, never
+ * maybeSingle/single). postgrest-js can turn a blank 404 into { status: 204,
+ * error: null, data: null }, and a non-ok 404 whose body is a JSON array into
+ * { status: 200, error: null, data: [] } — neither proves anything. The count
+ * comes from PostgREST's Content-Range header, which a misrouting proxy does not
+ * send (count null). Any error, status 0, non-200, null/undefined data or a
+ * count other than exactly 0 is unknown.
  */
 export async function checkReplyActionPresence(organizationId: string, idempotencyKey: string): Promise<PresenceCheck> {
-  let res: { data?: unknown; error?: unknown; status?: unknown };
+  let res: { data?: unknown; error?: unknown; status?: unknown; count?: unknown };
   try {
     res = (await ownedDbTable('community_ai_actions')
-      .select(EXISTING_COLUMNS)
+      .select(EXISTING_COLUMNS, { count: 'exact' })
       .eq('organization_id', organizationId)
       .eq('idempotency_key', idempotencyKey)
-      .limit(2)) as { data?: unknown; error?: unknown; status?: unknown };
+      .limit(2)) as { data?: unknown; error?: unknown; status?: unknown; count?: unknown };
   } catch (thrown) {
     return { kind: 'unknown', error: `presence read threw: ${errorText(thrown)}` };
   }
@@ -249,6 +253,7 @@ export async function checkReplyActionPresence(organizationId: string, idempoten
   const rows = (res.data as ExistingReplyAction[]).filter((r) => !r.organization_id || r.organization_id === organizationId);
   if (rows.length > 0) return { kind: 'present', row: rows[0] };
   if (res.status !== 200) return { kind: 'unknown', error: `presence read status ${String(res.status)}` };
+  if (res.count !== 0) return { kind: 'unknown', error: `presence read count ${String(res.count)} (no exact count from the server)` };
   return { kind: 'absent' };
 }
 
