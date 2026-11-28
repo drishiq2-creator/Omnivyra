@@ -114,7 +114,7 @@ function InboxDashboardComponent({
     loading: workQueueLoading,
     refresh: refreshWorkQueue,
   } = useWorkQueue(organizationId);
-  const { platforms: integrations } = useCompanyIntegrations(organizationId);
+  const { platforms: integrations, error: integrationsError } = useCompanyIntegrations(organizationId);
   const connectedPlatformSlugs = useMemo(
     () => Array.from(
       new Set(
@@ -136,6 +136,7 @@ function InboxDashboardComponent({
   const {
     platformHealth,
     platformHealthLoading,
+    platformHealthError,
     refreshPlatformHealth,
     extensionStatus,
     extensionAuth,
@@ -332,7 +333,8 @@ function InboxDashboardComponent({
     };
   }, [needsResponseQueueItems, postThreads]);
   const actionableThreads = queueCounts.needsResponse;
-  const connectedPlatformsCount = connectedPlatformSlugs.length;
+  // Unknown (null), not 0, when the connected-platforms read failed.
+  const connectedPlatformsCount = integrationsError ? null : connectedPlatformSlugs.length;
   const connectedPlatformSet = useMemo(
     () => new Set(connectedPlatformSlugs),
     [connectedPlatformSlugs]
@@ -749,6 +751,7 @@ function InboxDashboardComponent({
           onSelectPlatform: handleSelectPlatform,
           workQueue: clientWorkQueue as typeof workQueue,
           platforms: connectedPlatformSlugs,
+          error: integrationsError,
           loading: countsLoading || workQueueLoading,
         }}
         platformHealth={{
@@ -757,6 +760,7 @@ function InboxDashboardComponent({
           organizationId,
           onSelectPlatform: handleSelectPlatform,
           onHealthRefresh: refreshPlatformHealth,
+          error: platformHealthError,
           loading: platformHealthLoading,
         }}
         onRefreshWorkspace={handleRefresh}

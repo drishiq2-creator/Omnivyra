@@ -103,6 +103,7 @@ import {
 const A = 'company-a';
 const B = 'company-b';
 const C = 'company-c';
+const D = 'company-d';
 
 function seed() {
   store.user_company_roles = [
@@ -113,6 +114,8 @@ function seed() {
     { user_id: 'user-b1', company_id: B, status: 'active' },
     { user_id: 'user-c1', company_id: C, status: 'active' },
     { user_id: 'user-c2', company_id: C, status: 'active' },
+    { user_id: 'user-d1', company_id: D, status: 'active' },
+    { user_id: 'user-d2', company_id: D, status: 'active' },
   ];
   store.social_accounts = [
     // A's own single linkedin account (positive control), oldest.
@@ -144,6 +147,13 @@ function seed() {
     // youtube: two DISTINCT token-bearing accounts (genuine ambiguity, control).
     { id: 'sa-c-yt-1', user_id: 'user-c1', company_id: C, platform: 'youtube', platform_user_id: 'yt-c-1', is_active: true, access_token: 'enc', updated_at: '2026-01-01T00:00:00Z' },
     { id: 'sa-c-yt-2', user_id: 'user-c2', company_id: C, platform: 'youtube', platform_user_id: 'yt-c-2', is_active: true, access_token: 'enc', updated_at: '2026-02-01T00:00:00Z' },
+
+    // ---- company D: two DIFFERENT members connected the SAME external account ----
+    { id: 'sa-d-li-m1', user_id: 'user-d1', company_id: D, platform: 'linkedin', platform_user_id: 'li-d-shared', is_active: true, access_token: 'enc', updated_at: '2026-01-01T00:00:00Z' },
+    { id: 'sa-d-li-m2', user_id: 'user-d2', company_id: D, platform: 'linkedin', platform_user_id: 'li-d-shared', is_active: true, access_token: 'enc', updated_at: '2026-03-01T00:00:00Z' },
+    // control: the same two members, two DISTINCT external accounts
+    { id: 'sa-d-fb-m1', user_id: 'user-d1', company_id: D, platform: 'facebook', platform_user_id: 'fb-d-1', is_active: true, access_token: 'enc', updated_at: '2026-01-01T00:00:00Z' },
+    { id: 'sa-d-fb-m2', user_id: 'user-d2', company_id: D, platform: 'facebook', platform_user_id: 'fb-d-2', is_active: true, access_token: 'enc', updated_at: '2026-03-01T00:00:00Z' },
   ];
   for (const k of Object.keys(injectedErrors)) delete injectedErrors[k];
 }
@@ -229,6 +239,17 @@ describe('platformTokenService.getToken — what counts as a second account', ()
   it('one account stored under both x and twitter is one account (latest row used)', async () => {
     await expect(getToken(C, C, 'x')).resolves.toMatchObject({ access_token: 'tok:sa-c-x-new' });
     await expect(getToken(C, C, 'twitter')).resolves.toMatchObject({ access_token: 'tok:sa-c-x-new' });
+  });
+
+  it('two different members who connected the same external account are one account (latest row used)', async () => {
+    const shared = store.social_accounts.filter((r) => r.company_id === D && r.platform === 'linkedin');
+    expect(new Set(shared.map((r) => r.user_id)).size).toBe(2);
+    expect(new Set(shared.map((r) => r.platform_user_id)).size).toBe(1);
+    await expect(getToken(D, D, 'linkedin')).resolves.toMatchObject({ access_token: 'tok:sa-d-li-m2' });
+  });
+
+  it('control: the same two members with two distinct platform_user_ids are refused as ambiguous', async () => {
+    await expect(getToken(D, D, 'facebook')).rejects.toMatchObject({ code: 'PLATFORM_ACCOUNT_AMBIGUOUS' });
   });
 
   it('control: two distinct token-bearing accounts are still refused as ambiguous', async () => {

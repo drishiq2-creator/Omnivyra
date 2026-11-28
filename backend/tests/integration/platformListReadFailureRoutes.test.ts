@@ -6,6 +6,7 @@
  * Controls: a successful read still answers 200 / resolves with the platform.
  */
 import integrationsHandler from '../../../pages/api/engagement/integrations';
+import platformHealthHandler from '../../../pages/api/engagement/platform-health';
 import { createApiRequestMock, createMockRes } from '../utils';
 
 jest.mock('../../db/supabaseClient', () => {
@@ -32,7 +33,8 @@ import { getPlatformHealth } from '../../services/platformHealth/platformHealthS
 
 const activeMock = getPlatformsWithActiveSocialAccountsForOrg as jest.Mock;
 const tokenMock = getPlatformsWithTokensForOrg as jest.Mock;
-const lookupFailed = () => Object.assign(new Error('read failed'), { name: 'PlatformAccountResolutionError', code: 'PLATFORM_ACCOUNT_LOOKUP_FAILED' });
+const RAW = 'Could not read social_accounts while listing platforms: canceling statement due to statement timeout on relation social_accounts';
+const lookupFailed = () => Object.assign(new Error(RAW), { name: 'PlatformAccountResolutionError', code: 'PLATFORM_ACCOUNT_LOOKUP_FAILED' });
 
 const callIntegrations = async () => {
   const res = createMockRes();
@@ -81,5 +83,34 @@ describe('getPlatformHealth on a list read failure', () => {
     tokenMock.mockRejectedValue(lookupFailed());
     activeMock.mockResolvedValue(['linkedin']);
     await expect(getPlatformHealth('company-a')).rejects.toMatchObject({ code: 'PLATFORM_ACCOUNT_LOOKUP_FAILED' });
+  });
+});
+
+describe('500 bodies carry a stable code, never the raw database message', () => {
+  it('integrations: body is { error: PLATFORM_ACCOUNT_LOOKUP_FAILED }', async () => {
+    tokenMock.mockRejectedValue(lookupFailed());
+    activeMock.mockResolvedValue([]);
+    const res = await callIntegrations();
+    expect(res.statusCode).toBe(500);
+    expect(res.body).toEqual({ error: 'PLATFORM_ACCOUNT_LOOKUP_FAILED' });
+    expect(JSON.stringify(res.body)).not.toContain('statement timeout');
+  });
+
+  it('platform-health: body is { error: PLATFORM_ACCOUNT_LOOKUP_FAILED }', async () => {
+    tokenMock.mockRejectedValue(lookupFailed());
+    activeMock.mockResolvedValue([]);
+    const res = createMockRes() as any;
+    await platformHealthHandler(createApiRequestMock({ query: { organization_id: 'company-a' } }), res);
+    expect(res.statusCode).toBe(500);
+    expect(res.body).toEqual({ error: 'PLATFORM_ACCOUNT_LOOKUP_FAILED' });
+    expect(JSON.stringify(res.body)).not.toContain('statement timeout');
+  });
+
+  it('control: platform-health answers 200 when the reads succeed', async () => {
+    tokenMock.mockResolvedValue(['linkedin']);
+    activeMock.mockResolvedValue(['linkedin']);
+    const res = createMockRes() as any;
+    await platformHealthHandler(createApiRequestMock({ query: { organization_id: 'company-a' } }), res);
+    expect(res.statusCode).toBe(200);
   });
 });

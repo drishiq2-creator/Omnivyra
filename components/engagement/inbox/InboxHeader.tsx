@@ -41,7 +41,8 @@ type PlatformHealthData = React.ComponentProps<typeof PlatformHealthStrip>;
 export interface InboxHeaderQueueStats {
   activeQueueFilter: string | 'People Reacted';
   actionableThreads: number;
-  connectedPlatformsCount: number;
+  /** null = unknown (the connected-platforms read failed), rendered as "—", never 0. */
+  connectedPlatformsCount: number | null;
   visibleThreadCount: number;
   refreshDisabled: boolean;
 }
@@ -127,7 +128,7 @@ export const InboxHeader = React.memo(function InboxHeader({
               className={`inline-flex items-center gap-2 rounded-full bg-white px-3 py-2 text-sm text-slate-700 ring-1 ring-slate-200 ${queueStats.activeQueueFilter === 'all' ? 'ring-2 ring-indigo-200' : ''}`}
             >
               <span className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500">Platforms</span>
-              <span className="text-base font-semibold text-slate-900">{queueStats.connectedPlatformsCount}</span>
+              <span className="text-base font-semibold text-slate-900" title={queueStats.connectedPlatformsCount === null ? 'Unknown: connected platforms could not be loaded' : undefined}>{queueStats.connectedPlatformsCount ?? '—'}</span>
             </button>
             <button
               type="button"

@@ -102,6 +102,8 @@ export interface PlatformTabsProps {
   /** Configured platform slugs for company. When provided, only these + All shown. When empty [], only All. */
   platforms?: string[];
   loading?: boolean;
+  /** Connected-platforms read failed: the tab list is NOT "no platforms connected". */
+  error?: string | null;
   className?: string;
 }
 
@@ -112,6 +114,7 @@ export const PlatformTabs = React.memo(function PlatformTabs({
   workQueue,
   platforms: integratedPlatforms,
   loading = false,
+  error = null,
   className = '',
 }: PlatformTabsProps) {
   const workByPlatform = new Map((workQueue?.platforms ?? []).map((p) => [p.platform, p]));
@@ -160,6 +163,11 @@ export const PlatformTabs = React.memo(function PlatformTabs({
         </TabsList>
       </Tabs>
       {loading && <div className="h-1 bg-slate-100 rounded animate-pulse mt-2" />}
+      {error ? (
+        <p role="alert" title={error} className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+          Couldn&apos;t load connected platforms. Connection status is unknown; this does not mean they are disconnected.
+        </p>
+      ) : null}
     </div>
   );
 });

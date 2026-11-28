@@ -15,6 +15,8 @@ import {
   getPlatformsWithActiveSocialAccountsForOrg,
   getPlatformsWithTokensForOrg,
 } from '../../../backend/services/platformTokenService';
+import { platformAccountResolutionCode } from '../../../backend/services/platformAccountResolution';
+import { describeProviderError } from '../../../backend/auth/safeErrorLog';
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'GET') {
@@ -65,6 +67,12 @@ async function handler(req: NextApiRequest, res: NextApiResponse) {
     setPrivateCache(res, CACHE_TTL.STANDARD);
     return res.status(200).json({ platforms });
   } catch (err) {
+    const code = platformAccountResolutionCode(err);
+    if (code) {
+      // Stable code to the client; the database detail stays in the (redacted) server log.
+      console.error('[engagement/integrations]', code, describeProviderError(err));
+      return res.status(500).json({ error: code });
+    }
     console.error('[engagement/integrations]', err);
     return res.status(500).json({
       error: (err as Error)?.message ?? 'Failed to fetch integrations',
