@@ -14,6 +14,7 @@ import { ThreadView } from '@/components/engagement/ThreadView';
 import { AIEngagementAssistant } from '@/components/engagement/AIEngagementAssistant';
 import { InboxLayout } from '@/components/engagement/inbox/InboxLayout';
 import { InboxHeader } from '@/components/engagement/inbox/InboxHeader';
+import { selectVisiblePlatformHealth } from '@/components/engagement/inbox/helpers';
 import { useEngagementInbox } from '@/hooks/useEngagementInbox';
 import { usePlatformCounts } from '@/hooks/usePlatformCounts';
 import { useWorkQueue } from '@/hooks/useWorkQueue';
@@ -339,9 +340,10 @@ function InboxDashboardComponent({
     () => new Set(connectedPlatformSlugs),
     [connectedPlatformSlugs]
   );
+  // Unfiltered when the connected-platform list is unknown (its read failed).
   const connectedPlatformHealth = useMemo(
-    () => platformHealth.filter((platform) => connectedPlatformSet.has(normalizePlatform(platform.platform))),
-    [connectedPlatformSet, platformHealth]
+    () => selectVisiblePlatformHealth(platformHealth, connectedPlatformSet, Boolean(integrationsError), normalizePlatform),
+    [connectedPlatformSet, platformHealth, integrationsError]
   );
   const extensionPanelPlatforms = useMemo(() => {
     return connectedPlatformSlugs.map((platform) => {
@@ -692,6 +694,7 @@ function InboxDashboardComponent({
         browserAssist={{
           enabled: browserAssistEnabled,
           hasLinkedInConnection,
+          linkedInConnectionUnknown: Boolean(integrationsError),
           extensionPanel: {
             loading: extensionLoading || workspacePreferencesLoading || extensionAuthenticating,
             error: extensionError,

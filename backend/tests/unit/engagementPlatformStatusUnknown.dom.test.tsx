@@ -108,3 +108,56 @@ describe('InboxDashboard wires both errors into the header (source pin)', () => 
     expect(src).not.toMatch(/platformTabs=\{\{[^}]*error: definitelyNotWired,/);
   });
 });
+
+describe('integrations read failure does not collapse the LinkedIn panel or health strip to "absent"', () => {
+  const enabledAssist = (extra: Record<string, unknown>) => ({
+    enabled: true,
+    hasLinkedInConnection: false,
+    extensionPanel: { loading: false, error: null, authenticated: false, platforms: [], onRefresh: jest.fn(), onTogglePlatform: jest.fn(async () => undefined) },
+    linkedinPanel: {} as any,
+    browserOpsPanel: { loading: false, authenticated: false, platforms: [], onRunBrowserAssist: jest.fn(async () => undefined) },
+    ...extra,
+  });
+  const header = (browserAssist: any) => (
+    <InboxHeader
+      queueStats={{ activeQueueFilter: 'all', actionableThreads: 0, connectedPlatformsCount: 0, visibleThreadCount: 0, refreshDisabled: false }}
+      browserAssist={browserAssist}
+      platformTabs={tabsProps}
+      platformHealth={{ platforms: [], selectedPlatform: 'all', organizationId: 'co-A' }}
+      onRefreshWorkspace={jest.fn()}
+      onSetQueueFilter={jest.fn()}
+    />
+  );
+
+  it('LinkedIn connection unknown renders an unknown notice, not nothing', () => {
+    render(header(enabledAssist({ linkedInConnectionUnknown: true })));
+    const alerts = screen.queryAllByRole('alert').map((a) => a.textContent ?? '');
+    expect(alerts.some((t) => /linkedin/i.test(t) && /unknown/i.test(t))).toBe(true);
+  });
+
+  it('control: LinkedIn genuinely not connected renders no LinkedIn notice', () => {
+    render(header(enabledAssist({ linkedInConnectionUnknown: false })));
+    const alerts = screen.queryAllByRole('alert').map((a) => a.textContent ?? '');
+    expect(alerts.some((t) => /linkedin/i.test(t))).toBe(false);
+  });
+
+  const { selectVisiblePlatformHealth } = require('../../../components/engagement/inbox/helpers');
+  const rows = [{ platform: 'linkedin' }, { platform: 'facebook' }];
+  const norm = (p: string) => p;
+
+  it('connected list unknown: every health row is shown (not filtered to nothing)', () => {
+    expect(selectVisiblePlatformHealth(rows, new Set<string>(), true, norm)).toEqual(rows);
+  });
+
+  it('control: connected list known: health is filtered to connected platforms', () => {
+    expect(selectVisiblePlatformHealth(rows, new Set(['facebook']), false, norm)).toEqual([{ platform: 'facebook' }]);
+    expect(selectVisiblePlatformHealth(rows, new Set<string>(), false, norm)).toEqual([]);
+  });
+
+  it('InboxDashboard uses the helper and passes the unknown flag (source pin, with a failing control)', () => {
+    const src = readFileSync(join(__dirname, '../../../components/engagement/InboxDashboard.tsx'), 'utf8');
+    expect(src).toMatch(/selectVisiblePlatformHealth\(platformHealth, connectedPlatformSet, Boolean\(integrationsError\), normalizePlatform\)/);
+    expect(src).toMatch(/linkedInConnectionUnknown: Boolean\(integrationsError\),/);
+    expect(src).not.toMatch(/linkedInConnectionUnknown: definitelyNotWired/);
+  });
+});
