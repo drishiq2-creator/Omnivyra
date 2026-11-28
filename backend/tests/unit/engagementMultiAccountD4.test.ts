@@ -69,11 +69,11 @@ function seedIdentity(opts: { a2Active?: boolean } = {}) {
     { user_id: 'user_b1', company_id: COMPANY_B, status: 'active' },
   ];
   db.social_accounts = [
-    { user_id: A_USERS[0], platform: 'linkedin', platform_user_id: A1.member, is_active: true },
-    { user_id: A_USERS[1], platform: 'linkedin', platform_user_id: A2.member, is_active: opts.a2Active ?? true },
-    { user_id: A_USERS[2], platform: 'linkedin', platform_user_id: A3.member, is_active: true },
-    { user_id: A_USERS[0], platform: 'twitter',  platform_user_id: A_TW.member, is_active: true },
-    { user_id: 'user_b1', platform: 'linkedin', platform_user_id: B1.member, is_active: true },
+    { user_id: A_USERS[0], company_id: COMPANY_A, platform: 'linkedin', platform_user_id: A1.member, is_active: true },
+    { user_id: A_USERS[1], company_id: COMPANY_A, platform: 'linkedin', platform_user_id: A2.member, is_active: opts.a2Active ?? true },
+    { user_id: A_USERS[2], company_id: COMPANY_A, platform: 'linkedin', platform_user_id: A3.member, is_active: true },
+    { user_id: A_USERS[0], company_id: COMPANY_A, platform: 'twitter',  platform_user_id: A_TW.member, is_active: true },
+    { user_id: 'user_b1', company_id: COMPANY_B, platform: 'linkedin', platform_user_id: B1.member, is_active: true },
   ];
   db.engagement_authors = [
     // Display names deliberately identical across every actor — if ownership
@@ -250,7 +250,7 @@ describe('D4 — adversarial identity resolution', () => {
     // Adversarial: a blank connected-account id and a blank author id would
     // both key as "linkedin:" — a false self-classification if the code keys
     // naively. This asserts a blank-id author is NOT treated as the company.
-    db.social_accounts.push({ user_id: A_USERS[0], platform: 'linkedin', platform_user_id: '', is_active: true });
+    db.social_accounts.push({ user_id: A_USERS[0], company_id: COMPANY_A, platform: 'linkedin', platform_user_id: '', is_active: true });
     db.engagement_authors.push({ id: 'auth_blank', platform: 'linkedin', platform_user_id: '', display_name: 'Blank' });
     seedThread('t', COMPANY_A, [{ author: EXT.author, at: 1 }, { author: 'auth_blank', at: 2 }]);
     expect(await actionableOf('t')).toBe(true);

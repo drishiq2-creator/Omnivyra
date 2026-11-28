@@ -63,7 +63,7 @@ const EXTERNAL_AUTHOR_ID = 'author_external';
 
 function seedIdentity() {
   db.user_company_roles = [{ user_id: USER, company_id: ORG, status: 'active' }];
-  db.social_accounts = [{ user_id: USER, platform: 'linkedin', platform_user_id: CONNECTED_MEMBER_ID, is_active: true }];
+  db.social_accounts = [{ user_id: USER, company_id: ORG, platform: 'linkedin', platform_user_id: CONNECTED_MEMBER_ID, is_active: true }];
   db.engagement_authors = [
     { id: CONNECTED_AUTHOR_ID, platform: 'linkedin', platform_user_id: CONNECTED_MEMBER_ID },
     { id: EXTERNAL_AUTHOR_ID, platform: 'linkedin', platform_user_id: 'someone-else-xyz' },
@@ -212,7 +212,7 @@ describe('identity edge cases', () => {
   });
 
   it('an inactive social account no longer counts as the connected identity', async () => {
-    db.social_accounts = [{ user_id: USER, platform: 'linkedin', platform_user_id: CONNECTED_MEMBER_ID, is_active: false }];
+    db.social_accounts = [{ user_id: USER, company_id: ORG, platform: 'linkedin', platform_user_id: CONNECTED_MEMBER_ID, is_active: false }];
     seedThread('t1');
     setMessages('t1', [{ author_id: CONNECTED_AUTHOR_ID, content: 'old reply' }]);
     expect((await actionable()).actionable).toBe(1);   // safe direction

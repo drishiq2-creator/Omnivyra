@@ -682,6 +682,7 @@ export async function computeEngagementPortalCounts(
           .eq('organization_id', org)
           .in('thread_id', ids)
           .order('thread_id', { ascending: true })
+          .order('id', { ascending: true }) // unique tiebreaker for stable offset paging
           .range(from, to) as unknown as PromiseLike<PageResult<{ thread_id: string; triage_priority: number | null }>>,
     );
     for (const c of classifications) {

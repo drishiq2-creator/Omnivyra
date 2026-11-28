@@ -198,6 +198,7 @@ export async function getOrgAuthorIds(
         .eq('company_id', organizationId)
         .eq('status', 'active')
         .order('user_id', { ascending: true })
+        .order('id', { ascending: true })
         .range(from, to) as unknown as PromiseLike<StrictPage<{ user_id: string }>>,
     );
     userIds = Array.from(new Set(roleRows.map((row) => row.user_id).filter(Boolean)));
@@ -214,6 +215,7 @@ export async function getOrgAuthorIds(
             .eq('company_id', organizationId)
             .eq('is_active', true)
             .order('platform_user_id', { ascending: true })
+            .order('id', { ascending: true })
             .range(from, to) as unknown as PromiseLike<StrictPage<{ platform: string; platform_user_id: string }>>,
         )),
       );
@@ -226,10 +228,16 @@ export async function getOrgAuthorIds(
       .eq('status', 'active');
     userIds = (roleUsers ?? []).map((row: { user_id: string }) => row.user_id);
     if (userIds.length === 0) return new Set();
+    // E4 re-review #3/#1: the SAME company-only identity rule as the strict
+    // path — only accounts bound to this company (social_accounts.company_id)
+    // are its identities, so getThreads' self detection (inbox list, work
+    // queue, AI assistant labelling) agrees with the portal count. Production
+    // has no company_id NULL rows (verified read-only 2026-11-28).
     const { data: accountRows } = await supabase
       .from('social_accounts')
       .select('platform, platform_user_id')
       .in('user_id', userIds)
+      .eq('company_id', organizationId)
       .eq('is_active', true);
     accounts = (accountRows ?? null) as typeof accounts;
   }
